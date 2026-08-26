@@ -337,6 +337,28 @@ def build_app() -> FastAPI:
     except Exception as exc:  # noqa: BLE001
         logger.warning("metrics_middleware_failed err=%s", exc)
 
+    # Registered LAST so it runs FIRST — reverse order, as above. The point of
+    # the guard is to answer before routing, because the route it closes is
+    # /healthz, which has no dependencies to hang a check on.
+    #
+    # api and the sandbox share a network by necessity (api has to reach it,
+    # and a Docker network carries traffic both ways) and the sandbox runs the
+    # code under review. Every other route already needs a token that
+    # container never receives; this one did not.
+    try:
+        from src.api.sandbox_guard import SandboxNetworkGuard, from_environment
+        _sandbox_nets = from_environment()
+        if _sandbox_nets:
+            app.add_middleware(SandboxNetworkGuard, networks=_sandbox_nets)
+            logger.info("sandbox_guard_active nets=%s",
+                        ",".join(str(n) for n in _sandbox_nets))
+        else:
+            logger.warning(
+                "sandbox_guard_inactive — SANDBOX_NET_SUBNET is unset, so the "
+                "execution sandbox can still reach this API")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sandbox_guard_failed err=%s", exc)
+
     # Routers
     # Said, or refused, before a single request is served. These checks
     # existed and nothing called them: a guard with no call site is a comment

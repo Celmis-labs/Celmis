@@ -112,6 +112,39 @@ for svc in postgres qdrant; do
     || fail "$svc does not resolve by service name — the stack is up but cannot reach its own database"
 done
 
+# ─── 3b. the sandbox must not be able to knock on the host ───────────
+#
+# Measured from inside the sandbox, running as the code under review would:
+# `172.17.0.1:22` was OPEN. That is the docker bridge gateway — the host
+# itself, and with it anything the host has bound.
+#
+# Outbound internet from the sandbox is DELIBERATE and stays: `pip install`
+# and `npm ci` need it, and a sandbox that cannot install dependencies cannot
+# run a test suite. That is exactly why this cannot live in compose. Docker
+# has no switch for "reach the internet but not the router you reach it
+# through", because from the container both are the same next hop. Only the
+# host firewall sees the difference: traffic TO the host arrives on INPUT,
+# traffic THROUGH it to the internet arrives on FORWARD. Dropping the first
+# leaves the second alone.
+#
+# Idempotent, and a missing iptables is a warning rather than a failure — a
+# deploy must not stop over a hardening rule on a host that does not use
+# iptables at all (nftables-only, a managed runtime, a rootless daemon).
+SANDBOX_SUBNET="$(grep -E '^SANDBOX_NET_SUBNET=' .env 2>/dev/null | cut -d= -f2- | tr -d '[:space:]')"
+: "${SANDBOX_SUBNET:=172.28.90.0/24}"
+if command -v iptables >/dev/null 2>&1; then
+  # -C tests for the rule; a non-zero exit means it is not there yet.
+  if iptables -C INPUT -s "$SANDBOX_SUBNET" -j DROP 2>/dev/null; then
+    log "sandbox→host already blocked ($SANDBOX_SUBNET)"
+  elif iptables -I INPUT 1 -s "$SANDBOX_SUBNET" -j DROP 2>/dev/null; then
+    log "blocked sandbox→host ($SANDBOX_SUBNET); internet egress untouched"
+  else
+    log "WARNING: could not install the sandbox→host firewall rule"
+  fi
+else
+  log "WARNING: no iptables — the sandbox can reach the host on this box"
+fi
+
 # ─── 4. the stamp, and the migration ─────────────────────────────────
 #
 # The COMMIT the running image was built from, not the tag that was asked for:

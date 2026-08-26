@@ -268,6 +268,8 @@ services:
       # sandbox" (which the client already does, failing closed) rather than
       # refuse to start postgres, api and web along with it.
       SANDBOX_URL: "${SANDBOX_URL:-http://sandbox:8900}"
+      # Which peer addresses are the sandbox. Must match sandbox_net's subnet.
+      SANDBOX_NET_SUBNET: "${SANDBOX_NET_SUBNET:-172.28.90.0/24}"
       SANDBOX_TOKEN: "${SANDBOX_TOKEN:-}"
       # Passed through purely so the state is observable from /api/ops/gateway.
       # Compose consumes COMPOSE_PROFILES itself and passes it to nobody, so
@@ -673,7 +675,18 @@ networks:
   #
   # Residual, stated rather than hidden: a shared network is reachable in both
   # directions at the IP level, so the sandbox can address api. Every api
-  # route requires a signed token this container never receives.
+  # route requires a signed token this container never receives — except
+  # /healthz, which answered 200 to anyone, with the review configuration in
+  # it. SandboxNetworkGuard now refuses anything whose peer address is on this
+  # subnet, before routing, which is why the subnet is pinned above.
+  #
+  # Two neighbours of that hole, measured from inside the sandbox rather than
+  # reasoned about: outbound internet is OPEN and stays — `pip install` and
+  # `npm ci` need it, and a sandbox that cannot install dependencies cannot
+  # run a test suite. The docker host itself was reachable too, which is not
+  # the same thing as the internet and was written down nowhere;
+  # scripts/deploy-on-server.sh drops that at the firewall, the only layer
+  # that can tell the host apart from the internet it is routing for.
   #
   # `default` is deliberately NOT redeclared here, and that is not tidiness.
   # It was declared as `default: {driver: bridge}` — which is what it already
@@ -690,3 +703,10 @@ networks:
   # it here is valid and is what api does.
   sandbox_net:
     driver: bridge
+    # Pinned so the api can be told which addresses are the sandbox's.
+    # Docker hands out a different subnet per host otherwise, and a guard
+    # aimed at the wrong network guards nothing while looking installed.
+    # Override if 172.28.90/24 collides with something on your host.
+    ipam:
+      config:
+        - subnet: ${SANDBOX_NET_SUBNET:-172.28.90.0/24}
