@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Virtual envs — щоб не копіювати у image
+.venv/
+venv/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Secrets — НЕ потрапляють в image
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+
+# Local data — у container ставимо через volumes
+repos/
+data/
+logs/
+vault-local/
+workspace/
+
+# Docker
+Dockerfile.local
+docker-compose.override.yml
+
+# Tests
+tests/
+.tox/
+
+# Git
+.git/
+.gitignore
+
+# Project artifacts
+task/
+*.md
+!README.md

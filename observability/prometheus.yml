@@ -1,0 +1,15 @@
+# Prometheus scrape config (Stage 21).
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: celmis-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          service: celmis-api
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

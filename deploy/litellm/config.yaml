@@ -1,0 +1,60 @@
+# LiteLLM proxy — Celmis gateway config (mounted read-only at /app/config.yaml).
+#
+# Deliberately minimal. Everything tenant-specific (per-workspace deployments
+# and virtual keys) is created at RUNTIME by `src/llm/gateway.py` through
+# /model/new + /key/generate, and persisted in the proxy's own Postgres
+# database (STORE_MODEL_IN_DB=True) — so it survives restarts and this file
+# never has to know about workspaces.
+#
+# No UI / SSO blocks here: the admin UI is not exposed, the proxy is only
+# reachable from inside the compose network.
+#
+# Secrets come from the environment (`os.environ/NAME`), never from this file.
+
+general_settings:
+  # Must start with "sk-" — the proxy rejects anything else.
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Prisma URL (postgresql://…, NOT postgresql+asyncpg://). Separate database
+  # on the same Postgres instance; the proxy migrates it itself on boot.
+  database_url: os.environ/DATABASE_URL
+  # /model/new and /key/generate persist to the DB instead of living in memory,
+  # so provisioning a workspace never needs a proxy restart.
+  store_model_in_db: true
+
+litellm_settings:
+  # Provider-specific params we forward (e.g. `task_type` for Gemini
+  # embeddings) reach providers that support them and are silently dropped for
+  # providers that don't — without this the proxy 400s the whole request.
+  drop_params: true
+  num_retries: 2
+  request_timeout: 600
+  telemetry: false
+  # Never echo prompts/responses into the proxy logs.
+  turn_off_message_logging: true
+
+# Bootstrap deployments — the house Gemini key, available before any workspace
+# has been provisioned (smoke tests, `/health`, single-tenant installs).
+# Values are env-substituted at load time; when GEMINI_API_KEY is empty these
+# entries simply fail auth on use, they do not break startup.
+model_list:
+  - model_name: celmis-bootstrap-chat
+    litellm_params:
+      model: os.environ/CELMIS_BOOTSTRAP_CHAT_MODEL
+      api_key: os.environ/GEMINI_API_KEY
+    model_info:
+      celmis_bootstrap: true
+
+  - model_name: celmis-bootstrap-review
+    litellm_params:
+      model: os.environ/CELMIS_BOOTSTRAP_REVIEW_MODEL
+      api_key: os.environ/GEMINI_API_KEY
+    model_info:
+      celmis_bootstrap: true
+
+  - model_name: celmis-bootstrap-embed
+    litellm_params:
+      model: os.environ/CELMIS_BOOTSTRAP_EMBED_MODEL
+      api_key: os.environ/GEMINI_API_KEY
+    model_info:
+      mode: embedding
+      celmis_bootstrap: true

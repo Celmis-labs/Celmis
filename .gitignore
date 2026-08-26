@@ -1,0 +1,88 @@
+# ─── Secrets (NEVER commit) ───────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+secrets/
+
+# ─── Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.so
+
+# ─── Node / Next.js ───────────────────────────────────────────────────
+node_modules/
+.next/
+.pnpm-store/
+*.tsbuildinfo
+next-env.d.ts
+
+# ─── Runtime data (mounted as docker volumes, not source) ─────────────
+# Leading slash matters: unanchored, `repos/` also matched `src/repos/` and
+# silently kept that package out of every checkout.
+/workspace/
+/repos/
+/data/
+/logs/
+/vault-local/
+*.sqlite
+*.sqlite3
+*.db
+*.fdblite
+qdrant_data/
+
+# ─── IDE / editor / AI agent state ────────────────────────────────────
+.idea/
+.vscode/
+# Not the whole directory: `.claude/skills/` is documentation that ships with
+# the repository — an agent opening this checkout should find the guide to
+# querying Celmis over MCP without being told it exists. Everything else under
+# .claude/ is one machine's local state.
+.claude/*
+!.claude/skills/
+.cursor/
+.aider*
+*.swp
+*.swo
+
+# ─── OS ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── Test / coverage artifacts ────────────────────────────────────────
+.tox/
+coverage.xml
+*.cover
+task/
+
+# ─── Misc ─────────────────────────────────────────────────────────────
+*.log
+/tmp/
+docker-compose.override.yml
+
+# робочі .env-дампи бенчмарка — містять живі секрети
+bench/results/.env-*
+
+# Signal file the benchmark session watches for; never committed.
+.ready-for-bench
+
+# Process leftovers. Neither ignored nor tracked, which is the state where a
+# stray file is one `git add -A` away from the repository. Nothing in this tree
+# writes either name today — they are here because `nohup cmd &` and a
+# build-dirty marker are what a person reaches for at 2am, and the cost of the
+# two lines is nothing against the cost of noticing later.
+nohup.out
+dirty_at_build.txt

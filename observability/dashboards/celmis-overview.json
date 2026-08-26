@@ -1,0 +1,82 @@
+{
+  "title": "Celmis Overview",
+  "uid": "celmis-overview",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "HTTP requests / min by class",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(celmis_http_requests_total[5m])) by (path_class) * 60",
+          "legendFormat": "{{path_class}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "p95 latency by class",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(celmis_http_request_duration_seconds_bucket[5m])) by (le, path_class))",
+          "legendFormat": "{{path_class}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Job queue by status",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "celmis_sync_jobs", "legendFormat": "{{status}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Reviews last 24h",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "targets": [
+        { "expr": "sum(celmis_review_runs_24h)", "legendFormat": "runs" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "LLM cost 24h (USD)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "targets": [
+        { "expr": "celmis_review_cost_usd_24h", "legendFormat": "USD" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Error responses (4xx/5xx) / min",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum(rate(celmis_http_requests_total{status=~\"4..|5..\"}[5m])) by (status) * 60",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "All container logs (Loki)",
+      "type": "logs",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "targets": [
+        { "expr": "{container=~\".+\"}" }
+      ]
+    }
+  ]
+}

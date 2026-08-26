@@ -1,0 +1,679 @@
+# Celmis — full-stack containerized deployment (Stage 9).
+#
+# Three services + named volumes. External dependencies (Qdrant Cloud, Gemini)
+# are reached via HTTPS — not containerized here.
+#
+# Usage:
+#   docker compose --env-file .env up -d --build      # build + start
+#   docker compose logs -f api                        # tail FastAPI logs
+#   docker compose exec api alembic upgrade head      # run migrations
+#   docker compose exec api analyzer repo list        # use CLI inside container
+#   docker compose down                               # stop (keeps volumes)
+#   docker compose down -v                            # stop + WIPE volumes
+
+# ─── Log rotation ─────────────────────────────────────────────────────
+# The default json-file driver has NO size limit, so container logs grow
+# until the disk does. This box logs every outbound HTTP request; left
+# uncapped that is the single biggest consumer on a 20GB volume, and it
+# fails as "no space left on device" during an unrelated build.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# A missing signing secret stops `compose up` with the variable's own name,
+# before a container starts. The fallback used to be a literal
+# "change-me-in-production": the stack came up, the API refused to serve on
+# it, and the operator read a runtime error instead of a config one.
+services:
+  # ─── Postgres 17 — primary DB для projects, chats, messages ──────────
+  postgres:
+    image: postgres:17-alpine
+    container_name: celmis-postgres
+    logging: *default-logging
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-analyzer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: ${POSTGRES_DB:-analyzer}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      # 127.0.0.1 ONLY. This was "${POSTGRES_HOST_PORT:-5432}:5432", which
+      # Docker binds to 0.0.0.0 — verified from off-box: port 5432 answered
+      # from the open internet. Every tenant's projects, chats, messages
+      # and findings live behind that socket, on a bare-IP host with no
+      # TLS. Nothing outside this compose network needs it: api and the
+      # worker reach postgres by service name. Bound to loopback rather
+      # than removed so `ssh -L 5432:localhost:5432` still works, which is
+      # how an operator should have been reaching it all along.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-analyzer} -d ${POSTGRES_DB:-analyzer}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
+  # ─── LiteLLM bootstrap — must finish before the proxy starts ──────────
+  #
+  # Everything the compose file itself cannot express:
+  #
+  #   1. Refuse to start an UNAUTHENTICATED proxy. `${VAR:?required}` is not an
+  #      option on the litellm service — Compose interpolates the WHOLE file,
+  #      including services whose profile is inactive, so it would break every
+  #      deploy that never asked for the gateway.
+  #   2. Create the proxy's own database. Prisma claims to create a missing
+  #      database on `migrate deploy`, but that needs CREATEDB on the role and
+  #      is not something to discover mid-deploy. Doing it here is explicit,
+  #      idempotent, and — unlike /docker-entrypoint-initdb.d, which only ever
+  #      runs on a virgin volume — it also works on the existing production box.
+  litellm-init:
+    image: postgres:17-alpine     # already pulled for `postgres`; brings psql
+    container_name: celmis-litellm-init
+    logging: *default-logging
+    profiles: ["gateway"]
+    restart: "no"                 # one-shot; `unless-stopped` would loop it
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: "${POSTGRES_USER:-analyzer}"
+      PGPASSWORD: "${POSTGRES_PASSWORD}"
+      PGDATABASE: postgres        # maintenance DB — CREATE DATABASE needs one
+      LITELLM_DB: "${LITELLM_DB:-litellm}"
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-}"
+      LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:-}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        fail() { echo "litellm-init FATAL: $$1" >&2; exit 1; }
+        case "$${LITELLM_MASTER_KEY}" in
+          sk-*) ;;
+          *) fail "LITELLM_MASTER_KEY must be set and start with 'sk-'. Without it the proxy holds every tenant's provider keys behind no auth at all." ;;
+        esac
+        [ $${#LITELLM_MASTER_KEY} -ge 16 ] || fail "LITELLM_MASTER_KEY is too short (min 16 chars)."
+        [ $${#LITELLM_SALT_KEY} -ge 16 ] || fail "LITELLM_SALT_KEY must be set (min 16 chars) BEFORE the first start. It encrypts every provider key the proxy stores, and it can never be changed afterwards."
+        case "$${LITELLM_DB}" in
+          *[!A-Za-z0-9_]*|"") fail "LITELLM_DB must be a bare identifier ([A-Za-z0-9_]); got '$${LITELLM_DB}'." ;;
+        esac
+        psql -v ON_ERROR_STOP=1 -Atqc 'SELECT 1' >/dev/null || fail "cannot reach postgres as '$${PGUSER}'."
+        if psql -v ON_ERROR_STOP=1 -Atqc "SELECT 1 FROM pg_database WHERE datname = '$${LITELLM_DB}'" | grep -q 1; then
+          echo "litellm-init: database '$${LITELLM_DB}' already present"
+        else
+          echo "litellm-init: creating database '$${LITELLM_DB}'"
+          createdb "$${LITELLM_DB}" \
+            || psql -v ON_ERROR_STOP=1 -Atqc "SELECT 1 FROM pg_database WHERE datname = '$${LITELLM_DB}'" | grep -q 1 \
+            || fail "could not create database '$${LITELLM_DB}' (does '$${PGUSER}' have CREATEDB?)."
+        fi
+        echo "litellm-init: ok"
+    security_opt:
+      - no-new-privileges:true
+
+  # ─── LiteLLM gateway — one exit door to every LLM provider ────────────
+  #
+  # Off by default, TWICE over: the container only exists when the `gateway`
+  # profile is active (set COMPOSE_PROFILES=gateway in .env — Compose reads
+  # COMPOSE_* from the project .env, so no deploy-workflow change is needed),
+  # and the API only routes through it when LITELLM_PROXY_URL is also set (see
+  # src/llm/gateway.py). A box with neither behaves exactly as before.
+  #
+  # The port is deliberately NOT published: the proxy stores every tenant's
+  # real provider key, so it must be reachable only from inside the compose
+  # network. If you ever need to poke it from the host, use
+  # `docker compose exec` — never a `ports:` mapping.
+  litellm:
+    image: ghcr.io/berriai/litellm-database:v1.96.0   # pinned; not :latest
+    container_name: celmis-litellm
+    logging: *default-logging
+    restart: unless-stopped
+    profiles: ["gateway"]        # `--profile gateway` (or COMPOSE_PROFILES) starts it
+    depends_on:
+      postgres:
+        condition: service_healthy
+      litellm-init:
+        condition: service_completed_successfully
+    environment:
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-}"
+      # Encrypts provider credentials stored in the proxy DB.
+      # SET ONCE — rotating it makes every stored key unreadable.
+      LITELLM_SALT_KEY: "${LITELLM_SALT_KEY:-}"
+      # Separate database on the SAME Postgres instance (Prisma URL — no +asyncpg).
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-analyzer}:${POSTGRES_PASSWORD}@postgres:5432/${LITELLM_DB:-litellm}"
+      STORE_MODEL_IN_DB: "True"   # /model/new + /key/generate persist across restarts
+      LITELLM_MODE: "PRODUCTION"
+      LITELLM_LOG: "ERROR"
+      NO_DOCS: "True"
+      NO_REDOC: "True"
+      # Bootstrap deployments in deploy/litellm/config.yaml (`os.environ/…`).
+      # Per-workspace deployments are created at runtime via /model/new and do
+      # NOT come from here.
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      # ДВІ РІЗНІ МОДЕЛІ, і раніше тут була одна змінна на обидві.
+      #
+      # Чат — один виклик за раз, тож сильніша модель нічим не ризикує.
+      # Рев'ю — ТРИ одночасні виклики (defect, contract, security йдуть
+      # паралельно), а при CELMIS_SYNC_WORKER_CONCURRENCY=2 два рев'ю дають
+      # шість. Заміряно прямо в Google того ж дня: gemini-3.1-pro-preview на
+      # трьох одночасних — найдовший виклик 51.6 с, на чотирьох — 503.
+      # gemini-3.6-flash: 10.0 с і 4 з 4. Див. ReviewSettings.defect_model.
+      CELMIS_BOOTSTRAP_CHAT_MODEL: "gemini/${GEMINI_GENERATION_MODEL:-gemini-3.1-pro-preview}"
+      CELMIS_BOOTSTRAP_REVIEW_MODEL: "gemini/${GEMINI_REVIEW_MODEL:-gemini-3.6-flash}"
+      CELMIS_BOOTSTRAP_EMBED_MODEL: "gemini/${GEMINI_EMBEDDING_MODEL:-gemini-embedding-2}"
+    volumes:
+      - ./deploy/litellm/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    healthcheck:
+      # `python3` is what the image installs (apk add … python3); a bare
+      # `python` is not guaranteed to be on PATH. No curl/wget either, which is
+      # why this is stdlib urllib and not the usual one-liner.
+      # /health/liveliness is one of LiteLLM's public_routes — no key needed.
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=4).status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # First boot runs the proxy's Prisma migrations against an empty database;
+      # 40s was optimistic enough to mark a perfectly healthy proxy unhealthy.
+      start_period: 120s
+    security_opt:
+      - no-new-privileges:true
+
+  # ─── FastAPI — Q&A API + PR review + auth ─────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: celmis-qdrant
+    logging: *default-logging
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # No ports published — internal to the compose network.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # THE FRONT DOOR, in the base file rather than an overlay.
+  #
+  # The web bundle asks for the relative `/backend`, because an image that
+  # bakes an absolute API URL works on one installation and nowhere else. That
+  # relative path needs something to resolve against, so the proxy is part of
+  # the product, not part of one deployment's opinion about TLS.
+  #
+  # Overlays still add TLS and a domain on top; this one only puts both apps on
+  # one origin, which is the part every installation needs.
+  caddy:
+    image: caddy:2-alpine
+    container_name: celmis-caddy
+    restart: unless-stopped
+    ports:
+      - "${CELMIS_HTTP_PORT:-80}:80"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - web
+      - api
+
+  api:
+    image: ${CELMIS_REGISTRY:-ghcr.io/celmis-labs}/celmis-api:${CELMIS_TAG:-latest}
+    container_name: celmis-api
+    logging: *default-logging
+    restart: unless-stopped
+    # Long enough for shutdown_all() to let every live agent session push what
+    # it has written. Docker's default is 10s, which is SHORTER than the 25s
+    # that wait — the container would be SIGKILLed mid-push and the work lost,
+    # which is the exact bug the wait exists to fix. Keep above
+    # CELMIS_SHUTDOWN_PUSH_SECONDS.
+    stop_grace_period: 40s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Postgres (через service-name resolve у compose network)
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-analyzer}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-analyzer}"
+      # External APIs — passthrough з .env
+      # Optional: an LLM key can instead be added at runtime via /settings/llm
+      # (credential store). Left empty here so the UI key flow can be tested.
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      # ── LiteLLM gateway (optional) ──
+      # BOTH must be set for the API to route through the proxy; either one
+      # missing = provider keys are used directly, exactly as before.
+      # Start the proxy with: docker compose --profile gateway up -d
+      LITELLM_PROXY_URL: "${LITELLM_PROXY_URL:-}"
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:-}"
+      # ── Credential store ──
+      # The Fernet key for every stored git token and LLM key. Passed
+      # explicitly because the fallback is silent: with no value the store
+      # reads /workspace/data/secrets/.master.key, and if that file is absent
+      # it GENERATES a new one, writes it, logs a single INFO line and carries
+      # on — leaving every existing credential undecryptable while everything
+      # looks healthy. A restore that brought back credentials.db without the
+      # hidden key file beside it is exactly that case.
+      CREDENTIAL_MASTER_KEY: "${CREDENTIAL_MASTER_KEY:-}"
+      # ── Execution sandbox ──
+      # Without these two the api half of src/agent/sandbox.py reads an empty
+      # token, `available()` returns False, and the sandbox is unreachable —
+      # which is how it shipped: the service was on the network and the api was
+      # never told the secret or the address.
+      #
+      # `:-` and not `:?required`: the token is provisioned by the deploy
+      # workflow, and a sandbox that is not configured must degrade to "no
+      # sandbox" (which the client already does, failing closed) rather than
+      # refuse to start postgres, api and web along with it.
+      SANDBOX_URL: "${SANDBOX_URL:-http://sandbox:8900}"
+      SANDBOX_TOKEN: "${SANDBOX_TOKEN:-}"
+      # Passed through purely so the state is observable from /api/ops/gateway.
+      # Compose consumes COMPOSE_PROFILES itself and passes it to nobody, so
+      # without this line "did the .env ask for the gateway?" is a question
+      # only answerable with a shell on the box — which is the situation this
+      # whole endpoint exists to avoid.
+      COMPOSE_PROFILES: "${COMPOSE_PROFILES:-}"
+      # Presence only — the value never leaves the proxy and its init job.
+      LITELLM_SALT_KEY_SET: "${LITELLM_SALT_KEY:+yes}"
+      # Same value — LiteLLM's SDK reads this one for `litellm_proxy/…` chat
+      # completions issued outside src/llm/completion.py (e.g. the deps report).
+      LITELLM_PROXY_API_BASE: "${LITELLM_PROXY_URL:-}"
+      # Optional outbound email (password reset + invites). Unset SMTP_HOST →
+      # mailer-less behaviour: links are returned/logged for manual delivery.
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USERNAME: "${SMTP_USERNAME:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      SMTP_FROM: "${SMTP_FROM:-}"
+      SMTP_STARTTLS: "${SMTP_STARTTLS:-true}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-}"
+      # Generation model override (free-tier keys have 0 quota on -pro; set
+      # to a flash model in .env to make Q&A/reviews work on such keys).
+      GEMINI_GENERATION_MODEL: "${GEMINI_GENERATION_MODEL:-gemini-3.1-pro-preview}"
+      # Модель рев'ю, окремо від генерації — див. коментар при
+      # CELMIS_BOOTSTRAP_REVIEW_MODEL. Щоб повернути Pro на рев'ю, поставте
+      # її ТУТ і опустіть REVIEW_AGENT_CONCURRENCY до 2: числа кажуть, що ці
+      # дві зміни ходять разом.
+      GEMINI_REVIEW_MODEL: "${GEMINI_REVIEW_MODEL:-gemini-3.6-flash}"
+      GEMINI_THINKING_BUDGET: "${GEMINI_THINKING_BUDGET:--1}"
+      # Стелі відповіді агентів рев'ю. Існували в src/review/settings.py і не
+      # передавалися сюди — тобто налаштування було, а змінити його ззовні
+      # контейнера не можна було. Та сама пастка, що й з GEMINI_THINKING_BUDGET.
+      REVIEW_AGENT_MAX_OUTPUT_TOKENS: "${REVIEW_AGENT_MAX_OUTPUT_TOKENS:-16384}"
+      REVIEW_AGENT_TEMPERATURE: "${REVIEW_AGENT_TEMPERATURE:-0.1}"
+      REVIEW_VERIFIER_MAX_OUTPUT_TOKENS: "${REVIEW_VERIFIER_MAX_OUTPUT_TOKENS:-32768}"
+      REVIEW_COMPLIANCE_MAX_OUTPUT_TOKENS: "${REVIEW_COMPLIANCE_MAX_OUTPUT_TOKENS:-256}"
+      REVIEW_AGENT_CONCURRENCY: "${REVIEW_AGENT_CONCURRENCY:-3}"
+      # Скільки рев'ю воркер бере одночасно. Кожне рев'ю саме по собі жене
+      # до REVIEW_AGENT_CONCURRENCY паралельних викликів до провайдера, тож
+      # два одночасні рев'ю дають шість з'єднань — рівно та кількість, на якій
+      # ми ловили ConnectError і 503.
+      CELMIS_SYNC_WORKER_CONCURRENCY: "${CELMIS_SYNC_WORKER_CONCURRENCY:-2}"
+      # Тепер підключений: `genai.Client` будувався без http_options, тож
+      # виклики Gemini у QA-агента не мали таймауту взагалі, а ця настройка
+      # не читалась жодним шляхом коду.
+      GEMINI_TIMEOUT_SECONDS: "${GEMINI_TIMEOUT_SECONDS:-120}"
+
+      # ── Годинники рев'ю ──────────────────────────────────────────
+      #
+      # ЧОМУ ВОНИ ВЗАГАЛІ ТУТ. `ReviewSettings` оголошує
+      # `env_file = <корінь>/.env` — правда на ноуті й неправда всюди, де
+      # продукт працює: у образі немає `.env` і ніщо його не монтує. Тож
+      # єдиний шлях всередину — імʼя, перелічене саме тут. Настройка,
+      # відсутня в цьому блоці, мовчки бере код-дефолт, і аргумент «у числа
+      # тепер є імʼя, його можна підняти» в деплої не виконується.
+      #
+      # І ЖОДНОГО ДРУГОГО ДЕФОЛТУ. Тут стояло
+      # `${REVIEW_TIMEOUT_SECONDS:-${REVIEW_REVIEW_TIMEOUT_SECONDS:-300}}` —
+      # 300 було дефолтом поля, поки його не виміряли: на 517 реальних рев'ю
+      # медіана 74 с, p90 328 с, і дедлайн 300 с ріже 14.3% з них. Поле тепер
+      # каже 900, а цей рядок казав 300, і вигравав рядок. Два дефолти на одну
+      # настройку — рівно той дефект, який тиждень виправлявся в коді, на шар
+      # вище. Числа нижче збігаються з полями; розходження побачить тест
+      # `test_a_setting_the_deployment_drops_is_not_settable`.
+      #
+      # `/backend/healthz` віддає ці значення так, як їх розвʼязав процес —
+      # єдиний спосіб дізнатись ззовні, що саме доїхало.
+      REVIEW_TIMEOUT_SECONDS: "${REVIEW_TIMEOUT_SECONDS:-900}"
+      # Стара назва — подвоєний префікс (`env_prefix="REVIEW_"` плюс поле
+      # `review_timeout_seconds`). Поле перейменоване, місток у
+      # `_legacy_env_bridge` її ще приймає й пише попередження. Порожня за
+      # замовчуванням: значення тут перебило б рядок вище.
+      REVIEW_REVIEW_TIMEOUT_SECONDS: "${REVIEW_REVIEW_TIMEOUT_SECONDS:-}"
+      # Дедлайн ОДНОГО виклику моделі. Був дефолтом keyword-аргументу
+      # `LLMClient.generate(timeout=120)`, який не передавав жоден з п'яти
+      # сайтів рев'ю: 16 збоїв агентів за 8 годин, усі APITimeoutError.
+      REVIEW_LLM_TIMEOUT_SECONDS: "${REVIEW_LLM_TIMEOUT_SECONDS:-300}"
+      # Наскільки довша друга спроба, коли перша померла НА дедлайні. 1.0 —
+      # вимкнути розширення. `llm_timeout × (1 + це)` мусить лишатись у межах
+      # REVIEW_TIMEOUT_SECONDS, інакше стадійний gate стає недосяжним.
+      REVIEW_LLM_TIMEOUT_RETRY_FACTOR: "${REVIEW_LLM_TIMEOUT_RETRY_FACTOR:-2.0}"
+      # Diff, більший за це, — SKIPPED з названою причиною, а не рев'ю першої
+      # пʼятої частини змін, подане як рев'ю змін.
+      REVIEW_MAX_DIFF_SIZE_BYTES: "${REVIEW_MAX_DIFF_SIZE_BYTES:-500000}"
+      # Годинник CVE-обходу. 120 с — судження про розмір lockfile, яке може
+      # винести лише конкретна інсталяція; монорепа з тисячами пакетів
+      # проходить більше батчів, ніж маленький репозиторій.
+      REVIEW_CVE_LOOKUP_TIMEOUT_SECONDS: "${REVIEW_CVE_LOOKUP_TIMEOUT_SECONDS:-120}"
+      # LLM-вето хибних спрацювань. ВИМКНЕНЕ за замовчуванням: це другий
+      # виклик моделі по кожній знахідці рев'ю, найповільніший у конвеєрі, і
+      # чи вартий він своєї ціни — рішення про конкретний репозиторій.
+      # Детермінований префільтр (дедуп, кластеризація, deny-list правил,
+      # поріг впевненості, сортування) працює завжди й цим не вимикається.
+      REVIEW_VERIFIER_ENABLED: "${REVIEW_VERIFIER_ENABLED:-false}"
+      # Оренда job-а в черзі. Мусить перевищувати найдовше рев'ю, інакше
+      # сусідній воркер забирає рядок, поки перший ще в хендлері: 3.5% з 517
+      # рев'ю виконувались двічі. Хендлер тепер продовжує оренду, поки
+      # працює, — це стеля, а не здогад про тривалість.
+      CELMIS_JOB_LEASE_SECONDS: "${CELMIS_JOB_LEASE_SECONDS:-600}"
+      # Скільки клієнт чекає ПОНАД власний бюджет команди: черга sandbox-а,
+      # завантаження tar і відповідь. Надсилається на дріт, щоб sandbox
+      # обмежив своє очікування слота нашим терпінням, а не лише власною
+      # стелею — два незалежні числа якраз і давали гарантований обрив.
+      SANDBOX_CLIENT_WAIT_BUDGET: "${SANDBOX_CLIENT_WAIT_BUDGET:-180}"
+      GEMINI_SUBAGENT_MODEL: "${GEMINI_SUBAGENT_MODEL:-gemini-3-flash-preview}"
+      # Vector store: defaults to the local qdrant container below. Point at
+      # Qdrant Cloud (or any server) via QDRANT_URL/QDRANT_API_KEY in .env,
+      # or configure it in the UI (LLM Setup -> Vector store).
+      QDRANT_URL: "${QDRANT_URL:-http://qdrant:6333}"
+      QDRANT_API_KEY: "${QDRANT_API_KEY:-}"
+      # ── Local embeddings (self-hosted) ──
+      # The whole family Settings reads for EMBEDDING_PROVIDER=openai_compatible
+      # (see .env.example, "Local embeddings"). This container is the only
+      # service that runs src/ — the review poller and the vault writer live
+      # inside this process — and until these lines existed none of the
+      # variables crossed the container boundary: EMBEDDING_PROVIDER set in
+      # .env changed nothing inside, and the local embedder shipped
+      # unreachable in the only supported deployment.
+      #
+      # The int/bool defaults are the Settings defaults SPELLED OUT, not "":
+      # `"${VAR:-}"` writes an empty string into the container environment,
+      # pydantic refuses "" for an integer/bool field, and Settings() would
+      # then raise on every request — a default install crash-looping for a
+      # feature it never asked for. String fields tolerate "" (and the
+      # provider validator maps "" to "gemini"), so a .env without any of
+      # these behaves byte-identically to before.
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-gemini}"
+      EMBEDDING_BASE_URL: "${EMBEDDING_BASE_URL:-}"
+      EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-}"
+      EMBEDDING_DIMENSIONS: "${EMBEDDING_DIMENSIONS:-0}"
+      EMBEDDING_TIMEOUT_SECONDS: "${EMBEDDING_TIMEOUT_SECONDS:-60}"
+      EMBEDDING_DOCUMENT_PREFIX: "${EMBEDDING_DOCUMENT_PREFIX:-}"
+      EMBEDDING_QUERY_PREFIX: "${EMBEDDING_QUERY_PREFIX:-}"
+      # Required (=1) for a 127.0.0.1 / compose-service EMBEDDING_BASE_URL:
+      # the egress policy fails closed on private addresses without it, so
+      # the local-embeddings example config indexes nothing and every error
+      # says egress_blocked. Off by default — the switch opens the LAN, and
+      # only the LAN (public hosts and the cloud metadata address stay
+      # refused; see src/security/egress.py).
+      EGRESS_ALLOW_PRIVATE_NETWORK: "${EGRESS_ALLOW_PRIVATE_NETWORK:-false}"
+      # Path overrides — у container працюємо з mount points
+      WORKSPACE_DIR: /workspace/data
+      # One-time DB reset switch. Set RESET_ONCE=<any token> in .env to wipe all
+      # users on the NEXT deploy (so the next signup becomes the first admin).
+      # A marker is written to the volume, so the same token never wipes twice —
+      # change the token to reset again. Empty = never wipe.
+      RESET_ONCE: "${RESET_ONCE:-}"
+      VAULT_DIR: /workspace/vault
+      # CORS — accept browser calls from host-published Next.js.
+      # Override via CELMIS_CORS_ORIGINS in .env if you use a non-default port.
+      CELMIS_CORS_ORIGINS: "${CELMIS_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}"
+      # JWT secret
+      CELMIS_JWT_SECRET: "${CELMIS_JWT_SECRET:?set it in .env — openssl rand -hex 32; see .env.example}"
+      # Bootstrap superadmin (LiteLLM-style): BOTH values must be set in
+      # .env — logging in as CELMIS_MASTER_EMAIL with CELMIS_MASTER_KEY as
+      # the password yields the single global-admin recovery account. No
+      # other path grants global admin. No defaults: either missing =
+      # the path is disabled. Key min length 12.
+      CELMIS_MASTER_KEY: "${CELMIS_MASTER_KEY:-}"
+      # Read-only ops credential for /api/ops/logs|logs.txt|diag via the
+      # X-Ops-Token header — debugging when SSH is unreachable and no browser
+      # session is at hand. Unlocks nothing else. Min 16 chars; unset = off.
+      CELMIS_OPS_TOKEN: "${CELMIS_OPS_TOKEN:-}"
+      # Which commit this container is actually running. The deploy workflow
+      # appends it to the server's .env, so "did my push reach production?"
+      # is answerable from /api/ops/diag instead of by guessing from log
+      # timestamps. Empty in local runs.
+      # Web Push. Unset = the notification card says push is unconfigured and
+      # nothing else changes.
+      VAPID_PUBLIC_KEY: "${VAPID_PUBLIC_KEY:-}"
+      VAPID_PRIVATE_KEY: "${VAPID_PRIVATE_KEY:-}"
+      VAPID_SUBJECT: "${VAPID_SUBJECT:-}"
+      CELMIS_GIT_SHA: "${CELMIS_GIT_SHA:-}"
+      CELMIS_DEPLOYED_AT: "${CELMIS_DEPLOYED_AT:-}"
+      CELMIS_MASTER_EMAIL: "${CELMIS_MASTER_EMAIL:-}"
+      # MCP JWT secret — scoped separately so rotating it doesn't log out the
+      # web session. Falls back to CELMIS_JWT_SECRET when unset.
+      MCP_JWT_SECRET: "${MCP_JWT_SECRET:-${CELMIS_JWT_SECRET:?set it in .env — see .env.example}}"
+      # Server-side Google ID-token verification (audience check). Same value as
+      # the web GOOGLE_CLIENT_ID. Empty -> Google sign-in returns 503.
+      GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:-}"
+      # PR-review webhook secrets. All three handlers refuse when their secret
+      # is unset, and until now none of these reached the container at all —
+      # ReviewSettings reads a project-root .env that the image does not ship,
+      # so a webhook could not be configured on a deployed instance. Empty
+      # stays empty: unset here means unset there, and the endpoint keeps
+      # answering 500 rather than accepting unauthenticated events.
+      # Hosts the MCP transport answers to. The SDK rejects an unknown Host
+      # header (DNS-rebinding protection) and defaults to localhost only, so a
+      # deployed instance is unreachable over MCP until its own host is named.
+      MCP_ALLOWED_HOSTS: "${MCP_ALLOWED_HOSTS:-}"
+      REVIEW_WEBHOOK_SECRET: "${REVIEW_WEBHOOK_SECRET:-}"
+      REVIEW_GITLAB_TOKEN: "${REVIEW_GITLAB_TOKEN:-}"
+      REVIEW_BITBUCKET_SECRET: "${REVIEW_BITBUCKET_SECRET:-}"
+      # Provider tokens — optional, для CLI fallback всередині container
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      GITLAB_TOKEN: "${GITLAB_TOKEN:-}"
+      BITBUCKET_TOKEN: "${BITBUCKET_TOKEN:-}"
+      BITBUCKET_USERNAME: "${BITBUCKET_USERNAME:-}"
+    ports:
+      # Caddy proxies to `api:8000` over the compose network, so publishing
+      # this on 0.0.0.0 only created a second door that bypasses the proxy
+      # — no rate limiting, no access log, no future TLS termination.
+      - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
+    networks:
+      # Both, explicitly: naming a network removes the implicit `default`, and
+      # api needs `default` for postgres/litellm/qdrant and `sandbox_net` to
+      # reach the sandbox.
+      - default
+      - sandbox_net
+    volumes:
+      - workspace_data:/workspace/data
+      - vault_data:/workspace/vault
+    # Apply Alembic migrations before starting uvicorn.
+    # Якщо migration вже applied — `upgrade head` no-op.
+    command: >-
+      sh -c 'R="$${RESET_ONCE:-}";
+             if [ -n "$$R" ] && [ ! -f "/workspace/data/.reset-$$R" ]; then
+               echo "RESET_ONCE=$$R: wiping all users (one-time, first signup becomes admin)";
+               rm -f /workspace/data/secrets/users.db;
+               mkdir -p /workspace/data && touch "/workspace/data/.reset-$$R";
+             fi;
+             alembic upgrade head &&
+             uvicorn src.api.main:app --host 0.0.0.0 --port 8000'
+    healthcheck:
+      # /healthz, not /docs. The schema and the Swagger page now require
+      # a session, so curl against /docs gets a 401 and `-fsS` treats
+      # that as failure — the container would report unhealthy while
+      # serving every request perfectly.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  # ─── Next.js — UI ─────────────────────────────────────────────────────
+  web:
+    image: ${CELMIS_REGISTRY:-ghcr.io/celmis-labs}/celmis-web:${CELMIS_TAG:-latest}
+    container_name: celmis-web
+    logging: *default-logging
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NEXTAUTH_SECRET: "${NEXTAUTH_SECRET:-${CELMIS_JWT_SECRET:?set it in .env — see .env.example}}"
+      NEXTAUTH_URL: "${NEXTAUTH_URL:-http://localhost:3000}"
+      NEXT_PUBLIC_API_BASE: "${NEXT_PUBLIC_API_BASE:-http://localhost:8000}"
+      # Server-side calls (auth.ts) — use compose network DNS, not localhost
+      API_BASE_INTERNAL: "http://api:8000"
+      # Optional Google OAuth
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+    ports:
+      # Same as api: Caddy already proxies to `web:3000`.
+      - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/login"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+
+  # ── Execution sandbox ──────────────────────────────────────────────
+  # Where "run the tests" happens, so that it does NOT happen in `api`.
+  #
+  # `api` holds /workspace/data/secrets/.master.key and credentials.db — the
+  # Fernet key and every tenant's git tokens, in one directory, owned by the
+  # same user the agent runs as. A shell there needs no exploit; `cat` is
+  # enough. Everything below exists to make this container a place where that
+  # sentence is not true.
+  sandbox:
+    image: ${CELMIS_REGISTRY:-ghcr.io/celmis-labs}/celmis-sandbox:${CELMIS_TAG:-latest}
+    container_name: celmis-sandbox
+    restart: unless-stopped
+    # A real init as PID 1. Without it PID 1 is the python server, which never
+    # calls wait() on anything it did not spawn — so every grandchild orphaned
+    # by a job (and every one this kills between tenants) becomes a permanent
+    # zombie holding a slot in the shared pids_limit. It fills slowly and then
+    # nothing can fork, which reads as "the sandbox broke" days later.
+    init: true
+    # ITS OWN NETWORK, and only that one. postgres, litellm and qdrant are not
+    # resolvable from here. The host's published ports are bound to 127.0.0.1,
+    # so the bridge gateway is not a way round it either.
+    networks:
+      - sandbox_net
+    environment:
+      # A shared secret so a stray process on this network cannot drive it.
+      # Not the security boundary — the boundary is that there is nothing here
+      # worth reaching — but the surface should still be closed.
+      #
+      # This was `:?required`, which meant a deployment whose .env had no token
+      # could not bring up ANY service: postgres, api and web all failed on an
+      # interpolation error for an optional feature. Every deploy after the
+      # sandbox landed failed exactly there.
+      #
+      # Empty is refused by the server itself (it exits rather than serve
+      # unauthenticated), so the failure is now one container that does not
+      # start instead of a whole box that does not deploy.
+      SANDBOX_TOKEN: "${SANDBOX_TOKEN:-}"
+      SANDBOX_MAX_TIMEOUT: "${SANDBOX_MAX_TIMEOUT:-900}"
+      # How many jobs run at once, each as its own user. This is the knob that
+      # costs memory — mem_limit below has to hold all of them, and `npm ci` is
+      # not a cheap neighbour. The box has 4 cores and ~5GB free, so four.
+      # Raising it past SANDBOX_UID_POOL (64, baked into the image) needs a
+      # rebuild; anything below that is a .env change.
+      SANDBOX_SLOTS: "${SANDBOX_SLOTS:-4}"
+      # СТЕЛЯ очікування вільного слота, не саме очікування: реальна межа —
+      # менше з цього і того, що назвав клієнт (`wait_budget` у заголовку).
+      # Сервер спершу стоїть у черзі, а ПОТІМ виконує команду, тож два його
+      # годинники додаються; клієнт давав `timeout + 60`, і будь-яке
+      # очікування довше за хвилину означало, що виклик обірвано на job-і,
+      # який sandbox довиконував до кінця — робота оплачена, результат нікому.
+      SANDBOX_SLOT_WAIT: "${SANDBOX_SLOT_WAIT:-120}"
+    # NOTE the absences: no workspace_data, no vault_data, no POSTGRES_*, no
+    # GEMINI_API_KEY, no git tokens. Adding any of them defeats the point.
+    read_only: true
+    tmpfs:
+      # The only writable place, and it is RAM that vanishes on restart.
+      # exec is required — a test run needs to execute what it installed.
+      #
+      # 0711, not 1777: concurrent jobs belong to different tenants, and a
+      # world-readable /work lets one list the others' directories. The server
+      # re-applies this at startup, and each job's own directory is 0700 owned
+      # by that job's user — two independent reasons a neighbour cannot read it.
+      - /work:rw,exec,mode=0711,size=2g
+      # Still 1777, because that is what /tmp means. Jobs are given a private
+      # TMPDIR inside their own work directory, so nothing of theirs lands here
+      # by default — but a program that hardcodes /tmp still lands here, and
+      # here is shared.
+      - /tmp:rw,exec,mode=1777,size=512m
+      # /dev/shm defaults to 1777 too, and unlike /tmp nothing redirects it:
+      # POSIX shared memory goes where the library decides. 0711 keeps a job
+      # from LISTING what its neighbours created, which is the difference
+      # between stumbling on a name and having to guess one.
+      - /dev/shm:rw,nosuid,nodev,mode=0711,size=256m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Six back, each for one reason, and the jobs themselves get none of them —
+    # a job runs as sbx<N> with no_new_privs set, so it cannot pick any of
+    # these up through a setuid binary.
+    cap_add:
+      - SETUID        # run each job as its own user
+      - SETGID        # …and its own group, with no supplementary groups
+      - CHOWN         # hand the unpacked checkout to that user
+      - FOWNER        # and clean it up afterwards, when it is not ours
+      - DAC_OVERRIDE  # traverse and delete those 0700 directories
+      - KILL          # kill what a job leaves running before the uid is reused
+    # pids_limit is not decoration: without it a fork bomb in somebody's test
+    # suite takes the whole host down, which is exactly the outcome this
+    # service exists to prevent. Raised from 512 because it is now shared by
+    # four concurrent builds rather than one.
+    pids_limit: 2048
+    mem_limit: 3g
+    cpus: 3.0
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://localhost:8900/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  postgres_data:
+    driver: local
+  # Local vector store (bundled qdrant container).
+  qdrant_data:
+    driver: local
+  # Workspace — repo clones + per-repo graphs + SQLite stores + Fernet master key.
+  # На зовнішніх системах можна замінити на bind mount: { type: bind, source: ... }.
+  workspace_data:
+    driver: local
+  # Vault — Obsidian-style markdown notes (PRD/BRD per module).
+  vault_data:
+    driver: local
+
+networks:
+  # Everything unlisted stays on the implicit `default` network. `sandbox_net`
+  # exists so the sandbox can be reached by api WITHOUT being able to reach
+  # postgres, litellm or qdrant by name.
+  #
+  # Residual, stated rather than hidden: a shared network is reachable in both
+  # directions at the IP level, so the sandbox can address api. Every api
+  # route requires a signed token this container never receives.
+  #
+  # `default` is deliberately NOT redeclared here, and that is not tidiness.
+  # It was declared as `default: {driver: bridge}` — which is what it already
+  # is — and that still counts as changing the network's definition, so the
+  # next deploy recreated it. Compose reconnects containers it is not
+  # recreating, and a reconnect does NOT restore the service-name alias: the
+  # api and the sandbox were built fresh and kept theirs, while postgres and
+  # qdrant had been up for three days and silently lost `postgres` and
+  # `qdrant`. Only `celmis-postgres` still resolved, so every service that
+  # connects by service name failed DNS and the whole box went down with
+  # "Temporary failure in name resolution".
+  #
+  # Referencing `default` from a service's `networks:` list without declaring
+  # it here is valid and is what api does.
+  sandbox_net:
+    driver: bridge

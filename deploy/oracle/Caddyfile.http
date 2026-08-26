@@ -1,0 +1,14 @@
+# No-domain, HTTP-only, single port 80 (for a locked-down network that blocks
+# dynamic-DNS hostnames and non-standard ports — only :80 is reachable).
+#
+# The frontend reaches FastAPI under the /backend/* prefix (set via
+# NEXT_PUBLIC_API_BASE=http://<ip>/backend), which Caddy strips and forwards to
+# the api container. Everything else — including NextAuth's own /api/auth/*
+# routes — goes to the web app. That keeps the two /api namespaces from
+# colliding without needing a second origin (subdomain or port).
+:80 {
+	handle_path /backend/* {
+		reverse_proxy api:8000
+	}
+	reverse_proxy web:3000
+}

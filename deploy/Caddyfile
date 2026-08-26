@@ -1,0 +1,22 @@
+# ONE ORIGIN, TWO APPS.
+#
+# The browser bundle asks for `/backend/*` and everything else goes to Next.
+# That is not a deployment preference — it is what makes a PUBLISHED image
+# possible at all. `NEXT_PUBLIC_*` is substituted into the client bundle at
+# build time, so an image built with an absolute API URL works on exactly one
+# hostname; every other user's browser calls their own machine. A relative
+# `/backend` resolves against whatever host served the page, and one image
+# then serves everybody.
+#
+# Which means this proxy is not optional and does not belong in an overlay:
+# without it the bundle's default has nothing to resolve against, and the
+# README quickstart 404s on every page while the API is perfectly healthy.
+#
+# NextAuth's own `/api/auth/*` lives in the Next app, so only the `/backend`
+# prefix is peeled off — the two `/api` namespaces never meet.
+:80 {
+	handle_path /backend/* {
+		reverse_proxy api:8000
+	}
+	reverse_proxy web:3000
+}

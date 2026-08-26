@@ -1,0 +1,33 @@
+# Hetzner production overlay — adds a Caddy reverse proxy in front of web + api.
+#
+# Run from the REPO ROOT so relative paths resolve:
+#   docker compose -f docker-compose.yml -f deploy/hetzner/docker-compose.hetzner.yml up -d --build
+#
+# Caddy joins the project's default network and reaches `web` / `api` by service
+# name. Only Caddy publishes 80/443 to the host; keep api/web bound to localhost
+# via API_HOST_PORT / WEB_HOST_PORT in .env (see .env.hetzner.example).
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: celmis-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"          # HTTP/3
+    environment:
+      APP_DOMAIN: "${APP_DOMAIN:?set APP_DOMAIN in .env}"
+      API_DOMAIN: "${API_DOMAIN:?set API_DOMAIN in .env}"
+      ACME_EMAIL: "${ACME_EMAIL:?set ACME_EMAIL in .env}"
+    volumes:
+      - ./deploy/hetzner/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data       # persists Let's Encrypt certs — DO NOT delete
+      - caddy_config:/config
+    depends_on:
+      - web
+      - api
+
+volumes:
+  caddy_data:
+  caddy_config:

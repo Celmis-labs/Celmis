@@ -1,0 +1,32 @@
+# Local build, for people working ON Celmis rather than running it.
+#
+# `docker-compose.yml` pins published images, so a user installs by pulling
+# three tags instead of building them — the biggest barrier to trying this
+# product, and on a small server the most expensive thing it does. Measured on
+# the production box: one `api` build took 485 seconds and 4.2GB of a disk with
+# 4.2GB free, with no build cache reuse at all (the containerd image store
+# keeps the layers, and `docker builder prune -af` there reclaims 0B — the
+# deploy ran it three times a build for nothing).
+#
+# Developers still need the other direction, so it lives here:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#
+# The `image:` keys stay, so a build tags exactly what the base file expects
+# and a mixed setup (built api, pulled web) works.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox

@@ -1,0 +1,77 @@
+# Observability stack (Stage 21) — Prometheus + Grafana + Loki + Promtail.
+#
+# Design goal: platform-wide logs, not just Celmis. Promtail tails the
+# Docker daemon's container logs (via /var/lib/docker/containers) and
+# labels each stream with the container name — so EVERY service running
+# on this host (all 30 of them, if you have 30) shows up in Grafana's
+# Loki explorer, filterable by container.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#
+# Grafana:    http://localhost:3100  (admin / admin on first login)
+# Prometheus: http://localhost:9090
+#
+# Celmis metrics are scraped from api:8000/metrics (см. prometheus.yml).
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: celmis-prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    ports:
+      - "${PROMETHEUS_HOST_PORT:-9090}:9090"
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.1.0
+    container_name: celmis-loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - loki-data:/loki
+    ports:
+      - "${LOKI_HOST_PORT:-3105}:3100"
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.1.0
+    container_name: celmis-promtail
+    volumes:
+      - ./observability/promtail.yml:/etc/promtail/config.yml:ro
+      # Read ALL container logs on this host — this is what makes the
+      # stack platform-wide instead of Celmis-only.
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: ["-config.file=/etc/promtail/config.yml"]
+    restart: unless-stopped
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: celmis-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./observability/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./observability/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_HOST_PORT:-3100}:3000"
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - loki
+
+volumes:
+  prometheus-data:
+  loki-data:
+  grafana-data:

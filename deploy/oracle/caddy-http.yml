@@ -1,0 +1,14 @@
+# HTTP-only overlay (port 80, no TLS) for a no-domain / restricted-network box.
+#   docker compose -f docker-compose.yml -f deploy/oracle/caddy-http.yml up -d --build
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: celmis-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/oracle/Caddyfile.http:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - web
+      - api

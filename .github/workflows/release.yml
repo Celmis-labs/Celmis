@@ -1,0 +1,124 @@
+name: Release images
+
+# Build the three images ONCE, on a tag, and publish them to GHCR.
+#
+# Until now every push to main rebuilt all three ON THE PRODUCTION SERVER over
+# ssh, and the rented runner was billed for the ~17.5 minutes it spent watching.
+# That is what exhausted the account's 2000 included Actions minutes. It was
+# also the worst possible place to build: measured on that box, one `api` build
+# took 485 seconds and 4.2GB of a disk that had 4.2GB free, with NO cache reuse
+# — `docker builder prune -af` reclaims 0B there, and the deploy ran it three
+# times a build for nothing.
+#
+# Tags are rare, so the minutes are cheap. And a user installs by pulling three
+# images instead of building them, which is the single biggest barrier to
+# trying this product.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g. v0.1.0)"
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false      # a half-published release is worse than a slow one
+
+permissions:
+  contents: read
+  packages: write                # the only thing this workflow may do
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false           # one image failing must not hide the others
+      matrix:
+        include:
+          - name: api
+            context: .
+            dockerfile: Dockerfile
+          - name: web
+            context: ./web
+            dockerfile: web/Dockerfile
+          - name: sandbox
+            context: .
+            dockerfile: Dockerfile.sandbox
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Lower-case the owner: GHCR rejects an upper-case path, and
+      # github.repository_owner is spelled however the account is.
+      - name: Work out the image name
+        id: img
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "repo=ghcr.io/$owner/celmis-${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+          ref="${{ inputs.tag || github.ref_name }}"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+          echo "tag=$ref" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          # BOTH, because the hosts we document are not the host we run.
+          # This said "the only architecture we deploy to" and meant the one
+          # box in front of me — while docs/ORACLE_CICD.md picks an Ampere A1
+          # and docs/HETZNER.md a CAX21, both arm64, and the Dockerfile carries
+          # per-architecture SHA pins precisely so arm64 works. An amd64-only
+          # manifest answers "no matching manifest for linux/arm64/v8" on the
+          # machines the documentation tells people to buy.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.img.outputs.repo }}:${{ steps.img.outputs.tag }}
+            ${{ steps.img.outputs.repo }}:latest
+          # Cache in the registry rather than on a server with 4GB free.
+          cache-from: type=registry,ref=${{ steps.img.outputs.repo }}:buildcache
+          cache-to: type=registry,ref=${{ steps.img.outputs.repo }}:buildcache,mode=max
+          provenance: false             # keeps the manifest a plain image
+          # WITHOUT THIS THE PACKAGE IS AN ORPHAN. GHCR links a package to a
+          # repository through `org.opencontainers.image.source`, and only
+          # through it: no label, no "Source" link on the package page, and —
+          # under an organisation — no inherited repository permissions, so
+          # access has to be granted to each package by hand.
+          #
+          # Built from `github.repository` rather than written out, so a fork
+          # labels its own images and this line does not have to be edited
+          # after every move.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+          build-args: |
+            CELMIS_VERSION=${{ steps.img.outputs.version }}
+
+      # A tag that exists but cannot be pulled is worse than no tag: the deploy
+      # would fail on the server, after the release looked finished.
+      # A tag that exists but cannot be pulled is worse than no tag: the deploy
+      # would fail on the server, after the release looked finished. Inspect the
+      # MANIFEST rather than pulling — a pull resolves to the runner's own
+      # architecture and would say nothing about the other one.
+      - name: Check both architectures are published
+        run: |
+          ref="${{ steps.img.outputs.repo }}:${{ steps.img.outputs.tag }}"
+          manifest=$(docker buildx imagetools inspect "$ref" --raw)
+          for arch in amd64 arm64; do
+            echo "$manifest" | grep -q "\"architecture\": *\"$arch\"" \
+              || { echo "::error::$ref has no linux/$arch"; exit 1; }
+          done
+          echo "$ref: amd64 and arm64 published"

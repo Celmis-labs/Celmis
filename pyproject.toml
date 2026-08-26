@@ -1,0 +1,190 @@
+[project]
+name = "celmis"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+# The version is NOT written here. `src/__init__.py.__version__` is the single
+# source of truth and this file reads it — see [tool.setuptools.dynamic] below.
+#
+# It was written here AND in src/__init__.py AND in two FastAPI app
+# constructors, four independent copies of "0.1.0" that nothing kept in step.
+# src/__init__.py wins over this file because it is the copy that can be read
+# without the package being installed: `from src import __version__` works in
+# a test, in a source checkout and in the image, whereas
+# importlib.metadata.version() answers only after an install and returns
+# "unknown" otherwise — which src/vault/provenance.py already learned the hard
+# way (tests/vault/test_provenance.py::test_the_version_is_a_real_version).
+#
+# The distribution metadata still carries the version, so that lookup and the
+# vault stamp keep working; it is now derived rather than duplicated.
+dynamic = ["version"]
+description = "Code intelligence and AI pull-request review across repositories"
+requires-python = ">=3.13"
+readme = "task/implementation-plan.md"
+
+dependencies = [
+    # ─── LLM + embeddings (Google stack) ─────────────────────────────
+    "google-genai>=1.73,<2",
+
+    # ─── LLM router / multi-provider (Stage 11) ─────────────────────
+    # LiteLLM as SDK — not proxy — for provider-agnostic completions.
+    # Pinned model_prices_and_context_window.json ships with the pkg.
+    "litellm>=1.55,<2",
+
+    # ─── Code parsing (pure tree-sitter) ─────────────────────────────
+    "tree-sitter>=0.25,<0.26",
+    "tree-sitter-language-pack>=1.6.2,<2",
+    "ast-grep-py>=0.42,<1",         # structural pattern review (Phase 17.6)
+
+    # ─── Code chunking ───────────────────────────────────────────────
+
+    # ─── Storage ─────────────────────────────────────────────────────
+    "falkordblite>=0.9,<1",         # embedded graph DB (BSD-3, Cypher) — primary
+    "qdrant-client>=1.17,<2",       # vector DB client (Qdrant Cloud or local)
+    # Postgres для projects/chats у Celmis (Phase 1+).
+    # asyncpg — primary async driver; psycopg як sync fallback для Alembic.
+    "sqlalchemy[asyncio]>=2.0.36,<3",
+    "asyncpg>=0.30,<1",
+    "psycopg[binary]>=3.2,<4",      # sync driver для Alembic migrations
+    "alembic>=1.14,<2",              # schema migrations
+    # src/review/lifecycle.py imports TTLCache at module level. It was never
+    # declared, so that module raised ModuleNotFoundError in the built image —
+    # its whole test file failed collection and took the suite's exit code with
+    # it. Nothing in src/ imports lifecycle today (the warm-cache tier it
+    # implements is unwired), which is why the break went unseen for so long.
+    "cachetools>=5.5,<7",
+
+    # ─── API server (FastAPI 0.135+ — native SSE через EventSourceResponse) ─
+    "fastapi>=0.135,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "sse-starlette>=3.3,<4",          # graceful shutdown + ping для streaming
+    "python-multipart>=0.0.20",       # for form uploads (potential)
+    "PyJWT[crypto]>=2.10,<3",         # JWT auth (вже в src/api/jwt_auth)
+    "argon2-cffi>=23,<26",            # password hashing (вже використовується)
+
+    # ─── Retrieval / chunk handling ──────────────────────────────────
+    "bm25s>=0.3.6,<0.4",            # Tier 1 BM25 (rank-bm25 abandoned 2022)
+    "tiktoken>=0.8,<1",             # token counting for budgets
+
+    # ─── Security ────────────────────────────────────────────────────
+    "detect-secrets>=1.5,<2",       # redaction (Yelp)
+    "cryptography>=44,<46",         # Fernet AES-128 + HMAC-SHA256 для encrypted creds
+    # semgrep не у Python deps — встановлюється окремо як CLI
+    # (semgrep тримає click<8.2, конфліктує з typer/streamlit)
+
+    # ─── Sync ────────────────────────────────────────────────────────
+    "GitPython>=3.1.47,<4",
+    "unidiff>=0.7,<1",              # parse unified-diff hunks (review poller)
+
+    # ─── App framework ───────────────────────────────────────────────
+    "pydantic[email]>=2.13,<3",
+    "pydantic-settings>=2.14,<3",
+    "python-dotenv>=1,<2",
+    "structlog>=25.5,<26",          # JSON audit log
+    "httpx>=0.28,<0.29",            # HTTP with egress allowlist
+    "pywebpush>=2.0,<3",            # Web Push (VAPID) — "your session finished"
+    "tenacity>=9,<10",              # retry/backoff
+
+    # ─── Observability (Stage 21) ───────────────────────────────────
+    "prometheus-client>=0.20,<1",
+
+    # ─── MCP (Stage 13) ──────────────────────────────────────────────
+    # Python MCP SDK — both server and client sides. Uses Streamable HTTP
+    # transport by default (Cloudflare-remote pattern); STDIO available
+    # for local integrations.
+    "mcp>=1.19,<2",
+    # Embedded Claude Code agent sessions (headless; drives the `claude` CLI
+    # installed in the Docker image via Node).
+    "claude-agent-sdk>=0.1.1,<1",
+
+    # Resource sampling (RAM/CPU history for ops docs) — tiny, wheels everywhere.
+    "psutil>=5.9,<8",
+    "typer>=0.25,<1",               # CLI (>=0.25 потребується semgrep)
+    "rich>=14,<15",                 # terminal UI
+    "jinja2>=3,<4",                 # vault templates
+    "python-frontmatter>=1.1,<2",   # MD frontmatter parsing
+    "PyYAML>=6,<7",                 # docker-compose / CI yamls
+
+    # Streamlit видалено (Phase 6 — мігровано у Next.js + FastAPI + Postgres)
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    # scripts/build_e2e_docx.py imports it. Undeclared until the docx had to
+    # be rebuilt without a customer's name in it and the import was missing.
+    "python-docx",
+    # Moved out of the production dependencies, where it was pulling a large
+    # tree into every image for a code path production never takes:
+    # `CodeSplitter` is imported lazily inside
+    # `CodeChunker._get_splitter`, and the only importers of the chunker are
+    # `qdrant_indexer` (itself reached by nothing but tests) and the tests
+    # themselves. Here it still installs for the suite; the runtime image
+    # stops carrying it.
+    "llama-index-core>=0.14.21,<0.15",
+]
+
+[project.scripts]
+analyzer = "src.cli:app"
+
+[build-system]
+# >=61 is what understands the [tool.setuptools] tables below at all; an older
+# setuptools would silently ignore [tool.setuptools.dynamic] and then fail with
+# "version not specified" instead of reading src/__init__.py.
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+# Resolved by static AST parse of src/__init__.py — setuptools does not import
+# the package to read it, so this works before dependencies are installed.
+# Keep src/__init__.py free of side effects at import time and it stays that
+# way. The builder stage COPYs src/ before `uv pip install -e .`, so the file
+# is present when the backend looks for it.
+version = {attr = "src.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# B008 flags a function call in a default argument, which is a real bug in
+# ordinary Python and the REQUIRED idiom in FastAPI: `user: User =
+# Depends(get_current_user)` is how a dependency is declared, and the call is
+# resolved per request rather than once at import.
+#
+# It accounted for 339 of the 933 findings in this repository — a third of the
+# "debt" was the linter not being told what framework it was reading. Left
+# unconfigured it makes the whole run useless: nobody reads a report that is
+# a third noise, so nobody reads the other two thirds either.
+extend-immutable-calls = [
+    "fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Header",
+    "fastapi.Body", "fastapi.Form", "fastapi.File", "fastapi.Cookie",
+    "fastapi.Security",
+    # Imported bare in most routers: `from fastapi import Depends, Query`.
+    "Depends", "Query", "Path", "Header", "Body", "Form", "File", "Cookie",
+    "Security",
+    # A dependency FACTORY of our own: `_ = Depends(require_repo_permission("read"))`
+    # is the documented FastAPI shape for a parameterised dependency, and the
+    # call in the default is the whole mechanism.
+    "require_repo_permission", "src.api.deps.require_repo_permission",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: real network/git operations (skipped by default; run with -m integration)",
+]
+# Skip integration tests за замовчуванням; -m integration або --override-ini увімкне
+addopts = "-m 'not integration'"

@@ -1,0 +1,219 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme {
+  /* Neutrals carry a faint green undertone so they sit with the brand. */
+  --color-background: hsl(160 20% 98%);
+  --color-foreground: hsl(172 16% 10%);
+  --color-card: hsl(0 0% 100%);
+  --color-card-foreground: hsl(172 16% 10%);
+  --color-popover: hsl(0 0% 100%);
+  --color-popover-foreground: hsl(172 16% 10%);
+  --color-primary: hsl(170 14% 12%);
+  --color-primary-foreground: hsl(0 0% 100%);
+  --color-secondary: hsl(160 14% 96%);
+  --color-secondary-foreground: hsl(170 14% 12%);
+  --color-muted: hsl(160 14% 96%);
+  --color-muted-foreground: hsl(170 8% 42%);
+  --color-accent: hsl(165 36% 95%);
+  --color-accent-foreground: hsl(168 44% 20%);
+  --color-destructive: hsl(0 68% 48%);
+  --color-destructive-foreground: hsl(0 0% 98%);
+  --color-success: hsl(150 62% 34%);
+  --color-warning: hsl(35 92% 46%);
+  --color-border: hsl(160 12% 89%);
+  --color-input: hsl(160 12% 89%);
+  --color-ring: hsl(168 44% 32%);
+
+  /* Brand — deep forest green. */
+  --color-brand: hsl(168 44% 25%);
+  --color-brand-foreground: hsl(0 0% 100%);
+  --color-brand-muted: hsl(165 38% 94%);
+
+  --radius: 0.625rem;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  /* Elevation scale — soft, layered shadows for depth. */
+  --shadow-xs: 0 1px 2px 0 hsl(170 14% 10% / 0.04);
+  --shadow-sm: 0 1px 3px 0 hsl(170 14% 10% / 0.06), 0 1px 2px -1px hsl(170 14% 10% / 0.06);
+  --shadow-md: 0 4px 12px -2px hsl(170 14% 10% / 0.08), 0 2px 6px -2px hsl(170 14% 10% / 0.05);
+  --shadow-lg: 0 12px 28px -6px hsl(170 16% 10% / 0.12), 0 6px 12px -6px hsl(170 16% 10% / 0.08);
+}
+
+.dark {
+  --color-background: hsl(172 14% 6%);
+  --color-foreground: hsl(160 10% 97%);
+  --color-card: hsl(172 12% 9%);
+  --color-card-foreground: hsl(160 10% 97%);
+  --color-popover: hsl(172 12% 9%);
+  --color-popover-foreground: hsl(160 10% 97%);
+  --color-primary: hsl(160 10% 97%);
+  --color-primary-foreground: hsl(170 14% 12%);
+  --color-secondary: hsl(172 8% 15%);
+  --color-secondary-foreground: hsl(160 10% 97%);
+  --color-muted: hsl(172 8% 15%);
+  --color-muted-foreground: hsl(165 8% 62%);
+  --color-accent: hsl(168 22% 15%);
+  --color-accent-foreground: hsl(160 45% 82%);
+  --color-destructive: hsl(0 62% 52%);
+  --color-success: hsl(150 55% 48%);
+  --color-warning: hsl(35 85% 55%);
+  --color-border: hsl(172 8% 17%);
+  --color-input: hsl(172 8% 19%);
+  --color-ring: hsl(160 45% 52%);
+
+  /* Brand lifts in dark mode so it stays legible on the near-black canvas. */
+  --color-brand: hsl(160 45% 55%);
+  --color-brand-foreground: hsl(172 30% 8%);
+  --color-brand-muted: hsl(168 28% 15%);
+
+  --shadow-xs: 0 1px 2px 0 hsl(0 0% 0% / 0.3);
+  --shadow-sm: 0 1px 3px 0 hsl(0 0% 0% / 0.4), 0 1px 2px -1px hsl(0 0% 0% / 0.4);
+  --shadow-md: 0 4px 12px -2px hsl(0 0% 0% / 0.5), 0 2px 6px -2px hsl(0 0% 0% / 0.4);
+  --shadow-lg: 0 12px 28px -6px hsl(0 0% 0% / 0.6), 0 6px 12px -6px hsl(0 0% 0% / 0.5);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-brand) 22%, transparent);
+  }
+  /* Slim, unobtrusive scrollbars. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--color-border);
+    border-radius: 9999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: var(--color-muted-foreground);
+    background-clip: content-box;
+  }
+}
+
+/* ── driver.js tour popover ──────────────────────────────────────────────
+ * Theme overrides for the product tour (lib/tour.ts). Every popover gets
+ * `popoverClass: "celmis-tour"`, which both scopes these rules and gives
+ * them the specificity to beat driver.css (it loads after this file).
+ * Colors are the same tokens the rest of the UI reads, so dark mode comes
+ * free via `.dark`; buttons mirror the app <Button> default/outline look. */
+.driver-popover.celmis-tour {
+  background-color: var(--color-card);
+  color: var(--color-foreground);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  font-family: var(--font-sans);
+  max-width: 340px;
+  padding: 1rem;
+}
+.celmis-tour .driver-popover-title {
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--color-foreground);
+}
+.celmis-tour .driver-popover-description {
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: var(--color-muted-foreground);
+}
+.celmis-tour .driver-popover-progress-text {
+  font-size: 0.75rem;
+  color: var(--color-muted-foreground);
+}
+.celmis-tour .driver-popover-close-btn {
+  color: var(--color-muted-foreground);
+}
+.celmis-tour .driver-popover-close-btn:hover,
+.celmis-tour .driver-popover-close-btn:focus {
+  color: var(--color-foreground);
+}
+/* Arrow — only the visible side; the other borders stay transparent from
+ * driver.css's own side rules. */
+.celmis-tour .driver-popover-arrow-side-left {
+  border-left-color: var(--color-card);
+}
+.celmis-tour .driver-popover-arrow-side-right {
+  border-right-color: var(--color-card);
+}
+.celmis-tour .driver-popover-arrow-side-top {
+  border-top-color: var(--color-card);
+}
+.celmis-tour .driver-popover-arrow-side-bottom {
+  border-bottom-color: var(--color-card);
+}
+/* Next/Done — like the default (brand) button. */
+.celmis-tour .driver-popover-footer-btn {
+  box-sizing: border-box;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius) - 0.25rem);
+  padding: 0.3rem 0.75rem;
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  font-weight: 500;
+  line-height: 1.4;
+  text-shadow: none;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+  background-color: var(--color-brand);
+  color: var(--color-brand-foreground);
+}
+.celmis-tour .driver-popover-footer-btn:hover,
+.celmis-tour .driver-popover-footer-btn:focus {
+  background-color: var(--color-brand);
+  color: var(--color-brand-foreground);
+  opacity: 0.9;
+}
+/* Previous — like the outline button. */
+.celmis-tour .driver-popover-prev-btn {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  border-color: var(--color-border);
+}
+.celmis-tour .driver-popover-prev-btn:hover,
+.celmis-tour .driver-popover-prev-btn:focus {
+  background-color: var(--color-accent);
+  color: var(--color-foreground);
+  opacity: 1;
+}
+.celmis-tour .driver-popover-footer .driver-popover-btn-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* Printing is how a PDF gets made here — no server-side renderer, and the
+   page prints with the typography the reader just approved on screen. The
+   app chrome is not part of the document. */
+@media print {
+  aside, nav, header, .print\:hidden { display: none !important; }
+  main, body { background: #fff !important; color: #000 !important; }
+  a[href]::after { content: ""; }
+  pre, code { white-space: pre-wrap !important; word-break: break-word; }
+}

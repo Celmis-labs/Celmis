@@ -1,0 +1,65 @@
+# Celmis dependency audit, as a self-contained CI image.
+#
+# Nothing in here talks to a database, a vector store or a model. `src/deps`
+# imports stdlib plus httpx and nothing else at module level, which is what
+# makes this possible at all — the audit reads manifests and lock files off
+# disk, shells out to each ecosystem's own auditor, and asks OSV.dev.
+#
+# Deliberately smaller than the product image: no Claude Code, no Next.js, no
+# Qdrant client, no Postgres driver. Someone running this on a pull request
+# should not be pulling a runtime they will never execute.
+
+FROM python:3.13-slim
+
+ARG OSV_SCANNER_VERSION=2.5.0
+ARG OSV_SCANNER_SHA256=edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c
+
+# `git` because the audit is pointed at a checkout; `nodejs` because
+# `npm audit` is one of the auditors and is the one that covers the ecosystem
+# with the most advisories.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
+
+# A single static Go binary. `--version` is a real gate, not decoration: a
+# truncated download or a wrong architecture would otherwise only surface as
+# "not installed in this image" on somebody's first audit.
+RUN curl -fsSL -o /usr/local/bin/osv-scanner \
+        "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" \
+    && echo "${OSV_SCANNER_SHA256}  /usr/local/bin/osv-scanner" | sha256sum -c - \
+    && chmod 0755 /usr/local/bin/osv-scanner \
+    && osv-scanner --version
+
+# pip-audit in its own virtualenv, exactly as the product image does it, so its
+# dependency tree cannot collide with the audit's own.
+RUN python -m venv /opt/pip-audit \
+    && /opt/pip-audit/bin/pip install --no-cache-dir pip-audit \
+    && ln -s /opt/pip-audit/bin/pip-audit /usr/local/bin/pip-audit \
+    && pip-audit --version
+
+WORKDIR /opt/celmis
+# httpx is the only third-party import `src/deps` makes at module scope.
+# PyYAML is not optional despite looking it: locks.py parses pnpm and
+# yarn-berry lock files inside `except Exception: return []`, so omitting it
+# reports zero packages for those ecosystems — the exact silent zero this
+# audit exists to prevent.
+RUN pip install --no-cache-dir "httpx>=0.27" "PyYAML>=6"
+
+COPY src/__init__.py src/__init__.py
+COPY src/deps src/deps
+
+ENV PYTHONPATH=/opt/celmis \
+    PYTHONUNBUFFERED=1 \
+    # pip-audit resolves by running `pip install --dry-run`, which evaluates a
+    # source distribution's build metadata. On a server auditing a repository
+    # the operator chose, that is a considered risk. Here the input is an
+    # outside contributor's pull request, so the pinned-only path that never
+    # invokes pip is the default and is not negotiable from the workflow.
+    DEPS_PIP_AUDIT_NO_EXEC=1 \
+    DEPS_PIP_AUDIT_PROJECT=0
+
+ENTRYPOINT ["python", "-m", "src.deps.ci"]
+CMD ["--help"]

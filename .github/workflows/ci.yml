@@ -1,0 +1,107 @@
+name: CI
+
+# Every push and every pull request. Until now the only workflow in this
+# repository was deploy.yml — so 2908 tests, ruff, the typechecker and the web
+# build ran on one laptop and nowhere else. A test that only ever runs where
+# it was written is a test that stops running the day that laptop is busy.
+#
+# Deliberately NOT part of deploy.yml. Deployment is a different question from
+# correctness, and a deploy that waits ten minutes for a test suite is a
+# deploy people learn to skip.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push supersedes the first: the answer to "is main green" is about
+# the newest commit, and paying for two answers to a question with one useful
+# reply is how CI minutes disappear.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: tests + lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"     # pyproject: requires-python = ">=3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # The package itself, so `import src...` resolves the same way it
+          # does locally, plus the dev extra that carries pytest and ruff.
+          pip install -e ".[dev]"
+
+      # Not `ruff check` outright: this repository carries 602 findings that
+      # predate CI, and a build that is red on day one is a build everybody
+      # learns to ignore. The ratchet fails when the number GROWS, so new code
+      # meets the standard immediately and the backlog is paid down by whoever
+      # is already in the file.
+      #
+      # A third of the original 933 was not debt at all — B008 flagging
+      # `Depends(...)`, which is FastAPI's required idiom. The linter had
+      # never been told what framework it was reading.
+      - name: Ruff (must not get worse)
+        run: python scripts/lint_ratchet.py
+
+      # GEMINI_API_KEY is read at import time by settings; the value is never
+      # used because no test reaches a provider — integration tests are
+      # deselected by addopts in pyproject.toml. A dummy keeps the import from
+      # refusing, and makes it obvious in the log that nothing real is called.
+      - name: Tests
+        env:
+          GEMINI_API_KEY: dummy-for-tests
+          CELMIS_JWT_SECRET: dummy-for-tests
+        run: pytest -q -p no:warnings --durations=10
+
+  web:
+    name: typecheck + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+
+      # Three separate steps rather than one `&&`: when this goes red the
+      # question is which of the three, and a combined step answers it with a
+      # wall of output.
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # The rules-of-hooks violation that once took every authenticated page
+      # down was visible to eslint the whole time and nobody ran it. That rule
+      # is now enforced as a TEST — tests/web/test_rules_of_hooks.py, in the
+      # python job above — so it is blocking there rather than advisory here.
+      #
+      # This step is the rest of eslint, which has pre-existing errors of its
+      # own (`no-explicit-any` in three places). Reported, not enforced, and
+      # marked as such rather than quietly passing.
+      - name: Lint (advisory)
+        run: npx eslint . || echo "::warning::eslint reported findings — see above"
+
+      - name: Build
+        env:
+          # Baked in at build time; the real value only matters at deploy.
+          NEXT_PUBLIC_API_BASE: http://localhost:8000
+        run: npm run build

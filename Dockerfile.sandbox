@@ -1,0 +1,72 @@
+# The execution sandbox.
+#
+# Small on purpose. This image runs a tenant's own build and test commands, so
+# everything in it is attack surface for the process that runs next: no
+# framework, no Celmis source beyond one file, no credentials, nothing that
+# talks to a database.
+#
+# What makes it safe is not this file — it is the compose service around it:
+# its own network, no secret env, no workspace volume, a read-only root and
+# hard resource limits. This just gives the command something to run in.
+
+FROM python:3.13-slim
+
+# What a real repository's own commands need, and what an agent reaches for
+# while working out why one failed.
+#
+# The second half is the part that is easy to leave out and expensive to miss:
+# a test fails, and the next thing anyone does is search the tree for the
+# symbol, diff two files, or pull one field out of a JSON report. Without
+# ripgrep the agent falls back to `grep -r` over node_modules and burns its
+# turn; without jq it parses coverage output with sed. These are small packages
+# and they are the difference between a sandbox that can run a command and one
+# that can be worked in.
+#
+# make/pkg-config because a great many test suites shell out to them; unzip and
+# xz for the archives dependency installs unpack; procps so `ps` exists when a
+# suite checks for a leftover process of its own.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bash git curl wget ca-certificates build-essential \
+        ripgrep fd-find jq less file procps \
+        make pkg-config unzip xz-utils \
+    && ln -sf "$(command -v fdfind)" /usr/local/bin/fd \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
+
+# One user per concurrent job.
+#
+# Jobs run at the same time and belong to different tenants, so they must not
+# share a uid: with one user, tenant A's test suite reads tenant B's checkout
+# straight out of /work. The server leases one of these per job, chowns the
+# checkout to it, and kills anything still running as it afterwards.
+#
+# Sixty-four exist; SANDBOX_SLOTS decides how many are handed out, so the
+# ceiling can be raised from .env without rebuilding. They are ordinary
+# unprivileged users with no shell, no home and no password — nothing here is
+# a login, only an identity to be different from the neighbours.
+RUN for i in $(seq 0 63); do \
+        useradd --uid $((20000 + i)) --no-create-home --shell /usr/sbin/nologin \
+                --password '!' "sbx$i"; \
+    done
+
+WORKDIR /app
+COPY src/sandbox/server.py /app/server.py
+
+# No PYTHONPATH into the Celmis tree: this file is standalone by design, and a
+# stray import of src.* would drag settings and a database driver in here.
+ENV PYTHONUNBUFFERED=1 \
+    SANDBOX_WORK_ROOT=/work \
+    SANDBOX_PORT=8900 \
+    SANDBOX_UID_BASE=20000 \
+    SANDBOX_UID_POOL=64
+
+# Deliberately root, and this is the one place in Celmis where that is the
+# safer choice. Setting a job's uid requires the privilege to set uids: as a
+# normal user this process could only run every tenant as ITSELF, which is the
+# leak it exists to prevent. The compose service keeps exactly four
+# capabilities and drops the rest, the root filesystem is read-only, and the
+# COMMANDS themselves run as sbx*, never as this.
+EXPOSE 8900
+CMD ["python", "/app/server.py"]

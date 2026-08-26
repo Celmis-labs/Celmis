@@ -1,0 +1,59 @@
+Celmis Enterprise Edition Licence
+=================================
+
+Applies to: any file whose path contains `ee/`, and any file whose name
+contains `.ee.`. Everything else in this repository is AGPL-3.0 — see LICENSE.
+
+At the time of writing, no product code lives behind this boundary. The line
+is drawn early on purpose: moving a file under it later means re-asking every
+contributor who had already sent work under an unqualified AGPL, and that
+conversation does not get easier with time.
+
+
+1. GRANT
+
+   Subject to the restrictions below, you may read, modify and redistribute
+   the covered files, and you may run them for development, evaluation and
+   testing.
+
+
+2. RESTRICTIONS
+
+   You may not use the covered files in production, or deploy them for
+   internal use within your organisation, without a valid commercial licence
+   from the copyright holder.
+
+   "Production or internal use" means running the covered files to serve real
+   work — your own or anybody else's. Running them on a laptop to try Celmis
+   out, to develop against, or to decide whether to buy a licence, is not
+   production use and needs no licence.
+
+   You may not remove or circumvent any licence check the covered files
+   contain, and you may not redistribute them with such a check removed.
+
+
+3. WHAT THIS DOES NOT COVER
+
+   Nothing here restricts the AGPL-covered part of Celmis. A deployment that
+   uses no `ee/` file needs no commercial licence, and every capability
+   present at the first public release is in that part: PR review, the code
+   graph, Q&A, the MCP server, dependency audit, documentation generation,
+   the audit console, usage and spend, compliance checks and installation
+   metrics.
+
+   Security controls are never enterprise-only. The audit LOG is written by
+   `src/security/audit.py` under AGPL and always will be; what a commercial
+   licence may one day cover is convenience built on top of it, not the record
+   itself. The same holds for redaction, egress control and log filtering.
+
+
+4. NO WARRANTY
+
+   The covered files are provided "as is", without warranty of any kind,
+   express or implied. The copyright holder is not liable for any claim,
+   damages or other liability arising from their use.
+
+
+5. CONTACT
+
+   For a commercial licence, open an issue in this repository.

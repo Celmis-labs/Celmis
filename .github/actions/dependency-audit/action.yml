@@ -1,0 +1,67 @@
+name: Celmis dependency audit
+description: >-
+  Audit a checkout's dependencies against OSV.dev and each ecosystem's own
+  auditor. No server, no account, no model calls.
+
+inputs:
+  path:
+    description: Directory to audit, relative to the workspace.
+    required: false
+    default: "."
+  fail-on:
+    description: >-
+      Fail the job when a finding at or above this severity exists.
+      One of critical, high, medium, low, none, never.
+    required: false
+    default: high
+  comment:
+    description: Post the result as a pull-request comment.
+    required: false
+    default: "true"
+
+outputs:
+  markdown:
+    description: The audit as markdown.
+    value: ${{ steps.audit.outputs.markdown }}
+
+runs:
+  using: composite
+  steps:
+    # The audit reads lock files from the checkout; it never fetches history,
+    # so the default shallow clone is enough.
+    - id: audit
+      shell: bash
+      run: |
+        set -o pipefail
+        out="${RUNNER_TEMP}/celmis-audit.md"
+        # `|| true` so a non-zero "findings exist" does not lose the report —
+        # the exit code is applied deliberately two steps down.
+        docker run --rm \
+          -v "${GITHUB_WORKSPACE}:/src:ro" \
+          -w /src \
+          "ghcr.io/${GITHUB_REPOSITORY_OWNER}/celmis-audit:latest" \
+          "${{ inputs.path }}" --fail-on "${{ inputs.fail-on }}" \
+          | tee "$out" || echo "AUDIT_FAILED=1" >> "$GITHUB_ENV"
+        {
+          echo 'markdown<<CELMIS_EOF'
+          cat "$out"
+          echo 'CELMIS_EOF'
+        } >> "$GITHUB_OUTPUT"
+        cat "$out" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Comment on the pull request
+      if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh pr comment "${{ github.event.pull_request.number }}" \
+          --body "${{ steps.audit.outputs.markdown }}" || true
+
+    - name: Apply the threshold
+      shell: bash
+      run: |
+        if [ "${AUDIT_FAILED:-0}" = "1" ]; then
+          echo "Dependency audit found findings at or above '${{ inputs.fail-on }}'." >&2
+          exit 1
+        fi

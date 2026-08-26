@@ -1,0 +1,18 @@
+# Caddy v2 — auto-HTTPS reverse proxy for the two Celmis subdomains.
+# Domains/email come from the environment (set in the project .env):
+#   APP_DOMAIN, API_DOMAIN, ACME_EMAIL
+# Caddy substitutes {$VAR} at load time from its process environment.
+
+{
+	email {$ACME_EMAIL}
+}
+
+# Browser-facing web app
+{$APP_DOMAIN} {
+	reverse_proxy web:3000
+}
+
+# API + MCP (browser calls it directly via NEXT_PUBLIC_API_BASE)
+{$API_DOMAIN} {
+	reverse_proxy api:8000
+}
