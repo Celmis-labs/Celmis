@@ -518,8 +518,21 @@ services:
         condition: service_healthy
     environment:
       NEXTAUTH_SECRET: "${NEXTAUTH_SECRET:-${CELMIS_JWT_SECRET:?set it in .env — see .env.example}}"
-      NEXTAUTH_URL: "${NEXTAUTH_URL:-http://localhost:3000}"
-      NEXT_PUBLIC_API_BASE: "${NEXT_PUBLIC_API_BASE:-http://localhost:8000}"
+      # Passed through only when the operator sets it. A compose key with no
+      # value is *unset in the container* when the variable is undefined and
+      # forwarded when it is — so an operator who clears their .env is not
+      # handed this file's opinion instead.
+      #
+      # Unset is what you want: `trustHost` in web/auth.ts then derives the
+      # address from the request, which is the only thing that knows it. A
+      # default of http://localhost:3000 here redirected every logged-out
+      # visitor to the login page on their own machine.
+      NEXTAUTH_URL:
+      # Build-time for the browser bundle (Next.js substitutes it into the
+      # JS), so this runtime value only ever reaches the server side, where
+      # API_BASE_INTERNAL above already wins. Left as pass-through so it
+      # cannot quietly become the wrong answer for either.
+      NEXT_PUBLIC_API_BASE:
       # Server-side calls (auth.ts) — use compose network DNS, not localhost
       API_BASE_INTERNAL: "http://api:8000"
       # Optional Google OAuth
