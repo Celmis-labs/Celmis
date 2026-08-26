@@ -187,14 +187,29 @@ def beat(monkeypatch):
     return _install
 
 
-def _beat_a_few_times(coro, *, ticks: int = 12):
-    """Let the heartbeat run a bounded number of turns, then stop it. It is an
-    endless loop by design; the test is what it did on the way."""
+def _beat_a_few_times(coro, *, until: int = 1, calls=None, ticks: int = 2000):
+    """Let the heartbeat run until it has beaten `until` times, then stop it.
+
+    COUNTING EVENT-LOOP TURNS IS NOT COUNTING HEARTBEATS. This yielded a fixed
+    twelve times and assumed three renewals had happened by then — true on an
+    idle laptop and false on a shared runner, where the same twelve turns go to
+    somebody else's work. The suite was green here and red there, and the
+    failure said "it gave up on the first hiccup" about code that had not given
+    up on anything.
+
+    Waiting for the OBSERVABLE EVENT instead makes the test independent of how
+    the machine schedules: it stops as soon as the renewals it is about have
+    happened, and the tick budget is only a backstop so a genuinely stuck beat
+    fails instead of hanging. It is an endless loop by design; the test is what
+    it did on the way.
+    """
 
     async def _main():
         task = asyncio.create_task(coro)
         for _ in range(ticks):
             if task.done():
+                break
+            if calls is not None and len(calls) >= until:
                 break
             await _REAL_SLEEP(0)
         task.cancel()
@@ -206,7 +221,8 @@ def _beat_a_few_times(coro, *, ticks: int = 12):
 
 def test_the_beat_keeps_renewing_while_the_handler_runs(beat):
     calls = beat([True, True, True])
-    _beat_a_few_times(worker_mod._hold_lease("job-1", "review"))
+    _beat_a_few_times(worker_mod._hold_lease("job-1", "review"),
+                      until=2, calls=calls)
     assert len(calls) >= 2, "one renewal is a stamp, not a heartbeat"
 
 
@@ -214,7 +230,8 @@ def test_a_failed_renewal_does_not_end_the_beat(beat):
     """A database blip is not a lost lease. Renewing at a third of the width
     is what buys the retries — two may be lost before anything reclaims."""
     calls = beat([RuntimeError("connection reset"), True, True])
-    _beat_a_few_times(worker_mod._hold_lease("job-1", "review"))
+    _beat_a_few_times(worker_mod._hold_lease("job-1", "review"),
+                      until=3, calls=calls)
     assert len(calls) >= 3, "it gave up on the first hiccup"
 
 

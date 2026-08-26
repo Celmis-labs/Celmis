@@ -129,11 +129,47 @@ class TestFactory:
         backend = get_snapshot_backend()
         assert isinstance(backend, LocalSnapshotBackend)
 
-    def test_s3_falls_back_якщо_boto3_missing(self, monkeypatch) -> None:
-        """Якщо REVIEW_S3_BUCKET set але boto3 не installed → fallback до Local."""
+    def test_s3_falls_back_when_boto3_is_missing(self, monkeypatch) -> None:
+        """A bucket is configured and boto3 is not installed — take Local.
+
+        THE TEST HAD TO CAUSE THE CONDITION IT ASSERTS. It set the bucket and
+        then asserted the fallback, on the strength of boto3 not being in the
+        developer's virtualenv — so it passed here and failed on a runner where
+        boto3 arrives as somebody else's transitive dependency. It never proved
+        the fallback; it proved which machine it ran on, and it would have gone
+        on doing that until the day the fallback broke and nobody noticed,
+        because the environment that hides the bug is the common one.
+
+        `builtins.__import__` is where the absence has to be simulated: the
+        backend imports boto3 inside its own constructor, exactly so that a
+        missing dependency is a runtime choice rather than an import-time
+        crash.
+        """
+        import builtins
+
+        monkeypatch.setenv("REVIEW_S3_BUCKET", "fake-bucket")
+        real_import = builtins.__import__
+
+        def no_boto3(name, *args, **kwargs):
+            if name == "boto3" or name.startswith("boto3."):
+                raise ImportError("No module named 'boto3'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", no_boto3)
+
+        from src.review.settings import get_review_settings
+        get_review_settings.cache_clear()
+
+        assert isinstance(get_snapshot_backend(), LocalSnapshotBackend)
+
+    def test_s3_is_used_when_boto3_is_present(self, monkeypatch) -> None:
+        """The other half, which nothing checked: with boto3 available the
+        fallback must NOT fire. A test that only ever sees one branch cannot
+        tell a working selector from one that always returns Local."""
+        pytest.importorskip("boto3")
+
         monkeypatch.setenv("REVIEW_S3_BUCKET", "fake-bucket")
         from src.review.settings import get_review_settings
         get_review_settings.cache_clear()
-        backend = get_snapshot_backend()
-        # boto3 not installed → fallback
-        assert isinstance(backend, LocalSnapshotBackend)
+
+        assert not isinstance(get_snapshot_backend(), LocalSnapshotBackend)
