@@ -62,7 +62,10 @@ jobs:
       - name: Tests
         env:
           GEMINI_API_KEY: dummy-for-tests
-          CELMIS_JWT_SECRET: dummy-for-tests
+          # The product refuses a signing secret under 16 characters
+          # (src/api/jwt_auth.py). This value is 15, so every test that
+          # builds an app failed at import — CI has been red on that alone.
+          CELMIS_JWT_SECRET: dummy-for-tests-not-a-real-secret
         run: pytest -q -p no:warnings --durations=10
 
   web:
@@ -75,13 +78,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The frontend is pnpm, not npm: `web/pnpm-lock.yaml` is what is
+      # committed and there is no `package-lock.json` to cache or install
+      # from. Asking setup-node for an npm cache pointed the action at a path
+      # that does not exist, which failed the job before a line of TypeScript
+      # was read. pnpm has to be on PATH BEFORE setup-node, because that is
+      # when the cache is resolved.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       # Three separate steps rather than one `&&`: when this goes red the
       # question is which of the three, and a combined step answers it with a
