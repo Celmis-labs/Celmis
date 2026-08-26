@@ -112,6 +112,36 @@ def test_the_client_defaults_match_the_compose_address():
     assert "http://sandbox:8900" in COMPOSE
 
 
+def test_the_example_file_does_not_override_that_address_with_another():
+    """The test above guarded the file nobody edits.
+
+    `.env` beats the compose default, `init-env.sh` writes `.env` from
+    `.env.example`, and the example said 8080 while every other place said
+    8900 — Dockerfile.sandbox's EXPOSE, the compose default, the healthcheck,
+    the client default, and the assertion directly above. So the one file an
+    operator actually copies was the only one that disagreed, and the api
+    could not reach its own sandbox on any install that followed the README.
+
+    Empty is the answer here: `${SANDBOX_URL:-http://sandbox:8900}` supplies
+    the pair when the variable is unset OR empty, so one place names it.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    for line in (root / ".env.example").read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line.startswith("SANDBOX_URL="):
+            continue
+        value = line.partition("=")[2].strip()
+        assert value in ("", "http://sandbox:8900"), (
+            f".env.example sets SANDBOX_URL={value!r}; the sandbox listens on "
+            f"8900 and this file is what init-env.sh copies into every .env"
+        )
+        break
+    else:
+        raise AssertionError("SANDBOX_URL vanished from .env.example")
+
+
 # ─── an empty token is not "no authentication" ───────────────────────
 
 

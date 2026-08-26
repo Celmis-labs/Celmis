@@ -198,6 +198,22 @@ def enqueue(
 # ─── Dequeue / lease ────────────────────────────────────────────────
 
 
+def _claimed_attempt(row: dict[str, Any]) -> dict[str, Any]:
+    """The row as the worker should see it: `attempts` is THIS attempt.
+
+    `claim` SELECTs before it increments, so the row it reads carries the
+    count from before this run. Handing that number onward made the first
+    attempt `0`, the first backoff half the base delay, and — because
+    `mark_failure` stops at `attempts >= max_attempts` — the fifth run of a
+    five-attempt job report four and retry. Five means five.
+
+    A copy, not an edit: the mapping the driver returned is also what the
+    UPDATE above was built from, and two readers disagreeing about the same
+    row is the shape of the bug this replaces.
+    """
+    return {**row, "attempts": row["attempts"] + 1}
+
+
 def dequeue_one() -> dict[str, Any] | None:
     """Atomically lease one pending job. Returns dict or None if idle.
 
@@ -231,7 +247,7 @@ def dequeue_one() -> dict[str, Any] | None:
             "  attempts = attempts + 1, cancel_requested = FALSE "
             "WHERE id = :id"
         ), {"w": worker, "until": lease_until, "now": now, "id": row["id"]})
-    return dict(row)
+    return _claimed_attempt(dict(row))
 
 
 def lease_seconds() -> float:
