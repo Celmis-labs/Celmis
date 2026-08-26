@@ -25,7 +25,14 @@ import secrets as _secrets
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+)
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,6 +106,7 @@ def get_ingest_token(
 async def ingest(
     token: str,
     request: Request,
+    background: BackgroundTasks,
     session: AsyncSession = Depends(get_async_session),
 ) -> dict:
     workspace_id, _, provided = token.partition(".")
@@ -114,7 +122,8 @@ async def ingest(
         raise HTTPException(status_code=400, detail="invalid JSON") from None
 
     created = 0
-    for alert in _parse_alerts(payload):
+    parsed = _parse_alerts(payload)
+    for alert in parsed:
         session.add(IncomingAlert(
             id=str(uuid.uuid4()),
             workspace_id=workspace_id,
@@ -127,7 +136,61 @@ async def ingest(
         created += 1
     await session.commit()
     logger.info("alerts_ingested ws=%s n=%d", workspace_id, created)
+
+    # An alert that only lands in a table is an inbox you have to remember to
+    # open, which is the thing an alert exists to save you from. `severity`
+    # and `repo_hint` above are exactly what the binding matcher gates on —
+    # they were being stored for a routing step that was never taken.
+    #
+    # AFTER the response, not during it: the sender is a monitoring system
+    # that retries on anything but a 2xx, and a slow chat webhook must not
+    # turn one firing alert into a stream of duplicates. That is what the 202
+    # on this endpoint already promised.
+    if parsed:
+        background.add_task(
+            _dispatch_alerts, workspace_id, parsed, _alerts_page(request),
+        )
     return {"ok": True, "created": created}
+
+
+def _alerts_page(request: Request) -> str:
+    """Where to look, as an address the recipient can actually open.
+
+    Derived from the request rather than PUBLIC_BASE_URL: this box does not
+    know its own public name, and a card whose only link is unreachable is
+    read as a broken alert rather than a misconfigured setting.
+    """
+    headers = request.headers
+    proto = headers.get("x-forwarded-proto") or request.url.scheme
+    host = headers.get("x-forwarded-host") or headers.get("host") or ""
+    return f"{proto}://{host}/alerts" if host else "/alerts"
+
+
+def _dispatch_alerts(
+    workspace_id: str, alerts: list[dict[str, Any]], link_url: str,
+) -> None:
+    """Hand each parsed alert to the channel dispatcher.
+
+    Non-raising, like `notify` itself: this runs after the response has gone,
+    so an exception here has nobody left to tell and would only show up as an
+    unhandled-task warning in the log.
+    """
+    from src.notifications import notify
+
+    for alert in alerts:
+        try:
+            notify(
+                workspace_id=workspace_id,
+                event="alert_received",
+                repo_slug=alert.get("repo_hint"),
+                title=alert["title"][:500],
+                body_md=alert["body"][:2000],
+                severity=alert["severity"],
+                link_url=link_url,
+                extra={"source": alert["source"]},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("alert_dispatch_failed ws=%s err=%s", workspace_id, exc)
 
 
 def _parse_alerts(payload: dict[str, Any]) -> list[dict[str, Any]]:

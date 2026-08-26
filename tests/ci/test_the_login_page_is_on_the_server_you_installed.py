@@ -116,6 +116,29 @@ def test_the_example_says_what_happens_when_they_are_unset(example):
     )
 
 
+def test_the_one_case_that_does_need_a_fixed_address_is_named(example):
+    """Blank is right for sign-in by password and wrong for Google.
+
+    Google only redirects back to a URI registered with it in advance, so
+    there the address is fixed by definition. An operator who reads "leave it
+    unset" and enables Google gets a login that dead-ends; the exception has
+    to sit next to the rule, not in another file.
+    """
+    text = (ROOT / ".env.example").read_text(encoding="utf-8")
+    if "GOOGLE_CLIENT_ID" not in text:
+        pytest.skip("no Google provider shipped")
+    lines = text.splitlines()
+    start = next(i for i, ln in enumerate(lines)
+                 if ln.startswith("#") and "Addresses" in ln)
+    ends = [i for i in range(start + 1, len(lines))
+            if lines[i].startswith("# \u2500\u2500")]
+    body = "\n".join(lines[start:ends[0] if ends else len(lines)]).lower()
+    assert "google" in body, (
+        "the address section says to leave these blank without naming the "
+        "provider for which blank does not work"
+    )
+
+
 # ── the compose file ────────────────────────────────────────────────
 
 def _env_block(compose: dict, service: str) -> dict:

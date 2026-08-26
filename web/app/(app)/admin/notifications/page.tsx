@@ -28,13 +28,18 @@ import { useT } from "@/lib/i18n";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 
+// Exactly the events something emits. compliance_failed, deprecation_used
+// and apply_fix_applied used to be here and were emitted by nothing: the
+// binding appeared in the table, read as configured, and was silent for
+// ever — and silence is indistinguishable from nothing having gone wrong.
+// tests/notifications/test_a_binding_can_only_name_an_event_that_happens.py
+// fails if this list and the notify() call sites drift in either direction.
 const EVENT_OPTIONS = [
   { v: "*", label: "any event" },
   { v: "review_complete", label: "review_complete" },
   { v: "breaking_change", label: "breaking_change" },
-  { v: "compliance_failed", label: "compliance_failed" },
-  { v: "deprecation_used", label: "deprecation_used" },
-  { v: "apply_fix_applied", label: "apply_fix_applied" },
+  { v: "agent_turn_done", label: "agent_turn_done" },
+  { v: "alert_received", label: "alert_received" },
 ];
 
 const SEVERITY_OPTIONS = [
