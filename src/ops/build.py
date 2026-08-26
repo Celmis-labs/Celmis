@@ -13,14 +13,34 @@ The deploy workflow appends CELMIS_GIT_SHA/CELMIS_DEPLOYED_AT to the server's
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from functools import lru_cache
 from typing import Any
 
+#: What a commit sha looks like. Anything else is not one.
+_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
 
 @lru_cache(maxsize=1)
 def build_info() -> dict[str, Any]:
-    """``{git_sha, git_sha_short, deployed_at, source}`` — never raises."""
+    """``{git_sha, git_sha_short, deployed_at, source}`` — never raises.
+
+    THE SHORT FORM USED TO BE `sha[:7]` ON WHATEVER ARRIVED. That is correct
+    for a commit sha and nonsense for anything else, and it produced the one
+    failure this value exists to prevent: a deploy stamped the IMAGE DIGEST,
+    which is immutable and therefore looked like the safer choice, and
+    `"sha256:150805b1…"[:7]` is the literal string `"sha256:"`. So
+    `/api/capabilities` answered `0.1.0+sha256:` and the AGPL §13 footer built
+    a source link ending in `/tree/sha256:` — a 404 offered as the offer of
+    source the licence requires.
+
+    Truncating is a claim about SHAPE, so the shape is checked. A value that is
+    not a commit sha is reported whole under `source: "unrecognised"` rather
+    than sliced into something that looks like one: a wrong seven characters
+    are harder to notice than an obviously foreign string, and this field is
+    read by a link somebody clicks.
+    """
     sha = (os.environ.get("CELMIS_GIT_SHA") or "").strip()
     source = "env"
     if not sha:
@@ -35,6 +55,15 @@ def build_info() -> dict[str, Any]:
                 source = "git"
         except Exception:  # noqa: BLE001 — a missing git is not an error here
             pass
+    if sha and not _SHA_RE.match(sha):
+        # Do not guess at it, and do not hide it: an operator who set this to
+        # something odd needs to see what they set.
+        return {
+            "git_sha": sha,
+            "git_sha_short": sha,
+            "deployed_at": (os.environ.get("CELMIS_DEPLOYED_AT") or "").strip() or None,
+            "source": "unrecognised",
+        }
     return {
         "git_sha": sha or None,
         "git_sha_short": sha[:7] if sha else None,
