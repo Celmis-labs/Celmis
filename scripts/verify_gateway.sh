@@ -34,7 +34,7 @@ step "1. Configuration (server .env)"
 
 # Only KEYS are matched; no value is ever read into the shell.
 grep -Eq '^COMPOSE_PROFILES=.*gateway' .env \
-  || fail "COMPOSE_PROFILES in .env does not include 'gateway', so the litellm container is never created. Add COMPOSE_PROFILES=gateway to the DEPLOY_ENV secret and redeploy."
+  || fail "COMPOSE_PROFILES in .env does not include 'gateway', so the litellm container is never created. Add COMPOSE_PROFILES=gateway to the server's .env and redeploy."
 ok "COMPOSE_PROFILES includes 'gateway'"
 
 grep -q '^LITELLM_MASTER_KEY=sk-' .env \

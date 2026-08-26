@@ -520,8 +520,10 @@ docker compose exec api analyzer graph-stats <repo>   # what parsed, what did no
 model settings. **Usage & cost** breaks spend down by surface, so a batch
 documentation build does not read as chat.
 
-Deploy to a server is a push to `main`: `.github/workflows/deploy.yml` builds on
-the box and brings the stack up behind Caddy. See
+Deploy to a server is `./scripts/deploy-on-server.sh v0.1.0`, run **on the
+server**: it pulls the published images, brings the stack up behind Caddy and
+stamps the build the AGPL footer links to. Nothing outside that machine needs a
+credential for it. See
 [docs/ORACLE_CICD.md](docs/ORACLE_CICD.md), or
 [docs/HETZNER.md](docs/HETZNER.md) for a plain VM.
 

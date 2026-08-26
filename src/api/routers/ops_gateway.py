@@ -91,7 +91,7 @@ def gateway_status(_access: str = Depends(require_ops_access)) -> dict:
                "it passes."
                if out["proxy_up"] else
                ("The proxy is not answering, and COMPOSE_PROFILES does not ask "
-                "for it — add COMPOSE_PROFILES=gateway to the DEPLOY_ENV secret "
+                "for it — add COMPOSE_PROFILES=gateway to the server's .env "
                 "and deploy again."
                 if not out["profile_requested"] else
                 "COMPOSE_PROFILES asks for the gateway but the proxy is not "
