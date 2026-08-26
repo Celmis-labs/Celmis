@@ -87,9 +87,13 @@ def test_the_linter_was_told_which_framework_it_is_reading():
 
 def test_deploy_is_not_where_tests_live(workflow):
     """Correctness and deployment are different questions, and a deploy that
-    waits ten minutes for a suite is a deploy people learn to skip."""
-    deploy = yaml.safe_load(
-        (ROOT / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8"))
-    runs = " ".join(
-        s.get("run", "") for s in deploy["jobs"]["deploy"]["steps"])
-    assert "pytest" not in runs
+    waits ten minutes for a suite is a deploy people learn to skip.
+
+    This read `deploy.yml`, which no longer exists — the push deploy held a
+    root key to production in the secrets of a now-public repository, so it
+    moved onto the server. The rule outlived the file: whatever deploys must
+    not be where the suite runs.
+    """
+    script = (ROOT / "scripts" / "deploy-on-server.sh").read_text(encoding="utf-8")
+
+    assert "pytest" not in script

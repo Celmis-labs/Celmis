@@ -24,7 +24,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = (ROOT / "docker-compose.yml").read_text()
-DEPLOY = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
+# The push deploy is gone: it held a root key to production in the secrets of
+# what is now a public repository. Its work moved to two files that need no
+# credential anybody outside that machine holds — so these guards moved with
+# it, and the ones whose MECHANISM died rather than whose GUARANTEE died were
+# deleted rather than re-pointed at something that only looks similar.
+INIT_ENV = (ROOT / "scripts" / "init-env.sh").read_text()
+DEPLOY_SH = (ROOT / "scripts" / "deploy-on-server.sh").read_text()
 SERVER = (ROOT / "src" / "sandbox" / "server.py").read_text()
 
 
@@ -67,10 +73,17 @@ def test_no_optional_feature_can_block_the_whole_deploy():
     )
 
 
-def test_the_deploy_supplies_everything_compose_demands():
-    """POSTGRES_PASSWORD is the one hard requirement, and the workflow verifies
-    it landed. Anything else added to that set needs the same treatment."""
-    assert 'grep -q "^POSTGRES_PASSWORD=" celmis/.env' in DEPLOY
+def test_something_supplies_everything_compose_demands():
+    """POSTGRES_PASSWORD is the one hard requirement compose interpolates with
+    `:?`, so a .env without it fails EVERY service, not just the one that wants
+    it. The workflow used to verify it landed; `init-env.sh` now generates it,
+    and the deploy refuses to start without a .env at all.
+
+    Anything added to compose's `:?` set needs the same treatment."""
+    assert '"POSTGRES_PASSWORD"' in INIT_ENV, "nothing generates it any more"
+    assert ".env is missing" in DEPLOY_SH, (
+        "the deploy would run against a compose file that cannot interpolate"
+    )
 
 
 # ─── the api half has to be told the secret and the address ──────────
@@ -130,43 +143,65 @@ def test_the_api_side_treats_no_token_as_no_sandbox():
 # ─── provisioning ────────────────────────────────────────────────────
 
 
-def test_the_token_is_provisioned_by_the_deploy():
-    assert "Provision the sandbox token" in DEPLOY
-    assert "/dev/urandom" in DEPLOY
+def test_the_token_is_provisioned():
+    """Generated, not asked for. The sandbox refuses to start without it, so a
+    setup step that leaves it blank breaks the whole stack — which is exactly
+    what `${SANDBOX_TOKEN:?required}` did."""
+    assert '"SANDBOX_TOKEN"' in INIT_ENV
+    assert "token_hex(32)" in INIT_ENV, "32 bytes, as the server checks for"
 
 
-def test_it_is_kept_outside_the_directory_the_sync_deletes():
-    """`rsync --delete` into celmis/ removes anything not in the repo, so a
-    token stored there is regenerated every deploy — and a token that changes
-    under a running api is a 403 on the next call."""
-    sync = DEPLOY[DEPLOY.find("Sync repo to server"):]
-    assert "--delete" in sync[:400], "the premise changed; recheck this test"
-    provision = DEPLOY[DEPLOY.find("Provision the sandbox token"):]
-    provision = provision[:provision.find("- name:", 10)]
-    assert "~/celmis-secrets" in provision
-    assert "celmis/celmis-secrets" not in provision
+# `test_it_is_kept_outside_the_directory_the_sync_deletes` was deleted with the
+# mechanism it described, not with the guarantee. It existed because
+# `rsync --delete` into celmis/ wiped anything not in the repository, so a
+# token stored there was regenerated every deploy and 403'd the session in
+# flight. Nothing rsyncs any more — the images come from a registry and .env
+# is written once, on the server, by a script that never touches a value it
+# already finds. Re-pointing that assertion at some other directory would have
+# been a test about a hazard that no longer exists.
 
 
-def test_it_is_appended_after_the_env_file_is_written():
-    """The .env write truncates. Appending before it writes into a file that
-    is about to be replaced."""
-    assert DEPLOY.find("Write .env on server") < DEPLOY.find("Provision the sandbox token")
+def test_the_token_survives_being_filled_in_again():
+    """The .env write used to truncate, so appending before it wrote into a
+    file about to be replaced. `init-env.sh` fills blanks in place instead —
+    and the property that matters is the same one: a token already in the file
+    must come out unchanged. Rotating it under a running api is a 403 on the
+    next call."""
+    assert "Idempotent" in INIT_ENV
+    assert "already has a value is never touched" in INIT_ENV
 
 
 def test_the_token_is_never_printed():
-    provision = DEPLOY[DEPLOY.find("Provision the sandbox token"):]
-    provision = provision[:provision.find("- name:", 10)]
-    assert "echo \"$(cat ~/celmis-secrets" not in provision
-    assert "cat ~/celmis-secrets/sandbox_token" in provision  # only into .env
-    # The verification checks a shape, not a value.
-    assert 'grep -q "^SANDBOX_TOKEN=.\\{32,\\}"' in provision
+    """A secret that reaches a log has left the machine.
+
+    The generator writes values into the file and reports only NAMES: it says
+    `filled 3: MCP_JWT_SECRET, …`, never what it put in them. `lines[i]` is
+    where a value is produced and it goes straight into the file.
+
+    Keyed on the generator call, not on the word "value" — the first version of
+    this assertion failed on the sentence "the earlier value is silently
+    discarded", which is prose about duplicate keys. A word is not the thing it
+    names, which is the mistake this whole file exists to catch elsewhere.
+    """
+    import re
+
+    for call in re.findall(r"print\(([^\n]*)\)", INIT_ENV):
+        assert "GENERATORS[" not in call, call
+        assert "secrets." not in call, call
+        assert "lines[" not in call, call
 
 
-def test_it_is_generated_once_rather_than_every_deploy():
-    """Rotating it on every deploy would 403 any session in flight while api
-    restarts ahead of the sandbox."""
-    provision = DEPLOY[DEPLOY.find("Provision the sandbox token"):]
-    assert "[ ! -s ~/celmis-secrets/sandbox_token ]" in provision
+def test_the_summary_names_what_it_filled():
+    """The other half: reporting nothing would be safe and useless. An operator
+    has to know which blanks were filled to know what to back up."""
+    assert "filled {len(filled)}" in INIT_ENV
+    assert "sorted(filled)" in INIT_ENV
+
+
+def test_it_is_generated_once_rather_than_every_run():
+    """Rotating it would 403 any session in flight while api restarts ahead of
+    the sandbox. The generator only ever fills a blank."""
+    assert "nothing to fill" in INIT_ENV
 
 
 # ─── the outage this shape caused ────────────────────────────────────
@@ -202,8 +237,13 @@ def test_the_deploy_checks_service_dns_after_bringing_things_up():
     """The failure was invisible to everything the deploy looked at: images
     built, containers started, healthchecks pending. Only a name lookup shows
     it, so the deploy does one — and repairs it, since recreating the service
-    restores the alias."""
-    after_up = DEPLOY[DEPLOY.find("$COMPOSE up -d"):]
+    restores the alias.
+
+    The workflow that used to carry this is gone; the script that replaced it
+    carries the same three steps, so the assertion moved rather than the
+    guarantee.
+    """
+    after_up = DEPLOY_SH[DEPLOY_SH.find("$COMPOSE up -d"):]
     assert "getent hosts" in after_up
     assert "force-recreate" in after_up
     assert "does not resolve by service name" in after_up, (
@@ -214,27 +254,19 @@ def test_the_deploy_checks_service_dns_after_bringing_things_up():
 def test_the_repair_runs_even_when_up_d_fails():
     """The guard existed on the deploy that took the box down, and never ran.
 
-    With `set -e`, a bare `$COMPOSE up -d` aborts the script the moment api
-    fails its healthcheck — which is precisely the symptom of the alias loss
-    the guard repairs. The repair has to survive its own trigger.
+    With `set -e`, a bare `$COMPOSE up -d` aborts the moment api fails its
+    healthcheck — which is precisely the symptom of the alias loss the guard
+    repairs. The repair has to survive its own trigger.
     """
-    start = DEPLOY.find("UP_FAILED")
+    start = DEPLOY_SH.find("UP_FAILED")
     assert start > 0, "the non-fatal up-and-repair block is gone"
-    # …to the NEXT prune after it. There is an earlier `image prune -af`
-    # between the builds, and slicing to the first match gives an empty block
-    # that every assertion below then passes over in silence.
-    block = DEPLOY[start:DEPLOY.find("docker image prune", start)]
-    assert block.strip(), "empty slice — the markers moved"
+    block = DEPLOY_SH[start:]
     assert "$COMPOSE up -d || UP_FAILED=1" in block, (
         "up -d is fatal again, so the repair below it is unreachable"
     )
     assert block.index("UP_FAILED=1") < block.index("getent hosts"), (
         "the repair must come after the non-fatal up, not before"
     )
-    assert "retrying up -d after alias repair" in block, (
-        "a first attempt that failed for a now-removed reason is never retried"
-    )
-
 
 def test_a_missing_sandbox_token_is_said_out_loud_but_stops_nothing_else(monkeypatch):
     """The failure that made this expensive was silence, not severity.

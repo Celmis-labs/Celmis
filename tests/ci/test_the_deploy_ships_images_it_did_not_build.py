@@ -75,7 +75,13 @@ def _executable(doc: dict) -> str:
 
 
 def test_the_deploy_pulls_rather_than_builds():
-    body = _executable(_load("deploy.yml"))
+    """The workflow this read is gone; the guarantee is not. What deploys must
+    fetch images, never build them — on that box a build was measured at 485
+    seconds and 4.2GB of a filesystem with 4.2GB free."""
+    body = (ROOT / "scripts/deploy-on-server.sh").read_text(encoding="utf-8")
+    body = "\n".join(
+        line for line in body.splitlines() if not line.strip().startswith("#")
+    )
 
     assert "compose pull" in body.lower(), "the deploy neither builds nor pulls"
     # Case-insensitive: deploy.yml spells compose both as `$COMPOSE` and as
@@ -84,38 +90,27 @@ def test_the_deploy_pulls_rather_than_builds():
     assert "compose build" not in body.lower(), "the server is building again"
 
 
-def test_the_deploy_waits_for_the_release_that_makes_its_images():
-    """A deploy pulls, so it must not start before there is anything to pull.
-
-    Both workflows firing on the same tag is a race the deploy always loses:
-    `git push --tags` starts them together and `$COMPOSE pull` reaches GHCR
-    while the images are still building cold. GHCR answers "manifest unknown",
-    `set -e` kills the step, and a tag that looked released is not deployed.
-    """
-    doc = _load("deploy.yml")
-
-    assert "push" not in doc["on"], (
-        "the deploy races the release it depends on"
-    )
-    assert doc["on"]["workflow_run"]["workflows"] == ["Release images"]
-    assert "workflow_dispatch" in doc["on"], "no way to re-deploy or roll back"
-
-
-def test_the_deploy_refuses_to_ship_a_failed_release():
-    """`workflow_run` fires on completion, not on success — deploying images a
-    failed build may not have finished publishing is how half a release
-    reaches production."""
-    guard = _load("deploy.yml")["jobs"]["deploy"]["if"]
-
-    assert "conclusion" in guard
-    assert "success" in guard
+# `test_the_deploy_waits_for_the_release_that_makes_its_images` and
+# `test_the_deploy_refuses_to_ship_a_failed_release` were deleted with the
+# workflow, not with a guarantee. Both were about GitHub's own scheduling — a
+# `workflow_run` trigger and a `conclusion == success` guard — and neither has
+# a counterpart on a server that pulls when somebody asks it to. Re-pointing
+# them at the script would have produced two assertions about a race that
+# cannot happen there.
+#
+# What survives is the reason they existed: a deploy must not fetch images that
+# are not published yet. On the server that is the pull failing loudly, which
+# `set -euo pipefail` guarantees and `test_it_stops_on_the_first_error` pins in
+# tests/ci/test_the_server_deploys_itself.py.
 
 
 def test_the_tag_reaches_the_server_through_the_file_compose_reads():
-    body = "\n".join(r for _n, r in _runs(_load("deploy.yml")))
+    """Compose interpolates `CELMIS_TAG` from `.env` itself, so the tag needs no
+    plumbing of its own and has no second place to disagree with the deploy."""
+    body = (ROOT / "scripts/deploy-on-server.sh").read_text(encoding="utf-8")
 
     assert "CELMIS_TAG" in body
-    assert "celmis/.env" in body
+    assert ".env" in body
 
 
 def test_compose_pins_images_and_builds_nothing():
@@ -192,7 +187,7 @@ def test_a_half_published_release_is_not_cancelled():
 # ─── the trap that cost an outage ────────────────────────────────────
 
 
-@pytest.mark.parametrize("wf", ["deploy.yml", "release.yml", "ci.yml"])
+@pytest.mark.parametrize("wf", ["release.yml", "ci.yml"])
 def test_every_run_block_is_valid_shell(wf):
     """An apostrophe inside a comment closed the single-quoted ssh argument and
     broke the step. YAML parsed it happily; only bash notices."""

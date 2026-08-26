@@ -27,7 +27,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER_SRC = (ROOT / "src" / "agent" / "runner.py").read_text()
-DEPLOY = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
+# The push deploy is gone — it kept a root key to production in the secrets of
+# a now-public repository. Its work is in this script, which needs no
+# credential anyone off that machine holds, so these guards point here.
+DEPLOY = (ROOT / "scripts" / "deploy-on-server.sh").read_text()
 DOCKERFILE = (ROOT / "Dockerfile.sandbox").read_text()
 
 
