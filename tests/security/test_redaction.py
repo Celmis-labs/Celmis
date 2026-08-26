@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import pytest
 
+from src.security.redactor import Redactor
+
 # Fixture values, assembled rather than written out.
 #
 # They are fake — the digits count up and the letters are the alphabet — but
@@ -20,8 +22,6 @@ _STRIPE = "sk_" + "live_51AbCdEfGhIjKlMnOpQrStUvWxYz"
 _TWILIO = "AC" + "1234567890abcdef1234567890abcdef"
 _ANTHROPIC = "sk-ant-" + "abcdef0123456789012345678901234567890123456789012345"
 
-
-from src.security.redactor import Redactor
 
 
 @pytest.fixture
