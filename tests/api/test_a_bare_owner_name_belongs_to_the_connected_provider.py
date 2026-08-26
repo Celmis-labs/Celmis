@@ -125,3 +125,51 @@ def test_the_hint_no_longer_recommends_the_ambiguous_form_alone():
 
     assert "connected provider" in hint, hint
     assert "github:" in hint, "the explicit form is not offered"
+
+
+# ─── and the stored value has to agree with the parsed one ───────────
+
+
+def test_the_qualified_url_is_what_gets_stored():
+    """Half a fix is the same defect wearing the fix's name.
+
+    The first version of this qualified the string for PARSING and stored
+    `req.url` unchanged. The slug then said `github_owner-name` while every
+    later re-parse of the stored url said bitbucket, so the clone was attempted
+    at a path with no provider prefix and failed with Bitbucket's own error
+    message — on a repository registered as GitHub, in a workspace connected to
+    GitHub.
+
+    Caught on the live system, not in review: the repositories registered
+    cleanly, reported `provider: github`, and their index jobs still died six
+    times each.
+
+    Keyed on the AST: `url=` in the registration must be the qualified name,
+    not the request field.
+    """
+    import ast
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "src/api/routers/repos.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
+              and n.name == "add_repo")
+
+    # The RepoConfig being written, not the response being built: the same
+    # function also does `url=cfg.url` to echo back what was stored, and that
+    # one is a read.
+    written = [
+        kw.value for call in ast.walk(fn)
+        if isinstance(call, ast.Call)
+        and getattr(call.func, "id", None) == "RepoConfig"
+        for kw in call.keywords if kw.arg == "url"
+    ]
+    assert written, "nothing constructs a RepoConfig any more"
+    for value in written:
+        assert isinstance(value, ast.Name), ast.dump(value)
+        assert value.id == "qualified", (
+            "the raw request url is stored, so the slug and the clone path "
+            "will disagree"
+        )

@@ -158,9 +158,14 @@ def add_repo(
     req: RepoAddRequest, user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> RepoOut:
-    parsed = parse_repo_url(
-        _qualify_with_connected_provider(req.url, workspace_id, user.id)
-    )
+    # QUALIFY ONCE, AND STORE WHAT WAS QUALIFIED. The first version of this
+    # qualified the string for PARSING and then saved `req.url` unchanged — so
+    # the slug said github and every later re-parse of the stored url said
+    # bitbucket, and the clone went to an address that does not exist. Half a
+    # fix is the same defect wearing the fix's name: one place corrected, the
+    # stored value left alone, two derivations disagreeing.
+    qualified = _qualify_with_connected_provider(req.url, workspace_id, user.id)
+    parsed = parse_repo_url(qualified)
     full_name = f"{parsed.owner}/{parsed.name}"
     store = get_auto_review_store()
     # Enforce a 1:1 repo->workspace binding so the unauthenticated webhook can
@@ -193,7 +198,7 @@ def add_repo(
         repo_slug=parsed.slug,
         provider=parsed.provider.value,
         full_name=full_name,
-        url=req.url,
+        url=qualified,
         workspace_id=workspace_id,
         branch=(req.branch or "").strip() or None,
         enabled=req.auto_review,
