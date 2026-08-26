@@ -361,6 +361,36 @@ def _scan_consumers(symbol: str) -> list[dict[str, Any]]:
 # ═══ Notification channels ═══════════════════════════════════════════
 
 
+#: Which host a channel kind actually posts to. A webhook URL announces its
+#: provider in its hostname, so a kind that disagrees with the host is a
+#: mistake the form can catch before the first alert is lost.
+_KIND_HOSTS = {
+    "slack": ("hooks.slack.com",),
+    "discord": ("discord.com", "discordapp.com"),
+    "google_chat": ("chat.googleapis.com",),
+}
+
+
+def _kind_matches_url(kind: str, url: str) -> str | None:
+    """The kind the URL belongs to, when it disagrees with `kind`.
+
+    A Google Chat URL saved under `kind: slack` is accepted by every layer:
+    the pattern allows both values, the URL is a valid string, the row stores
+    fine. It fails at the first send with a 400 from a provider that was never
+    asked — and until somebody presses Test, the only symptom is alerts that
+    quietly never arrive.
+
+    `webhook` is deliberately absent: it means "some endpoint of my own", and
+    that has no host to check.
+    """
+    if kind == "webhook":
+        return None
+    for other, hosts in _KIND_HOSTS.items():
+        if any(h in url for h in hosts):
+            return None if other == kind else other
+    return None
+
+
 class ChannelIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     kind: str = Field(pattern="^(slack|discord|google_chat|webhook)$")
@@ -424,6 +454,16 @@ async def create_channel(
     user: User = Depends(require_workspace_admin),
     ws_id: str = Depends(current_workspace_id),
 ) -> ChannelOut:
+    mismatch = _kind_matches_url(payload.kind, payload.webhook_url)
+    if mismatch:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"That looks like a {mismatch.replace('_', ' ')} webhook, "
+                    f"but the channel kind is {payload.kind}. Each provider "
+                    f"expects its own message format — pick "
+                    f"{mismatch.replace('_', ' ')}, or use 'webhook' for a "
+                    f"plain endpoint of your own."),
+        )
     row = NotificationChannel(
         id=str(uuid.uuid4()),
         name=payload.name, kind=payload.kind,
@@ -485,8 +525,37 @@ async def test_channel(
             severity="info", link_url=None, extra=None,
         )
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "detail": str(exc)}
+        # THE WEBHOOK URL IS THE CREDENTIAL. `str(exc)` on an httpx error
+        # includes the request URL, and for Google Chat that URL carries both
+        # `key` and `token` in its query string — so a failed test answered
+        # with the secret it was testing, straight into a toast in the browser,
+        # into whatever logs the response, and into any screenshot of the page.
+        # Found by pressing Test on a channel saved with the wrong kind.
+        #
+        # The status and the reason are what the operator needs; the address is
+        # what they already have.
+        detail = _redact_url(str(exc), row.webhook_url)
+        logger.warning("channel_test_failed id=%s kind=%s", channel_id, row.kind)
+        return {"ok": False, "detail": detail}
     return {"ok": True, "detail": "sent"}
+
+
+def _redact_url(message: str, url: str) -> str:
+    """Take a webhook URL, and anything that looks like one, out of a message.
+
+    Both halves matter: the exact URL, because it is the one thing we know is
+    a secret here, and the general shape, because a client library is free to
+    quote a redirect target or a second address we never stored.
+    """
+    import re
+
+    out = message.replace(url, "<webhook url>")
+    if url:
+        base = url.split("?", 1)[0]
+        out = out.replace(base, "<webhook url>")
+    # Any surviving query string on any URL: the secret parts live there.
+    out = re.sub(r"(https?://[^\s'\"]+)\?[^\s'\"]*", r"\1?<redacted>", out)
+    return out[:400]
 
 
 class BindingIn(BaseModel):
