@@ -11,7 +11,7 @@ git push ──▶ GitHub Actions (free runner) ──rsync+ssh──▶ Oracle 
                                                          └─ Caddy → HTTP
 ```
 
-Files in the repo: [.github/workflows/deploy.yml](../.github/workflows/deploy.yml),
+Files in the repo: [scripts/deploy-on-server.sh](../scripts/deploy-on-server.sh),
 [deploy/oracle/caddy-http.yml](../deploy/oracle/caddy-http.yml),
 [deploy/oracle/Caddyfile.http](../deploy/oracle/Caddyfile.http).
 
@@ -19,7 +19,8 @@ Files in the repo: [.github/workflows/deploy.yml](../.github/workflows/deploy.ym
 > `caddy.yml` / `Caddyfile` — a TLS overlay the workflow has never referenced.
 > The deploy runs
 > `docker compose -f docker-compose.yml -f deploy/oracle/caddy-http.yml`
-> (deploy.yml:225), and three superseded overlays that sat beside it —
+> (in the deploy workflow this document predates), and three superseded
+> overlays that sat beside it —
 > `caddy.yml`, `caddy-ip.yml`, `caddy-sslip.yml` with their Caddyfiles — have
 > been deleted. One of them hardcoded the production IP.
 >

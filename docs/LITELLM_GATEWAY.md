@@ -56,9 +56,9 @@ They are independent on purpose, and both must be on:
 
 The container lives behind `profiles: ["gateway"]` in `docker-compose.yml`, so
 `docker compose up -d` never creates it unless the profile is active. Compose
-reads `COMPOSE_*` variables from the project `.env`, which is exactly the file
-the deploy workflow writes from the `DEPLOY_ENV` secret — so **turning the
-gateway on never requires a change to `.github/workflows/deploy.yml`**.
+reads `COMPOSE_*` variables from the project `.env` on the server — so
+**turning the gateway on is a change to that file and nothing else**. No image
+is rebuilt and no deployment machinery is touched.
 
 Setting only `COMPOSE_PROFILES` runs the proxy but leaves the app on direct
 provider calls: a safe way to bring the proxy up and verify it before any real
@@ -66,11 +66,12 @@ traffic depends on it. That is the recommended order.
 
 ---
 
-## 2. Variables to add to the `DEPLOY_ENV` secret
+## 2. Variables to add to the server's `.env`
 
-Only the repository owner can edit `Settings → Secrets and variables → Actions →
-DEPLOY_ENV`. Append this block to that secret; it is the full contents of the
-server's `.env`, so keep everything already in it.
+Append this block to `.env` on the server, beside the values
+`scripts/init-env.sh` generated. Keep everything already in the file — compose
+resolves interpolation for the whole document before starting anything, so one
+missing variable stops services that have nothing to do with the gateway.
 
 ```dotenv
 # ── LiteLLM gateway ──────────────────────────────────────────────────
@@ -138,7 +139,8 @@ It prints every check and exits non-zero on the first thing that is wrong.
 
 **Step 3 — route the app through it.**
 
-Add `LITELLM_PROXY_URL=http://litellm:4000` to `DEPLOY_ENV` and deploy again.
+Add `LITELLM_PROXY_URL=http://litellm:4000` to the server's `.env` and
+re-run `./scripts/deploy-on-server.sh`.
 From then on, the first LLM call for each workspace provisions that workspace on
 the proxy (team + one deployment per surface + a scoped virtual key) and every
 later call reads the cached route.
@@ -179,13 +181,13 @@ search quietly worse, which is far more expensive than an error.
 
 **Stop routing through the proxy** (instant, reversible, no data touched):
 
-remove `LITELLM_PROXY_URL` from `DEPLOY_ENV` and deploy. `src/llm/gateway.py`
+remove `LITELLM_PROXY_URL` from the server's `.env` and re-deploy. `src/llm/gateway.py`
 requires both `LITELLM_PROXY_URL` and `LITELLM_MASTER_KEY`; with either missing
 `is_enabled()` is False, every route lookup returns None, and the app is
 byte-for-byte on the direct-provider path it used before. The proxy keeps
 running, harmlessly.
 
-To also stop the container, remove `COMPOSE_PROFILES=gateway` from `DEPLOY_ENV`,
+To also stop the container, remove `COMPOSE_PROFILES=gateway` from `.env`,
 deploy, then on the server:
 
 ```bash
@@ -214,7 +216,7 @@ database. It is not a session secret and it is not rotatable:
 Rules:
 
 1. Generate it once (`openssl rand -hex 32`) and never change it.
-2. Back it up with the rest of the `DEPLOY_ENV` secret. Losing it is the same
+2. Back it up with the rest of the server's `.env`. Losing it is the same
    as changing it.
 3. If it ever *is* lost or changed, the recovery is: stop the proxy, drop the
    `litellm` database, set the new salt, let `litellm-init` recreate the
@@ -222,7 +224,7 @@ Rules:
    workspace re-provisions from scratch.
 
 `LITELLM_MASTER_KEY` is *not* in this category — it can be rotated. Change it in
-`DEPLOY_ENV` and redeploy; already-minted virtual keys keep working, and the
+the server's `.env` and redeploy; already-minted virtual keys keep working, and the
 next provisioning cycle uses the new master key.
 
 ---
@@ -232,7 +234,7 @@ next provisioning cycle uses the new master key.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Deploy fails: `celmis-litellm is "absent"` | profile not active on the server | `grep COMPOSE_PROFILES celmis/.env`; check for CRLF |
-| `litellm-init FATAL: LITELLM_MASTER_KEY must be set...` | key missing or not `sk-` prefixed | fix `DEPLOY_ENV`, redeploy |
+| `litellm-init FATAL: LITELLM_MASTER_KEY must be set...` | key missing or not `sk-` prefixed | fix `.env`, redeploy |
 | `litellm-init FATAL: could not create database` | the Postgres role lacks CREATEDB | `docker compose exec postgres psql -U analyzer -c 'ALTER ROLE analyzer CREATEDB;'` |
 | Container unhealthy for a few minutes on first start | first-boot Prisma migrations | expected; `start_period` is 120s |
 | App logs `litellm_gateway_unreachable` | proxy down, or `LITELLM_PROXY_URL` points at the wrong host | from the API container: `curl -s http://litellm:4000/health/liveliness` |
