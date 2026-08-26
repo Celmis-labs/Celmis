@@ -36,23 +36,6 @@
 #      unstamped deploy offers the wrong source, which is the one thing that
 #      footer exists to get right.
 
-# NOT YET RUN ON A SERVER. Written after ssh to production became unreachable
-# from here, so every claim below is derived from the workflow it replaces and
-# from the outages that shaped it — not from watching this file work. The parts
-# that could be checked without the box were: `bash -n`, the digest extraction
-# against a real image, and the `(head)` match against real alembic output.
-#
-# Before trusting it in cron, run it once by hand and read what it prints:
-#
-#     ./scripts/deploy-on-server.sh v0.1.0
-#
-# The two places most likely to be wrong are the digest lookup through
-# `$COMPOSE images -q`, which was verified a different way, and the final
-# `curl localhost/backend/...`, which assumes the proxy from the base compose
-# file is answering on port 80.
-#
-# Delete this comment once it has run.
-
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -131,10 +114,23 @@ done
 
 # ─── 4. the stamp, and the migration ─────────────────────────────────
 #
-# The digest of the image actually running, not the tag that was asked for: a
-# tag can be moved, and "which build is this" has to survive that.
-digest=$(docker inspect --format '{{index .RepoDigests 0}}' \
-         "$($COMPOSE images -q api | head -1)" 2>/dev/null | sed 's/.*@//' || true)
+# The COMMIT the running image was built from, not the tag that was asked for:
+# a tag can be moved, and "which build is this" has to survive that. It comes
+# from the image's own `revision` label, which `release.yml` sets.
+#
+# The first version stamped the image DIGEST — equally immutable and useless
+# here. `src/ops/build.py` shortens this value to seven characters, so
+# `sha256:150805…` displayed as the string "sha256:", and the AGPL §13 footer
+# offered source at `…/tree/sha256:`, which 404s. A digest names an image; the
+# footer needs something a git host can resolve. Reading the code, the digest
+# looked right; the first real run on the server is what showed it was not.
+rev=$(docker inspect \
+        --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+        "$($COMPOSE images -q api | head -1)" 2>/dev/null || true)
+# An image built before those labels existed carries none — fall back to the
+# digest rather than stamping nothing, and accept that its short form is noise.
+digest=${rev:-$(docker inspect --format '{{index .RepoDigests 0}}' \
+         "$($COMPOSE images -q api | head -1)" 2>/dev/null | sed 's/.*@sha256://' || true)}
 sed -i '/^CELMIS_GIT_SHA=/d;/^CELMIS_DEPLOYED_AT=/d' .env
 printf 'CELMIS_GIT_SHA=%s\nCELMIS_DEPLOYED_AT=%s\n' \
   "${digest:-unknown}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .env
