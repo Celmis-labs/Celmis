@@ -1522,7 +1522,7 @@
   "repositories.tabBrowse": "Огляд",
   "repositories.tabByUrl": "За URL",
   "repositories.title": "Репозиторії",
-  "repositories.urlHint": "Приймає: повний URL, owner/name або provider:owner/name.",
+  "repositories.urlHint": "Приймає повний URL або owner/name — розпізнається за підключеним провайдером. Явно: github:owner/name.",
   "repositories.urlOrSlug": "URL або slug",
   "repositories.viewLink": "переглянути",
   "reviews.af.filePath": "Шлях до файлу",

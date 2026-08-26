@@ -1522,7 +1522,7 @@
   "repositories.tabBrowse": "Przeglądaj",
   "repositories.tabByUrl": "Przez URL",
   "repositories.title": "Repozytoria",
-  "repositories.urlHint": "Akceptuje: pełny URL, owner/name lub provider:owner/name.",
+  "repositories.urlHint": "Accepts a full URL, or owner/name — resolved to your connected provider. Use github:owner/name to be explicit.",
   "repositories.urlOrSlug": "URL lub slug",
   "repositories.viewLink": "zobacz",
   "reviews.af.filePath": "Ścieżka pliku",

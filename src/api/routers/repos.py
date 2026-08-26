@@ -106,13 +106,61 @@ def list_repos(
     return out
 
 
+def _qualify_with_connected_provider(value: str, workspace_id: str,
+                                     user_id: str) -> str:
+    """`owner/name` means whichever provider this workspace is connected to.
+
+    THE FORM INVITED A SPELLING THAT MEANT SOMETHING ELSE. Its own hint reads
+    "Accepts: full URL, owner/name, or provider:owner/name", and a bare
+    `owner/name` with no scheme parses as BITBUCKET — that default predates
+    GitHub support and is relied on by the tests that own it. So a user who
+    connected GitHub and typed exactly what the hint suggested got a repository
+    registered under the wrong provider, whose index job then failed five times
+    with "No bitbucket credentials" and died. The page showed `indexed: false`
+    and no reason.
+
+    Found by installing this product from its own README and following the
+    interface instead of prior knowledge.
+
+    The workspace already knows the answer: if exactly one Git provider is
+    connected, an unqualified name belongs to it. Two connected providers make
+    it genuinely ambiguous and the historical default stands — guessing between
+    two right answers is worse than the documented one.
+
+    A value that already names its provider — a URL, or `github:owner/name` —
+    is returned untouched.
+    """
+    v = (value or "").strip()
+    if not v or "://" in v or ":" in v.split("/", 1)[0]:
+        return v
+    try:
+        from src.credentials import get_credential_store
+        from src.credentials.git_keys import resolve_git_credential
+
+        store = get_credential_store()
+        connected = [
+            p for p in ("github", "gitlab", "bitbucket")
+            if resolve_git_credential(p, user_id=user_id,
+                                      workspace_id=workspace_id, store=store)
+        ]
+    except Exception:  # noqa: BLE001 — an unreadable store decides nothing
+        return v
+    if len(connected) == 1:
+        logger.info("repo_provider_inferred provider=%s from=%r",
+                    connected[0], v)
+        return f"{connected[0]}:{v}"
+    return v
+
+
 @router.post("", response_model=RepoOut, status_code=status.HTTP_201_CREATED)
 def add_repo(
     request: Request,
     req: RepoAddRequest, user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> RepoOut:
-    parsed = parse_repo_url(req.url)
+    parsed = parse_repo_url(
+        _qualify_with_connected_provider(req.url, workspace_id, user.id)
+    )
     full_name = f"{parsed.owner}/{parsed.name}"
     store = get_auto_review_store()
     # Enforce a 1:1 repo->workspace binding so the unauthenticated webhook can
@@ -299,6 +347,12 @@ def trigger_index(
 class IndexAllOut(BaseModel):
     queued: int
     skipped: int
+    #: WHICH repositories were skipped, because the count alone cannot be
+    #: acted on. `{"queued": 0, "skipped": 4}` is a successful answer to a
+    #: request that did nothing, and it reads the same whether every repo is
+    #: already indexing (fine) or every one of them failed and was retried into
+    #: the ground (not fine). Naming them lets the page say which.
+    skipped_repos: list[str] = []
     #: Slugs that already had a graph and were left alone unless `force`.
     already_indexed: list[str] = []
 
@@ -326,6 +380,7 @@ def index_all(
     settings = get_settings()
     configs = get_auto_review_store().list_for_workspace(workspace_id)
     queued, skipped, already = 0, 0, []
+    skipped_repos: list[str] = []
     for cfg in configs:
         if not force and settings.repo_graph_path(cfg.repo_slug).exists():
             already.append(cfg.repo_slug)
@@ -345,12 +400,16 @@ def index_all(
             enqueued_by=user.email,
         )
         if job_id is None:
+            # An index for this repo is already pending or running — dedup by
+            # the same key registration uses.
             skipped += 1
+            skipped_repos.append(cfg.repo_slug)
         else:
             queued += 1
     logger.info("index_all ws=%s queued=%d skipped=%d already=%d by=%s",
                 workspace_id, queued, skipped, len(already), user.email)
-    return IndexAllOut(queued=queued, skipped=skipped, already_indexed=already)
+    return IndexAllOut(queued=queued, skipped=skipped,
+                       skipped_repos=skipped_repos, already_indexed=already)
 
 
 class GenerateVaultIn(BaseModel):

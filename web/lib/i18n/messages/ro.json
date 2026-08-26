@@ -1522,7 +1522,7 @@
   "repositories.tabBrowse": "Răsfoiește",
   "repositories.tabByUrl": "După URL",
   "repositories.title": "Repository-uri",
-  "repositories.urlHint": "Acceptă: URL complet, owner/name sau provider:owner/name.",
+  "repositories.urlHint": "Accepts a full URL, or owner/name — resolved to your connected provider. Use github:owner/name to be explicit.",
   "repositories.urlOrSlug": "URL sau slug",
   "repositories.viewLink": "vezi",
   "reviews.af.filePath": "Cale fișier",

@@ -1522,7 +1522,7 @@
   "repositories.tabBrowse": "Bladeren",
   "repositories.tabByUrl": "Via URL",
   "repositories.title": "Repositories",
-  "repositories.urlHint": "Accepteert: volledige URL, owner/name, of provider:owner/name.",
+  "repositories.urlHint": "Accepts a full URL, or owner/name — resolved to your connected provider. Use github:owner/name to be explicit.",
   "repositories.urlOrSlug": "URL of slug",
   "repositories.viewLink": "bekijken",
   "reviews.af.filePath": "Bestandspad",

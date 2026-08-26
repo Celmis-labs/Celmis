@@ -1522,7 +1522,7 @@
   "repositories.tabBrowse": "浏览",
   "repositories.tabByUrl": "按 URL",
   "repositories.title": "仓库",
-  "repositories.urlHint": "支持：完整 URL、owner/name，或 provider:owner/name。",
+  "repositories.urlHint": "Accepts a full URL, or owner/name — resolved to your connected provider. Use github:owner/name to be explicit.",
   "repositories.urlOrSlug": "URL 或标识",
   "repositories.viewLink": "查看",
   "reviews.af.filePath": "文件路径",

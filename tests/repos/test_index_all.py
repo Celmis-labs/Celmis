@@ -138,8 +138,17 @@ def test_pressing_the_button_twice_cannot_clone_twice(tmp_path, monkeypatch):
 
     # Per repo, not per workspace: a workspace-wide key would have let the
     # first repo's job swallow the second repo's.
-    assert first == {"queued": 2, "skipped": 0, "already_indexed": []}
-    assert second == {"queued": 0, "skipped": 2, "already_indexed": []}
+    # Field-by-field, not dict equality. Adding `skipped_repos` — which names
+    # WHICH repositories were skipped, because the bare count reads the same
+    # whether they are all already indexing or all dead — broke four tests that
+    # compared the whole response. A client ignores a field it does not know;
+    # a test that fails for one is asserting the shape of the envelope rather
+    # than the answer inside it.
+    assert (first["queued"], first["skipped"]) == (2, 0)
+    assert first["already_indexed"] == []
+    assert (second["queued"], second["skipped"]) == (0, 2)
+    assert second["already_indexed"] == []
+    assert len(second["skipped_repos"]) == 2, "the skipped ones are not named"
     assert len(queue.live) == 2
 
 
@@ -163,7 +172,9 @@ def test_the_key_is_the_one_registering_a_repo_uses(tmp_path, monkeypatch):
     finally:
         get_settings.cache_clear()
 
-    assert out == {"queued": 0, "skipped": 1, "already_indexed": []}
+    assert (out["queued"], out["skipped"]) == (0, 1)
+    assert out["already_indexed"] == []
+    assert len(out["skipped_repos"]) == 1
 
 
 def test_an_already_indexed_repo_is_skipped_unless_forced():

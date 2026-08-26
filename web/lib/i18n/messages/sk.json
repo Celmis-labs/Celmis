@@ -1522,7 +1522,7 @@
   "repositories.tabBrowse": "Prehľadávať",
   "repositories.tabByUrl": "Podľa URL",
   "repositories.title": "Repozitáre",
-  "repositories.urlHint": "Prijíma: celú URL, owner/name alebo provider:owner/name.",
+  "repositories.urlHint": "Accepts a full URL, or owner/name — resolved to your connected provider. Use github:owner/name to be explicit.",
   "repositories.urlOrSlug": "URL alebo slug",
   "repositories.viewLink": "zobraziť",
   "reviews.af.filePath": "Cesta k súboru",

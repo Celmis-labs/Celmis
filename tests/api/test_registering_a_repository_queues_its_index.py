@@ -257,7 +257,16 @@ def test_registration_and_index_all_share_one_dedup_key(client, queue):
     resp = client.post("/api/repos/index-all")
 
     assert resp.status_code == 202, resp.text
-    assert resp.json() == {"queued": 0, "skipped": 1, "already_indexed": []}
+    # Field-by-field, not dict equality. Adding `skipped_repos` — which names
+    # WHICH repositories were skipped, because the bare count reads the same
+    # whether they are all already indexing or all dead — broke four tests that
+    # compared the whole response. A client ignores a field it does not know;
+    # a test that fails for one is asserting the shape of the envelope rather
+    # than the answer inside it.
+    body = resp.json()
+    assert (body["queued"], body["skipped"]) == (0, 1)
+    assert body["already_indexed"] == []
+    assert body["skipped_repos"], "a skipped repo is not named"
     assert queue.calls[1]["dedup_key"] == queue.calls[0]["dedup_key"]
 
 
@@ -269,7 +278,9 @@ def test_index_all_still_skips_a_repo_that_has_a_graph(client, queue):
 
     resp = client.post("/api/repos/index-all")
 
-    assert resp.json() == {"queued": 0, "skipped": 0, "already_indexed": [SLUG]}
+    body = resp.json()
+    assert (body["queued"], body["skipped"]) == (0, 0)
+    assert body["already_indexed"] == [SLUG]
     assert queue.calls == []
 
 

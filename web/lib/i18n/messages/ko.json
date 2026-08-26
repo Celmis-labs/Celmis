@@ -1522,7 +1522,7 @@
   "repositories.tabBrowse": "찾아보기",
   "repositories.tabByUrl": "URL로",
   "repositories.title": "저장소",
-  "repositories.urlHint": "허용 형식: 전체 URL, owner/name, provider:owner/name.",
+  "repositories.urlHint": "Accepts a full URL, or owner/name — resolved to your connected provider. Use github:owner/name to be explicit.",
   "repositories.urlOrSlug": "URL 또는 슬러그",
   "repositories.viewLink": "보기",
   "reviews.af.filePath": "파일 경로",
