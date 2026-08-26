@@ -1855,7 +1855,7 @@
   "onboarding.sc.level.all": "すべて",
   "alertGuide.title": "アラートと通知の設定",
   "alertGuide.subtitle": "監視システムから本番の問題を取り込み、完了したレビューをチームのチャットへ送り出します。",
-  "alertGuide.twoHalves": "これは互いに独立した 2 つの仕組みです。ここに届いたアラートが Slack、Discord、Google Chat へ転送されることは一切なく、チャットチャンネルがそれを受け取ることもありません — 受信したものはこのページの一覧に入り、送信されるのはレビュー結果です。必要なほうだけ設定しても、両方設定しても構いません。",
+  "alertGuide.twoHalves": "バインディングで出会う二つの半分です。ここに届いたアラートはチャットチャンネルへ送られます—完了したレビューも同様です—ただしバインディングが指定した先に限ります：チャンネルとイベントと最低重大度。このページに届くものには alert_received、レビューには review_complete、両方には「すべてのイベント」を選んでください。バインディングがなければ何も送信されません。",
   "alertGuide.inboundTitle": "アラートを取り込む",
   "alertGuide.inboundIntro": "まず上のカードで受信 URL を作成してください — ボタンを押すまで URL は存在せず、ドットより後ろの部分は秘密情報です。JSON を POST できるものであれば、何でも利用できます。",
   "alertGuide.in.grafana.title": "Grafana",

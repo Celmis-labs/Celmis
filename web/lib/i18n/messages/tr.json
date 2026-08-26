@@ -1855,7 +1855,7 @@
   "onboarding.sc.level.all": "Tümü",
   "alertGuide.title": "Uyarı ve bildirim kurulumu",
   "alertGuide.subtitle": "Prodüksiyon sorunlarını izleme sisteminizden içeri alın, tamamlanan incelemeleri ekibinizin sohbetine dışarı gönderin.",
-  "alertGuide.twoHalves": "Bunlar birbirinden bağımsız iki ayrı yarıdır. Buraya gelen uyarılar Slack, Discord veya Google Chat'e İLETİLMEZ; sohbet kanalları da bunları almaz — gelenler bu sayfadaki listeye düşer, gidenler inceleme sonuçlarını taşır. İhtiyacınız olanı kurun ya da ikisini birden.",
+  "alertGuide.twoHalves": "Bir bağlantıda buluşan iki yarım. Buraya gelen uyarılar sohbet kanallarınıza gider — tamamlanan incelemeler de öyle — ancak yalnızca bir bağlantının söylediği yere: kanal artı olay artı asgari önem derecesi. Bu sayfaya düşenler için alert_received, incelemeler için review_complete veya ikisi için “herhangi bir olay” seçin. Bağlantı olmadan hiçbir şey gönderilmez.",
   "alertGuide.inboundTitle": "Uyarıları içeri alma",
   "alertGuide.inboundIntro": "Önce yukarıdaki karttan ingest URL'sini oluşturun — düğmeye basana kadar var olmaz ve noktadan sonraki kısım bir sırdır. JSON POST edebilen her şey bunu kullanabilir.",
   "alertGuide.in.grafana.title": "Grafana",

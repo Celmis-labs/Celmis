@@ -1855,7 +1855,7 @@
   "onboarding.sc.level.all": "Alles",
   "alertGuide.title": "Meldingen en notificaties instellen",
   "alertGuide.subtitle": "Haal productieproblemen binnen vanuit je monitoring en stuur afgeronde reviews naar de chat van je team.",
-  "alertGuide.twoHalves": "Dit zijn twee onafhankelijke helften. Meldingen die hier binnenkomen, worden NIET doorgestuurd naar Slack, Discord of Google Chat, en een chatkanaal ontvangt ze niet — inkomend belandt in de lijst op deze pagina, uitgaand verstuurt reviewresultaten. Stel in wat je nodig hebt, of allebei.",
+  "alertGuide.twoHalves": "Twee helften die samenkomen in een binding. Alerts die hier binnenkomen gaan naar uw chatkanalen — net als afgeronde reviews — maar alleen waar een binding dat zegt: kanaal plus gebeurtenis plus minimale ernst. Kies alert_received voor wat op deze pagina terechtkomt, review_complete voor reviews, of “elke gebeurtenis” voor beide. Zonder binding wordt er niets verzonden.",
   "alertGuide.inboundTitle": "Meldingen binnenhalen",
   "alertGuide.inboundIntro": "Maak eerst de ingest-URL aan in de kaart hierboven — die bestaat pas als je op de knop drukt, en het deel na de punt is een geheim. Alles wat JSON via POST kan versturen, kan hem gebruiken.",
   "alertGuide.in.grafana.title": "Grafana",

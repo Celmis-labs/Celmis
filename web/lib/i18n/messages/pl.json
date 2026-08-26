@@ -1855,7 +1855,7 @@
   "onboarding.sc.level.all": "Wszystko",
   "alertGuide.title": "Konfiguracja alertów i powiadomień",
   "alertGuide.subtitle": "Przyjmuj problemy produkcyjne ze swojego monitoringu i wysyłaj gotowe przeglądy na czat zespołu.",
-  "alertGuide.twoHalves": "To dwie niezależne połowy. Alerty przychodzące tutaj NIE są przekazywane do Slacka, Discorda ani Google Chat, a kanał czatu ich nie otrzymuje — przychodzące lądują na liście na tej stronie, wychodzące niosą wyniki przeglądów. Skonfiguruj tę część, której potrzebujesz, albo obie.",
+  "alertGuide.twoHalves": "Dwie połowy, które spotykają się w powiązaniu. Alerty przychodzące tutaj trafiają do twoich kanałów czatu — podobnie jak zakończone przeglądy — ale tylko tam, gdzie mówi o tym powiązanie: kanał plus zdarzenie plus minimalna waga. Wybierz alert_received dla tego, co trafia na tę stronę, review_complete dla przeglądów albo „dowolne zdarzenie” dla obu. Bez powiązania nic nie zostanie wysłane.",
   "alertGuide.inboundTitle": "Przyjmowanie alertów",
   "alertGuide.inboundIntro": "Najpierw utwórz URL odbiorczy w karcie powyżej — nie istnieje, dopóki nie naciśniesz przycisku, a część po kropce jest sekretem. Może z niego korzystać wszystko, co potrafi wysłać POST z danymi JSON.",
   "alertGuide.in.grafana.title": "Grafana",

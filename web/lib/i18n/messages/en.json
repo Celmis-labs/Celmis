@@ -1855,7 +1855,7 @@
   "onboarding.sc.level.all": "Everything",
   "alertGuide.title": "Set up alerts and notifications",
   "alertGuide.subtitle": "Bring production problems in from your monitoring, and send finished reviews out to your team's chat.",
-  "alertGuide.twoHalves": "These are two independent halves. Alerts arriving here are NOT forwarded to Slack, Discord or Google Chat, and a chat channel does not receive them — inbound lands in the list on this page, outbound carries review results. Set up whichever you need, or both.",
+  "alertGuide.twoHalves": "Two halves that meet at a binding. Alerts arriving here go out to your chat channels — and so do finished reviews — but only where a binding says so: channel plus event plus minimum severity. Pick alert_received for what lands on this page, review_complete for reviews, or “any event” for both. Without a binding nothing is sent.",
   "alertGuide.inboundTitle": "Bringing alerts in",
   "alertGuide.inboundIntro": "Create the ingest URL in the card above first — it does not exist until you press the button, and the part after the dot is a secret. Anything that can POST JSON can use it.",
   "alertGuide.in.grafana.title": "Grafana",

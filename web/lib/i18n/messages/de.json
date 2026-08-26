@@ -1855,7 +1855,7 @@
   "onboarding.sc.level.all": "Alles",
   "alertGuide.title": "Alerts und Benachrichtigungen einrichten",
   "alertGuide.subtitle": "Holen Sie Produktionsprobleme aus Ihrem Monitoring herein und senden Sie fertige Reviews in den Chat Ihres Teams.",
-  "alertGuide.twoHalves": "Das sind zwei unabhängige Hälften. Alerts, die hier eintreffen, werden NICHT an Slack, Discord oder Google Chat weitergeleitet, und ein Chat-Kanal empfängt sie nicht — Eingehendes landet in der Liste auf dieser Seite, Ausgehendes transportiert Review-Ergebnisse. Richten Sie ein, was Sie brauchen, oder beides.",
+  "alertGuide.twoHalves": "Zwei Hälften, die sich in einer Bindung treffen. Hier eingehende Alerts gehen an Ihre Chat-Kanäle — ebenso abgeschlossene Reviews — aber nur dort, wo eine Bindung es sagt: Kanal plus Ereignis plus Mindestschwere. Wählen Sie alert_received für das, was auf dieser Seite landet, review_complete für Reviews oder „jedes Ereignis“ für beides. Ohne Bindung wird nichts gesendet.",
   "alertGuide.inboundTitle": "Alerts hereinholen",
   "alertGuide.inboundIntro": "Erstellen Sie zuerst die Ingest-URL in der Karte oben — sie existiert erst, wenn Sie die Schaltfläche drücken, und der Teil nach dem Punkt ist ein Secret. Alles, was JSON per POST senden kann, kann sie verwenden.",
   "alertGuide.in.grafana.title": "Grafana",

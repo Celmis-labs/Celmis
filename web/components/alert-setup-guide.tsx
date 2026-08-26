@@ -3,10 +3,16 @@
 /**
  * How to wire monitoring into Celmis, and Celmis into a chat room.
  *
- * These are two independent halves that look like one feature and are not:
- * inbound alerts land in a list on this page, outbound notifications are
- * configured on Settings → Notification channels, and neither triggers the
- * other. That is the single thing people get wrong, so it is stated first.
+ * Two halves that meet at a binding. Inbound alerts land in a list on this
+ * page AND go out to chat; outbound notifications also carry review results.
+ * What connects them is a binding — channel plus event plus minimum severity
+ * — and without one the channel is silent, which is the single thing people
+ * get wrong, so it is stated first.
+ *
+ * This paragraph used to say the two halves never touched, which was true
+ * until the ingest endpoint started dispatching. Copy that describes an
+ * absent behaviour outlives the absence: it is the last place anyone looks
+ * when the feature works and the page says it does not.
  *
  * The provider recipes are menu paths, which no amount of reading our own code
  * would reveal — they are the part of the setup that happens in someone else's

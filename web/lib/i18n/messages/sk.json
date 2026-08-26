@@ -1855,7 +1855,7 @@
   "onboarding.sc.level.all": "Všetko",
   "alertGuide.title": "Nastavenie alertov a notifikácií",
   "alertGuide.subtitle": "Produkčné problémy z monitoringu priveďte dovnútra a hotové review posielajte von do tímového chatu.",
-  "alertGuide.twoHalves": "Sú to dve nezávislé polovice. Alerty, ktoré prídu sem, sa NEPREPOSIELAJÚ do Slacku, Discordu ani Google Chatu a chatový kanál ich nedostane — prichádzajúce končia v zozname na tejto stránke, odchádzajúce nesú výsledky review. Nastavte si tú, ktorú potrebujete, alebo obe.",
+  "alertGuide.twoHalves": "Dve polovice, ktoré sa stretávajú vo väzbe. Upozornenia prichádzajúce sem odchádzajú do vašich chatových kanálov — rovnako ako dokončené revízie — ale len tam, kde to určuje väzba: kanál plus udalosť plus minimálna závažnosť. Zvoľte alert_received pre to, čo pristáva na tejto stránke, review_complete pre revízie alebo „akákoľvek udalosť“ pre oboje. Bez väzby sa neodešle nič.",
   "alertGuide.inboundTitle": "Ako dostať alerty dovnútra",
   "alertGuide.inboundIntro": "Najprv si v karte vyššie vytvorte ingest URL — kým nestlačíte tlačidlo, neexistuje, a časť za bodkou je tajomstvo. Použiť ju vie čokoľvek, čo dokáže poslať POST s JSON.",
   "alertGuide.in.grafana.title": "Grafana",

@@ -1855,7 +1855,7 @@
   "onboarding.sc.level.all": "Tout",
   "alertGuide.title": "Configurer les alertes et les notifications",
   "alertGuide.subtitle": "Faites entrer les problèmes de production depuis votre monitoring, et envoyez les revues terminées vers le chat de votre équipe.",
-  "alertGuide.twoHalves": "Ce sont deux moitiés indépendantes. Les alertes qui arrivent ici NE SONT PAS retransmises à Slack, Discord ou Google Chat, et un canal de chat ne les reçoit pas — ce qui entre atterrit dans la liste de cette page, ce qui sort transporte les résultats de revue. Configurez celle dont vous avez besoin, ou les deux.",
+  "alertGuide.twoHalves": "Deux moitiés qui se rejoignent dans une liaison. Les alertes qui arrivent ici partent vers vos canaux de discussion — tout comme les revues terminées — mais uniquement là où une liaison le dit : canal plus événement plus sévérité minimale. Choisissez alert_received pour ce qui arrive sur cette page, review_complete pour les revues, ou « tout événement » pour les deux. Sans liaison, rien n’est envoyé.",
   "alertGuide.inboundTitle": "Faire entrer les alertes",
   "alertGuide.inboundIntro": "Créez d'abord l'URL d'ingestion dans la carte ci-dessus — elle n'existe pas tant que vous n'avez pas appuyé sur le bouton, et la partie après le point est un secret. Tout ce qui sait envoyer du JSON en POST peut l'utiliser.",
   "alertGuide.in.grafana.title": "Grafana",

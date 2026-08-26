@@ -1855,7 +1855,7 @@
   "onboarding.sc.level.all": "Tot",
   "alertGuide.title": "Configurează alertele și notificările",
   "alertGuide.subtitle": "Adu problemele de producție din monitorizarea ta și trimite review-urile finalizate în chatul echipei.",
-  "alertGuide.twoHalves": "Sunt două jumătăți independente. Alertele care ajung aici NU sunt trimise mai departe către Slack, Discord sau Google Chat, iar un canal de chat nu le primește — ce intră ajunge în lista de pe această pagină, ce iese duce rezultatele review-urilor. Configurează ce îți trebuie, sau ambele.",
+  "alertGuide.twoHalves": "Două jumătăți care se întâlnesc într-o legătură. Alertele care sosesc aici pleacă spre canalele voastre de chat — la fel și recenziile finalizate — dar numai acolo unde o legătură o spune: canal plus eveniment plus severitate minimă. Alegeți alert_received pentru ce ajunge pe această pagină, review_complete pentru recenzii sau „orice eveniment” pentru ambele. Fără o legătură nu se trimite nimic.",
   "alertGuide.inboundTitle": "Primirea alertelor",
   "alertGuide.inboundIntro": "Creează întâi URL-ul de ingest în cardul de mai sus — nu există până nu apeși butonul, iar partea de după punct este un secret. Îl poate folosi orice sistem care poate trimite JSON prin POST.",
   "alertGuide.in.grafana.title": "Grafana",

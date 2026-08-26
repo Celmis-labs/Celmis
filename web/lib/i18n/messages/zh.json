@@ -1855,7 +1855,7 @@
   "onboarding.sc.level.all": "全部",
   "alertGuide.title": "配置告警与通知",
   "alertGuide.subtitle": "把监控系统中的生产环境问题接进来，把完成的审查结果发到团队的聊天里。",
-  "alertGuide.twoHalves": "这是两个互相独立的部分。到达这里的告警绝不会被转发到 Slack、Discord 或 Google Chat，聊天渠道也收不到它们 — 入站告警只会落在本页的列表里，出站发送的是审查结果。需要哪一半就配哪一半，也可以两边都配。",
+  "alertGuide.twoHalves": "两个在绑定中相遇的半边。到达这里的告警会发往您的聊天频道——完成的代码审查也一样——但仅限于绑定所指定之处：频道加事件加最低严重程度。对于落在本页的内容选 alert_received，审查选 review_complete，两者兼顾则选“任何事件”。没有绑定就什么都不会发送。",
   "alertGuide.inboundTitle": "接收告警",
   "alertGuide.inboundIntro": "请先在上面的卡片中创建接收 URL — 在你点击那个按钮之前它并不存在，而点号后面的那一段是机密。任何能 POST JSON 的东西都可以用它。",
   "alertGuide.in.grafana.title": "Grafana",

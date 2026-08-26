@@ -1855,7 +1855,7 @@
   "onboarding.sc.level.all": "전체",
   "alertGuide.title": "알림 수신과 발송 설정",
   "alertGuide.subtitle": "모니터링에서 감지한 운영 환경 문제를 여기로 받아오고, 완료된 리뷰는 팀 채팅으로 내보내세요.",
-  "alertGuide.twoHalves": "이 둘은 서로 독립된 별개의 절반입니다. 여기로 들어온 알림은 Slack, Discord, Google Chat으로 절대 전달되지 않으며, 채팅 채널도 이 알림을 받지 않습니다 — 수신 알림은 이 페이지의 목록에 쌓이고, 발송 알림은 리뷰 결과를 전달합니다. 필요한 쪽만, 또는 양쪽 모두 설정하세요.",
+  "alertGuide.twoHalves": "바인딩에서 만나는 두 절반입니다. 여기로 들어오는 알림은 채팅 채널로 나갑니다 — 완료된 리뷰도 마찬가지입니다 — 다만 바인딩이 지정한 곳으로만 갑니다: 채널 더하기 이벤트 더하기 최소 심각도. 이 페이지에 도착하는 것은 alert_received, 리뷰는 review_complete, 둘 다는 “모든 이벤트”를 선택하세요. 바인딩이 없으면 아무것도 전송되지 않습니다.",
   "alertGuide.inboundTitle": "알림 받아오기",
   "alertGuide.inboundIntro": "먼저 위 카드에서 수집 URL을 만드세요 — 버튼을 누르기 전까지는 존재하지 않으며, 점 뒤에 오는 부분은 비밀 값입니다. JSON을 POST할 수 있는 시스템이면 무엇이든 사용할 수 있습니다.",
   "alertGuide.in.grafana.title": "Grafana",

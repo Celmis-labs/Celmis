@@ -1855,7 +1855,7 @@
   "onboarding.sc.level.all": "Tudo",
   "alertGuide.title": "Configurar alertas e notificações",
   "alertGuide.subtitle": "Traga para cá os problemas de produção do seu monitoramento e envie as revisões concluídas para o chat da sua equipe.",
-  "alertGuide.twoHalves": "São duas metades independentes. Os alertas que chegam aqui NÃO são encaminhados para Slack, Discord ou Google Chat, e um canal de chat não os recebe — o que entra vai para a lista desta página, o que sai leva os resultados das revisões. Configure o que você precisar, ou os dois.",
+  "alertGuide.twoHalves": "Duas metades que se encontram num vínculo. Os alertas que chegam aqui seguem para os seus canais de chat — tal como as revisões concluídas — mas apenas onde um vínculo o determina: canal mais evento mais severidade mínima. Escolha alert_received para o que chega a esta página, review_complete para revisões ou «qualquer evento» para ambos. Sem um vínculo nada é enviado.",
   "alertGuide.inboundTitle": "Receber alertas",
   "alertGuide.inboundIntro": "Primeiro crie a URL de ingestão no card acima — ela não existe até você clicar no botão, e a parte depois do ponto é um segredo. Qualquer coisa que consiga enviar JSON via POST pode usá-la.",
   "alertGuide.in.grafana.title": "Grafana",
