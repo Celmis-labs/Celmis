@@ -140,9 +140,9 @@ def test_empty_input(redactor: Redactor) -> None:
 def test_multiple_secrets_all_redacted(redactor: Redactor) -> None:
     code = """
 OPENAI_KEY = "sk-proj-abcdefghij1234567890abcdefghij1234567890"
-STRIPE_KEY = _STRIPE
+STRIPE_KEY = "__STRIPE__"
 AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
-"""
+""".replace("__STRIPE__", _STRIPE)
     out, stats = redactor.redact(code)
     assert "sk-proj-abcdefghij" not in out
     assert "sk_live_51" not in out
@@ -271,16 +271,16 @@ def test_kitchen_sink_all_secret_types(redactor: Redactor) -> None:
         openai: 'sk-proj-abcdefghij1234567890abcdefghij1234567890',
         github: 'ghp_1234567890abcdefghij1234567890abcdefgh',
         github_pat: 'github_pat_11ABCDEFGH0123456789_AbCdEfGhIj0123ABCdef',
-        stripe: " + _STRIPE + ",
+        stripe: '__STRIPE__',
         aws: 'AKIAIOSFODNN7EXAMPLE',
         google: 'AIzaSyTESTFIXTUREvalueNOTrealABCDEFGhijK',
-        slack: " + _SLACK + ",
+        slack: '__SLACK__',
         db: 'postgres://app:dbPass_X9_secret@db:5432/db',
         mongo: 'mongodb+srv://user:m0ngo_secret_pwd@cluster.mongo/db',
         api_url: 'https://api.x.com?api_key=secret_token_abc1234567',
         jwt: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.signature_part_xyz_abcdefg_long_enough',
     };
-    """
+    """.replace("__STRIPE__", _STRIPE).replace("__SLACK__", _SLACK)
     out, stats = redactor.redact(code)
     leaks = [
         "sk-proj-abcdefghij",
