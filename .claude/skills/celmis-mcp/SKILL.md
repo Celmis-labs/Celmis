@@ -201,6 +201,7 @@ before `find_consumers` can see an edge that crosses between them.
 
 | Symptom | Cause |
 |---|---|
+| `421 Invalid Host header` | the host you reached it at is not declared — set `MCP_ALLOWED_HOSTS` (or `PUBLIC_BASE_URL`) in `.env` and restart. It hides behind the 401: without a valid token the same request answers `401`, so fix the token first or you will chase the wrong one |
 | `401` / `invalid token` | expired (default lifetime 1 hour) — mint another |
 | `403` / `missing scope` | the token lacks the scope that tool needs — see the table above |
 | `307` then nothing | the trailing slash is missing from `/mcp/` |

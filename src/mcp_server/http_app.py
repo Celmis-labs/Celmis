@@ -81,6 +81,72 @@ def _transport_security():
     )
 
 
+def _explain_invalid_host(host: str) -> str:
+    """What the SDK's refusal should have said.
+
+    `Invalid Host header` names neither the host it rejected nor the setting
+    that would admit it, so it reads like a client bug. It is not: the guard
+    is DNS-rebinding protection and it is correct to refuse a host nobody
+    declared. Only the operator can say which host is theirs, so the message
+    has to ask them — by name, with the line already written out.
+    """
+    return (
+        "Invalid Host header: this server was reached at "
+        f"'{host}', which is not in its allowed list.\n"
+        "\n"
+        "That list is localhost plus whatever you have declared, because a "
+        "host nobody declared is what DNS-rebinding protection exists to "
+        "refuse. Declare yours in .env and restart:\n"
+        "\n"
+        f"    MCP_ALLOWED_HOSTS={host}\n"
+        "\n"
+        "PUBLIC_BASE_URL is read the same way if you already set it to the "
+        "address people reach this instance at."
+    )
+
+
+class _ExplainInvalidHost:
+    """Rewrite the transport guard's 421 body, and nothing else.
+
+    A wrapper rather than a change to the guard: the refusal is right and
+    stays exactly as strict. Only the sentence changes, and only for 421 —
+    every other status, including the 401 that hides this one until a token
+    is correct, passes through byte for byte.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+
+        replaced = False
+
+        async def _send(message):
+            nonlocal replaced
+            if message["type"] == "http.response.start" and message["status"] == 421:
+                replaced = True
+                headers = {k.lower(): v for k, v in scope.get("headers") or []}
+                host = (headers.get(b"x-forwarded-host")
+                        or headers.get(b"host") or b"?").decode("latin-1")
+                body = _explain_invalid_host(host).encode("utf-8")
+                await send({
+                    "type": "http.response.start", "status": 421,
+                    "headers": [
+                        (b"content-type", b"text/plain; charset=utf-8"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                    ],
+                })
+                await send({"type": "http.response.body", "body": body})
+                return
+            if replaced and message["type"] == "http.response.body":
+                return
+            await send(message)
+
+        await self.app(scope, receive, _send)
+
+
 def _build_mcp() -> FastMCP:  # noqa: F821 — quoted for typing without an import when the package is absent
     """Build the FastMCP instance with project-aware + review tools.
 
@@ -1575,7 +1641,7 @@ def mount_mcp(app: FastAPI, *, path: str = "/mcp") -> bool:
         # Read-only on some FastMCP builds; the mount below is what matters.
         with contextlib.suppress(Exception):
             mcp.settings.streamable_http_path = "/"
-        app.mount(path, sub_app)
+        app.mount(path, _ExplainInvalidHost(sub_app))
         # Assert the endpoint is where we claim: a silent 404 here costs the
         # agent every mcp__celmis__* tool with no error anywhere.
         try:
