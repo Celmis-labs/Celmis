@@ -20,7 +20,33 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.8`.
+Nothing since `v0.1.9`.
+
+## [0.1.9] — 2026-08-27
+
+### Security
+
+- **The agent's git push carried its token in the command line.** The module's
+  own "Credential hygiene" paragraph said the token arrived "via a one-shot env
+  askpass"; no askpass in this repository supplies a token — `GIT_ASKPASS:
+  "echo"` suppresses a prompt, it does not answer one. The credential was
+  inside the push URL, passed as an argument, and therefore in `ps auxww` for
+  the duration of the push. It now reaches git through a credential helper
+  reading the environment, and the URL git is handed carries none.
+- **The inherited credential-helper list is cleared first.** `-c
+  credential.helper=<x>` appends rather than replaces, so a helper configured
+  in the environment answers before ours and can hand git a different
+  account's credential — a failure that reads as `Permission … denied` on an
+  account with admin rights.
+
+### Fixed
+
+- **`:latest` moved to whatever tag was built last.** Rebuilding an old
+  release silently repointed the tag that a first-time `docker compose up`
+  pulls, with every log line green. It now moves only for the newest release,
+  decided by a script the tests can run rather than a YAML expression they
+  cannot. A tree that predates that script — any older tag being rebuilt —
+  answers "no" instead of failing on a missing file.
 
 ## [0.1.8] — 2026-08-27
 
