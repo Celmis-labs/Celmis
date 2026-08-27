@@ -52,6 +52,26 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      # THE TAG AND THE LITERAL HAVE TO AGREE, and this is the only place
+      # that can tell. `src/__init__.py` holds the version as a literal on
+      # purpose — it is readable without installing the package — but a
+      # literal is exactly what drifts: eight tags were cut while it still
+      # said 0.1.0, so a v0.1.7 install reported itself as 0.1.0 and the
+      # number the product gave about itself was false.
+      #
+      # Checked BEFORE the build, so a mismatch costs seconds rather than
+      # three multi-arch images.
+      - name: The tag must match src/__init__.py
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          lit=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/__init__.py)
+          [ "$tag" = "v$lit" ] || {
+            echo "::error::tag $tag but src/__init__.py says $lit."
+            echo "::error::Bump the literal to ${tag#v} in the same commit as the tag."
+            exit 1
+          }
+          echo "tag $tag matches the literal"
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3

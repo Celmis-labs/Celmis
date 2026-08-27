@@ -83,16 +83,18 @@ def _version() -> str:
     Read rather than hardcoded: the string was written out in several files
     and they had already begun to disagree.
 
-    Two changes from the version that returned "0.0.0+unknown" on production:
+    Two parts, answering two different questions:
 
-      * the fallback is `src.__version__` rather than a placeholder. That
-        attribute is a literal and is readable without an install, which is
-        the whole reason `pyproject.toml` points at it;
-      * the git sha is appended as a local version segment when the deploy
-        stamped one. Deploys here are rsync + `compose up --build` with no
-        image tag to read back, so the release number alone cannot answer
-        "is my push running?" — and `0.1.0` will be the answer for a long
-        time while the code underneath it changes daily.
+      * the release number comes from `src.__version__`, a literal readable
+        without an install — which is the whole reason `pyproject.toml` points
+        at it. A literal is also exactly what drifts: eight tags were cut while
+        it still said 0.1.0, so an install of v0.1.7 reported itself as 0.1.0.
+        The release workflow now refuses to build a tag that disagrees with it,
+        which is the only place that can tell;
+      * the git sha follows as a local version segment when the deploy stamped
+        one. It answers the narrower question — not "which release" but "which
+        build of it" — and it is what the AGPL footer links to, so a deploy
+        that skips the stamp offers source at a version that does not exist.
     """
     from src import __version__ as literal
 
