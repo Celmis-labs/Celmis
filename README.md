@@ -812,6 +812,9 @@ is needed to build, audit or fork what is here.
 That file is a record of facts, not the licence. The licence is
 [AGPL-3.0](LICENSE), with one exception: anything under `ee/`, and any file
 whose name contains `.ee.`, is covered by [LICENSE_EE](LICENSE_EE) instead.
+[LICENSING.md](LICENSING.md) states the boundary in full — `LICENSE` itself is
+the unmodified AGPL text, because a licence file with a preamble in front of
+it is not recognised as that licence.
 `ee/` holds no product code today — the boundary was drawn before the first
 tag because adding it afterwards means re-asking every contributor who has
 already sent work under an unqualified AGPL.

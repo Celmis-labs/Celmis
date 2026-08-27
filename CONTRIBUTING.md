@@ -14,6 +14,9 @@ There is exactly one exception, and it is drawn by path:
 > Anything under `ee/`, and any file whose name contains `.ee.`, is covered by
 > [`LICENSE_EE`](LICENSE_EE), not by the AGPL.
 
+[`LICENSING.md`](LICENSING.md) states that boundary and why it is where it is.
+[`LICENSE`](LICENSE) is the unmodified AGPL text and nothing else.
+
 **New enterprise capabilities go in `ee/` from their first commit.** SSO/SAML,
 an organisation-wide role directory, extended reporting — anything a company
 buys because it is a company.

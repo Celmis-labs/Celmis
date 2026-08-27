@@ -158,10 +158,40 @@ def test_release_builds_all_three_images():
 
 
 def test_release_only_asks_for_the_permission_it_uses():
-    perms = _load("release.yml")["permissions"]
+    """Least privilege, derived from what the workflow does — not a constant.
 
+    This asserted `contents: read` with the note "a build job has no business
+    writing code", which was exactly right while the workflow only built
+    images. It now also publishes the GitHub Release for the tag, and creating
+    a Release is `contents: write` in GitHub's scope model.
+
+    So the assertion follows the work instead of naming a value: write is
+    permitted only while something here actually publishes. Delete the publish
+    job and leave the permission, and this fails — which is the property the
+    original was protecting.
+
+    The residual, stated rather than hidden: `contents: write` also permits
+    pushing commits, and nothing in this workflow does. GitHub has no narrower
+    scope for "may create a release", so the guard is this test plus the fact
+    that every `run:` block here is in the file under review.
+    """
+    doc = _load("release.yml")
+    perms = doc["permissions"]
     assert perms["packages"] == "write"
-    assert perms["contents"] == "read", "a build job has no business writing code"
+
+    publishes = any(
+        "gh release" in (step.get("run") or "")
+        for job in doc["jobs"].values()
+        for step in job.get("steps", [])
+    )
+    if publishes:
+        assert perms["contents"] == "write", (
+            "the workflow creates a Release and cannot with contents: read"
+        )
+    else:
+        assert perms["contents"] == "read", (
+            "nothing here writes to the repository; do not ask for write"
+        )
 
 
 def test_release_verifies_what_it_published():

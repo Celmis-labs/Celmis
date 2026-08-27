@@ -28,8 +28,8 @@ concurrency:
   cancel-in-progress: false      # a half-published release is worse than a slow one
 
 permissions:
-  contents: read
-  packages: write                # the only thing this workflow may do
+  contents: write                # to publish the GitHub Release for the tag
+  packages: write
 
 jobs:
   images:
@@ -177,3 +177,64 @@ jobs:
               || { echo "::error::$ref has no linux/$arch"; exit 1; }
           done
           echo "$ref: amd64 and arm64 published"
+
+  # A TAG IS NOT A RELEASE, and the tools that read this repository only know
+  # the second one. Eleven tags existed with an empty `releases` array: a
+  # directory filling in a `current_release` field, a listing counting
+  # activity, anyone opening /releases — all of them saw a project that had
+  # never shipped. Tags are a git concept; Releases are the GitHub API's, and
+  # nothing here was creating them.
+  #
+  # After the images, and only if they published: a Release announcing a
+  # version whose images do not exist points at nothing.
+  publish:
+    needs: images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          # The section for this version, from its heading to the next one.
+          # Written down once, in the file people already read; a second set
+          # of notes composed here would drift from it by the second release.
+          python3 - "$tag" <<'PY' > notes.md
+          import re, sys
+          tag = sys.argv[1].lstrip("v")
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(rf"^## \[{re.escape(tag)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
+                        text, re.M | re.S)
+          body = (m.group(1).strip() if m else "")
+          print(body or f"See CHANGELOG.md for {tag}.")
+          PY
+          echo "notes<<NOTES_EOF" >> "$GITHUB_OUTPUT"
+          cat notes.md >> "$GITHUB_OUTPUT"
+          echo "NOTES_EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          # `--latest` is decided by the same rule the image tag uses, and for
+          # the same reason: v0.1.10 is lexicographically SMALLER than v0.1.9,
+          # so anything sorting these as text points "latest" at the older
+          # release. A rebuild of an old tag must not move it either.
+          latest=false
+          if [ -f scripts/should_move_latest.py ]; then
+            latest=$(git ls-remote --tags --refs origin \
+                     | sed 's|.*refs/tags/||' \
+                     | python3 scripts/should_move_latest.py "$tag")
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --notes-file notes.md --latest="$latest"
+          else
+            gh release create "$tag" --title "$tag" --notes-file notes.md \
+              --latest="$latest"
+          fi
+          gh release view "$tag" --json tagName,isLatest
+

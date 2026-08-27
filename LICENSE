@@ -1,33 +1,3 @@
-Celmis is licensed under the GNU Affero General Public License v3.0, with one
-exception.
-
-    THE ee/ EXCEPTION
-    -----------------
-    Anything whose path contains `ee/`, and any file whose name contains
-    `.ee.`, is NOT covered by this licence. Those files are governed by
-    LICENSE_EE in the root of this repository.
-
-    The boundary is visible to git, so no separate registry of covered files
-    is kept and none can drift out of date. At the time of writing `ee/` holds
-    no product code: the line exists before it is needed because adding it
-    later would mean re-asking every contributor who had already sent work
-    under an unqualified AGPL.
-
-    Everything else in this repository — the whole of `src/`, `web/`,
-    `tests/`, `scripts/` and the deployment files — is AGPL-3.0, including the
-    audit console, the usage and spend views, the compliance checks and the
-    installation metrics. Those are not held back: a team self-hosting Celmis
-    is exactly the audience this licence is chosen for, and taking their audit
-    console away on the first release would be a cost to them and no revenue
-    to anybody.
-
-    Section 13 of this licence applies to Celmis. It is a network service:
-    anyone who interacts with a running instance over a network is entitled to
-    its source. The application states its version and links to the source at
-    that version in its own interface.
-
-────────────────────────────────────────────────────────────────────────────
-
                     GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 

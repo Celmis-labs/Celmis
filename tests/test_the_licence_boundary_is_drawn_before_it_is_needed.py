@@ -13,6 +13,21 @@ line costs an hour now and a negotiation later.
 
 These are cheap guards on facts that are easy to lose in a move between
 repositories — which is exactly when they will be lost.
+
+THE EXCEPTION USED TO LIVE AT THE TOP OF `LICENSE`, and these tests required
+it there — a reader had to meet the carve-out before the grant. That was good
+reasoning and it cost the project its licence: GitHub compares a licence file
+against a reference text by similarity, and twenty-five lines of our own prose
+ahead of the AGPL were enough to answer `NOASSERTION`. The sidebar read
+"Other", `license:agpl-3.0` searches did not find the repository, and any
+directory or index reading that field saw a project with no licence.
+
+So the words moved to `LICENSING.md` and `LICENSE` became the unmodified text.
+The property these tests hold is unchanged — a reader must meet the boundary —
+but it is now held where a reader actually arrives: the README and
+CONTRIBUTING link to it. What is added is the reason the move was needed:
+`LICENSE` must stay byte-for-byte the licence, so that nobody restores a
+helpful preamble and silently un-licenses the project again.
 """
 
 from __future__ import annotations
@@ -39,25 +54,53 @@ def test_the_licence_carries_the_whole_text_not_a_reference():
     assert len(text) > 30_000, "the full AGPL is ~34KB; this looks like a stub"
 
 
-def test_the_exception_is_stated_before_the_licence_text():
-    """A reader must meet the carve-out before they meet the grant."""
-    text = (ROOT / "LICENSE").read_text(encoding="utf-8")
-    exception = text.index("ee/")
-    grant = text.index("GNU AFFERO GENERAL PUBLIC LICENSE")
+def test_the_licence_file_is_the_licence_and_nothing_else():
+    """The one that broke, and the reason the others moved.
 
-    assert exception < grant
+    GitHub's licence detection is a similarity comparison against a reference
+    text. Twenty-five lines of our own preamble in front of the grant took the
+    score below its threshold, and the repository reported `NOASSERTION` —
+    which every directory, package index and `license:` search reads as "no
+    licence". Anything prepended here does it again, however well meant.
+    """
+    text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+
+    assert text.lstrip().startswith("GNU AFFERO GENERAL PUBLIC LICENSE"), (
+        "something precedes the licence text; GitHub will answer NOASSERTION"
+    )
+    assert "ee/" not in text, (
+        "the ee/ exception is back in LICENSE — it belongs in LICENSING.md"
+    )
+    assert text.rstrip().endswith("<https://www.gnu.org/licenses/>."), (
+        "the licence text is truncated or something follows it"
+    )
+
+
+def test_the_exception_is_stated_where_a_reader_arrives():
+    """The carve-out still has to be met — just not inside the licence file.
+
+    LICENSING.md is the address now, and it is only an address if the two
+    documents a reader opens first point at it.
+    """
+    licensing = (ROOT / "LICENSING.md").read_text(encoding="utf-8")
+    assert "AGPL" in licensing
+    assert "LICENSE" in licensing, "nothing tells the reader where the grant is"
+
+    for name in ("README.md", "CONTRIBUTING.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert "LICENSING.md" in text, f"{name} does not link the boundary"
 
 
 def test_the_exception_names_both_halves_of_the_rule():
-    text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+    text = (ROOT / "LICENSING.md").read_text(encoding="utf-8")
 
     assert "`ee/`" in text or "ee/" in text
     assert ".ee." in text, "the filename half of the rule is missing"
     assert "LICENSE_EE" in text
 
 
-@pytest.mark.parametrize("name", ["LICENSE", "LICENSE_EE", "CONTRIBUTING.md",
-                                  "ee/README.md"])
+@pytest.mark.parametrize("name", ["LICENSE", "LICENSE_EE", "LICENSING.md",
+                                  "CONTRIBUTING.md", "ee/README.md"])
 def test_the_file_is_present(name):
     assert (ROOT / name).is_file(), f"{name} is missing"
 
