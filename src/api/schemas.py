@@ -172,6 +172,21 @@ class RepoOut(BaseModel):
     #: alone cannot distinguish from "nobody asked yet".
     last_index_error: str | None = None
     last_index_error_at: datetime | None = None
+    #: WHEN THE REMOTE WAS LAST ASKED, and what it said — a different question
+    #: from when the index was built. "Indexed three days ago" means either
+    #: nobody has looked since or we looked this morning and the branch has
+    #: not moved, and those are the two answers a person wants told apart.
+    last_checked_at: datetime | None = None
+    last_remote_sha: str | None = None
+    #: Why the last check failed, if it did. A check that cannot reach the
+    #: remote must not render as "no new changes": a wrong answer carrying a
+    #: fresh timestamp is worse than no answer.
+    last_check_error: str | None = None
+    #: True / False / **null**, and null is an answer. It means we cannot say —
+    #: never checked, the check failed, or nothing recorded to compare
+    #: against. Rendering null as "up to date" is the same mistake as
+    #: reporting zero vulnerabilities for an ecosystem nobody scanned.
+    up_to_date: bool | None = None
 
 
 class RepoAddRequest(BaseModel):

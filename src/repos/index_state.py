@@ -72,6 +72,28 @@ class RepoIndexInfo:
     last_indexed_files: int
     last_error: str | None
     last_error_at: datetime | None
+    #: When the REMOTE was last asked, and what it answered. None for
+    #: `last_checked_at` means never asked — which is not the same as asked
+    #: and unchanged, and the surface must not render them alike.
+    last_checked_at: datetime | None = None
+    last_remote_sha: str | None = None
+    last_check_error: str | None = None
+
+    @property
+    def up_to_date(self) -> bool | None:
+        """True / False / None — and None is an answer, not a missing one.
+
+        None means we cannot say: never checked, or the check failed, or the
+        index has no recorded revision to compare against. A surface that
+        renders None as "up to date" is the failure this whole column set
+        exists to prevent — the same shape as reporting zero vulnerabilities
+        for an ecosystem that was never scanned.
+        """
+        if self.last_checked_at is None or self.last_check_error:
+            return None
+        if not self.last_remote_sha or not self.last_indexed_sha:
+            return None
+        return self.last_remote_sha == self.last_indexed_sha
 
     @property
     def short_sha(self) -> str | None:
@@ -161,6 +183,9 @@ def _to_info(row: RepoIndexState) -> RepoIndexInfo:
         last_indexed_files=int(row.last_incremental_files or 0),
         last_error=message,
         last_error_at=when,
+        last_checked_at=_aware(row.last_checked_at),
+        last_remote_sha=row.last_remote_sha,
+        last_check_error=row.last_check_error,
     )
 
 
@@ -307,6 +332,41 @@ def record_index_failure(repo_slug: str, error: str) -> None:
         )
 
 
+
+
+def record_remote_check(
+    repo_slug: str,
+    *,
+    remote_sha: str | None,
+    error: str | None = None,
+) -> None:
+    """We asked the remote. This is when, and what it said.
+
+    Called on EVERY check, including the ones that find nothing new — that is
+    the point. "Indexed three days ago" and "checked an hour ago, unchanged"
+    are the same row until this is written, and only the second one answers
+    the question a person opens the page to ask.
+
+    A failed check records the reason and leaves `last_remote_sha` alone: the
+    previous answer is still the last thing the remote actually said, and
+    erasing it would turn a stale-but-true fact into a silence.
+
+    Never raises — the check is a background nicety and must not take a
+    request or a scheduler tick down with it.
+    """
+    now = datetime.now(UTC)
+    try:
+        with _session() as session:
+            row = _row(session, repo_slug)
+            row.last_checked_at = now
+            row.last_check_error = (error or None) and str(error)[:500]
+            if error is None and remote_sha:
+                row.last_remote_sha = remote_sha
+            session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("index_state_check_write_failed repo=%s err=%s", repo_slug, exc)
+
+
 __all__ = [
     "RepoIndexInfo",
     "read_index_state",
@@ -314,4 +374,5 @@ __all__ = [
     "record_index_failure",
     "record_index_success",
     "record_index_unchanged",
+    "record_remote_check",
 ]

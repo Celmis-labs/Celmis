@@ -175,6 +175,33 @@ def _extract_github_pr(payload: dict) -> dict | None:
     }
 
 
+def _extract_github_push(payload: dict) -> dict | None:
+    """(repo, ref, after) from a GitHub push, or None when it is not ours.
+
+    Branch pushes only. A tag push carries `refs/tags/…` and does not move the
+    code the index is built from; a branch DELETION arrives with an `after` of
+    forty zeroes and nothing to index. Both are silently not-our-event rather
+    than errors — a webhook that 400s on a tag push looks broken in the
+    provider's delivery list, and an operator reading red rows stops trusting
+    the green ones.
+
+    Which branch is not decided here: the sweep resolves the repo's tracked
+    branch when it checks. Passing every branch push through and letting the
+    check compare against the tracked ref keeps one definition of "the branch
+    we index" instead of two that can disagree.
+    """
+    ref = str(payload.get("ref") or "")
+    if not ref.startswith("refs/heads/"):
+        return None
+    after = str(payload.get("after") or "")
+    if not after or set(after) == {"0"}:
+        return None
+    repo = (payload.get("repository") or {}).get("full_name")
+    if not repo:
+        return None
+    return {"repo": repo, "ref": ref, "after": after}
+
+
 def _extract_gitlab_mr(payload: dict) -> dict | None:
     """Get (action, project, mr_iid) from a GitLab merge_request hook."""
     if payload.get("object_kind") != "merge_request":
@@ -216,6 +243,69 @@ def _extract_bitbucket_pr(payload: dict, event_key: str) -> dict | None:
 
 
 # ─── Background review dispatch ────────────────────────────────
+
+
+#: One freshness check per repository at a time, and a bound on all of them.
+#:
+#: A push webhook fires per push, and a busy morning or a force-push storm
+#: arrives as a burst. Without this, each one became an unreferenced
+#: `asyncio.create_task` running its own `git ls-remote`: N concurrent git
+#: processes and N requests to one provider, which is how a webhook earns a
+#: rate limit for the whole workspace. The per-repo lock also collapses the
+#: five pushes of one branch being force-pushed into one check.
+_REFRESH_GATE = asyncio.Semaphore(4)
+_REFRESH_INFLIGHT: set[str] = set()
+
+
+async def _dispatch_refresh(
+    provider: str, full_name: str, *, expected_workspace_id: str | None,
+) -> None:
+    """A push landed — ask the remote and re-index if it moved.
+
+    Goes through the same `check_repo` the daily sweep uses rather than
+    enqueueing an index straight from the payload. The push tells us something
+    changed; it does not tell us the branch this instance tracks, and two
+    routes deciding that separately is how they come to disagree.
+
+    Never raises: this runs in a fire-and-forget task, so an exception here
+    reaches nobody and would only surface as an unhandled-task warning.
+    """
+    key = f"{provider}:{full_name}"
+    if key in _REFRESH_INFLIGHT:
+        # A check for this repository is already running and will read the
+        # branch as it is now — including this push. A second one would ask
+        # the same question and get the same answer.
+        logger.info("push_refresh_already_running repo=%s", full_name)
+        return
+    _REFRESH_INFLIGHT.add(key)
+    try:
+        from src.api.auto_review import get_auto_review_store
+        from src.repos.freshness import check_repo
+
+        store = get_auto_review_store()
+        workspace_id = expected_workspace_id or store.workspace_for_repo(provider, full_name)
+        if not workspace_id:
+            logger.info("push_refresh_no_workspace repo=%s", full_name)
+            return
+        cfg = next(
+            (c for c in store.list_for_workspace(workspace_id)
+             if c.full_name == full_name and c.provider == provider),
+            None,
+        )
+        if cfg is None:
+            logger.info("push_refresh_unregistered repo=%s ws=%s", full_name, workspace_id)
+            return
+        async with _REFRESH_GATE:
+            result = await asyncio.to_thread(
+                check_repo, cfg.repo_slug, workspace_id=workspace_id,
+                user_id=getattr(cfg, "user_id", "default") or "default",
+            )
+        logger.info("push_refresh repo=%s state=%s queued=%s",
+                    cfg.repo_slug, result.state, bool(result.reindex_job_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("push_refresh_failed repo=%s err=%s", full_name, exc)
+    finally:
+        _REFRESH_INFLIGHT.discard(key)
 
 
 async def _dispatch_review(
@@ -478,6 +568,25 @@ def build_webhook_app(
             return JSONResponse({"status": "duplicate"}, status_code=200)
 
         # 3. Filter event types
+        #
+        # `push` is not a review trigger — it is an INDEX trigger. A merge to
+        # the tracked branch changes the code every later question is answered
+        # from, and until this existed nothing noticed: the index held
+        # whatever was there when somebody last pressed a button, and answered
+        # from it without saying so.
+        if x_github_event == "push":
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                raise HTTPException(400, "Invalid JSON") from None
+            info = _extract_github_push(payload)
+            if info is None:
+                return JSONResponse({"status": "ignored", "reason": "not the tracked branch"})
+            asyncio.create_task(_dispatch_refresh(
+                "github", info["repo"], expected_workspace_id=workspace_id))
+            stats_counter["dispatched"] += 1
+            return JSONResponse({"status": "accepted", **info}, status_code=202)
+
         if x_github_event != "pull_request":
             return JSONResponse({"status": "ignored", "event": x_github_event})
 

@@ -28,6 +28,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select } from "@/components/ui/select";
 
 import { WorkspaceBadge } from "@/components/workspace-badge";
+import { RepoFreshness } from "@/components/repo-freshness";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader,
   DialogTitle, DialogTrigger,
@@ -378,6 +379,14 @@ function RepoRow({
             <div className="font-medium wrap-anywhere sm:truncate">{repo.full_name}</div>
             {/* Wraps instead of widening the card: on a phone the badge, the
                 two work buttons, the branch chip and the link never fit one line. */}
+            {/* Freshness first, because "is this current?" is the question a
+                person came to ask; everything below it is what to DO about
+                the answer. */}
+            {repo.indexed && (
+              <div className="mt-1 text-xs">
+                <RepoFreshness repo={repo} token={token} />
+              </div>
+            )}
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted-foreground)]">
               {repo.indexed ? (
                 <>

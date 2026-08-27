@@ -603,6 +603,21 @@ def build_app() -> FastAPI:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("ownership_scheduler_start_failed err=%s", exc)
 
+        # Daily "has the branch moved?" sweep. One `git ls-remote` per repo
+        # per day; anything that moved gets an INCREMENTAL re-index, anything
+        # that did not gets a recorded check so the page can say so.
+        #
+        # Not an alternative to the push webhook — the webhook is immediate
+        # and fires only where somebody registered it, and this is the floor
+        # under every registered repository whatever else is configured.
+        # CELMIS_REFRESH_INTERVAL_HOURS=0 turns it off.
+        if os.environ.get("CELMIS_DISABLE_REFRESH_SCHED", "").strip() != "1":
+            try:
+                from src.repos.refresh_scheduler import start_refresh_scheduler
+                start_refresh_scheduler()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("refresh_scheduler_start_failed err=%s", exc)
+
         # Debug log ring buffer — makes /api/ops/logs work when the box is
         # not SSH-reachable. Cheap (in-memory, bounded).
         try:

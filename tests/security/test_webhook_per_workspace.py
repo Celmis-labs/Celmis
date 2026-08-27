@@ -204,8 +204,41 @@ def test_the_assertion_comes_after_the_binding_is_resolved():
 
 def test_every_handler_passes_its_tenant_on():
     """A handler that verifies against a workspace's secret and then dispatches
-    without saying which workspace is the same hole with extra steps."""
-    assert WEBHOOK_SRC.count("expected_workspace_id=workspace_id") == 3
+    without saying which workspace is the same hole with extra steps.
+
+    Keyed on the property, not on a count. This asserted
+    `count(...) == 3` and failed the day a fourth dispatcher was added that
+    passes the tenant correctly — the failure mode the docstring two functions
+    above names in so many words. A count also passes for the wrong reason:
+    add a handler that omits the tenant while deleting one that had it, and
+    three is still three.
+
+    Every call to any `_dispatch_*` inside the app factory must carry
+    `expected_workspace_id`, whatever the number of them turns out to be.
+    """
+    import ast
+
+    from src.review.webhook import build_webhook_app
+
+    tree = ast.parse(_code(build_webhook_app).lstrip())
+    dispatches = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and str(getattr(node.func, "id", "") or getattr(node.func, "attr", ""))
+        .startswith("_dispatch_")
+    ]
+    assert len(dispatches) >= 3, (
+        f"expected a dispatcher per provider, found {len(dispatches)}"
+    )
+    missing = [
+        ast.unparse(d.func)
+        for d in dispatches
+        if not any(kw.arg == "expected_workspace_id" for kw in d.keywords)
+    ]
+    assert not missing, (
+        f"these dispatch without naming the workspace they verified against: "
+        f"{missing}"
+    )
 
 
 def test_the_repo_binding_is_still_the_backstop():

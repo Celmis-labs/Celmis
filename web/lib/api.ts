@@ -186,6 +186,18 @@ export interface RepoOut {
   last_full_rebuild_at?: string | null;
   last_index_error?: string | null;
   last_index_error_at?: string | null;
+  /** WHEN THE REMOTE WAS LAST ASKED — a different question from when the
+   *  graph was built. Without it "indexed three days ago" reads the same
+   *  whether nobody has looked since or the branch simply has not moved. */
+  last_checked_at?: string | null;
+  last_remote_sha?: string | null;
+  /** Why the last check failed. A check that could not reach the remote must
+   *  not render as "no new changes": a wrong answer under a fresh timestamp
+   *  is worse than an absent one. */
+  last_check_error?: string | null;
+  /** true / false / **null**, and null is an answer — we cannot say. Never
+   *  checked, the check failed, or nothing recorded to compare against. */
+  up_to_date?: boolean | null;
 }
 
 /** POST /api/repos body. `index` defaults to true server-side — send false

@@ -59,14 +59,23 @@ def run_index(
     if not repo_path.exists() or not (repo_path / ".git").exists():
         return {"status": "skipped", "reason": "clone missing", "repo": repo_slug}
 
-    # Pull latest before diffing so we compare against remote HEAD.
-    try:
-        subprocess.run(
-            ["git", "-C", str(repo_path), "fetch", "--all", "--quiet"],
-            check=False, timeout=60,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("fetch_failed repo=%s err=%s", repo_slug, exc)
+    # Bring the CHECKOUT to the remote, not just the remote-tracking ref.
+    #
+    # This was `git fetch --all` alone, under a comment saying it pulled. It
+    # does not: fetch advances `origin/<branch>` and leaves HEAD, the index
+    # and the working tree where they were. So `_git_head` returned the OLD
+    # commit, `prior_sha == head_sha` held, and the pass recorded "unchanged"
+    # for a repository whose remote had moved — with the pushed files not even
+    # on disk to parse.
+    #
+    # It survived because nothing called this function: every enqueuer used
+    # `index_repo_full`. The freshness check made the path reachable, and a
+    # re-index that indexes nothing is worse than none — the row stamps
+    # `last_indexed_at = now` while `last_indexed_sha` stays old, so one
+    # column reads "indexed just now" and the next reads "behind", for ever.
+    if not _advance_to_remote(repo_path):
+        logger.warning("advance_failed repo=%s — indexing the checkout as it is",
+                       repo_slug)
     head_sha = _git_head(repo_path)
     if not head_sha:
         return {"status": "skipped", "reason": "cannot resolve HEAD"}
@@ -276,6 +285,48 @@ def _run_incremental(
 
 
 # ─── git helpers ─────────────────────────────────────────────────
+
+
+def _advance_to_remote(repo_path: Path) -> bool:
+    """Fetch, then move the checkout onto the branch's remote head.
+
+    Returns False when it could not — a detached HEAD, a directory that is not
+    a repository, a branch with no remote counterpart. False is reported
+    rather than swallowed: the caller must not treat "I could not update" as
+    "there was nothing to update", which is the exact confusion this function
+    was written to end.
+
+    `reset --hard`, not a merge, for the reason RepoSync does the same on the
+    full path: nobody's work lives in the indexer's clone, and a merge
+    conflict on a machine with no human at it is a repository that quietly
+    stops updating.
+    """
+    try:
+        if not (repo_path / ".git").exists():
+            return False
+        subprocess.run(["git", "-C", str(repo_path), "fetch", "--all", "--quiet"],
+                       check=False, timeout=120)
+        branch = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+        if not branch or branch == "HEAD":
+            # Detached: somebody pinned this deliberately, and forcing it onto
+            # a branch head would silently discard that decision.
+            return False
+        remote_ref = f"origin/{branch}"
+        exists = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "--verify", "--quiet", remote_ref],
+            capture_output=True, text=True, timeout=10,
+        )
+        if exists.returncode != 0:
+            return False
+        subprocess.run(["git", "-C", str(repo_path), "reset", "--hard", remote_ref],
+                       capture_output=True, text=True, timeout=60, check=True)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("advance_to_remote_failed path=%s err=%s", repo_path, exc)
+        return False
 
 
 def _git_head(repo_path: Path) -> str | None:

@@ -646,6 +646,22 @@ class RepoIndexState(Base):
     last_incremental_files: Mapped[int] = mapped_column(nullable=False, server_default="0")
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    #: When the REMOTE was last asked, and what it said.
+    #:
+    #: Separate from the indexing columns above because "indexed three days
+    #: ago" answers a different question from "current as of this morning".
+    #: A row with `last_checked_at` NULL has never been asked; one where
+    #: `last_remote_sha == last_indexed_sha` is up to date and known to be.
+    #: Collapsing those into a single timestamp produces a screen that cannot
+    #: tell "no changes" from "nobody looked".
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    last_remote_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Why the last check failed. Not `last_error`, which belongs to indexing:
+    #: an index that succeeded and a check that cannot reach the remote are
+    #: unrelated conditions with unrelated remedies.
+    last_check_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
 
 # ════════════════════════════════════════════════════════════════════
 # Stage 19 — OAuth 2.1 + multi-tenant workspaces

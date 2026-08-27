@@ -102,6 +102,10 @@ def list_repos(
             last_full_rebuild_at=st.last_full_rebuild_at if st else None,
             last_index_error=st.last_error if st else None,
             last_index_error_at=st.last_error_at if st else None,
+            last_checked_at=st.last_checked_at if st else None,
+            last_remote_sha=st.last_remote_sha if st else None,
+            last_check_error=st.last_check_error if st else None,
+            up_to_date=st.up_to_date if st else None,
         ))
     return out
 
@@ -360,6 +364,67 @@ class IndexAllOut(BaseModel):
     skipped_repos: list[str] = []
     #: Slugs that already had a graph and were left alone unless `force`.
     already_indexed: list[str] = []
+
+
+class FreshnessOut(BaseModel):
+    """What one look at the remote learned."""
+
+    repo_slug: str
+    #: up_to_date | behind | never_indexed | unreachable.
+    #:
+    #: Four, not two. "Could not reach the remote" and "nothing changed" are
+    #: opposite answers that a two-state field renders identically, and the
+    #: second one carries a fresh timestamp while being wrong.
+    state: str
+    remote_sha: str | None = None
+    indexed_sha: str | None = None
+    #: Set when the check queued an incremental re-index.
+    reindex_queued: bool = False
+    #: Why the check failed, redacted.
+    detail: str | None = None
+
+
+@router.post("/{slug}/check-freshness", response_model=FreshnessOut)
+def check_freshness(
+    slug: str,
+    reindex: bool = Query(default=True),
+    user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> FreshnessOut:
+    """Ask the remote now, and re-index if the branch moved.
+
+    The manual half of the same mechanism the daily sweep and the push webhook
+    use — one `check_repo`, so a button, a schedule and a webhook cannot come
+    to three different conclusions about what "current" means.
+
+    Synchronous because it is one `git ls-remote`: a network round trip, no
+    clone and no parse. The re-index it may queue is the slow part, and that
+    goes to the queue as it always did.
+
+    `reindex=false` looks without touching anything — for a caller that wants
+    the answer and not the consequence.
+    """
+    from src.repos.freshness import check_repo
+
+    # The tenant check every by-slug route here does, and for the reason this
+    # codebase has closed the same hole in channels, chats and projects: a
+    # slug is not a permission. Without it, knowing another workspace's slug
+    # would be enough to make this instance reach out with THEIR credential
+    # and queue work in THEIR queue.
+    store = get_auto_review_store()
+    if (store.get_in_workspace(workspace_id, slug) or store.get(user.id, slug)) is None:
+        raise HTTPException(status_code=404, detail="Repo not registered")
+
+    result = check_repo(slug, workspace_id=workspace_id, user_id=user.id,
+                        reindex=reindex)
+    return FreshnessOut(
+        repo_slug=result.repo_slug,
+        state=result.state,
+        remote_sha=result.remote_sha,
+        indexed_sha=result.indexed_sha,
+        reindex_queued=bool(result.reindex_job_id),
+        detail=result.detail,
+    )
 
 
 @router.post("/index-all", response_model=IndexAllOut, status_code=202)
