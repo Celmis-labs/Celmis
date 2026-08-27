@@ -8,10 +8,17 @@ Every function here is synchronous git/subprocess work — callers run them via
 `asyncio.to_thread` so the single uvicorn event loop never stalls.
 
 Credential hygiene: the clone URL carries the workspace git token, so right
-after cloning we reset `origin` to the clean URL. The token is re-injected
-only for the one `git push` invocation (via a one-shot env askpass), which
-keeps the token out of `.git/config` — the agent's Read tool can see every
-file in its workspace.
+after cloning we reset `origin` to the clean URL. That keeps the token out of
+`.git/config` — the agent's Read tool can see every file in its workspace.
+
+For the one `git push` it is passed through a credential helper reading the
+environment, and the URL git is handed carries no credential at all. It used
+to be pushed as part of the URL argument, which put it in `ps auxww` for the
+duration of the push; this paragraph claimed an askpass delivered it, and no
+askpass in this repository delivers anything — `GIT_ASKPASS: "echo"` here and
+in clone.py suppresses a prompt, it does not answer one. The wrong half of a
+sentence like that is the dangerous half: it tells an auditor where not to
+look.
 """
 
 from __future__ import annotations
@@ -29,6 +36,40 @@ logger = logging.getLogger(__name__)
 # Hooks are always disabled for runner-invoked git: the agent can Write into
 # .git/hooks of its own workspace, and hooks would execute that on commit.
 _GIT_BASE = ["git", "-c", "core.hooksPath=/dev/null"]
+
+#: Hand git the credential without putting it in argv.
+#:
+#: THE EMPTY VALUE FIRST IS LOAD-BEARING. `-c credential.helper=<x>` APPENDS to
+#: the helper list; it does not replace it. A helper configured in the
+#: environment — osxkeychain on a developer machine, a store helper baked into
+#: an image — is asked first and can hand git a different account's
+#: credential. The result reads as a permissions problem
+#: (`remote: Permission to … denied to <someone>`) on an account with full
+#: rights, which is a diagnosis that costs hours. An empty value resets the
+#: list, so ours is the only one asked.
+_PUSH_CREDENTIAL = [
+    "-c", "credential.helper=",
+    "-c", ('credential.helper=!f() { echo "username=$CELMIS_GIT_USER"; '
+           'echo "password=$CELMIS_GIT_PW"; }; f'),
+]
+
+#: `https://user:secret@host/path` → its three parts, or None when there are
+#: no credentials in it.
+_CRED_IN_URL = re.compile(r"^(?P<scheme>https?://)(?P<user>[^:@/]+):(?P<secret>[^@]+)@(?P<rest>.+)$")
+
+
+def _split_credential(url: str) -> tuple[str, str, str] | None:
+    """(url without credentials, username, secret).
+
+    The secret is percent-decoded: `push_url` builds with `quote(token,
+    safe="")`, and a helper must emit the raw value.
+    """
+    from urllib.parse import unquote
+
+    m = _CRED_IN_URL.match(url or "")
+    if not m:
+        return None
+    return (f"{m['scheme']}{m['rest']}", unquote(m["user"]), unquote(m["secret"]))
 
 _AGENT_GIT_USER = ["-c", "user.name=Celmis Agent", "-c", "user.email=agent@celmis.local"]
 
@@ -88,11 +129,21 @@ class AgentWorkspace:
             self.root_dir = self.repo_dir
 
 
-def _run(cmd: list[str], cwd: Path, timeout: int = 300) -> subprocess.CompletedProcess:
+def _run(cmd: list[str], cwd: Path, timeout: int = 300,
+         env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Run git with a minimal environment.
+
+    `env_extra` exists for the push credential and nothing else: it is read by
+    the helper in `_PUSH_CREDENTIAL` and never appears in `cmd`, so it stays
+    out of `ps` and out of the redacted error below.
+    """
     from src.sync.git_providers import strip_credentials
+    env = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "echo",
+           "PATH": "/usr/bin:/bin:/usr/local/bin"}
+    env.update(env_extra or {})
     proc = subprocess.run(
         cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
-        env={"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "echo", "PATH": "/usr/bin:/bin:/usr/local/bin"},
+        env=env,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -446,9 +497,22 @@ def commit_and_push(ws: AgentWorkspace, *, summary: str = "",
             verifications=verifications or [])
         _run(_GIT_BASE + _AGENT_GIT_USER + ["commit", "-m", message],
              cwd=repo.path)
-        # Re-inject credentials only for this single push invocation.
-        _run(_GIT_BASE + ["push", repo.push_url, f"HEAD:refs/heads/{branch}"],
-             cwd=repo.path, timeout=300)
+        # The credential goes through the environment for this one
+        # invocation; the URL git is given carries none.
+        cred = _split_credential(repo.push_url)
+        if cred is None:
+            # No credential to move out of the way — a public remote, or a
+            # local path in a test. `push_url` is still WHERE to push, so it
+            # is used unchanged; substituting `clean_url` here would send a
+            # local bare repo's push to github.com.
+            _run(_GIT_BASE + ["push", repo.push_url, f"HEAD:refs/heads/{branch}"],
+                 cwd=repo.path, timeout=300)
+        else:
+            clean, user, secret = cred
+            _run(_GIT_BASE + _PUSH_CREDENTIAL
+                 + ["push", clean, f"HEAD:refs/heads/{branch}"],
+                 cwd=repo.path, timeout=300,
+                 env_extra={"CELMIS_GIT_USER": user, "CELMIS_GIT_PW": secret})
         sha = _run(_GIT_BASE + ["rev-parse", "HEAD"], cwd=repo.path).stdout.strip()
         pushed.append({
             "repo_slug": repo.slug,
