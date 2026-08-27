@@ -20,7 +20,49 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.9`.
+Nothing since `v0.1.10`.
+
+## [0.1.10] — 2026-08-27
+
+### Added
+
+- **The index notices when the branch moves.** Until now "Ask the code"
+  answered from whatever was indexed the last time somebody pressed a button,
+  and said nothing about it — a repository indexed on Tuesday answered
+  Friday's questions from Tuesday's code. Three ways in, one decision: a daily
+  sweep (`git ls-remote` per repository, no clone, no model call), a `push`
+  webhook, and a **Check** button on each repository. All three call the same
+  `check_repo`, so a schedule, a provider and a person cannot disagree about
+  what "current" means.
+- **The repositories list says when the remote was last asked**, and what it
+  answered: "No new changes · checked 2 h ago", "New commits on the branch —
+  re-indexing", or "Could not reach the remote". Four states, not two — a
+  check that could not reach the remote must never render as "no new changes",
+  so `up_to_date` is `true`/`false`/**null** and null renders as "never
+  checked", never as green.
+- `CELMIS_REFRESH_INTERVAL_HOURS` (default 24; `0` disables the sweep),
+  `CELMIS_REFRESH_STAGGER_SECONDS`, `CELMIS_REFRESH_FIRST_DELAY_SECONDS`.
+- `POST /api/repos/{slug}/check-freshness`.
+
+### Fixed
+
+- **The incremental indexer never actually pulled.** `run_index` ran
+  `git fetch --all` under a comment saying it pulled; fetch advances
+  `origin/<branch>` and leaves HEAD, the index and the working tree where they
+  were. So it compared the old local commit against itself, recorded
+  "unchanged", and returned a no-op for a repository whose remote had moved —
+  with the pushed files not even on disk. It survived because nothing called
+  it: every enqueuer used the full path. This is what made the whole feature
+  above possible.
+- **A `git ls-remote <url> main` glob could answer about the wrong branch.** A
+  repository that also has `feature/main` gets both, sorted, with
+  `feature/main` first. Refs are fully qualified and matched by name now.
+- **Bitbucket freshness checks could never have authenticated.** The username
+  slot depends on the token type, not the host, and the stored username for a
+  legacy app password was being dropped; both now come from `git_auth_kwargs`.
+- **A typo in a scheduler setting killed the sweep permanently.** Two of the
+  three settings were parsed with a bare `float()` inside the task, before its
+  loop.
 
 ## [0.1.9] — 2026-08-27
 

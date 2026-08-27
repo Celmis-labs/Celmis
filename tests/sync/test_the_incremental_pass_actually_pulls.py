@@ -30,35 +30,54 @@ from pathlib import Path
 
 import pytest
 
+#: Nothing about these repositories may come from the machine running the
+#: tests. The first version let `git init` pick the default branch name, which
+#: is `main` on this laptop and `master` on the CI runner — so the bare
+#: remote's HEAD pointed at a branch the fixture never created, every clone
+#: came out empty, and six tests died on `rev-parse HEAD` in CI while passing
+#: locally. A test that reaches for git must not inherit the developer's git.
+_ISOLATED = ("-c", "init.defaultBranch=main",
+             "-c", "user.email=t@example.com",
+             "-c", "user.name=T",
+             "-c", "commit.gpgsign=false",
+             "-c", "protocol.file.allow=always")
+
+BRANCH = "main"
+
 
 def _git(*args: str, cwd: Path) -> str:
-    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
-                          text=True, check=True).stdout.strip()
+    return subprocess.run(["git", *_ISOLATED, *args], cwd=str(cwd),
+                          capture_output=True, text=True, check=True).stdout.strip()
 
 
 @pytest.fixture
 def remote_and_clone(tmp_path: Path):
     """A bare remote one commit ahead of a working clone — the real situation."""
     remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    subprocess.run(["git", *_ISOLATED, "init", "-q", "--bare", str(remote)], check=True)
+    # Say which branch the remote's HEAD names, rather than hoping the default
+    # matches the one we push to. `init -b` would do it too but is newer than
+    # some runners' git.
+    subprocess.run(["git", "-C", str(remote), "symbolic-ref", "HEAD",
+                    f"refs/heads/{BRANCH}"], check=True)
 
     author = tmp_path / "author"
-    subprocess.run(["git", "clone", "-q", str(remote), str(author)], check=True)
-    for k, v in (("user.email", "t@example.com"), ("user.name", "T")):
-        _git("config", k, v, cwd=author)
+    subprocess.run(["git", *_ISOLATED, "clone", "-q", str(remote), str(author)],
+                   check=True)
     (author / "a.py").write_text("def a(): pass\n")
     _git("add", "-A", cwd=author)
     _git("commit", "-qm", "first", cwd=author)
-    _git("push", "-q", "origin", "HEAD:main", cwd=author)
+    _git("push", "-q", "origin", f"HEAD:{BRANCH}", cwd=author)
 
     clone = tmp_path / "clone"
-    subprocess.run(["git", "clone", "-q", str(remote), str(clone)], check=True)
+    subprocess.run(["git", *_ISOLATED, "clone", "-q", str(remote), str(clone)],
+                   check=True)
     first = _git("rev-parse", "HEAD", cwd=clone)
 
     (author / "b.py").write_text("def b(): pass\n")
     _git("add", "-A", cwd=author)
     _git("commit", "-qm", "second", cwd=author)
-    _git("push", "-q", "origin", "HEAD:main", cwd=author)
+    _git("push", "-q", "origin", f"HEAD:{BRANCH}", cwd=author)
     second = _git("rev-parse", "HEAD", cwd=author)
 
     return {"remote": remote, "clone": clone, "first": first, "second": second}
@@ -69,7 +88,7 @@ def test_fetch_alone_leaves_the_checkout_behind(remote_and_clone):
     clone = remote_and_clone["clone"]
     subprocess.run(["git", "-C", str(clone), "fetch", "--all", "--quiet"], check=True)
     assert _git("rev-parse", "HEAD", cwd=clone) == remote_and_clone["first"]
-    assert _git("rev-parse", "origin/main", cwd=clone) == remote_and_clone["second"]
+    assert _git("rev-parse", f"origin/{BRANCH}", cwd=clone) == remote_and_clone["second"]
     assert not (clone / "b.py").exists()
 
 
