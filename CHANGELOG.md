@@ -20,9 +20,138 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing has been tagged or released. The version has read `0.1.0` since the
-root commit; it is a placeholder, not a shipped release, and this section is
-where the first real one will be cut from.
+Nothing since `v0.1.8`.
+
+## [0.1.8] — 2026-08-27
+
+This entry exists because the sentence that used to stand here — "Nothing has
+been tagged or released. The version has read `0.1.0` since the root commit" —
+was false in every clause by the time anyone read it. Eight tags were public
+and the file said none were. A changelog that reports no releases is worse
+than an empty one: it answers the question, and answers it wrongly.
+
+### Fixed
+
+- **The version literal caught up with the tags, and cannot fall behind
+  again.** `src/__init__.py` holds the release number as a literal on purpose
+  — it is readable without installing the package, which is why
+  `pyproject.toml` points at it — but a literal is exactly what drifts. Tags
+  `v0.1.1` through `v0.1.7` were cut without touching it, so an install of
+  `v0.1.7` answered `/api/capabilities` with `0.1.0`. Nothing broke visibly:
+  the AGPL footer builds its source link from the sha after the `+`, and that
+  sha was always right, so the offer of source kept resolving while the number
+  in front of it was false. A wrong number that hurts nothing is the kind that
+  survives.
+
+### Added
+
+- **The release workflow refuses to build a tag that disagrees with the
+  literal**, checked before buildx starts, so a mismatch costs seconds rather
+  than three multi-arch images. It is the only place that can make this
+  comparison — a test cannot see a tag that does not exist yet.
+- **A test pins the byte format that guard depends on.** The guard reads the
+  literal with `sed`; Python reads it by import. Five ordinary edits — single
+  quotes, a missing space, a doubled space, a trailing comment, CRLF endings —
+  keep every other test green while making the two disagree, and since
+  `ci.yml` does not run on tags the first signal would be a failed release.
+  The test extracts the `sed` program out of the workflow and compares its
+  output against the imported value, so editing either side alone goes red.
+
+## [0.1.7] — 2026-08-27
+
+### Fixed
+
+- **The execution sandbox could call the API and reach the host it runs on.**
+  Measured from inside it, as the code under review would: `api:8000` answered
+  `/healthz` with the review configuration, and `172.17.0.1:22` — the docker
+  host — was open. `SandboxNetworkGuard` now refuses anything whose peer
+  address is on the sandbox subnet, before routing, because the route it
+  closes is the one with no dependencies to hang a check on. The deploy script
+  drops sandbox→host traffic at the firewall, which is the only layer that can
+  tell the host apart from the internet it routes for. Outbound internet stays
+  open on purpose: `pip install` and `npm ci` need it.
+- **`max_attempts=5` ran a job six times.** `claim()` returned the attempt
+  count from before it incremented, so the fifth run reported four and retried.
+  The same stale number logged the first attempt as `attempt=0` and made the
+  first backoff half the base delay. For a review job the extra run was an
+  extra billed model call on work already failing.
+- **The sandbox was unreachable on every install.** `.env.example` set
+  `SANDBOX_URL=http://sandbox:8080`; the sandbox listens on `8900`. An existing
+  test asserted the port against `docker-compose.yml`, which is not the file
+  anybody edits.
+
+## [0.1.6] — 2026-08-27
+
+### Fixed
+
+- **MCP over HTTP answered `421 Invalid Host header` on every install**, naming
+  neither the host it rejected nor the setting that would admit it. The guard
+  is correct — refusing an undeclared host is what DNS-rebinding protection is
+  for — so the refusal now prints the arriving host and the exact line to add.
+  It hides behind the `401`: without a valid token the same request reports an
+  authentication failure, so the real cause only surfaces once the token works.
+
+## [0.1.5] — 2026-08-27
+
+### Fixed
+
+- **`/alerts` still said alerts are not forwarded**, one commit after they
+  were. Copy describing an absent behaviour outlives the absence. Corrected in
+  all 16 locales.
+
+## [0.1.4] — 2026-08-26
+
+### Fixed
+
+- **Ingested alerts were stored and dispatched nowhere.**
+  `POST /webhook/alerts/{token}` wrote a row and returned; `severity` and
+  `repo_hint` were being stored for a routing step nobody took. Dispatch now
+  happens after the response, because the sender retries on anything but a
+  `2xx`.
+- **The event dropdown offered three events nothing emits** —
+  `compliance_failed`, `deprecation_used`, `apply_fix_applied` — and hid one
+  that does, `agent_turn_done`. A binding on a phantom event looks configured
+  and is silent for ever.
+- **A fresh install sent every logged-out visitor to `http://localhost:3000`.**
+  `.env.example` shipped `NEXTAUTH_URL=http://localhost:3000` and `init-env.sh`
+  copies it verbatim, overriding the `trustHost` setting that exists precisely
+  so a self-hosted app derives its address from the request.
+
+## [0.1.3] — 2026-08-26
+
+### Fixed
+
+- **Testing a notification channel returned the webhook it was testing.** A
+  Google Chat webhook URL carries `key` and `token` in its query string — the
+  URL *is* the credential — and `httpx` puts the request URL in its error
+  string, which the endpoint returned verbatim.
+- **A channel's kind is checked against its URL's host.** A Google Chat URL
+  saved as `slack` failed only at the first send, and until somebody pressed
+  Test the sole symptom was alerts quietly not arriving.
+
+## [0.1.2] — 2026-08-26
+
+### Fixed
+
+- **A bare `owner/name` was qualified for parsing and stored raw**, so the slug
+  said GitHub while the clone said Bitbucket. Half a fix is the same defect
+  wearing the fix's name.
+
+## [0.1.1] — 2026-08-26
+
+### Fixed
+
+- **The repository form recommended a spelling that meant a different
+  provider.** `owner/name` parsed as Bitbucket while the placeholder above it
+  showed a GitHub URL; a bare name is now resolved against the connected
+  provider when exactly one is connected.
+
+## [0.1.0] — 2026-08-26
+
+First tagged release, and the first published images
+(`ghcr.io/celmis-labs/celmis-{api,web,sandbox}`, `linux/amd64` and
+`linux/arm64`). The entries below this line describe changes made after the
+19 August rebuild and before that tag.
 
 ### Fixed
 
