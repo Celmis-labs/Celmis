@@ -2,41 +2,67 @@
 
 # Celmis
 
-**Self-hosted code intelligence — multi-repo Q&A, AI pull-request review, cross-repo drift detection**
+**Self-hosted code intelligence — ask your codebases, review pull requests, and produce the evidence an auditor asks for**
 
 </div>
 
-Celmis indexes private codebases into a symbol graph and a vector store, then
-answers questions about them and reviews pull requests against them. It runs on
-one machine under `docker compose`: Postgres, Qdrant, the API, the web UI and a
-sandbox, with a model provider of your choice behind them.
+Celmis reads your repositories once and keeps a symbol graph of them. Everything
+else — questions, reviews, dependency audits, generated documentation — is a
+different way of reading that graph. It runs on one machine under
+`docker compose`, with the model provider of your choice behind it, and nothing
+leaves your network except the calls you configure.
 
-Three surfaces:
+The name is from *ядро* — a core. The index is the core; the surfaces are what
+reads from it.
 
-- **Ask the code** — a question in a chat UI, answered with **file:line
-  citations** drawn from as many repositories as you point it at. Answers
-  stream over SSE.
-- **Pull-request review** — five agents read the diff and post findings to
-  GitHub, GitLab or Bitbucket, with a cross-repo drift detector that catches
-  configuration divergence a single-repo reviewer cannot see.
-- **Supply-chain checks that cannot produce a false positive** — malicious
-  package detection, lock-file drift and SBOM export, decided by reading files
-  rather than by asking a model.
+## What that buys you that a diff-only tool cannot
+
+Ask a question that spans two repositories, and the answer quotes both:
+
+![Ask the code, answering across two repositories](docs/images/ask-the-code-cross-repo.png)
+
+That is not a search result. The gateway and the payments service are separate
+repositories with no shared code, and the answer traces the call chain between
+them — then notices, unprompted, that the Kafka topic name is hardcoded in both
+and that changing one silently breaks the other.
+
+A reviewer that reads only the diff structurally cannot say that. It never had
+the other repository open.
 
 ---
 
+## Three numbers
+
+| | |
+|---|---|
+| **197 seconds** | from `git clone` to six healthy services, measured on a clean server |
+| **$0.118** | per pull request reviewed, on the model this ships with |
+| **17th of 50** | on the Martian Code Review Bench offline set, under all three judges |
+
+That last one is deliberately unflattering, and it stays. It measures one of the
+surfaces below — pull-request review on isolated single-repository PRs — and
+that set has no sibling service for a symbol to have consumers in, so the thing
+this product is built around is not in the number at all. The table, the audit
+of every finding it scored false, and the command that reproduces both are in
+[Results](#results).
+
 ## Table of contents
 
-- [Results](#results)
-- [Audit of the false positives](#audit-of-the-false-positives)
-- [Test repositories](#test-repositories)
+- [What that buys you that a diff-only tool cannot](#what-that-buys-you-that-a-diff-only-tool-cannot)
+- [Three numbers](#three-numbers)
 - [Quick start](#quick-start)
 - [First user and admin](#first-user-and-admin)
 - [Connect a repository](#connect-a-repository)
 - [Ask the code](#ask-the-code)
 - [Pull-request review](#pull-request-review)
-- [Deterministic checks](#deterministic-checks--no-model-no-false-positives)
+- [Dependencies, SBOM and the evidence pack](#dependencies-sbom-and-the-evidence-pack)
+- [Who can see what](#who-can-see-what)
+- [Languages and formats](#languages-and-formats)
+- [Deterministic checks — no model, no false positives](#deterministic-checks-no-model-no-false-positives)
 - [Connect Claude Code and other MCP clients](#connect-claude-code-and-other-mcp-clients)
+- [Results](#results)
+- [Audit of the false positives](#audit-of-the-false-positives)
+- [Test repositories](#test-repositories)
 - [Configuration](#configuration)
 - [Operations](#operations)
 - [Local development](#local-development)
@@ -44,111 +70,7 @@ Three surfaces:
 - [Architecture](#architecture)
 - [Troubleshooting](#troubleshooting)
 - [Project layout](#project-layout)
-
----
-
-## Results
-
-Celmis was run on the [Martian Code Review Bench](https://github.com/withmartian/code-review-benchmark)
-offline set: 50 curated pull requests, 173 human-written golden comments, scored
-against the gold set by an LLM judge. Measured on `e0db376` with
-`gemini-3.6-flash` at temperature 0.1, no reasoning tokens.
-
-| Judge | F1 | Precision | Recall | Rank |
-|---|---:|---:|---:|---:|
-| claude-opus-4.5 | 47.5% | 52.4% | 43.4% | **17 / 50** |
-| claude-sonnet-4.5 | 44.9% | 48.0% | 42.2% | **17 / 50** |
-| gpt-5.2 | 42.7% | 46.0% | 39.9% | **17 / 50** |
-
-The F1 moves 4.8 points depending on who judges. The rank does not move at all —
-seventeenth under all three. Below us in every one of the three: CodeRabbit
-(19/25/23), every version of Greptile (26–29), Kodus (21/23/21), Copilot,
-Claude Code, Gemini, and CodeAnt.
-
-The whole run cost **$5.88** — $0.118 per pull request — and produced 153
-findings, 3.06 per PR (defect 114, security 27, contract 6, structural 6).
-
-**Why this comparison is fair.** Martian ships its own evaluations of 49 tools
-in the benchmark repository, produced by the same three judges on the same 50
-PRs against the same goldens. We did not re-score anybody: their rows are taken
-as published and ours is appended. Reproduce the whole table with:
-
-```bash
-python3 autoloop/offline_table.py anthropic_claude-sonnet-4-5-20250929
-```
-
-**Offline is not the public leaderboard.** Martian runs two benchmarks. The
-public leaderboard is the *online* one — 200,000 real pull requests scored by
-what developers actually fixed. This table is the *offline* one — 50 curated PRs
-scored against a gold set. They measure different things and the numbers are not
-interchangeable. Claims of the form "tool X is #1 on Martian" usually refer to
-the online table, a different metric, or a different judge.
-
-**What this number does not contain.** The graph was empty for all 50 PRs
-(`graph_status` null, drift empty on every one), because the benchmark set is
-isolated single-repository pull requests — there is no sibling service for a
-symbol to have consumers in. Cross-repository drift, the thing this product
-carries a symbol graph for, contributed exactly nothing to the score above. It
-is not measurable here, and we are not claiming it from this table. See
-[Test repositories](#test-repositories) to watch it work on real code instead.
-
-## Audit of the false positives
-
-Benchmark scoring has a structural floor: the judge matches our comment against
-a finite list of human-written goldens, so a correct finding the annotator never
-wrote down is counted false **by construction**. We opened all 79 of ours in the
-source at the measured commit and assigned a verdict to each.
-
-Of 79 findings scored as false positives, **33 are real defects** the gold set
-does not contain, 38 are genuinely wrong, and 8 could not be settled from the
-code. That puts the true precision of this run between 69.7% and 75.0% rather
-than the measured 48.0% — but that corrected figure **cannot be compared with
-anything in the table above**, because nobody has audited the other tools the
-same way and their false positives almost certainly contain a similar share of
-real defects; for comparison with other tools the measured 48.0% is the honest
-number, because it is the same method applied to everyone.
-
-Twenty-four of the 38 genuinely-wrong findings share four root causes, and none
-of them is "the model is weak" — all four are about what the model was shown.
-The largest is an identifier declared in the same file but outside the excerpt
-the agent received: a method parameter 26 lines up, an import on line 3, an
-`attr_reader` on line 18.
-
-The full report gives the claim, the code at that commit, the verdict, the
-reasoning and a permalink for each of the 79, so any verdict can be disputed
-with the same evidence in front of you.
-
-## Test repositories
-
-Every review in the run above is still live and public. These are real pull
-requests from real projects, forked with their history, carrying the inline
-comments Celmis wrote:
-
-| Fork | PRs |
-|---|---:|
-| [celmis-bench/keycloak](https://github.com/celmis-bench/keycloak) | 9 |
-| [celmis-bench/grafana](https://github.com/celmis-bench/grafana) | 10 |
-| [celmis-bench/discourse-graphite](https://github.com/celmis-bench/discourse-graphite) | 10 |
-| [celmis-bench/cal.diy](https://github.com/celmis-bench/cal.diy) | 10 |
-| [celmis-bench/sentry](https://github.com/celmis-bench/sentry) | 6 |
-| [celmis-bench/sentry-greptile](https://github.com/celmis-bench/sentry-greptile) | 4 |
-
-Worth opening first:
-
-- [keycloak#17](https://github.com/celmis-bench/keycloak/pull/17) — a null
-  dereference and a recovery-code indexing question in Keycloak's test storage
-  provider
-- [grafana#16](https://github.com/celmis-bench/grafana/pull/16) — a Storage
-  failure recorded against the Legacy metric, one of three instances of the same
-  mistake in that file
-- [cal.diy#11](https://github.com/celmis-bench/cal.diy/pull/11) — `forEach` with
-  an async callback, so the deletions are fire-and-forget and the surrounding
-  `try` catches nothing
-- [sentry#11](https://github.com/celmis-bench/sentry/pull/11) — seven inline
-  comments on one Kafka consumer PR
-
-You are reading unedited output, including the findings the audit above marks
-wrong. Nothing was removed after scoring.
+- [Provenance and rights](#provenance-and-rights)
 
 ## Quick start
 
@@ -256,85 +178,114 @@ lists what was and was not read.
 
 ## Ask the code
 
-**Ask the code** in the sidebar, or from a terminal:
+A question in a chat, answered with **file:line citations** from as many
+repositories as you point it at. Answers stream as they are written.
 
-```bash
-docker compose exec api analyzer ask "where do we validate webhook signatures?"
-docker compose exec api analyzer chat           # interactive session
-```
+Group repositories into a project, and the question is asked of the group:
 
-Answers carry `path:line` citations, and every one is checked against the
-source before it is shown — the reply says so ("All N citations verified against
-the source"), and a claim the retriever cannot support is dropped rather than
-paraphrased. Each answer also carries what it cost: elapsed time and
-input→output tokens.
+![A project holding several repositories](docs/images/project-cross-repo.png)
 
-**Ask the code lives inside a Project.** A project groups repositories that
-belong to one product, and a question runs across all of them at once — which
-is how an answer can span a gateway, a worker and a billing service that live
-in three repositories. Create one under **Ask the code → Projects**; only
-repositories with an indexed vault can join.
+What it is for, beyond curiosity:
 
-Retrieval is scoped to what the asker may see. A member without access to a
-repository does not get its code quoted back to them, and a user from another
-workspace gets a 404 rather than a filtered list — the existence of the
-repository is not disclosed either.
+- **A new engineer asks the codebase instead of a senior one.** Every question a
+  new hire cannot self-serve pulls someone experienced out of flow, at the exact
+  moment they are already covering for a teammate who is not yet productive.
+- **A product manager, a delivery lead or the client asks directly.** "What
+  state is this group of projects in", "how does this actually work" — from any
+  device, without waiting for someone to be free, and without a meeting whose
+  only output is a paragraph.
+- **Two teams stop paying the coordination tax.** See
+  [Who can see what](#who-can-see-what) — a neighbouring team can be given the
+  right to ask about a repository while the files that must stay private are
+  refused at the source.
 
----
+Answers quote real code, and only the code the asker is allowed to see.
 
 ## Pull-request review
 
-Point a repository's webhook at Celmis, or run a review by hand:
+Agents read the diff and post findings to GitHub, GitLab or Bitbucket:
 
-```bash
-docker compose exec api analyzer review github owner/repo 42 --post
-```
+![A review running against a pull request](docs/images/review-run.png)
 
-### What reads the diff
+Where the graph is built, the review also carries what the diff does not show:
+who else calls the symbol being changed, including from another repository.
+Where it is not built, the review still runs — it just answers the narrower
+question, which is what the benchmark measured.
 
-| Agent | Looks for | Model? |
-|---|---|---|
-| **defect** | bugs inside a single file — the logic in front of it | yes, reads the diff twice |
-| **contract** | mismatches BETWEEN files: a caller and a callee that no longer agree | yes |
-| **security** | injection, authz gaps, secret handling, unsafe deserialisation | yes |
-| **structural** | ast-grep rules — patterns that are wrong by shape | no |
-| **cve** | known vulnerabilities in the dependencies this PR changes | no |
+Every finding the benchmark scored false was opened in the source and published
+with a verdict. Thirty-three of seventy-nine turned out to be real defects the
+gold set does not contain. That work is in
+[Audit of the false positives](#audit-of-the-false-positives), with the code and
+a permalink for each, so you can disagree with any of them.
 
-Two more stages run after them: **breaking_change** (a regex-plus-graph pass
-over public API changes) and **compliance** (one call per rule you have
-written, if any).
+## Dependencies, SBOM and the evidence pack
 
-The **verifier** is a sixth stage and is **off by default**: a second model
-pass over every finding, which drops low-confidence ones and merges duplicates.
-It is the slowest single call the pipeline makes, and whether it earns its price
-is a judgement about one repository's tolerance for noise — switch it on per
-repository at **Admin → Review policies**. The deterministic prefilter (exact
-dedup, near-duplicate clustering, a rule deny-list, a confidence floor and the
-severity sort) always runs and is not this.
+The dependency audit is **deterministic**: native auditors where the tool is
+installed, OSV everywhere else, no model involved. A language model, if you give
+it a key, writes the summary — it does not decide what is vulnerable.
 
-### What a review will tell you about itself
+![Compliance artefacts: SBOM, evidence pack, technical documentation](docs/images/compliance-artefacts.png)
 
-A review that could not do its whole job says so in the comment it posts,
-rather than returning fewer findings and letting them read as a clean diff:
+Two files come out of every audit, and neither needs an LLM key:
 
-- an agent that failed is named, **with the reason** — a timeout, an exhausted
-  quota and a rejected key are three different problems with three different
-  owners;
-- a review that passed its wall-clock budget opens with `⚠ REVIEW CUT SHORT`
-  and names the setting to raise;
-- a diff over `REVIEW_MAX_DIFF_SIZE_BYTES` is refused outright, because a
-  review of the first fifth of a change presented as a review of the change is
-  worse than no review;
-- the second pass of the defect agent failing is disclosed, because a review
-  that read the diff once is thinner than one that read it twice.
+- **SBOM** — a CycloneDX inventory of every dependency, its version, package URL
+  and the vulnerabilities known against it. This is the file people mean when
+  they say "send us your SBOM".
+- **Evidence pack** — the audit as a filing: every SBOM, every finding, the
+  timeline of past runs, and a sha256 of each file, so a third party can check
+  nothing was edited afterwards *without having to trust us*. A folder whose
+  contents can be changed later proves nothing; the manifest is what makes it
+  evidence.
 
-### Per-repository policy
+Alongside them, the generated technical documentation — module PRDs, feature
+documents and integration guides written from the code — which is yours to keep
+and keeps working after any subscription ends.
 
-**Admin → Review policies** sets, for one repository: which agents run, which
-model each one uses, per-agent prompt overrides, target branches, folder rules,
-suppressed rule ids, and whether the verifier runs.
+**Why this exists now.** From **11 September 2026** the EU Cyber Resilience Act
+requires a manufacturer to report an actively exploited vulnerability to ENISA
+within 24 hours. The formal SBOM mandate lands in December 2027, but you cannot
+answer the 24-hour question without component-level visibility first — to report
+what is affected, you have to know what is inside.
 
----
+**Celmis does not claim compliance, and will not.** It produces the artefacts a
+filing needs. Whether a filing is adequate is a lawyer's judgement, and a tool
+that implies otherwise is selling a false sense of safety.
+
+One more thing the audit page says out loud, because it is the failure nobody
+looks for: **an ecosystem nobody scanned reports zero vulnerabilities exactly
+like a clean one.** Coverage is shown next to the findings — which auditor
+produced each result, and, more usefully, what went unchecked and why.
+
+## Who can see what
+
+Access is resolved per repository, per team, and it governs every surface at
+once — Q&A, graph, search, MCP:
+
+| setting | effect |
+|---|---|
+| `visibility: none` | the repository does not exist for research |
+| `visibility: metadata` | documentation and architecture notes only |
+| `visibility: code` | source is readable |
+| `deny_globs` | **wins even at `code`** — credentials, crypto, database connections, secret verification |
+| `allow_globs` | an allow-list when set; deny still subtracts from it |
+
+This is what makes the neighbouring-team case work rather than being a promise:
+load the repository, grant the other team the right to ask, and deny the paths
+that must not be read. They get answers; those files are refused at the source,
+not filtered out of a response that already contained them.
+
+## Languages and formats
+
+Seventeen graph modules, plus a generic path through tree-sitter tag queries for
+languages without one:
+
+**Code** — Python, TypeScript, JavaScript, Go, Java, C#, C++, PHP, Vue, and more
+through the generic path.
+
+**Infrastructure** — Dockerfile, docker-compose, Helm, Kubernetes manifests,
+Terraform and CI workflows. This is the part most code-intelligence tools skip,
+and it is why a question can cross from a function to the service definition
+that runs it.
 
 ## Deterministic checks — no model, no false positives
 
@@ -470,6 +421,109 @@ describing it: the benchmark set is isolated single-repository pull requests, so
 there is no sibling repository for an edge to cross. The capability is real and
 the benchmark cannot see it — which is a statement about the benchmark, not a
 claim you should take on faith. Point an MCP client at your own group and check.
+
+## Results
+
+Celmis was run on the [Martian Code Review Bench](https://github.com/withmartian/code-review-benchmark)
+offline set: 50 curated pull requests, 173 human-written golden comments, scored
+against the gold set by an LLM judge. Measured on `e0db376` with
+`gemini-3.6-flash` at temperature 0.1, no reasoning tokens.
+
+| Judge | F1 | Precision | Recall | Rank |
+|---|---:|---:|---:|---:|
+| claude-opus-4.5 | 47.5% | 52.4% | 43.4% | **17 / 50** |
+| claude-sonnet-4.5 | 44.9% | 48.0% | 42.2% | **17 / 50** |
+| gpt-5.2 | 42.7% | 46.0% | 39.9% | **17 / 50** |
+
+The F1 moves 4.8 points depending on who judges. The rank does not move at all —
+seventeenth under all three. Below us in every one of the three: CodeRabbit
+(19/25/23), every version of Greptile (26–29), Kodus (21/23/21), Copilot,
+Claude Code, Gemini, and CodeAnt.
+
+The whole run cost **$5.88** — $0.118 per pull request — and produced 153
+findings, 3.06 per PR (defect 114, security 27, contract 6, structural 6).
+
+**Why this comparison is fair.** Martian ships its own evaluations of 49 tools
+in the benchmark repository, produced by the same three judges on the same 50
+PRs against the same goldens. We did not re-score anybody: their rows are taken
+as published and ours is appended. Reproduce the whole table with:
+
+```bash
+python3 autoloop/offline_table.py anthropic_claude-sonnet-4-5-20250929
+```
+
+**Offline is not the public leaderboard.** Martian runs two benchmarks. The
+public leaderboard is the *online* one — 200,000 real pull requests scored by
+what developers actually fixed. This table is the *offline* one — 50 curated PRs
+scored against a gold set. They measure different things and the numbers are not
+interchangeable. Claims of the form "tool X is #1 on Martian" usually refer to
+the online table, a different metric, or a different judge.
+
+**What this number does not contain.** The graph was empty for all 50 PRs
+(`graph_status` null, drift empty on every one), because the benchmark set is
+isolated single-repository pull requests — there is no sibling service for a
+symbol to have consumers in. Cross-repository drift, the thing this product
+carries a symbol graph for, contributed exactly nothing to the score above. It
+is not measurable here, and we are not claiming it from this table. See
+[Test repositories](#test-repositories) to watch it work on real code instead.
+
+## Audit of the false positives
+
+Benchmark scoring has a structural floor: the judge matches our comment against
+a finite list of human-written goldens, so a correct finding the annotator never
+wrote down is counted false **by construction**. We opened all 79 of ours in the
+source at the measured commit and assigned a verdict to each.
+
+Of 79 findings scored as false positives, **33 are real defects** the gold set
+does not contain, 38 are genuinely wrong, and 8 could not be settled from the
+code. That puts the true precision of this run between 69.7% and 75.0% rather
+than the measured 48.0% — but that corrected figure **cannot be compared with
+anything in the table above**, because nobody has audited the other tools the
+same way and their false positives almost certainly contain a similar share of
+real defects; for comparison with other tools the measured 48.0% is the honest
+number, because it is the same method applied to everyone.
+
+Twenty-four of the 38 genuinely-wrong findings share four root causes, and none
+of them is "the model is weak" — all four are about what the model was shown.
+The largest is an identifier declared in the same file but outside the excerpt
+the agent received: a method parameter 26 lines up, an import on line 3, an
+`attr_reader` on line 18.
+
+The full report gives the claim, the code at that commit, the verdict, the
+reasoning and a permalink for each of the 79, so any verdict can be disputed
+with the same evidence in front of you.
+
+## Test repositories
+
+Every review in the run above is still live and public. These are real pull
+requests from real projects, forked with their history, carrying the inline
+comments Celmis wrote:
+
+| Fork | PRs |
+|---|---:|
+| [celmis-bench/keycloak](https://github.com/celmis-bench/keycloak) | 9 |
+| [celmis-bench/grafana](https://github.com/celmis-bench/grafana) | 10 |
+| [celmis-bench/discourse-graphite](https://github.com/celmis-bench/discourse-graphite) | 10 |
+| [celmis-bench/cal.diy](https://github.com/celmis-bench/cal.diy) | 10 |
+| [celmis-bench/sentry](https://github.com/celmis-bench/sentry) | 6 |
+| [celmis-bench/sentry-greptile](https://github.com/celmis-bench/sentry-greptile) | 4 |
+
+Worth opening first:
+
+- [keycloak#17](https://github.com/celmis-bench/keycloak/pull/17) — a null
+  dereference and a recovery-code indexing question in Keycloak's test storage
+  provider
+- [grafana#16](https://github.com/celmis-bench/grafana/pull/16) — a Storage
+  failure recorded against the Legacy metric, one of three instances of the same
+  mistake in that file
+- [cal.diy#11](https://github.com/celmis-bench/cal.diy/pull/11) — `forEach` with
+  an async callback, so the deletions are fire-and-forget and the surrounding
+  `try` catches nothing
+- [sentry#11](https://github.com/celmis-bench/sentry/pull/11) — seven inline
+  comments on one Kafka consumer PR
+
+You are reading unedited output, including the findings the audit above marks
+wrong. Nothing was removed after scoring.
 
 ## Configuration
 
