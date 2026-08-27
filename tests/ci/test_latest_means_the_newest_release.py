@@ -177,3 +177,29 @@ def test_the_workflow_asks_the_script():
 
 def test_the_script_is_executable_and_shipped():
     assert SCRIPT.exists(), "the workflow calls a script that is not in the repo"
+
+
+def test_a_tree_without_the_script_does_not_move_latest():
+    """Rebuilding an old tag checks out an old tree, and the script is not in it.
+
+    `actions/checkout` follows `inputs.tag`, so a rebuild of v0.1.0 gets
+    v0.1.0's files — where this decision script does not exist, because it was
+    written after. Without a fallback the step would die on a missing file and
+    take a legitimate rebuild of an old release with it.
+
+    Its absence is an answer rather than an error, and the right one: a tree
+    that predates the fix is by definition not the newest release.
+    """
+    doc = yaml.safe_load(RELEASE.read_text(encoding="utf-8"))
+    step = next(s for s in doc["jobs"]["images"]["steps"] if s.get("id") == "img")
+    run = step["run"]
+    body = "\n".join(ln for ln in run.splitlines() if not ln.lstrip().startswith("#"))
+    assert "-f scripts/should_move_latest.py" in body, (
+        "the step calls the script unconditionally; a rebuild of any tag "
+        "predating it fails on a missing file"
+    )
+    guard = body.split("-f scripts/should_move_latest.py", 1)[1]
+    else_arm = guard.split("else", 1)[1] if "else" in guard else ""
+    assert "move=false" in else_arm.replace(" ", ""), (
+        "the missing-script branch does not answer `false`"
+    )

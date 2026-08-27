@@ -106,9 +106,20 @@ jobs:
           #
           # ls-remote rather than `git tag`: the checkout is shallow and
           # carries only the tag being built.
-          move=$(git ls-remote --tags --refs origin \
-                 | sed 's|.*refs/tags/||' \
-                 | python3 scripts/should_move_latest.py "$ref")
+          #
+          # A TREE WITHOUT THE SCRIPT IS A TREE FROM BEFORE THIS FIX, which is
+          # to say an old release — and an old release is exactly what must
+          # not move :latest. So its absence is an answer, not an error. The
+          # checkout follows `inputs.tag`, so rebuilding v0.1.0 checks out
+          # v0.1.0, where this file does not exist.
+          if [ -f scripts/should_move_latest.py ]; then
+            move=$(git ls-remote --tags --refs origin \
+                   | sed 's|.*refs/tags/||' \
+                   | python3 scripts/should_move_latest.py "$ref")
+          else
+            move=false
+            echo "no decision script in this tree — an older release; :latest stays"
+          fi
           echo "moves_latest=$move"
           {
             echo "tags<<TAGS_EOF"
