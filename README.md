@@ -292,10 +292,19 @@ mcp__exec__run: cat package.json | grep -A2 lodash; ls
   → "Confirmed no other manifest files exist, so no other changes were needed."
 ```
 
-The result is not a screenshot. It is a pull request you can open:
+The branch it pushed, and the pull request it opened, on GitHub:
 
+![The pull request the agent opened, one line changed](docs/images/pr-on-github.png)
+
+Look at what is *not* in that diff. `axios 0.21.1`, `minimist 1.2.0`,
+`node-fetch 2.6.0` sit on the lines directly above and below — all outdated, all
+flagged in the same audit — and all untouched. The task said manifests only, and
+an agent that tidied three more on the way past would have been a worse result
+to review, not a better one.
+
+It is a live pull request, not a screenshot:
 **[celmis-demo-gateway#6](https://github.com/celmis-codereviewer/celmis-demo-gateway/pull/6)**
-— branch `celmis-agent/b8960e01`, one commit, one file, `+1/-1`.
+— branch `celmis-agent/b8960e01`, one commit, `+1/-1`.
 
 ![The finished session, with its branch and a link to the pull request](docs/images/agent-session-finished.png)
 
