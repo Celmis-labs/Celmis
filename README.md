@@ -56,6 +56,7 @@ of every finding it scored false, and the command that reproduces both are in
 - [Ask the code](#ask-the-code)
 - [Pull-request review](#pull-request-review)
 - [Dependencies, SBOM and the evidence pack](#dependencies-sbom-and-the-evidence-pack)
+- [Fix it from here](#fix-it-from-here)
 - [Who can see what](#who-can-see-what)
 - [Languages and formats](#languages-and-formats)
 - [Deterministic checks — no model, no false positives](#deterministic-checks-no-model-no-false-positives)
@@ -211,9 +212,12 @@ Answers quote real code, and only the code the asker is allowed to see.
 
 ## Pull-request review
 
-Agents read the diff and post findings to GitHub, GitLab or Bitbucket:
-
-![A review running against a pull request](docs/images/review-run.png)
+Agents read the diff and post findings to GitHub, GitLab or Bitbucket. Rather
+than show that in a screenshot of this interface, the reviews are left where
+they were posted — fifty pull requests on real projects, with the comments still
+attached to the lines they were written about. They are listed under
+[Test repositories](#test-repositories), and the output there is unedited,
+including the findings the audit below marks wrong.
 
 Where the graph is built, the review also carries what the diff does not show:
 who else calls the symbol being changed, including from another repository.
@@ -263,6 +267,32 @@ One more thing the audit page says out loud, because it is the failure nobody
 looks for: **an ecosystem nobody scanned reports zero vulnerabilities exactly
 like a clean one.** Coverage is shown next to the findings — which auditor
 produced each result, and, more usefully, what went unchecked and why.
+
+## Fix it from here
+
+Finding something is half a loop. Celmis closes it: an embedded Claude Code
+session runs **inside** the installation, edits the checkout, and the runner
+commits, pushes a branch and opens a pull request.
+
+A vulnerability in the dependency audit carries a **Fix with Claude** button. It
+does not open a chat and leave you to explain the problem — it hands the session
+the repository, the package and the finding, already filled in. The same
+hand-off exists on a monitoring alert.
+
+What the agent may and may not do is decided by the runner, not by the prompt:
+
+- **No shell.** `Bash` is disallowed, along with `WebFetch`, `WebSearch` and
+  notebook editing. The agent reads and writes files in the checkout and calls
+  Celmis's own tools; it cannot run a command or reach the network.
+- **Git is the runner's job.** The agent never commits or pushes. When the work
+  is done — or when you press *Finish & push* — the runner makes the commit,
+  pushes the branch and opens the PR. An agent that times out mid-thought
+  therefore still produces a branch rather than a lost afternoon.
+- **The session is watchable.** Output streams over SSE with replay, so a
+  reconnect picks up where it left off instead of starting blank.
+
+Connection is a setup token, held per user or per workspace, and the API never
+returns it once saved — only whether it is there and whether it still works.
 
 ## Who can see what
 
