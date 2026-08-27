@@ -86,10 +86,36 @@ jobs:
         id: img
         run: |
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "repo=ghcr.io/$owner/celmis-${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+          repo="ghcr.io/$owner/celmis-${{ matrix.name }}"
           ref="${{ inputs.tag || github.ref_name }}"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
           echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
           echo "tag=$ref" >> "$GITHUB_OUTPUT"
+
+          # :LATEST BELONGS TO THE NEWEST RELEASE, NOT TO WHATEVER WAS BUILT
+          # LAST. This list used to carry `:latest` unconditionally, so
+          # rebuilding an old tag — a moved tag, a rerun, a cache
+          # investigation — repointed it at old code while every log line
+          # stayed green. `.env.example` ships CELMIS_TAG=latest and compose
+          # falls back to it, so that tag is exactly what a first-time
+          # install pulls.
+          #
+          # The decision is a script because a YAML expression cannot be run
+          # in a test, and tests/ci/test_latest_means_the_newest_release.py
+          # runs this one.
+          #
+          # ls-remote rather than `git tag`: the checkout is shallow and
+          # carries only the tag being built.
+          move=$(git ls-remote --tags --refs origin \
+                 | sed 's|.*refs/tags/||' \
+                 | python3 scripts/should_move_latest.py "$ref")
+          echo "moves_latest=$move"
+          {
+            echo "tags<<TAGS_EOF"
+            echo "$repo:$ref"
+            if [ "$move" = "true" ]; then echo "$repo:latest"; fi
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
         with:
@@ -104,9 +130,7 @@ jobs:
           # machines the documentation tells people to buy.
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ steps.img.outputs.repo }}:${{ steps.img.outputs.tag }}
-            ${{ steps.img.outputs.repo }}:latest
+          tags: ${{ steps.img.outputs.tags }}
           # Cache in the registry rather than on a server with 4GB free.
           cache-from: type=registry,ref=${{ steps.img.outputs.repo }}:buildcache
           cache-to: type=registry,ref=${{ steps.img.outputs.repo }}:buildcache,mode=max
