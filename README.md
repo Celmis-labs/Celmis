@@ -31,7 +31,7 @@ the other repository open.
 
 ---
 
-## Six things people do with it
+## Seven things people do with it
 
 | | |
 |---|---|
@@ -41,6 +41,7 @@ the other repository open.
 | **A customer or an auditor asks for your SBOM** | One button, CycloneDX, plus an evidence pack whose manifest lets them verify it without trusting you → [Dependencies, SBOM and the evidence pack](#dependencies-sbom-and-the-evidence-pack) |
 | **A vulnerability lands in a dependency** | *Fix with Claude* hands an embedded session the repository, the package and the finding. It edits, the runner pushes a branch and opens a PR → [Fix it from here](#fix-it-from-here) |
 | **A pull request needs reviewing** | Agents read the diff — and, where the graph is built, who else calls what is being changed, including from another repository → [Pull-request review](#pull-request-review) |
+| **Your own agent or editor needs to understand the codebase** | Point it at `/mcp/`. Eighteen tools over the same index, under the same access rules — no second copy of your code anywhere → [Connect Claude Code and other MCP clients](#connect-claude-code-and-other-mcp-clients) |
 
 The first three are the ones a code-review tool does not do at all, and they are
 the reason this is a platform rather than a reviewer: index once, then read that
@@ -64,7 +65,7 @@ of every finding it scored false, and the command that reproduces both are in
 ## Table of contents
 
 - [What that buys you that a diff-only tool cannot](#what-that-buys-you-that-a-diff-only-tool-cannot)
-- [Six things people do with it](#six-things-people-do-with-it)
+- [Seven things people do with it](#seven-things-people-do-with-it)
 - [Three numbers](#three-numbers)
 - [Quick start](#quick-start)
 - [First user and admin](#first-user-and-admin)
@@ -479,7 +480,7 @@ repositories in two languages — to a client that has checked out neither. The
 boundary a diff never crosses is the one this makes ordinary.
 
 
-Eight tools, served over Streamable HTTP at `/mcp/` and authenticated with the
+Eighteen tools, served over Streamable HTTP at `/mcp/` and authenticated with the
 same bearer token as `/api/`:
 
 | Tool | Answers |
