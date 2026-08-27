@@ -4,6 +4,8 @@
 
 **Self-hosted code intelligence — ask your codebases, review pull requests, and produce the evidence an auditor asks for**
 
+[**celmis-labs.github.io**](https://celmis-labs.github.io) · [Documentation](https://celmis-labs.github.io/docs/) · [Quick start](#quick-start) · [Results](#results)
+
 </div>
 
 Celmis reads your repositories once and keeps a symbol graph of them. Everything
@@ -12,8 +14,10 @@ different way of reading that graph. It runs on one machine under
 `docker compose`, with the model provider of your choice behind it, and nothing
 leaves your network except the calls you configure.
 
-The name is from *ядро* — a core. The index is the core; the surfaces are what
-reads from it.
+In the oldest telling, Kelmis was the smelter — one of the three Idaean Dactyls,
+alongside Damnameneus the hammer and Acmon the anvil, to whom the working of iron
+was credited. The index does the reducing here; the surfaces are what work the
+result.
 
 ## What that buys you that a diff-only tool cannot
 
