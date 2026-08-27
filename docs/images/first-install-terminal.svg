@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="871" height="750" viewBox="0 0 871 750" font-family="ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace" font-size="13.5">
+<rect width="871" height="750" rx="10" fill="#12151a"/>
+<rect width="871" height="34" rx="10" fill="#1b1f26"/>
+<rect y="24" width="871" height="10" fill="#1b1f26"/>
+<circle cx="22" cy="17.0" r="5.5" fill="#ff5f57"/>
+<circle cx="38" cy="17.0" r="5.5" fill="#febc2e"/>
+<circle cx="54" cy="17.0" r="5.5" fill="#28c840"/>
+<text x="435.5" y="21.5" fill="#6e7681" text-anchor="middle" font-size="12.0">git clone → six healthy services</text>
+<text x="22" y="60" fill="#7ee787" xml:space="preserve">$ git clone https://github.com/Celmis-labs/Celmis.git &amp;&amp; cd Celmis</text>
+<text x="22" y="79" fill="#c9d1d9" xml:space="preserve">  904 files, 25 MB, commit 6b1beeb                                    1 s</text>
+<text x="22" y="117" fill="#7ee787" xml:space="preserve">$ ./scripts/init-env.sh</text>
+<text x="22" y="136" fill="#c9d1d9" xml:space="preserve">  .env written, mode 600 — every generatable secret has a value</text>
+<text x="22" y="155" fill="#c9d1d9" xml:space="preserve">  13 optional variables left blank: Google OAuth, VAPID, SMTP,</text>
+<text x="22" y="174" fill="#c9d1d9" xml:space="preserve">  provider tokens                                                     0 s</text>
+<text x="22" y="212" fill="#7ee787" xml:space="preserve">$ docker compose --env-file .env up -d</text>
+<text x="22" y="231" fill="#c9d1d9" xml:space="preserve"> Container celmis-qdrant    Started</text>
+<text x="22" y="250" fill="#c9d1d9" xml:space="preserve"> Container celmis-postgres  Started</text>
+<text x="22" y="269" fill="#c9d1d9" xml:space="preserve"> Container celmis-postgres  Waiting</text>
+<text x="22" y="288" fill="#c9d1d9" xml:space="preserve"> Container celmis-sandbox   Started</text>
+<text x="22" y="307" fill="#c9d1d9" xml:space="preserve"> Container celmis-postgres  Healthy</text>
+<text x="22" y="326" fill="#c9d1d9" xml:space="preserve"> Container celmis-api       Starting</text>
+<text x="22" y="345" fill="#c9d1d9" xml:space="preserve"> Container celmis-api       Started</text>
+<text x="22" y="364" fill="#c9d1d9" xml:space="preserve"> Container celmis-api       Waiting</text>
+<text x="22" y="383" fill="#c9d1d9" xml:space="preserve"> Container celmis-api       Healthy</text>
+<text x="22" y="402" fill="#c9d1d9" xml:space="preserve"> Container celmis-web       Started</text>
+<text x="22" y="421" fill="#c9d1d9" xml:space="preserve"> Container celmis-caddy     Started</text>
+<text x="22" y="440" fill="#c9d1d9" xml:space="preserve">  pulled 3 images, brought up 6 services                            197 s</text>
+<text x="22" y="478" fill="#7ee787" xml:space="preserve">$ docker compose ps</text>
+<text x="22" y="497" fill="#56d364" xml:space="preserve">  api        Up 47 seconds (healthy)</text>
+<text x="22" y="516" fill="#c9d1d9" xml:space="preserve">  caddy      Up 29 seconds</text>
+<text x="22" y="535" fill="#56d364" xml:space="preserve">  postgres   Up 53 seconds (healthy)</text>
+<text x="22" y="554" fill="#56d364" xml:space="preserve">  qdrant     Up 53 seconds (healthy)</text>
+<text x="22" y="573" fill="#56d364" xml:space="preserve">  sandbox    Up 53 seconds (healthy)</text>
+<text x="22" y="592" fill="#56d364" xml:space="preserve">  web        Up 30 seconds (healthy)</text>
+<text x="22" y="630" fill="#7ee787" xml:space="preserve">$ docker compose exec api alembic current</text>
+<text x="22" y="649" fill="#c9d1d9" xml:space="preserve">  c8f1e2a70b34 (head)</text>
+<text x="22" y="687" fill="#c9d1d9" xml:space="preserve">  disk 21G used, 7.6G free      RAM 1910 / 7952 MB</text>
+<text x="22" y="732" fill="#6e7681" font-size="11.5">Recorded 26 Aug 2026 on a 4-core / 8 GB VPS. Rendered from the captured session logs (logs/01-04).</text>
+</svg>

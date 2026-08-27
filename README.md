@@ -124,6 +124,14 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 `init-env.sh --check` reports what is still empty without writing anything.
 
+![First install: clone, generate .env, bring the stack up](docs/images/first-install-terminal.svg)
+
+That is a **render of the captured session**, not a screen recording — the
+figures in it are the ones the run produced on 26 August 2026, and the compose
+output is verbatim from `logs/03-up.log` in the install report. It is drawn
+rather than photographed because a second stack cannot be brought up beside a
+running one: `docker-compose.yml` fixes `container_name`, so the names collide.
+
 ### Stop
 
 ```bash
@@ -389,6 +397,13 @@ Claude Code picks it up automatically when this repository is open.
 ---
 
 ### What the agent can ask for
+
+![An MCP client querying two repositories in one call](docs/images/mcp-cross-repo.svg)
+
+One `search_symbols` call, one contract symbol, and it comes back from two
+repositories in two languages — to a client that has checked out neither. The
+boundary a diff never crosses is the one this makes ordinary.
+
 
 Eight tools, served over Streamable HTTP at `/mcp/` and authenticated with the
 same bearer token as `/api/`:

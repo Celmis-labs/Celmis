@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="847" height="807" viewBox="0 0 847 807" font-family="ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace" font-size="13.5">
+<rect width="847" height="807" rx="10" fill="#12151a"/>
+<rect width="847" height="34" rx="10" fill="#1b1f26"/>
+<rect y="24" width="847" height="10" fill="#1b1f26"/>
+<circle cx="22" cy="17.0" r="5.5" fill="#ff5f57"/>
+<circle cx="38" cy="17.0" r="5.5" fill="#febc2e"/>
+<circle cx="54" cy="17.0" r="5.5" fill="#28c840"/>
+<text x="423.5" y="21.5" fill="#6e7681" text-anchor="middle" font-size="12.0">MCP over HTTP — one query, two repositories</text>
+<text x="22" y="60" fill="#6e7681" xml:space="preserve"># An MCP client talking to Celmis over HTTP. Nothing is cloned locally.</text>
+<text x="22" y="98" fill="#e3b341" xml:space="preserve">--&gt; initialize</text>
+<text x="22" y="117" fill="#e3b341" xml:space="preserve">&lt;-- 200   serverInfo: { &quot;name&quot;: &quot;celmis&quot;, &quot;version&quot;: &quot;1.29.1&quot; }</text>
+<text x="22" y="155" fill="#e3b341" xml:space="preserve">--&gt; tools/list</text>
+<text x="22" y="174" fill="#e3b341" xml:space="preserve">&lt;-- 200   18 tools</text>
+<text x="22" y="193" fill="#c9d1d9" xml:space="preserve">          list_projects        get_api_surface      bootstrap_client</text>
+<text x="22" y="212" fill="#c9d1d9" xml:space="preserve">          get_project          list_accessible_repos start_integration_walk</text>
+<text x="22" y="231" fill="#c9d1d9" xml:space="preserve">          search_symbols       get_my_access        route_incident</text>
+<text x="22" y="250" fill="#c9d1d9" xml:space="preserve">          find_consumers       get_review           list_workspace_repos</text>
+<text x="22" y="269" fill="#c9d1d9" xml:space="preserve">          get_owner            get_review_policy    get_dep_audit</text>
+<text x="22" y="288" fill="#c9d1d9" xml:space="preserve">          get_architecture     list_deprecations    list_dep_findings</text>
+<text x="22" y="326" fill="#e3b341" xml:space="preserve">--&gt; tools/call  list_projects</text>
+<text x="22" y="345" fill="#e3b341" xml:space="preserve">&lt;-- 200   { &quot;projects&quot;: [ { &quot;name&quot;: &quot;Demo Platform&quot;, &quot;repo_count&quot;: 4 } ] }</text>
+<text x="22" y="383" fill="#e3b341" xml:space="preserve">--&gt; tools/call  search_symbols</text>
+<text x="22" y="402" fill="#c9d1d9" xml:space="preserve">          { &quot;project_id&quot;: &quot;083bd97a-…&quot;, &quot;query&quot;: &quot;SETTLEMENT_TOPIC&quot; }</text>
+<text x="22" y="421" fill="#e3b341" xml:space="preserve">&lt;-- 200</text>
+<text x="22" y="440" fill="#c9d1d9" xml:space="preserve">          {</text>
+<text x="22" y="459" fill="#c9d1d9" xml:space="preserve">            &quot;query&quot;: &quot;SETTLEMENT_TOPIC&quot;,</text>
+<text x="22" y="478" fill="#c9d1d9" xml:space="preserve">            &quot;matches&quot;: [</text>
+<text x="22" y="497" fill="#c9d1d9" xml:space="preserve">              {</text>
+<text x="22" y="516" fill="#c9d1d9" xml:space="preserve">                &quot;repo_slug&quot;: &quot;…celmis-demo-gateway&quot;,</text>
+<text x="22" y="535" fill="#c9d1d9" xml:space="preserve">                &quot;kind&quot;: &quot;variable&quot;,   &quot;file&quot;: &quot;src/contract.ts&quot;,  &quot;line&quot;: 2</text>
+<text x="22" y="554" fill="#c9d1d9" xml:space="preserve">              },</text>
+<text x="22" y="573" fill="#c9d1d9" xml:space="preserve">              {</text>
+<text x="22" y="592" fill="#c9d1d9" xml:space="preserve">                &quot;repo_slug&quot;: &quot;…celmis-demo-payments&quot;,</text>
+<text x="22" y="611" fill="#c9d1d9" xml:space="preserve">                &quot;kind&quot;: &quot;constant&quot;,   &quot;file&quot;: &quot;src/config.py&quot;,    &quot;line&quot;: 9</text>
+<text x="22" y="630" fill="#c9d1d9" xml:space="preserve">              }</text>
+<text x="22" y="649" fill="#c9d1d9" xml:space="preserve">            ],</text>
+<text x="22" y="668" fill="#c9d1d9" xml:space="preserve">            &quot;count&quot;: 2</text>
+<text x="22" y="687" fill="#c9d1d9" xml:space="preserve">          }</text>
+<text x="22" y="725" fill="#6e7681" xml:space="preserve"># One query. Two repositories, two languages, the same contract symbol —</text>
+<text x="22" y="744" fill="#6e7681" xml:space="preserve"># from a client that has never checked either of them out.</text>
+<text x="22" y="789" fill="#6e7681" font-size="11.5">Recorded 27 Aug 2026 against Celmis 0.1.8+cc7fc7d. Verbatim transcript: logs/05-mcp-session.txt</text>
+</svg>
