@@ -31,6 +31,21 @@ the other repository open.
 
 ---
 
+## Six things people do with it
+
+| | |
+|---|---|
+| **You are a PM, a delivery lead or the client** and want to know what state a group of projects is in, or how something actually works | Ask it. From any device, anywhere, without booking time from an engineer and without a meeting whose only output is a paragraph → [Ask the code](#ask-the-code) |
+| **A new engineer has a question a senior would have to answer** | Every one of those pulls someone experienced out of flow, at the moment they are already covering. The codebase answers instead, with file:line citations → [Ask the code](#ask-the-code) |
+| **Two teams share an integration and neither can read the other's repository** | Load it, grant the right to ask, and deny the paths that must stay private. They get answers; the credentials are refused at the source → [Who can see what](#who-can-see-what) |
+| **A customer or an auditor asks for your SBOM** | One button, CycloneDX, plus an evidence pack whose manifest lets them verify it without trusting you → [Dependencies, SBOM and the evidence pack](#dependencies-sbom-and-the-evidence-pack) |
+| **A vulnerability lands in a dependency** | *Fix with Claude* hands an embedded session the repository, the package and the finding. It edits, the runner pushes a branch and opens a PR → [Fix it from here](#fix-it-from-here) |
+| **A pull request needs reviewing** | Agents read the diff — and, where the graph is built, who else calls what is being changed, including from another repository → [Pull-request review](#pull-request-review) |
+
+The first three are the ones a code-review tool does not do at all, and they are
+the reason this is a platform rather than a reviewer: index once, then read that
+index from whichever side of the work you are standing on.
+
 ## Three numbers
 
 | | |
@@ -49,6 +64,7 @@ of every finding it scored false, and the command that reproduces both are in
 ## Table of contents
 
 - [What that buys you that a diff-only tool cannot](#what-that-buys-you-that-a-diff-only-tool-cannot)
+- [Six things people do with it](#six-things-people-do-with-it)
 - [Three numbers](#three-numbers)
 - [Quick start](#quick-start)
 - [First user and admin](#first-user-and-admin)
@@ -194,21 +210,9 @@ Group repositories into a project, and the question is asked of the group:
 
 ![A project holding several repositories](docs/images/project-cross-repo.png)
 
-What it is for, beyond curiosity:
-
-- **A new engineer asks the codebase instead of a senior one.** Every question a
-  new hire cannot self-serve pulls someone experienced out of flow, at the exact
-  moment they are already covering for a teammate who is not yet productive.
-- **A product manager, a delivery lead or the client asks directly.** "What
-  state is this group of projects in", "how does this actually work" — from any
-  device, without waiting for someone to be free, and without a meeting whose
-  only output is a paragraph.
-- **Two teams stop paying the coordination tax.** See
-  [Who can see what](#who-can-see-what) — a neighbouring team can be given the
-  right to ask about a repository while the files that must stay private are
-  refused at the source.
-
-Answers quote real code, and only the code the asker is allowed to see.
+Answers quote real code, and only the code the asker is allowed to see — which
+is what makes it safe to hand the question to someone outside the team that
+owns the repository. See [Who can see what](#who-can-see-what).
 
 ## Pull-request review
 
