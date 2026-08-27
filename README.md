@@ -270,28 +270,59 @@ produced each result, and, more usefully, what went unchecked and why.
 
 ## Fix it from here
 
-Finding something is half a loop. Celmis closes it: an embedded Claude Code
-session runs **inside** the installation, edits the checkout, and the runner
-commits, pushes a branch and opens a pull request.
+Finding something is half a loop. An embedded Claude Code session runs **inside**
+the installation, edits the checkout, and the runner commits, pushes a branch and
+opens a pull request.
 
 A vulnerability in the dependency audit carries a **Fix with Claude** button. It
-does not open a chat and leave you to explain the problem — it hands the session
-the repository, the package and the finding, already filled in. The same
-hand-off exists on a monitoring alert.
+does not open an empty chat — it hands the session the repository, the package,
+both versions and the boundaries of the job, already written:
 
-What the agent may and may not do is decided by the runner, not by the prompt:
+![The session, pre-filled from a dependency finding](docs/images/fix-with-claude-prefilled.png)
 
-- **No shell.** `Bash` is disallowed, along with `WebFetch`, `WebSearch` and
-  notebook editing. The agent reads and writes files in the checkout and calls
-  Celmis's own tools; it cannot run a command or reach the network.
+Here is one such loop, end to end, on a real finding — `lodash 4.17.11` with a
+known vulnerability against it. **220 seconds** from *Start session* to an open
+pull request, in five turns:
+
+```
+Read package.json
+  → "Only package.json has lodash; no requirements.txt/pyproject/go.mod exist here."
+Edit package.json: "lodash": "4.17.11" → "4.18.0"
+mcp__exec__run: cat package.json | grep -A2 lodash; ls
+  → "Confirmed no other manifest files exist, so no other changes were needed."
+```
+
+The result is not a screenshot. It is a pull request you can open:
+
+**[celmis-demo-gateway#6](https://github.com/celmis-codereviewer/celmis-demo-gateway/pull/6)**
+— branch `celmis-agent/b8960e01`, one commit, one file, `+1/-1`.
+
+![The finished session, with its branch and a link to the pull request](docs/images/agent-session-finished.png)
+
+Two details in that transcript are worth more than the diff. The agent did not
+*assume* there were no other manifests — it ran a command in the sandbox to
+check. And the task said "manifests only, do not touch unrelated dependencies",
+so the change is exactly one line.
+
+### What the runner allows, and what it does not
+
+This is decided by the runner, not by the prompt — which is the part worth
+reading before you grant an agent anything:
+
+- **No shell of its own.** `Bash`, `WebFetch`, `WebSearch` and notebook editing
+  are disallowed. Commands run through the sandbox container, which is a
+  separate service with its own uid and a read-only root filesystem.
 - **Git is the runner's job.** The agent never commits or pushes. When the work
   is done — or when you press *Finish & push* — the runner makes the commit,
-  pushes the branch and opens the PR. An agent that times out mid-thought
-  therefore still produces a branch rather than a lost afternoon.
+  pushes the branch and opens the PR. Never to the default branch.
+- **A provider limit is a pause, not a loss.** The first attempt at the run above
+  hit a weekly account limit mid-session. The session did not die: it moved to
+  `paused`, kept its work resumable for fourteen days, and showed the provider's
+  own message rather than a generic failure. A second key finished it.
 - **The session is watchable.** Output streams over SSE with replay, so a
   reconnect picks up where it left off instead of starting blank.
 
-Connection is a setup token, held per user or per workspace, and the API never
+Connection is a setup token, held per user or per workspace. The API never
 returns it once saved — only whether it is there and whether it still works.
 
 ## Who can see what
