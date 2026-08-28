@@ -530,9 +530,7 @@ against the gold set by an LLM judge. Measured on `e0db376` with
 | gpt-5.2 | 42.7% | 46.0% | 39.9% | **17 / 50** |
 
 The F1 moves 4.8 points depending on who judges. The rank does not move at all —
-seventeenth under all three. Below us in every one of the three: CodeRabbit
-(19/25/23), every version of Greptile (26–29), Kodus (21/23/21), Copilot,
-Claude Code, Gemini, and CodeAnt.
+seventeenth under all three.
 
 The whole run cost **$5.88** — $0.118 per pull request — and produced 153
 findings, 3.06 per PR (defect 114, security 27, contract 6, structural 6).
