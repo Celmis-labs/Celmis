@@ -1,0 +1,149 @@
+{
+  "identifier": "celmis",
+  "name": "Celmis",
+  "version": "0.1.9",
+  "author": "Celmis Labs",
+  "authorUrl": "https://github.com/Celmis-labs",
+  "category": "developer",
+  "homepage": "https://celmis-labs.github.io/mcp/",
+  "icon": "◍",
+  "description": "Self-hosted code intelligence over a symbol graph. Search symbols and find consumers across repository boundaries, read API surfaces, route incidents to the repository that owns them, and read dependency audits and reviews — all over one index, under the same access rules as the rest of the product.",
+  "tags": [
+    "code-intelligence",
+    "symbol-graph",
+    "cross-repository",
+    "code-review",
+    "dependency-audit",
+    "sbom",
+    "self-hosted",
+    "agpl"
+  ],
+  "tools": [
+    {
+      "name": "list_projects",
+      "description": "List the projects in the workspace.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_project",
+      "description": "Describe one project and the repositories in it.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "search_symbols",
+      "description": "Find where a symbol is defined, across every repository in a project.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "find_consumers",
+      "description": "List the repositories that call a symbol, including ones never cloned locally.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_api_surface",
+      "description": "List the HTTP handlers a service actually exposes.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_owner",
+      "description": "Identify who owns a file.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_architecture",
+      "description": "Describe how a repository is put together.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_deprecations",
+      "description": "List what is on the way out and who still uses it.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "start_integration_walk",
+      "description": "Walk through an integration between two services step by step.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "bootstrap_client",
+      "description": "Describe what a client needs in order to call another team's service.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "route_incident",
+      "description": "Given a stack trace, identify the repository and owner it belongs to.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_accessible_repos",
+      "description": "List the repositories this token may read.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_my_access",
+      "description": "Report the access this token actually has.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_review",
+      "description": "Return the most recent review of a pull request.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_review_policy",
+      "description": "Report which review agents run where.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_workspace_repos",
+      "description": "List every repository: indexed, documented, auto-review state.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_dep_audit",
+      "description": "Return the most recent dependency audit for a repository.",
+      "inputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_dep_findings",
+      "description": "List dependency findings, worst first.",
+      "inputSchema": {
+        "type": "object"
+      }
+    }
+  ]
+}
