@@ -35,7 +35,7 @@ the other repository open.
 
 ---
 
-## Eight things people do with it
+## Nine things people do with it
 
 | | |
 |---|---|
@@ -45,6 +45,7 @@ the other repository open.
 | **A customer or an auditor asks for your SBOM** | One button, CycloneDX, plus an evidence pack whose manifest lets them verify it without trusting you → [Dependencies, SBOM and the evidence pack](#dependencies-sbom-and-the-evidence-pack) |
 | **A vulnerability lands in a dependency** | *Fix with Claude* hands an embedded session the repository, the package and the finding. It edits, the runner pushes a branch and opens a PR → [Fix with Claude](#fix-with-claude) |
 | **A pull request needs reviewing** | Agents read the diff — and, where the graph is built, who else calls what is being changed, including from another repository → [Pull-request review](#pull-request-review) |
+| **Forty services need the same thing done to them** | Write the sentence. Celmis shows which repositories it resolves to and waits for a second press, rather than finding them among forty and pressing a button forty times → [Ask for work across repositories](#ask-for-work-across-repositories) |
 | **An alert fires at 02:00 and you are not at a desk** | It lands in Celmis, a web push reaches your phone, and *Fix with Claude* opens a session already holding the alert. The runner opens the pull request → [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone) |
 | **Your own agent or editor needs to understand the codebase** | Point it at `/mcp/`. Eighteen tools over the same index, under the same access rules — no second copy of your code anywhere → [Connect Claude Code and other MCP clients](#connect-claude-code-and-other-mcp-clients) |
 
@@ -70,7 +71,7 @@ of every finding it scored false, and the command that reproduces both are in
 ## Table of contents
 
 - [What that buys you that a diff-only tool cannot](#what-that-buys-you-that-a-diff-only-tool-cannot)
-- [Eight things people do with it](#eight-things-people-do-with-it)
+- [Nine things people do with it](#nine-things-people-do-with-it)
 - [Three numbers](#three-numbers)
 - [Quick start](#quick-start)
 - [First user and admin](#first-user-and-admin)
@@ -80,6 +81,7 @@ of every finding it scored false, and the command that reproduces both are in
 - [Dependencies, SBOM and the evidence pack](#dependencies-sbom-and-the-evidence-pack)
 - [Fix with Claude](#fix-with-claude)
 - [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone)
+- [Ask for work across repositories](#ask-for-work-across-repositories)
 - [Who can see what](#who-can-see-what)
 - [Languages and formats](#languages-and-formats)
 - [Deterministic checks — no model, no false positives](#deterministic-checks-no-model-no-false-positives)
@@ -393,6 +395,44 @@ different questions:
 
 An agent session that edits a repository at two in the morning from somebody's phone
 is exactly the kind of event that has to be reconstructable afterwards. It is.
+
+## Ask for work across repositories
+
+Every surface above acts on one thing at a time: this repository, this pull
+request, this finding. That is the right shape for a button, and the wrong shape
+for a set defined by a condition.
+
+*Generate documentation for every service that has none* is one sentence. Through
+the interface it is finding them among forty and pressing a button forty times.
+*Audit everything under `acme-ai` that has not been audited in thirty days* needs
+filters, saved selections and bulk operations — a subsystem — or it needs a
+sentence.
+
+So there is a sentence box, and a deliberately short catalogue of verbs behind it.
+Single-object work stays on the buttons, where it belongs.
+
+**Nothing runs on the first press.** Interpretation is a guess, and these verbs
+cost money and hours — a vault build, a fleet of review agents, an audit across a
+group. So the answer to a sentence is not the work; it is *which repositories this
+resolves to*, listed, with a second button under them. You confirm the set, not
+the intent.
+
+**The scope is re-checked at the moment you confirm, not when you asked.** A
+repository registered in the seconds between the question and the press cannot
+quietly join a set that said "everything". The same rule that governs the rest of
+the product — the check runs where the work happens — governs this.
+
+**An automated caller can never enqueue an unbounded fan-out.** The verbs are
+capped, workspace-scoped, and take an explicit actor: nothing here reads an
+ambient request context, because a connector processing a queue has no request,
+and a function that guesses at a workspace is the way one tenant's automation
+reaches another tenant's repositories.
+
+Three callers are converging on these same verbs — an external agent over MCP, the
+embedded agent, and a ticket connector that turns *audit these four services* into
+work and posts the result back. They share one implementation on purpose: a second
+"start an audit" is a second set of rules about live runs, deduplication and forced
+restarts, and the copy nobody maintains is the one that corrupts the queue.
 
 ## Who can see what
 
