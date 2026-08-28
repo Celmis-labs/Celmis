@@ -35,7 +35,7 @@ the other repository open.
 
 ---
 
-## Seven things people do with it
+## Eight things people do with it
 
 | | |
 |---|---|
@@ -43,8 +43,9 @@ the other repository open.
 | **A new engineer has a question a senior would have to answer** | Every one of those pulls someone experienced out of flow, at the moment they are already covering. The codebase answers instead, with file:line citations → [Ask the code](#ask-the-code) |
 | **Two teams share an integration and neither can read the other's repository** | Load it, grant the right to ask, and deny the paths that must stay private. They get answers; the credentials are refused at the source → [Who can see what](#who-can-see-what) |
 | **A customer or an auditor asks for your SBOM** | One button, CycloneDX, plus an evidence pack whose manifest lets them verify it without trusting you → [Dependencies, SBOM and the evidence pack](#dependencies-sbom-and-the-evidence-pack) |
-| **A vulnerability lands in a dependency** | *Fix with Claude* hands an embedded session the repository, the package and the finding. It edits, the runner pushes a branch and opens a PR → [Fix it from here](#fix-it-from-here) |
+| **A vulnerability lands in a dependency** | *Fix with Claude* hands an embedded session the repository, the package and the finding. It edits, the runner pushes a branch and opens a PR → [Fix with Claude](#fix-with-claude) |
 | **A pull request needs reviewing** | Agents read the diff — and, where the graph is built, who else calls what is being changed, including from another repository → [Pull-request review](#pull-request-review) |
+| **An alert fires at 02:00 and you are not at a desk** | It lands in Celmis, a web push reaches your phone, and *Fix with Claude* opens a session already holding the alert. The runner opens the pull request → [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone) |
 | **Your own agent or editor needs to understand the codebase** | Point it at `/mcp/`. Eighteen tools over the same index, under the same access rules — no second copy of your code anywhere → [Connect Claude Code and other MCP clients](#connect-claude-code-and-other-mcp-clients) |
 
 The first three are the ones a code-review tool does not do at all, and they are
@@ -69,7 +70,7 @@ of every finding it scored false, and the command that reproduces both are in
 ## Table of contents
 
 - [What that buys you that a diff-only tool cannot](#what-that-buys-you-that-a-diff-only-tool-cannot)
-- [Seven things people do with it](#seven-things-people-do-with-it)
+- [Eight things people do with it](#eight-things-people-do-with-it)
 - [Three numbers](#three-numbers)
 - [Quick start](#quick-start)
 - [First user and admin](#first-user-and-admin)
@@ -77,7 +78,8 @@ of every finding it scored false, and the command that reproduces both are in
 - [Ask the code](#ask-the-code)
 - [Pull-request review](#pull-request-review)
 - [Dependencies, SBOM and the evidence pack](#dependencies-sbom-and-the-evidence-pack)
-- [Fix it from here](#fix-it-from-here)
+- [Fix with Claude](#fix-with-claude)
+- [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone)
 - [Who can see what](#who-can-see-what)
 - [Languages and formats](#languages-and-formats)
 - [Deterministic checks — no model, no false positives](#deterministic-checks-no-model-no-false-positives)
@@ -277,7 +279,7 @@ looks for: **an ecosystem nobody scanned reports zero vulnerabilities exactly
 like a clean one.** Coverage is shown next to the findings — which auditor
 produced each result, and, more usefully, what went unchecked and why.
 
-## Fix it from here
+## Fix with Claude
 
 Finding something is half a loop. An embedded Claude Code session runs **inside**
 the installation, edits the checkout, and the runner commits, pushes a branch and
@@ -342,6 +344,55 @@ reading before you grant an agent anything:
 
 Connection is a setup token, held per user or per workspace. The API never
 returns it once saved — only whether it is there and whether it still works.
+
+## Alerts, and fixing from a phone
+
+The loop above starts from a dependency finding. It also starts from production.
+
+Point any monitoring system at the workspace's ingest URL and its alerts land in
+Celmis:
+
+```
+POST /webhook/alerts/{workspace_id}.{secret}
+```
+
+Grafana's unified alerting webhook is parsed as-is; anything else can post
+`{"title", "body", "severity", "repo"}`. The secret half is stored Fernet-encrypted
+per workspace and compared in constant time. The endpoint is **unauthenticated by
+design** — monitoring systems cannot do OAuth — and **tenant-bound by
+construction**: a token can only ever write into the workspace it belongs to.
+
+What that buys is the route with no laptop in it:
+
+1. An alert fires. It reaches Celmis and a web push notification reaches your phone
+   — real web push, VAPID and a service worker, so it arrives whether or not the tab
+   is open.
+2. You open it. The alert carries its repository, because `route_incident` can take
+   a stack trace and say which repository and which owner it belongs to.
+3. You press **Fix with Claude**. The session opens already holding the alert — not
+   an empty chat.
+4. The runner commits, pushes a branch and opens the pull request.
+
+![An alert, ingested and bound to its repository](docs/images/alert-to-fix.png)
+
+None of those four steps needs a checkout, a terminal, or a machine you trust. The
+work happens inside your own installation; the phone is a screen for it.
+
+The same page lists every alert the workspace has received, so an alert that nobody
+acted on is visible rather than lost in a channel.
+
+**What is written down while this happens.** Two separate records, and they answer
+different questions:
+
+- **The audit trail** — append-only JSONL, rotated by size, filterable by time,
+  mode, operation and repository, exportable as CSV. It answers *who did what, to
+  which repository, when*. Retention defaults to 90 days and the active file is
+  never deleted, only rotated archives.
+- **Resource history** — samples and aggregates over the installation itself,
+  exportable as CSV for a sizing sheet. It answers *what did this cost to run*.
+
+An agent session that edits a repository at two in the morning from somebody's phone
+is exactly the kind of event that has to be reconstructable afterwards. It is.
 
 ## Who can see what
 
