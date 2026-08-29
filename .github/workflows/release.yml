@@ -52,6 +52,17 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      # `github.sha` is the head of the ref the run was DISPATCHED from, which
+      # on a workflow_dispatch is the branch — not the tag checked out above.
+      # v0.1.11 shipped the tag's tree labelled with main's commit, and the
+      # server reads that label back as the version it displays: it reported
+      # 0.1.11+f2a2b39 while running c2a5e48. The AGPL §13 footer offers source
+      # at that revision, so the label has to name the tree inside the image.
+      # Ask the checkout, which is the only thing that knows.
+      - name: The commit this build actually contains
+        id: src
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       # THE TAG AND THE LITERAL HAVE TO AGREE, and this is the only place
       # that can tell. `src/__init__.py` holds the version as a literal on
       # purpose — it is readable without installing the package — but a
@@ -141,7 +152,7 @@ jobs:
           # after every move.
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ steps.src.outputs.sha }}
             org.opencontainers.image.licenses=AGPL-3.0-or-later
           build-args: |
             CELMIS_VERSION=${{ steps.img.outputs.version }}
