@@ -20,6 +20,10 @@ derives it from there.
 
 ## [Unreleased]
 
+Nothing since `v0.1.13`.
+
+## [0.1.13] — 2026-08-29
+
 ### Fixed
 
 - **An alert's link was correct and would not open.** Google Chat refuses a
