@@ -20,7 +20,16 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.12`.
+### Fixed
+
+- **An alert's link was correct and would not open.** Google Chat refuses a
+  plain-http link to a bare IP address: the card's Open button renders inert,
+  and following it reports the site as unavailable — while
+  `http://<ip>/alerts` was serving a redirect to the login page the whole
+  time. Reached by IP is how an installation works before somebody puts a
+  hostname in front of it. The address now goes into the card as text as well,
+  which no link policy can switch off, so it can be copied when the button
+  will not move.
 
 ## [0.1.12] — 2026-08-29
 

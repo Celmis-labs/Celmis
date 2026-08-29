@@ -191,12 +191,22 @@ def _post_google_chat(chan, *, title, body_md, severity, link_url):
         }],
     }
     if link_url:
-        card["cardsV2"][0]["card"]["sections"][0]["widgets"].append({
+        widgets = card["cardsV2"][0]["card"]["sections"][0]["widgets"]
+        widgets.append({
             "buttonList": {"buttons": [{
                 "text": "Open",
                 "onClick": {"openLink": {"url": link_url}},
             }]},
         })
+        # AND as text, because the button is not always allowed to work. Google
+        # Chat will not open a plain-http link to a bare IP address: the button
+        # renders inert, and following it reports the site as unavailable — the
+        # address was right the whole time. That is the address of every
+        # installation reached by IP rather than by hostname, which this product
+        # supports on purpose and which the alert must not become useless on.
+        # No link policy can disable a string, so the address is copyable even
+        # when the button refuses to move.
+        widgets.append({"textParagraph": {"text": link_url}})
     _post_json(chan["webhook_url"], card)
 
 
