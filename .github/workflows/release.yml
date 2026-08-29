@@ -92,39 +92,23 @@ jobs:
           echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
           echo "tag=$ref" >> "$GITHUB_OUTPUT"
 
-          # :LATEST BELONGS TO THE NEWEST RELEASE, NOT TO WHATEVER WAS BUILT
-          # LAST. This list used to carry `:latest` unconditionally, so
-          # rebuilding an old tag — a moved tag, a rerun, a cache
-          # investigation — repointed it at old code while every log line
-          # stayed green. `.env.example` ships CELMIS_TAG=latest and compose
-          # falls back to it, so that tag is exactly what a first-time
-          # install pulls.
+          # THE VERSION TAG, AND NOTHING ELSE. Whether the moving tag follows
+          # is decided once, in `publish`, after every image in this matrix
+          # has succeeded — see the step there.
           #
-          # The decision is a script because a YAML expression cannot be run
-          # in a test, and tests/ci/test_latest_means_the_newest_release.py
-          # runs this one.
-          #
-          # ls-remote rather than `git tag`: the checkout is shallow and
-          # carries only the tag being built.
-          #
-          # A TREE WITHOUT THE SCRIPT IS A TREE FROM BEFORE THIS FIX, which is
-          # to say an old release — and an old release is exactly what must
-          # not move :latest. So its absence is an answer, not an error. The
-          # checkout follows `inputs.tag`, so rebuilding v0.1.0 checks out
-          # v0.1.0, where this file does not exist.
-          if [ -f scripts/should_move_latest.py ]; then
-            move=$(git ls-remote --tags --refs origin \
-                   | sed 's|.*refs/tags/||' \
-                   | python3 scripts/should_move_latest.py "$ref")
-          else
-            move=false
-            echo "no decision script in this tree — an older release; :latest stays"
-          fi
-          echo "moves_latest=$move"
+          # Each leg used to decide for itself and push the moving tag as it
+          # finished, so a slow one split it across two versions: on v0.1.11
+          # the web leg ran 61 minutes against its usual six, on a release
+          # that changed nothing under web/, and left api and sandbox on the
+          # new one with web on the old. `.env.example` ships
+          # CELMIS_TAG=latest and compose falls back to it, so during that
+          # window a first-time `docker compose up` installed a new API
+          # against an old front end. The note at the top of this file — "a
+          # half-published release is worse than a slow one" — was describing
+          # this matrix.
           {
             echo "tags<<TAGS_EOF"
             echo "$repo:$ref"
-            if [ "$move" = "true" ]; then echo "$repo:latest"; fi
             echo "TAGS_EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -215,21 +199,55 @@ jobs:
           cat notes.md >> "$GITHUB_OUTPUT"
           echo "NOTES_EOF" >> "$GITHUB_OUTPUT"
 
+      - name: Does the moving tag move to this one?
+        id: latest
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          # ONE DECISION, TWO CONSUMERS — the image tag below and the GitHub
+          # Release's own `latest` flag. They were computed separately from
+          # the same inputs, which is a place for two answers to appear.
+          #
+          # False until proved otherwise: v0.1.10 is lexicographically SMALLER
+          # than v0.1.9, so anything sorting these as text points "latest" at
+          # the older release, and a rebuild of an old tag must not move it at
+          # all. A tree that predates the script cannot decide, and answers no.
+          move=false
+          if [ -f scripts/should_move_latest.py ]; then
+            move=$(git ls-remote --tags --refs origin \
+                   | sed 's|.*refs/tags/||' \
+                   | python3 scripts/should_move_latest.py "$tag")
+          else
+            echo "no decision script in this tree — an older release; it stays"
+          fi
+          echo "move=$move" >> "$GITHUB_OUTPUT"
+          echo "moves=$move"
+
+      - name: Move the tag, once, for all three images
+        if: steps.latest.outputs.move == 'true'
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # Retag the manifest LIST, not one architecture: `imagetools create`
+          # copies the index by digest, so both platforms follow and nothing
+          # is rebuilt. This job `needs: images`, so reaching here means all
+          # three published — which is the whole point of doing it here and
+          # not in the matrix.
+          for name in api web sandbox; do
+            repo="ghcr.io/$owner/celmis-$name"
+            docker buildx imagetools create -t "$repo:latest" "$repo:$tag"
+            echo "  $repo:latest -> $tag"
+          done
+
       - name: Publish the Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${{ inputs.tag || github.ref_name }}"
-          # `--latest` is decided by the same rule the image tag uses, and for
-          # the same reason: v0.1.10 is lexicographically SMALLER than v0.1.9,
-          # so anything sorting these as text points "latest" at the older
-          # release. A rebuild of an old tag must not move it either.
-          latest=false
-          if [ -f scripts/should_move_latest.py ]; then
-            latest=$(git ls-remote --tags --refs origin \
-                     | sed 's|.*refs/tags/||' \
-                     | python3 scripts/should_move_latest.py "$tag")
-          fi
+          # The same answer the image tag used, read from the step above
+          # rather than recomputed — see the note there.
+          latest="${{ steps.latest.outputs.move }}"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release edit "$tag" --notes-file notes.md --latest="$latest"
           else
