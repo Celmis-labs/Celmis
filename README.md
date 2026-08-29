@@ -2,17 +2,27 @@
 
 # Celmis
 
-**Self-hosted code intelligence — ask your codebases, review pull requests, and produce the evidence an auditor asks for**
+**A self-hosted platform for most of a development cycle, and the observability that feeds it — from the alert to the fixed pull request**
 
 [**celmis-labs.github.io**](https://celmis-labs.github.io) · [Documentation](https://celmis-labs.github.io/docs/) · [Quick start](#quick-start) · [Results](#results)
 
 </div>
 
-Celmis reads your repositories once and keeps a symbol graph of them. Everything
-else — questions, reviews, dependency audits, generated documentation — is a
-different way of reading that graph. It runs on one machine under
-`docker compose`, with the model provider of your choice behind it, and nothing
-leaves your network except the calls you configure.
+An alert arrives from a service you run. Celmis already knows which repository
+that service is and who owns it, so the fix starts there: an embedded Claude Code
+session — on *your* subscription, inside *your* installation — edits the code, and
+the runner commits, pushes a branch and opens a pull request. On one measured
+finding that took **220 seconds**, from whatever device the alert reached first.
+
+That loop is the product. It closes because everything sits on one index: a symbol
+graph Celmis builds from your repositories once. The same index answers questions
+that cross repository boundaries, reviews pull requests, audits dependencies into a
+CycloneDX SBOM and a verifiable evidence pack, generates documentation, and serves
+eighteen tools over MCP — surfaces worth having, and none of them the point on
+their own.
+
+It runs on one machine under `docker compose`, with the model provider of your
+choice behind it, and nothing leaves your network except the calls you configure.
 
 In the oldest telling, Kelmis was the smelter — one of the three Idaean Dactyls,
 alongside Damnameneus the hammer and Acmon the anvil, to whom the working of iron
