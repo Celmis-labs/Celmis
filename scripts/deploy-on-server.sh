@@ -130,7 +130,14 @@ done
 # Idempotent, and a missing iptables is a warning rather than a failure — a
 # deploy must not stop over a hardening rule on a host that does not use
 # iptables at all (nftables-only, a managed runtime, a rootless daemon).
-SANDBOX_SUBNET="$(grep -E '^SANDBOX_NET_SUBNET=' .env 2>/dev/null | cut -d= -f2- | tr -d '[:space:]')"
+# `|| true` because grep exits 1 when the setting is simply absent, and under
+# `set -euo pipefail` a failing substitution in an assignment ends the deploy —
+# three lines after the comment that says a deploy must not stop over a
+# hardening rule, and one line before the default written for exactly this
+# case. It aborted AFTER `up -d`: new containers running, version unstamped,
+# health never checked.
+SANDBOX_SUBNET="$(grep -E '^SANDBOX_NET_SUBNET=' .env 2>/dev/null \
+                    | cut -d= -f2- | tr -d '[:space:]' || true)"
 : "${SANDBOX_SUBNET:=172.28.90.0/24}"
 if command -v iptables >/dev/null 2>&1; then
   # -C tests for the rule; a non-zero exit means it is not there yet.

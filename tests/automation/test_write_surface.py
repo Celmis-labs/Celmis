@@ -250,7 +250,45 @@ def test_a_workspace_owner_can_register_a_client_but_not_widen_themselves():
     assert "held_scopes" in head and "is_admin" in head, (
         "a non-platform-admin must be held to the scopes they actually hold"
     )
-    # Listing and deleting other people's clients stays platform-admin work.
-    for handler in ("async def list_clients(", "async def delete_client("):
-        h = oauth.find(handler)
-        assert "require_admin" in oauth[h:h + 400], handler
+    # Listing and deleting OTHER PEOPLE'S clients stays platform-admin work.
+    #
+    # This used to be spelled `require_admin`, which also locked the registrant
+    # out of the client they had just made: you could mint a credential and
+    # then neither see it nor revoke it. Both handlers now take a workspace
+    # admin and narrow by ownership instead, which is strictly less than the
+    # old 403 gave a non-platform-admin.
+    #
+    # Read with ast rather than grepped: `created_by` appears in the body of
+    # list_clients whatever it does, because the summary reports that field —
+    # a substring check would pass on a handler with no filter at all.
+    import ast
+
+    tree = ast.parse(oauth)
+    for handler in ("list_clients", "delete_client"):
+        fn = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == handler
+        )
+        compares = [
+            n for n in ast.walk(fn)
+            if isinstance(n, ast.Compare)
+            and any(
+                isinstance(side, ast.Attribute) and side.attr == "created_by"
+                for side in [n.left, *n.comparators]
+            )
+            and any(
+                isinstance(side, ast.Attribute) and side.attr == "email"
+                for side in [n.left, *n.comparators]
+            )
+        ]
+        assert compares, (
+            f"{handler} does not compare created_by against the caller's "
+            f"email, so it either hands out or acts on somebody else's clients"
+        )
+        checks_admin = any(
+            isinstance(n, ast.Attribute) and n.attr == "is_admin"
+            for n in ast.walk(fn)
+        )
+        assert checks_admin, (
+            f"{handler} narrows by owner but never lets a platform admin past"
+        )

@@ -20,7 +20,41 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.14`.
+### Security
+
+- **The OAuth consent screen echoed the query string into the page.**
+  `_render_consent` builds HTML with an f-string. `client_id`, `redirect_uri`
+  and `scope` are checked against the registered client first, but `state` and
+  `code_challenge` are not checked against anything — they cannot be, they are
+  the caller's own opaque data — and both land inside `value="..."`. Measured
+  against a running box, `state='"><b>PWNED</b>'` produced a live element on
+  the API's origin, which is the web app's origin too, so a script there runs
+  as the signed-in operator.
+
+  The precondition is self-serve: signup is open, a new account owns its
+  personal workspace, `require_workspace_admin` accepts an owner, and
+  `POST /oauth/register` then hands out a `client_id` with attacker-chosen
+  `redirect_uris` and `name`. `client_name` is rendered too, so the same
+  payload also works with no query string at all. Every value is escaped now.
+
+### Fixed
+
+- **You could register an OAuth client and then never see or revoke it.**
+  Registration takes a workspace admin — deliberately, "registering one grants
+  no authority the registrant does not already have" — while listing and
+  deleting took a platform admin. The argument that lets you make a credential
+  is the same one that lets you unmake it. Both now take a workspace admin and
+  narrow by ownership: platform admins still see and delete everything, and
+  everyone else sees and deletes their own, which is strictly more than the
+  403 they used to get.
+- **A missing setting in `.env` ended a deploy after the containers had
+  swapped.** `deploy-on-server.sh` read the sandbox subnet with a `grep`
+  pipeline, and grep exits 1 when the line is simply absent. Under
+  `set -euo pipefail` that ends the script — three lines below the comment
+  promising a deploy must not stop over a hardening rule, and one line above
+  the default written for exactly this case, which was never reached. It
+  aborted after `up -d`: new containers running, the version never stamped,
+  the health check never run.
 
 ## [0.1.14] — 2026-08-29
 

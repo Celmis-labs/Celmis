@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import logging
 import secrets
 import uuid
@@ -35,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import get_current_user, require_admin, require_workspace_admin
+from src.api.deps import get_current_user, require_workspace_admin
 from src.db.models import OAuthAuthCode, OAuthClient, OAuthRefreshToken
 from src.db.session import get_async_session
 from src.users import User
@@ -82,11 +83,21 @@ class ClientSummary(BaseModel):
 @router.get("/clients", response_model=list[ClientSummary])
 async def list_clients(
     session: AsyncSession = Depends(get_async_session),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_workspace_admin),
 ) -> list[ClientSummary]:
-    rows = (await session.scalars(
-        select(OAuthClient).order_by(OAuthClient.created_at.desc())
-    )).all()
+    """Platform admins see every client; everybody else sees their own.
+
+    This asked for a platform admin, while registration asks for a workspace
+    admin — so the person who registered a client could neither list it nor
+    delete it afterwards. Minting a credential you can never see again is the
+    wrong way round. This is strictly narrower than the old behaviour for
+    anyone who is not a platform admin: they used to get a 403, not somebody
+    else's clients.
+    """
+    stmt = select(OAuthClient).order_by(OAuthClient.created_at.desc())
+    if not user.is_admin:
+        stmt = stmt.where(OAuthClient.created_by == user.email)
+    rows = (await session.scalars(stmt)).all()
     return [
         ClientSummary(
             client_id=r.client_id, name=r.name,
@@ -104,11 +115,22 @@ async def list_clients(
 async def delete_client(
     client_id: str,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_workspace_admin),
 ) -> None:
     row = await session.get(OAuthClient, client_id)
     if row is None:
         return
+    # Registration is open to a workspace admin — "registering one grants no
+    # authority the registrant does not already have" — but deletion asked for
+    # a PLATFORM admin, so whoever created a client could not revoke it. A
+    # credential you can mint and cannot withdraw is the wrong way round; the
+    # argument that lets you make it is the same one that lets you unmake it.
+    # Platform admins keep deleting anything; everyone else deletes their own.
+    if not user.is_admin and row.created_by != user.email:
+        raise HTTPException(
+            status_code=403,
+            detail="only the client's creator or a platform admin may delete it",
+        )
     # Also revoke all outstanding refresh tokens for this client.
     tokens = (await session.scalars(
         select(OAuthRefreshToken).where(OAuthRefreshToken.client_id == client_id)
@@ -551,7 +573,31 @@ async def _revoke_family(session: AsyncSession, family_id: str) -> None:
 
 
 def _render_consent(**kwargs) -> str:
-    scopes = kwargs["scope"] or "(no scopes requested)"
+    """The consent screen, with every interpolated value escaped.
+
+    This is an f-string building HTML, and four of the values in it reach it
+    straight from the query string. `client_id`, `redirect_uri` and `scope` are
+    checked against the registered client before we get here, but `state` and
+    `code_challenge` are not checked against anything — they cannot be, they
+    are the caller's own opaque data — and both land inside value="...".
+
+    Measured against a running box, `state='"><b>PWNED</b>'` produced
+
+        <input type="hidden" name="state" value=""><b>PWNED</b>">
+
+    a live element on the API's origin, which is the web app's origin too. A
+    script there runs as the signed-in operator. Reaching it needs a client_id
+    and one of its redirect_uris, and a client_id is not a secret — it is in
+    the MCP configuration people paste around.
+
+    `client_name` comes from the database rather than the query, and is escaped
+    on the same principle: a workspace admin registering a client must not be
+    able to write markup into a page another person is shown.
+    """
+    e = {k: html.escape(str(v if v is not None else ""), quote=True)
+         for k, v in kwargs.items()}
+    scopes = e["scope"] or "(no scopes requested)"
+    kwargs = e
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Celmis — authorize</title>
 <style>
