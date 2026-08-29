@@ -20,7 +20,31 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.15`.
+### Fixed
+
+- **The incremental re-index could not move a single production clone.**
+  `RepoSync.clone_or_update` finishes with `_chmod_readonly` so analysers
+  physically cannot edit the code: directories under the repository root become
+  0550 and files 0440. Unlinking a file needs write on its *directory*, so
+  `git reset --hard` died on the first path inside any subdirectory —
+  `error: unable to unlink old 'src/contract.ts': Permission denied` — measured
+  on a copy of a production clone. `_advance_to_remote` returned False, the
+  pass recorded "unchanged", and the row carried `last_indexed_at = now` beside
+  a stale `last_indexed_sha`: one column saying indexed-just-now and the next
+  saying behind, re-queued daily, for ever. `RepoSync._pull` already brackets
+  its own pull with `_chmod_writable`; this path did not, so it worked in a
+  test whose clone was writable and never once where it shipped.
+
+  The tests that were written to prove this path really pulls all pass with the
+  bug reintroduced — they used a writable clone with only top-level files. The
+  fixture now applies the project's own `_chmod_readonly` and keeps a file in a
+  subdirectory, which is where the mode bites.
+- **A fetch that failed was reported as a successful advance.** The fetch ran
+  with `check=False`, so an unreachable remote or an expired token left
+  `origin/<branch>` at whatever it last said, and the reset then "succeeded"
+  onto that stale ref and returned True — the confusion between "could not
+  update" and "nothing to update" that this function's own docstring says it
+  exists to end.
 
 ## [0.1.15] — 2026-08-30
 

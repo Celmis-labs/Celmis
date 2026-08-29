@@ -65,6 +65,12 @@ def remote_and_clone(tmp_path: Path):
     subprocess.run(["git", *_ISOLATED, "clone", "-q", str(remote), str(author)],
                    check=True)
     (author / "a.py").write_text("def a(): pass\n")
+    # A file in a SUBDIRECTORY, because that is where the read-only mode bites:
+    # unlinking needs write on the containing directory, and `_chmod_readonly`
+    # leaves the repository root alone while setting every directory under it
+    # to 0550. A fixture with only top-level files cannot see the difference.
+    (author / "src").mkdir()
+    (author / "src" / "one.py").write_text("ONE = 1\n")
     _git("add", "-A", cwd=author)
     _git("commit", "-qm", "first", cwd=author)
     _git("push", "-q", "origin", f"HEAD:{BRANCH}", cwd=author)
@@ -75,6 +81,8 @@ def remote_and_clone(tmp_path: Path):
     first = _git("rev-parse", "HEAD", cwd=clone)
 
     (author / "b.py").write_text("def b(): pass\n")
+    (author / "src" / "one.py").write_text("ONE = 2\n")
+    (author / "src" / "two.py").write_text("TWO = 2\n")
     _git("add", "-A", cwd=author)
     _git("commit", "-qm", "second", cwd=author)
     _git("push", "-q", "origin", f"HEAD:{BRANCH}", cwd=author)
@@ -199,3 +207,134 @@ def test_run_index_itself_brings_the_clone_forward(remote_and_clone, monkeypatch
         f"a moved remote was reported as unchanged: {result}"
     )
     assert "called" not in unchanged
+
+
+# ─── the filesystem the clone actually lives on ──────────────────────
+#
+# Everything above runs against a writable clone, and every one of those tests
+# passed while `_advance_to_remote` could not move a single production
+# repository. `RepoSync.clone_or_update` ends with `_chmod_readonly` so that
+# analysers physically cannot edit the code: directories under the root become
+# 0550, files 0440. Unlinking a file needs write on its DIRECTORY, so
+# `git reset --hard` died on the first path inside `src/` —
+#
+#   error: unable to unlink old 'src/contract.ts': Permission denied
+#   fatal: Could not reset index file to revision 969fa59
+#
+# measured on a copy of a production clone. `RepoSync._pull` brackets its own
+# pull with `_chmod_writable`; this path did not.
+#
+# The fixture calls the project's own `_chmod_readonly` rather than setting
+# modes by hand, so it keeps tracking whatever that function decides to do.
+
+
+@pytest.fixture
+def readonly_clone(remote_and_clone):
+    """The clone as `RepoSync` leaves it: read-only, nested directories and all."""
+    from src.sync.clone import _chmod_readonly, _chmod_writable
+
+    clone = remote_and_clone["clone"]
+    _chmod_readonly(clone)
+    try:
+        yield remote_and_clone
+    finally:
+        # tmp_path cleanup cannot remove a 0550 directory either.
+        _chmod_writable(clone)
+
+
+def test_the_advance_moves_a_read_only_clone(readonly_clone):
+    """The production shape, which is the only shape that matters."""
+    from src.sync.incremental import _advance_to_remote
+
+    clone = readonly_clone["clone"]
+    assert (clone / "src" / "one.py").read_text() == "ONE = 1\n"
+
+    assert _advance_to_remote(clone) is True, (
+        "the read-only tree stopped the reset; every freshness re-index is a "
+        "no-op and the answers come from the old code"
+    )
+    assert _git("rev-parse", "HEAD", cwd=clone) == readonly_clone["second"]
+    assert (clone / "src" / "two.py").exists(), (
+        "the pushed file is not on disk to be parsed"
+    )
+    assert (clone / "src" / "one.py").read_text() == "ONE = 2\n", (
+        "the file that CHANGED still holds its old contents"
+    )
+
+
+def test_the_tree_is_read_only_again_afterwards(readonly_clone):
+    """The safeguard is borrowed for the reset, not spent on it."""
+    import stat
+
+    from src.sync.incremental import _advance_to_remote
+
+    clone = readonly_clone["clone"]
+    _advance_to_remote(clone)
+
+    src_mode = stat.S_IMODE((clone / "src").stat().st_mode)
+    file_mode = stat.S_IMODE((clone / "src" / "two.py").stat().st_mode)
+    assert not src_mode & stat.S_IWUSR, f"src/ left writable ({src_mode:o})"
+    assert not file_mode & stat.S_IWUSR, f"src/two.py left writable ({file_mode:o})"
+
+
+def test_a_failed_advance_still_restores_the_safeguard(readonly_clone, monkeypatch):
+    """A reset that dies must not leave the tree open behind it."""
+    import stat
+    import subprocess as sp
+
+    from src.sync import incremental
+
+    real = sp.run
+
+    def explode(cmd, *a, **kw):
+        if isinstance(cmd, list) and "reset" in cmd:
+            raise OSError("git vanished")
+        return real(cmd, *a, **kw)
+
+    monkeypatch.setattr(incremental.subprocess, "run", explode)
+    clone = readonly_clone["clone"]
+    assert incremental._advance_to_remote(clone) is False
+    assert not stat.S_IMODE((clone / "src").stat().st_mode) & stat.S_IWUSR
+
+
+def test_a_directory_that_is_not_a_repository_is_left_as_it_was(tmp_path):
+    """Only undo what this call did.
+
+    An early return happens before anything is made writable, so the restore
+    must not run — otherwise asking about a plain directory would silently
+    make it read-only.
+    """
+    import stat
+
+    from src.sync.incremental import _advance_to_remote
+
+    plain = tmp_path / "not-a-repo"
+    (plain / "sub").mkdir(parents=True)
+    (plain / "sub" / "f.txt").write_text("x")
+    before = stat.S_IMODE((plain / "sub").stat().st_mode)
+
+    assert _advance_to_remote(plain) is False
+    assert stat.S_IMODE((plain / "sub").stat().st_mode) == before, (
+        "a directory that was never touched came back read-only"
+    )
+
+
+def test_a_fetch_that_failed_is_not_an_advance(remote_and_clone):
+    """"Could not reach the remote" and "nothing changed" are opposite answers.
+
+    The fetch ran with check=False, so an unreachable remote left
+    `origin/<branch>` at whatever it said last time — and the reset then
+    succeeded onto that stale ref and returned True. The caller writes
+    last_indexed_at = now for code nobody fetched.
+    """
+    from src.sync.incremental import _advance_to_remote
+
+    clone = remote_and_clone["clone"]
+    _git("remote", "set-url", "origin",
+         str(clone.parent / "there-is-no-remote-here.git"), cwd=clone)
+
+    assert _advance_to_remote(clone) is False, (
+        "an unreachable remote was reported as a successful advance"
+    )
+    # And it did not move onto the stale ref it still had on disk.
+    assert _git("rev-parse", "HEAD", cwd=clone) == remote_and_clone["first"]

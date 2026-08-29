@@ -301,11 +301,49 @@ def _advance_to_remote(repo_path: Path) -> bool:
     conflict on a machine with no human at it is a repository that quietly
     stops updating.
     """
+    from src.sync.clone import _chmod_readonly, _chmod_writable
+
+    made_writable = False
     try:
         if not (repo_path / ".git").exists():
             return False
-        subprocess.run(["git", "-C", str(repo_path), "fetch", "--all", "--quiet"],
-                       check=False, timeout=120)
+        # THE CLONE IS READ-ONLY AND THIS IS WHAT MOVES IT.
+        #
+        # `RepoSync.clone_or_update` finishes with `_chmod_readonly` so that
+        # analysers physically cannot edit the code: subdirectories become 0550
+        # and files 0440. Unlinking a file needs write on its DIRECTORY, so
+        # `git reset --hard` dies on the first path in any subdirectory —
+        #
+        #   error: unable to unlink old 'src/contract.ts': Permission denied
+        #   fatal: Could not reset index file to revision 969fa59
+        #
+        # measured on a copy of a production clone. `check=True` then raised,
+        # this returned False, and the pass recorded "unchanged" for a
+        # repository whose remote had moved: `last_indexed_at = now` beside a
+        # stale `last_indexed_sha`, every day, for ever.
+        #
+        # `RepoSync._pull` already brackets its own pull this way. This did
+        # not, so it worked in a test whose clone was writable and never once
+        # in the deployment it shipped to. The restore is in `finally`: a
+        # failed reset must not leave the tree writable behind it.
+        _chmod_writable(repo_path)
+        made_writable = True
+        # A FAILED FETCH IS NOT AN UP-TO-DATE REPOSITORY. This ran with
+        # check=False, so an unreachable remote, an expired token or a DNS
+        # failure left `origin/<branch>` at whatever it said last time — and
+        # the reset below then "succeeded" onto that stale ref and returned
+        # True. The caller records the result as an advance and the row says
+        # indexed-just-now for code nobody fetched. That is the exact confusion
+        # the docstring above says this function exists to end, so it has to
+        # end here too.
+        fetched = subprocess.run(
+            ["git", "-C", str(repo_path), "fetch", "--all", "--quiet"],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        if fetched.returncode != 0:
+            logger.warning("advance_fetch_failed path=%s rc=%s", repo_path,
+                           fetched.returncode)
+            return False
         branch = subprocess.run(
             ["git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True, text=True, timeout=10, check=True,
@@ -327,6 +365,15 @@ def _advance_to_remote(repo_path: Path) -> bool:
     except Exception as exc:  # noqa: BLE001
         logger.warning("advance_to_remote_failed path=%s err=%s", repo_path, exc)
         return False
+    finally:
+        # Only undo what this call did. Returning early — not a repository at
+        # all — must not leave a tree read-only that nobody asked us to touch.
+        if made_writable:
+            try:
+                _chmod_readonly(repo_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("advance_readonly_restore_failed path=%s err=%s",
+                               repo_path, exc)
 
 
 def _git_head(repo_path: Path) -> str | None:
