@@ -20,6 +20,10 @@ derives it from there.
 
 ## [Unreleased]
 
+Nothing since `v0.1.14`.
+
+## [0.1.14] — 2026-08-29
+
 ### Security
 
 - **The sender of an alert chose where its Open button pointed.** The link on
