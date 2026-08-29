@@ -9,10 +9,25 @@
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 #
-# Grafana:    http://localhost:3100  (admin / admin on first login)
+# EVERY PORT HERE IS BOUND TO 127.0.0.1, and reached over an ssh tunnel:
+#
+#   ssh -L 3100:localhost:3100 -L 9090:localhost:9090 you@your-server
+#
+# They were published without an address, which binds 0.0.0.0. Turning this
+# overlay on — the responsible thing to do — opened three ports to the
+# internet: Grafana, whose password defaulted to `admin`; Prometheus, which is
+# every metric the instance emits; and Loki, which has no authentication of
+# its own, so `POST /loki/api/v1/push` accepted writes from anyone who could
+# reach it. Log storage strangers can write to is not log storage.
+#
+# docker-compose.yml already knew: its postgres line carries a note that
+# `5432:5432` was verified answering from the open internet. The rule was
+# written down in the other file, which is exactly how this one drifted.
+#
+# Grafana:    http://localhost:3100  (GRAFANA_ADMIN_PASSWORD, required)
 # Prometheus: http://localhost:9090
 #
-# Celmis metrics are scraped from api:8000/metrics (см. prometheus.yml).
+# Celmis metrics are scraped from api:8000/metrics (see prometheus.yml).
 
 services:
   prometheus:
@@ -25,7 +40,7 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"
     ports:
-      - "${PROMETHEUS_HOST_PORT:-9090}:9090"
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090"
     restart: unless-stopped
 
   loki:
@@ -35,7 +50,7 @@ services:
     volumes:
       - loki-data:/loki
     ports:
-      - "${LOKI_HOST_PORT:-3105}:3100"
+      - "127.0.0.1:${LOKI_HOST_PORT:-3105}:3100"
     restart: unless-stopped
 
   promtail:
@@ -57,7 +72,11 @@ services:
     container_name: celmis-grafana
     environment:
       GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
-      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      # REQUIRED, not defaulted. This was `:-admin`, so the overlay came up
+      # with a password anyone can guess. An overlay that refuses to start is
+      # a worse afternoon and a better outcome than one that starts open.
+      # `./scripts/init-env.sh` generates it.
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?set it in .env — ./scripts/init-env.sh generates one}"
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - grafana-data:/var/lib/grafana
@@ -65,7 +84,7 @@ services:
       - ./observability/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
       - ./observability/dashboards:/var/lib/grafana/dashboards:ro
     ports:
-      - "${GRAFANA_HOST_PORT:-3100}:3000"
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-3100}:3000"
     restart: unless-stopped
     depends_on:
       - prometheus

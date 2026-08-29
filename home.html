@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Celmis — open-source self-hosted code intelligence</title>
+<meta name="description" content="Celmis indexes your repositories once and keeps a symbol graph of them. Ask questions across repositories, review pull requests, produce the evidence an auditor asks for. Runs on one machine under docker compose. AGPLv3.">
+<link rel="canonical" href="https://celmis-labs.github.io/">
+<meta name="theme-color" content="#FBFCFB" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#080A09" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Celmis — open-source self-hosted code intelligence">
+<meta property="og:description" content="Index your repositories once. Ask across them, review pull requests, produce auditable evidence. Self-hosted, AGPLv3.">
+<meta property="og:url" content="https://celmis-labs.github.io/">
+<meta property="og:image" content="https://celmis-labs.github.io/img/og-celmis-2.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Celmis — open-source self-hosted code intelligence over a symbol graph">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230B0F0D'/><circle cx='16' cy='16' r='4.5' fill='%233DBE83'/><circle cx='16' cy='16' r='9.5' fill='none' stroke='%233DBE83' stroke-opacity='.4' stroke-width='1.6'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/assets/site.css">
+<script type="application/ld+json">
+{
+ "@context": "https://schema.org",
+ "@graph": [
+  {
+   "@type": "SoftwareApplication",
+   "@id": "https://celmis-labs.github.io/#software",
+   "name": "Celmis",
+   "alternateName": "Celmis code intelligence",
+   "applicationCategory": "DeveloperApplication",
+   "applicationSubCategory": "Code intelligence, code review, software composition analysis",
+   "operatingSystem": "Linux, macOS, Windows (via Docker)",
+   "url": "https://celmis-labs.github.io/",
+   "codeRepository": "https://github.com/Celmis-labs/Celmis",
+   "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+   "isAccessibleForFree": true,
+   "description": "Self-hosted code intelligence. Celmis indexes your repositories once and keeps a symbol graph of them; asking questions, reviewing pull requests, auditing dependencies and generating documentation are all different ways of reading that one graph. It runs on a single machine under docker compose, with the model provider of your choice behind it, and nothing leaves your network except the calls you configure.",
+   "featureList": [
+    "Ask questions across several repositories at once, answered with file and line citations",
+    "Pull-request review that also reads who else calls what is being changed, including from another repository",
+    "CycloneDX SBOM and an evidence pack whose manifest of sha256 digests a third party can verify independently",
+    "Fix with Claude: an embedded session edits the repository and the runner opens a pull request",
+    "Per-repository access control with visibility levels and deny globs",
+    "MCP server exposing eighteen tools over the same index under the same access rules",
+    "23 languages parsed"
+   ],
+   "softwareRequirements": "Docker 24+ with Compose v2, about 4 GB of free RAM, and an API key for Google Gemini, Anthropic, OpenAI, OpenRouter, Groq or Mistral. Postgres and Qdrant are bundled.",
+   "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+   },
+   "publisher": {
+    "@id": "https://celmis-labs.github.io/#org"
+   }
+  },
+  {
+   "@type": "Organization",
+   "@id": "https://celmis-labs.github.io/#org",
+   "name": "Celmis Labs",
+   "url": "https://celmis-labs.github.io/",
+   "sameAs": [
+    "https://github.com/Celmis-labs"
+   ]
+  },
+  {
+   "@type": "WebSite",
+   "@id": "https://celmis-labs.github.io/#site",
+   "url": "https://celmis-labs.github.io/",
+   "name": "Celmis",
+   "publisher": {
+    "@id": "https://celmis-labs.github.io/#org"
+   },
+   "inLanguage": "en"
+  },
+  {
+   "@type": "FAQPage",
+   "@id": "https://celmis-labs.github.io/#faq",
+   "mainEntity": [
+    {
+     "@type": "Question",
+     "name": "What is Celmis?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Celmis is self-hosted code intelligence. It reads your repositories once and keeps a symbol graph of them. Asking questions, reviewing pull requests, auditing dependencies and generating documentation are all different ways of reading that one index."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Is Celmis open source?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Yes. Celmis is released under the GNU Affero General Public License v3.0, with one exception noted in the licence file. Anyone you run it for over a network is entitled to its source. The repository is at github.com/Celmis-labs/Celmis."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Does Celmis send my code anywhere?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "No. It runs on one machine under docker compose with Postgres and Qdrant bundled. The only outbound calls are the ones the operator configures for their chosen model provider. There is no telemetry and no licence check."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "How does Celmis score on the Martian Code Review Bench?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "17th of 50 on the offline set, stable under all three judges. That figure measures pull-request review on isolated single-repository pull requests, a set in which no symbol has consumers in a sibling service, so the cross-repository work Celmis is built around is not in the number. An audit of the 79 findings the benchmark scored false found 33 were real defects the gold set was silent about."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "What does Celmis need to run?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "Docker 24 or newer with Compose v2, roughly 4 GB of free RAM, and an API key for one of Google Gemini, Anthropic, OpenAI, OpenRouter, Groq or Mistral. A first install took 197 seconds from git clone to six healthy services on a clean server."
+     }
+    },
+    {
+     "@type": "Question",
+     "name": "Does Celmis make my product CRA compliant?",
+     "acceptedAnswer": {
+      "@type": "Answer",
+      "text": "No, and it deliberately does not claim to. Celmis produces an evidence pack — a CycloneDX SBOM, findings, a timeline and a manifest of sha256 digests — that a third party can verify without trusting the machine that produced it. Compliance is a judgement about your organisation, not an output a tool can emit."
+     }
+    }
+   ]
+  }
+ ]
+}
+</script>
+</head>
+<body>
+
+<header class="bar" id="bar">
+  <div class="wrap">
+    <a class="mark" href="#top"><span class="core"><i></i></span>celmis</a>
+    <nav>
+      <a href="/docs/">Docs</a>
+      <a href="/mcp/">MCP</a>
+      <a href="#writing" class="opt">Writing</a>
+      <a href="/about/">About</a>
+      <a href="https://github.com/Celmis-labs/Celmis">GitHub</a>
+      <button class="tog" id="tog" type="button" aria-label="Switch colour theme">
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.6v2.3M12 19.1v2.3M21.4 12h-2.3M4.9 12H2.6M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6M18.7 18.7l-1.6-1.6M6.9 6.9L5.3 5.3"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 14.4A8.6 8.6 0 1 1 9.6 3.5a6.9 6.9 0 0 0 10.9 10.9z"/></svg>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<div class="hero">
+  <canvas id="graph" aria-hidden="true"></canvas>
+  <p class="hint" id="hint">hover a node — its consumers light up</p>
+  <div class="wrap">
+    <h1 class="rv">Celmis<span class="sr"> — open-source, self-hosted code intelligence</span></h1>
+    <p class="lede rv">Self-hosted <em>code intelligence</em>.</p>
+    <p class="sub rv">Ask your codebases, review pull requests, and produce the evidence
+      an auditor asks for. One open-source index, read by your team and by your coding
+      agents over MCP.</p>
+    <div class="cta rv">
+      <a class="btn primary" href="#start">Install in 197 seconds <span class="arw">→</span></a>
+      <a class="btn" href="https://github.com/Celmis-labs/Celmis">Read the source</a>
+    </div>
+    <div class="badges rv">
+      <span class="badge"><b>AGPLv3</b> · source-available to every user</span>
+      <span class="badge"><span class="g">●</span> <b>self-hosted</b> · one machine</span>
+      <span class="badge"><b>23</b> languages parsed</span>
+      <span class="badge"><b>18</b> MCP tools</span>
+    </div>
+  </div>
+</div>
+
+<section class="intro">
+  <div class="wrap">
+    <h2 class="introq rv">What is Celmis?</h2>
+    <div class="introgrid">
+      <p class="rv">Celmis is open-source, self-hosted code intelligence. It reads your
+        repositories once and keeps a symbol graph of them —
+        everything else is a different way of reading that graph. It runs on one machine
+        under <code>docker compose</code>, with the model provider of your choice behind
+        it, and nothing leaves your network except the calls you configure.</p>
+      <p class="etym rv">In the oldest telling, <b>Kelmis</b> was the smelter — one of
+        three who found how to work iron with fire. The index does the reducing here; the
+        surfaces are what work the result.</p>
+    </div>
+  </div>
+</section>
+
+<section id="thesis">
+  <div class="wrap">
+    <p class="eyebrow rv">What a diff-only tool cannot do</p>
+    <div class="col">
+      <h2 class="rv">Ask a question that spans two repositories, and the answer quotes both</h2>
+      <p class="h2sub rv">The gateway and the payments service are separate repositories with
+        no shared code. The answer traces the call chain between them — then notices,
+        unprompted, that the Kafka topic name is hardcoded in both, and that changing one
+        silently breaks the other.</p>
+      <p class="h2sub rv">A reviewer that reads only the diff structurally cannot say that.
+        It never had the other repository open.</p>
+    </div>
+    <figure class="rv">
+      <div class="frame">
+        <img src="img/ask-the-code-cross-repo.png" width="1600" height="1217" loading="lazy" decoding="async"
+             alt="Celmis answering a question that spans two repositories, citing files in both">
+      </div>
+      <figcaption>One question, two repositories, two languages — with file and line
+        citations on both sides.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="uses" class="tint">
+  <div class="wrap">
+    <p class="eyebrow rv">Seven things people do with it</p>
+    <div class="col">
+      <h2 class="rv">Index once, then read it from whichever side of the work you are standing on</h2>
+    </div>
+    <div class="rows">
+      <div class="row rv">
+        <div class="who">You are a PM, a delivery lead or the client, and want to know what
+          state a group of projects is in</div>
+        <p class="what">Ask it. From any device, anywhere, without booking time from an
+          engineer and without a meeting whose only output is a paragraph.
+          <span class="to">ask the code</span></p>
+      </div>
+      <div class="row rv">
+        <div class="who">A new engineer has a question a senior would have to answer</div>
+        <p class="what">Every one of those pulls someone experienced out of flow, at the
+          moment they are already covering. The codebase answers instead, with
+          <code>file:line</code> citations.
+          <span class="to">ask the code</span></p>
+      </div>
+      <div class="row rv">
+        <div class="who">Two teams share an integration and neither can read the other's
+          repository</div>
+        <p class="what">Load it, grant the right to ask, and deny the paths that must stay
+          private. They get answers; the credentials are refused at the source.
+          <span class="to">access rules</span></p>
+      </div>
+      <div class="row rv">
+        <div class="who">A customer or an auditor asks for your SBOM</div>
+        <p class="what">One button, CycloneDX, plus an evidence pack whose manifest lets
+          them verify it without trusting you.
+          <span class="to">dependencies and evidence</span></p>
+      </div>
+      <div class="row rv">
+        <div class="who">A vulnerability lands in a dependency</div>
+        <p class="what"><em>Fix with Claude</em> hands an embedded session the repository,
+          the package and the finding. It edits, the runner pushes a branch and opens a
+          pull request.
+          <span class="to">fix it from here</span></p>
+      </div>
+      <div class="row rv">
+        <div class="who">A pull request needs reviewing</div>
+        <p class="what">Agents read the diff — and, where the graph is built, who else
+          calls what is being changed, including from another repository.
+          <span class="to">pull-request review</span></p>
+      </div>
+      <div class="row rv">
+        <div class="who">Your own agent or editor needs to understand the codebase</div>
+        <p class="what">Point it at <code>/mcp/</code>. Eighteen tools over the same index,
+          under the same access rules — no second copy of your code anywhere.
+          <a class="to" href="/mcp/">mcp server</a></p>
+      </div>
+    </div>
+    <p class="small dim rv" style="margin-top:28px;max-width:68ch">The first three are the
+      ones a code-review tool does not do at all, and they are the reason this is a platform
+      rather than a reviewer.</p>
+  </div>
+</section>
+
+<section id="numbers">
+  <div class="wrap">
+    <p class="eyebrow rv">Three numbers</p>
+    <div class="col"><h2 class="rv">Including the one that does not flatter us</h2></div>
+    <div class="nums rv">
+      <div><div class="v">197 s</div><div class="l">from <code>git clone</code> to six
+        healthy services, measured on a clean server</div></div>
+      <div><div class="v">$0.118</div><div class="l">per pull request reviewed, on the
+        model this ships with</div></div>
+      <div><div class="v brass">17<span class="ord">th</span> of 50</div>
+        <div class="l">on the Martian Code Review Bench offline set, under all three
+        judges</div></div>
+    </div>
+    <div class="col">
+      <p class="dim rv">That last one is deliberately unflattering, and it stays. It measures
+        one of the surfaces above — pull-request review on isolated single-repository pull
+        requests — and that set has no sibling service for a symbol to have consumers in.
+        The thing this product is built around is not in the number at all.</p>
+      <p class="dim rv">The table, an audit of every finding it scored false, and the command
+        that reproduces both are in the repository. Of the 79 findings the benchmark counted
+        against us, 33 turned out to be real defects the gold set was silent about.</p>
+    </div>
+  </div>
+</section>
+
+<section id="proof" class="tint">
+  <div class="wrap">
+    <p class="eyebrow rv">The other surfaces</p>
+    <div class="col"><h2 class="rv">Same index, read four more ways</h2></div>
+
+    <figure class="rv">
+      <div class="frame">
+        <img src="img/compliance-artefacts.png" width="1600" height="700" loading="lazy" decoding="async"
+             alt="Evidence pack contents: CycloneDX SBOM, findings, timeline and a manifest of sha256 digests">
+      </div>
+      <figcaption><b>Dependencies, SBOM and the evidence pack.</b> CycloneDX plus findings,
+        a timeline and a manifest of sha256 digests — so a third party can verify the pack
+        without trusting the machine that produced it. Celmis does not claim regulatory
+        compliance on your behalf, and says so in its own output.</figcaption>
+    </figure>
+
+    <figure class="rv">
+      <div class="frame">
+        <img src="img/fix-with-claude-prefilled.png" width="1600" height="1300" loading="lazy" decoding="async"
+             alt="Fix with Claude, pre-filled with the repository, package and finding">
+      </div>
+      <figcaption><b>Fix it from here.</b> The finding hands an embedded session the
+        repository, the package and the context — no copy-pasting the problem into a chat
+        window somewhere else.</figcaption>
+    </figure>
+
+    <figure class="rv">
+      <div class="frame">
+        <img src="img/pr-on-github.png" width="1600" height="1066" loading="lazy" decoding="async"
+             alt="A pull request opened on GitHub by the embedded session">
+      </div>
+      <figcaption><b>And it lands as a pull request.</b> The session edits, the runner
+        pushes a branch and opens the PR — the review still belongs to a human.</figcaption>
+    </figure>
+
+    <figure class="rv">
+      <div class="frame">
+        <img src="img/mcp-cross-repo.svg" loading="lazy" decoding="async"
+             alt="MCP transcript: one query resolving a symbol across two repositories">
+      </div>
+      <figcaption><b>Eighteen tools over MCP.</b> One query, two repositories, two
+        languages, the same contract symbol — from a client that has never checked either
+        of them out.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="writing">
+  <div class="wrap">
+    <p class="eyebrow rv">Writing</p>
+    <div class="col"><h2 class="rv">Things worth reading once</h2></div>
+    <ul class="doccards rv">
+      <li><a href="/writing/one-question-two-repositories/">
+        <span class="t">Introducing Celmis <span class="arw">→</span></span>
+        <p>Self-hosted code intelligence over a symbol graph: what it does, what it
+          refuses to claim, and how to run it on one machine. Start here.</p>
+        <span class="n">27 August 2026</span></a></li>
+      <li><a href="/cra/">
+        <span class="t">What the Cyber Resilience Act asks for on 11 September <span class="arw">→</span></span>
+        <p>The reporting clock starts in 2026; the bill of materials is not mandated until
+          2027. Most preparation advice has those two the wrong way round — and the second
+          is a prerequisite for the first.</p>
+        <span class="n">27 August 2026</span></a></li>
+    </ul>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <p class="eyebrow rv">Quick start</p>
+    <div class="col">
+      <h2 class="rv">Docker, a model key, and about four gigabytes of RAM</h2>
+      <p class="h2sub rv">Postgres and Qdrant are bundled — there is no external cluster to
+        provision, and no Python or Node.js install needed for the Docker flow. A free
+        Gemini key is enough to evaluate.</p>
+    </div>
+
+<pre class="rv"><span class="c"># clone, then generate every secret in the format it needs</span>
+git clone <span class="s">https://github.com/Celmis-labs/Celmis.git</span> celmis
+<span class="k">cd</span> celmis
+./scripts/init-env.sh
+
+<span class="c"># first boot pulls three images and applies migrations</span>
+docker compose --env-file .env up -d
+docker compose ps</pre>
+
+    <figure class="rv">
+      <div class="frame">
+        <img src="img/first-install-terminal.svg" loading="lazy" decoding="async"
+             alt="Terminal transcript of a first install reaching six healthy services">
+      </div>
+      <figcaption>A first install on a clean server, recorded end to end.</figcaption>
+    </figure>
+
+    <ul class="tiles">
+        <li class="rv">
+          <span class="ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3v5M15 3v5M7 8h10v4a5 5 0 0 1-10 0z"/><path d="M12 17v4"/></svg></span>
+          <b>Bring your own model</b>Google Gemini, Anthropic, OpenAI, OpenRouter, Groq
+          or Mistral — whichever you already pay for.
+        </li>
+        <li class="rv">
+          <span class="ico"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.5" cy="12" r="3.5"/><path d="M12 12h9M17.5 12v3.5M20 12v2.5"/></svg></span>
+          <b>Keys go in through the interface</b>Not into a file you might commit, and not
+          into an image you might push.
+        </li>
+        <li class="rv">
+          <span class="ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7.5 3v5.5c0 4.3-3 8-7.5 9.5-4.5-1.5-7.5-5.2-7.5-9.5V6z"/><path d="M4 20L20 4"/></svg></span>
+          <b>Nothing phones home</b>The only outbound calls are the ones you configure.
+          No telemetry, no licence check.
+        </li>
+    </ul>
+    <p class="rv" style="margin-top:30px">
+      <a class="btn" href="/docs/guide/#quick-start">Full instructions in the guide
+      <span class="arw">→</span></a>
+    </p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap fgrid">
+    <div>
+      <p><strong>Celmis</strong> is free software under the GNU Affero General Public
+        License v3.0, with one exception noted in the licence file. If you run it for
+        others over a network, they are entitled to its source.</p>
+      <p style="margin:0">Built by <a href="https://github.com/Celmis-labs">Celmis Labs</a>
+        · <a href="mailto:kostiantynmakoid@gmail.com">kostiantynmakoid@gmail.com</a>
+        · <a href="https://www.linkedin.com/in/constantine-makoid-86245b326" rel="me">LinkedIn</a></p>
+    </div>
+    <nav>
+      <a href="/docs/">Documentation</a>
+      <a href="/about/">About and contact</a>
+      <a href="https://github.com/Celmis-labs/Celmis">Source</a>
+      <a href="https://github.com/Celmis-labs/Celmis#results">Benchmark results</a>
+      <a href="https://github.com/Celmis-labs/Celmis/blob/main/LICENSE">Licence</a>
+      <a href="https://github.com/Celmis-labs/Celmis/issues">Issues</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  /* ---- theme: device default, manual override remembered ---- */
+  try {
+    var saved = localStorage.getItem('celmis-theme');
+    if (saved === 'dark' || saved === 'light') root.setAttribute('data-theme', saved);
+  } catch (e) {}
+
+  function currentlyDark() {
+    var attr = root.getAttribute('data-theme');
+    if (attr) return attr === 'dark';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+  var tog = document.getElementById('tog');
+  if (tog) tog.addEventListener('click', function () {
+    var next = currentlyDark() ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('celmis-theme', next); } catch (e) {}
+    draw();
+  });
+
+  /* ---- sticky bar hairline ---- */
+  var bar = document.getElementById('bar');
+  var onScroll = function () { bar.classList.toggle('stuck', window.scrollY > 8); };
+  onScroll();
+  window.addEventListener('scroll', onScroll, { passive: true });
+
+  /* ---- scroll reveal ---- */
+  var items = document.querySelectorAll('.rv:not(.hero .rv)');
+  if (!('IntersectionObserver' in window) || reduce.matches) {
+    items.forEach(function (n) { n.classList.add('in'); });
+  } else {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e, i) {
+        if (!e.isIntersecting) return;
+        var d = Math.min(i * 55, 220);
+        setTimeout(function () { e.target.classList.add('in'); }, d);
+        io.unobserve(e.target);
+      });
+    }, { rootMargin: '0px 0px -8% 0px', threshold: 0.06 });
+    items.forEach(function (n) { io.observe(n); });
+  }
+
+  /* ---- hero: a live symbol graph. Two repositories, edges across.
+          Point at a node and its consumers light up — the thing the product is for. ---- */
+  var cv = document.getElementById('graph');
+  if (!cv) return;
+  var hero = cv.parentNode;
+  var hint = document.getElementById('hint');
+  var ctx = cv.getContext('2d');
+  var nodes = [], links = [], adj = [], W = 0, H = 0, raf = null;
+
+  /* pointer, and the smoothed value the drawing actually follows */
+  var pt = { x: -1e4, y: -1e4, on: false };
+  var sm = { x: -1e4, y: -1e4 };
+  var REACH = 190;
+
+  function build() {
+    nodes = []; links = []; adj = [];
+    var clusters = [{ x: 0.60, y: 0.34 }, { x: 0.86, y: 0.70 }];
+    var per = W < 700 ? 8 : 12;
+    clusters.forEach(function (c, ci) {
+      var start = nodes.length;
+      for (var i = 0; i < per; i++) {
+        var a = (i / per) * Math.PI * 2 + ci * 0.8;
+        var r = (0.055 + 0.05 * ((i * 37 % 11) / 11)) * Math.min(W, H) * 1.55;
+        nodes.push({
+          hx: c.x * W + Math.cos(a) * r,
+          hy: c.y * H + Math.sin(a) * r * 0.8,
+          ph: i * 1.7 + ci * 2.3, am: 3 + (i % 4),
+          c: ci, x: 0, y: 0, lit: 0
+        });
+      }
+      for (var j = start; j < nodes.length; j++) {
+        links.push({ a: j, b: start + ((j - start + 1) % per), cross: false });
+        if (j % 3 === 0) links.push({ a: j, b: start + ((j - start + 4) % per), cross: false });
+      }
+    });
+    /* the point of the picture: a few edges cross the repository boundary */
+    [[2, per + 3], [5, per + 8 < nodes.length ? per + 8 : per + 1], [8 % per, per + 1]]
+      .forEach(function (e) {
+        if (nodes[e[0]] && nodes[e[1]]) links.push({ a: e[0], b: e[1], cross: true });
+      });
+    nodes.forEach(function () { adj.push([]); });
+    links.forEach(function (l, i) { adj[l.a].push(i); adj[l.b].push(i); });
+  }
+
+  function size() {
+    var r = cv.getBoundingClientRect();
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = r.width; H = r.height;
+    cv.width = Math.max(1, Math.round(W * dpr));
+    cv.height = Math.max(1, Math.round(H * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    build();
+  }
+
+  if (!reduce.matches) {
+    hero.addEventListener('mousemove', function (e) {
+      var r = cv.getBoundingClientRect();
+      pt.x = e.clientX - r.left; pt.y = e.clientY - r.top;
+      if (!pt.on) {
+        pt.on = true;
+        sm.x = pt.x; sm.y = pt.y;               /* no swoop in from off-screen */
+        if (hint) hint.classList.add('on');
+      }
+    }, { passive: true });
+    hero.addEventListener('mouseleave', function () {
+      pt.on = false; pt.x = -1e4; pt.y = -1e4;
+      if (hint) hint.classList.remove('on');
+    }, { passive: true });
+  }
+
+  function draw(t) {
+    t = t || 0;
+    var cs = getComputedStyle(root);
+    var col = (cs.getPropertyValue('--graph') || '#3DBE83').trim();
+    var brass = (cs.getPropertyValue('--brass') || '#C08A3E').trim();
+    var al = parseFloat(cs.getPropertyValue('--graph-a')) || 0.32;
+    var moving = !reduce.matches;
+
+    /* the pointer is followed, not snapped to */
+    sm.x += (pt.x - sm.x) * 0.12;
+    sm.y += (pt.y - sm.y) * 0.12;
+
+    /* parallax: the field leans away from the pointer, which reads as depth */
+    var px = 0, py = 0;
+    if (pt.on) { px = (sm.x - W / 2) * -0.022; py = (sm.y - H / 2) * -0.022; }
+
+    ctx.clearRect(0, 0, W, H);
+
+    var near = -1, nearD = REACH;
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      n.x = n.hx + px + (moving ? Math.sin(t / 2600 + n.ph) * n.am : 0);
+      n.y = n.hy + py + (moving ? Math.cos(t / 3300 + n.ph) * n.am : 0);
+      var d = Math.hypot(n.x - sm.x, n.y - sm.y);
+      n.prox = pt.on ? Math.max(0, 1 - d / REACH) : 0;
+      if (pt.on && d < nearD) { nearD = d; near = i; }
+    }
+
+    /* which edges belong to the node being pointed at */
+    var hot = {};
+    if (near >= 0) adj[near].forEach(function (li) { hot[li] = true; });
+
+    ctx.lineWidth = 1;
+    for (var k = 0; k < links.length; k++) {
+      var l = links[k], a = nodes[l.a], b = nodes[l.b];
+      if (!a || !b) continue;
+      var isHot = !!hot[k];
+      var prox = Math.max(a.prox, b.prox);
+      var base = l.cross ? 0.95 : 0.32;
+      ctx.strokeStyle = isHot && l.cross ? brass : col;
+      ctx.globalAlpha = Math.min(0.95, al * (base + prox * 0.9) + (isHot ? 0.42 : 0));
+      ctx.lineWidth = isHot ? 1.7 : 1;
+      ctx.setLineDash(l.cross ? [4, 5] : []);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+    ctx.setLineDash([]); ctx.lineWidth = 1;
+
+    for (var m = 0; m < nodes.length; m++) {
+      var q = nodes[m];
+      var base = q.c === 0 ? 2.6 : 2.1;
+      ctx.fillStyle = col;
+      ctx.globalAlpha = Math.min(1, al * (0.85 + q.prox * 1.5));
+      ctx.beginPath(); ctx.arc(q.x, q.y, base + q.prox * 2.2, 0, Math.PI * 2); ctx.fill();
+    }
+
+    /* the node under the pointer wears a ring, like a selected symbol */
+    if (near >= 0) {
+      var s0 = nodes[near];
+      ctx.globalAlpha = 0.85;
+      ctx.strokeStyle = col; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.arc(s0.x, s0.y, 11, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = 0.28;
+      ctx.beginPath(); ctx.arc(s0.x, s0.y, 17 + Math.sin(t / 420) * 2.2, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function loop(t) { draw(t); raf = requestAnimationFrame(loop); }
+
+  size();
+  if (reduce.matches) { draw(0); } else { raf = requestAnimationFrame(loop); }
+
+  var rt;
+  window.addEventListener('resize', function () {
+    clearTimeout(rt);
+    rt = setTimeout(function () { size(); draw(0); }, 140);
+  });
+
+  /* stop painting when the hero is off screen */
+  if ('IntersectionObserver' in window && !reduce.matches) {
+    new IntersectionObserver(function (es) {
+      es.forEach(function (e) {
+        if (e.isIntersecting && !raf) raf = requestAnimationFrame(loop);
+        else if (!e.isIntersecting && raf) { cancelAnimationFrame(raf); raf = null; }
+      });
+    }, { threshold: 0 }).observe(cv);
+  }
+})();
+</script>
+
+</body>
+</html>

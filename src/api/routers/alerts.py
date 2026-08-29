@@ -124,6 +124,8 @@ async def ingest(
     created = 0
     parsed = _parse_alerts(payload)
     for alert in parsed:
+        # Before the row, before the dispatch, before the prompt.
+        alert["title"], alert["body"] = _redact_alert(alert["title"], alert["body"])
         session.add(IncomingAlert(
             id=str(uuid.uuid4()),
             workspace_id=workspace_id,
@@ -191,6 +193,40 @@ def _dispatch_alerts(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("alert_dispatch_failed ws=%s err=%s", workspace_id, exc)
+
+
+def _redact_alert(title: str, body: str) -> tuple[str, str]:
+    """Strip secrets out of an alert before it is stored or sent anywhere.
+
+    An alert body is written by somebody else's monitoring, about a failure —
+    precisely the text most likely to carry a credential. A connection string
+    in a `could not connect to` line. An Authorization header in a dumped
+    request. A token in an environment dump. It used to go three places
+    verbatim: into `incoming_alerts`, out to a chat room, and into a model
+    prompt when somebody pressed Fix with Claude.
+
+    `mode="markdown"` rather than `"code"`: an alert is prose with fragments
+    in it, and the code pipeline's entropy stage fires on ordinary sentences.
+
+    FAIL-CLOSED ON THE SECRET, NOT ON THE ALERT. The redactor raises rather
+    than let text through unchecked, which is right where the caller can
+    refuse to send. Here the caller cannot: an alert that never arrives is
+    the failure this whole feature exists to prevent. So a redactor that
+    breaks costs the operator the text and not the alarm — the row still
+    lands, the severity and the source are intact, and the body says why it
+    is missing.
+    """
+    from src.security.redactor import redact
+
+    out = []
+    for value in (title, body):
+        try:
+            cleaned, _ = redact(value or "", source_hint="alert", mode="markdown")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("alert_redaction_failed err=%s", exc)
+            cleaned = "[redaction unavailable — body withheld]"
+        out.append(cleaned)
+    return out[0], out[1]
 
 
 def _parse_alerts(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -296,3 +332,60 @@ async def patch_alert(
 
 
 __all__ = ["router"]
+
+
+#: How long an incoming alert is kept. Days, and settable.
+#:
+#: There was no answer to this at all: the table had no DELETE and no sweep,
+#: so whatever arrived stayed for the life of the installation. That turns a
+#: transient leak into a permanent one, and makes an erasure request
+#: unanswerable — the GDPR export walks a person's rows and an alert body can
+#: name one.
+_RETENTION_ENV = "CELMIS_ALERT_RETENTION_DAYS"
+
+
+def alert_retention_days() -> int:
+    """The window, or 90. Zero or negative disables the sweep."""
+    import os
+
+    raw = os.environ.get(_RETENTION_ENV, "")
+    try:
+        return int(raw) if str(raw).strip() else 90
+    except (TypeError, ValueError):
+        logger.warning("alert_retention_bad_value %s=%r — using 90", _RETENTION_ENV, raw)
+        return 90
+
+
+def purge_expired_alerts() -> int:
+    """Delete alerts older than the retention window. Returns how many.
+
+    Synchronous and self-contained, like the audit purge it runs beside:
+    called from the nightly scheduler thread, not from a request.
+    """
+    days = alert_retention_days()
+    if days <= 0:
+        return 0
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import create_engine, delete
+    from sqlalchemy.orm import Session
+
+    from src.db.session import get_database_url
+
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    url = get_database_url().replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    engine = create_engine(url, pool_pre_ping=True)
+    try:
+        with Session(engine) as s:
+            result = s.execute(
+                delete(IncomingAlert).where(IncomingAlert.created_at < cutoff))
+            s.commit()
+            deleted = int(result.rowcount or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("alert_purge_failed err=%s", exc)
+        return 0
+    finally:
+        engine.dispose()
+    if deleted:
+        logger.info("alerts_purged n=%d older_than_days=%d", deleted, days)
+    return deleted

@@ -60,6 +60,21 @@ async def _run_forever() -> None:
                 logger.info("audit_retention_purged files=%d", deleted)
         except Exception as exc:  # noqa: BLE001
             logger.warning("audit_retention_failed err=%s", exc)
+        # Alert retention, on the same loop and for the same reason as the
+        # audit purge above: `incoming_alerts` had no DELETE and no sweep, so
+        # whatever arrived stayed for the life of the installation. An alert
+        # body is somebody else's text about a failure and can name a person,
+        # which makes "kept for ever" an answer nobody wants to give to an
+        # erasure request.
+        try:
+            from src.api.routers.alerts import purge_expired_alerts
+            deleted = await asyncio.get_event_loop().run_in_executor(
+                None, purge_expired_alerts,
+            )
+            if deleted:
+                logger.info("alert_retention_purged rows=%d", deleted)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("alert_retention_failed err=%s", exc)
         elapsed = (datetime.now(UTC) - started).total_seconds()
         sleep_for = max(60.0, interval_hours * 3600.0 - elapsed)
         logger.info(

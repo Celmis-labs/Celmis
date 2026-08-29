@@ -81,6 +81,11 @@ GENERATORS = {
     # The sandbox refuses to start without this one. The deploy checks for
     # 32+ characters, so hex(32) — 64 chars — clears it either way.
     "SANDBOX_TOKEN":           lambda: secrets.token_hex(32),
+    # Generated here so the observability overlay has one before it is ever
+    # switched on. It used to default to `admin`, on a port that was bound to
+    # every interface — and the overlay is opt-in, so that was the reward for
+    # deciding to watch your own instance.
+    "GRAFANA_ADMIN_PASSWORD":  lambda: secrets.token_urlsafe(24),
 }
 
 #: Left empty on purpose, with the reason the operator needs to hear.

@@ -43,9 +43,29 @@ _WINDOW_SECONDS = 60
 
 _EXEMPT_PREFIXES = (
     "/healthz", "/readyz", "/metrics", "/docs", "/openapi.json",
-    "/webhook/",  # HMAC + dedup already guard these
+    # HMAC + dedup already guard these — TRUE OF THE GIT WEBHOOKS AND OF
+    # NOTHING ELSE. `/webhook/alerts/{token}` has no signature over the body
+    # and no dedup: the token in the path is compared, and every delivery is
+    # accepted and stored. Exempting it let a monitoring system in a loop —
+    # or anyone holding the token — write unboundedly into a table and fan
+    # each one out to a chat room. The prefix names the provider routes it
+    # was reasoned about.
+    "/webhook/github",
+    "/webhook/gitlab",
+    "/webhook/bitbucket",
     "/.well-known/",
 )
+
+
+def _is_exempt(path: str) -> bool:
+    """Whether this path skips rate limiting.
+
+    A function rather than an inline `any(...)` so a test can ask the same
+    question the middleware asks. The list it consults used to hold the bare
+    prefix `/webhook/`, which silently covered `/webhook/alerts/` — a route
+    with none of the protections the exemption was reasoned from.
+    """
+    return any(path.startswith(prefix) for prefix in _EXEMPT_PREFIXES)
 
 
 def _limits() -> dict[str, int]:
@@ -151,7 +171,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         cls = _classify(path)
-        exempt = any(path.startswith(p) for p in _EXEMPT_PREFIXES)
+        exempt = _is_exempt(path)
 
         # ── Body size — ALWAYS enforced, even on rate-limit-exempt paths.
         # Webhooks buffer the whole body before HMAC verification, so an
