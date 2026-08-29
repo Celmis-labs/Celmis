@@ -287,6 +287,34 @@ Finding something is half a loop. An embedded Claude Code session runs **inside*
 the installation, edits the checkout, and the runner commits, pushes a branch and
 opens a pull request.
 
+### It runs on your subscription, on your machine
+
+There is no key to buy from us and no model bundled. You connect **your own Claude
+subscription**, the way Cursor does it: run `claude setup-token` once on your own
+laptop and paste the token into Settings. It is stored encrypted in the credential
+store, and the session that runs later uses it.
+
+Two slots, resolved in that order:
+
+| | |
+|---|---|
+| **Personal** | your own subscription, visible to nobody else |
+| **Workspace** | one subscription an admin shares with the workspace — explicit opt-in |
+
+The workspace slot is off unless someone turns it on, and the interface says why
+before you save: **sharing one person's subscription across several people may
+breach Anthropic's consumer terms.** That is a decision for whoever holds the
+subscription, and the product will not make it quietly.
+
+And the session is not running in somebody's cloud. It runs on **your own
+installation**, in a workspace isolated per session. What that buys you is not
+"cloud access" — it is that the machine holding your code is one you control, and
+you reach it from a laptop in an office or a phone on a train for the same reason
+you reach any service you run: because it is yours and it is up.
+
+That is the whole of [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone)
+— an alert arrives, and the fix starts from wherever you happened to read it.
+
 A vulnerability in the dependency audit carries a **Fix with Claude** button. It
 does not open an empty chat — it hands the session the repository, the package,
 both versions and the boundaries of the job, already written:
