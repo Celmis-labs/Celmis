@@ -20,7 +20,26 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.11`.
+Nothing since `v0.1.12`.
+
+## [0.1.12] — 2026-08-29
+
+### Fixed
+
+- **A published image named a commit that was not inside it.** The release
+  checks out `inputs.tag`, but labelled the images with `github.sha` — the head
+  of the branch the run was started from. `deploy-on-server.sh` reads that label
+  back as the version the API reports, so v0.1.11 announced itself in production
+  as `0.1.11+f2a2b39` while running the tree at `c2a5e48`. One CI-only commit
+  apart this time; the mechanism can be off by anything. The AGPL §13 footer
+  offers source *at that revision*, which is the one thing it exists to get
+  right. The label now comes from the checkout.
+- **The release job went red after the release succeeded.** Its last line asked
+  `gh release view --json tagName,isLatest`; `isLatest` is a field of `release
+  list`, not of `release view`, so gh printed the valid names and exited 1 —
+  after all three images had published and `latest` had moved. The line was
+  decorative. It now checks the thing the step is for: that `/releases/latest`
+  resolves to this tag when we asked for it.
 
 ## [0.1.11] — 2026-08-29
 
