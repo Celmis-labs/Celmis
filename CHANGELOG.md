@@ -20,6 +20,10 @@ derives it from there.
 
 ## [Unreleased]
 
+Nothing since `v0.1.15`.
+
+## [0.1.15] — 2026-08-30
+
 ### Security
 
 - **The OAuth consent screen echoed the query string into the page.**
