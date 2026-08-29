@@ -221,12 +221,25 @@ async def test_the_alert_carries_the_repo_the_binding_gates_on(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_the_card_links_somewhere_the_reader_can_open(monkeypatch):
-    """Built from the request, honouring the proxy.
+    """From the operator's configured origin.
 
-    This box does not know its own public name — the same reason the login
-    redirect used to point at localhost. A card whose only link is unreachable
-    reads as a broken alert rather than a misconfigured setting.
+    This test used to assert the link was built from the request headers,
+    "because this box does not know its own public name". It does not — but
+    neither does the sender get to tell it. The alert arrives from somebody
+    else's monitoring over a token, and Host is theirs to write, so that
+    mechanism put an attacker-chosen address behind the Open button of a card
+    delivered into the workspace's chat room. See
+    tests/security/test_the_sender_of_an_alert_does_not_choose_the_link.py.
+
+    The property this test is named for survives: where the operator has said
+    what the box is called, the card links there and the reader can open it.
     """
+    from src import config
+
+    monkeypatch.setattr(
+        config, "get_settings",
+        lambda: type("S", (), {"public_base_url": "https://celmis.example.com"})(),
+    )
     sent: list[dict] = []
     await _ingest(monkeypatch, {"title": "t", "body": "b",
                                 "severity": "info"}, sent)

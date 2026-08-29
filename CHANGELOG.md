@@ -20,7 +20,23 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.13`.
+### Security
+
+- **The sender of an alert chose where its Open button pointed.** The link on
+  an alert card was built from the incoming request's `Host`, and that request
+  comes from somebody else's monitoring — the sender writes that header, and
+  the reverse proxy passes it through (Caddy overwrites `X-Forwarded-Host`, not
+  `Host`). Measured against a running box: an alert POSTed with
+  `Host: evil2.example.test` was delivered into the workspace's chat room as a
+  card carrying this product's branding, a title and body the sender wrote, and
+  an Open button on `http://evil2.example.test/alerts`. The only requirement is
+  the ingest token, which is handed to third-party monitoring on purpose.
+
+  The address now comes from `PUBLIC_BASE_URL` — the only party in that
+  exchange who is not the sender — and unset means no button rather than a
+  guessed one. Deriving a URL from the request stays correct where it goes back
+  to whoever made it, which is what the webhook-setup page does and why it is
+  untouched. What decides it is not the header, it is who receives the URL.
 
 ## [0.1.13] — 2026-08-29
 

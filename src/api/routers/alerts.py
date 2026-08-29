@@ -150,26 +150,61 @@ async def ingest(
     # on this endpoint already promised.
     if parsed:
         background.add_task(
-            _dispatch_alerts, workspace_id, parsed, _alerts_page(request),
+            _dispatch_alerts, workspace_id, parsed, _alerts_link(),
         )
     return {"ok": True, "created": created}
 
 
-def _alerts_page(request: Request) -> str:
-    """Where to look, as an address the recipient can actually open.
+def _alerts_link() -> str | None:
+    """An absolute address for the alerts page, or nothing at all.
 
-    Derived from the request rather than PUBLIC_BASE_URL: this box does not
-    know its own public name, and a card whose only link is unreachable is
-    read as a broken alert rather than a misconfigured setting.
+    NOT derived from the request, and that is the whole point. The request
+    that carries an alert in comes from somebody else's monitoring: the
+    sender writes its own Host header, and the reverse proxy passes it
+    through — Caddy overwrites X-Forwarded-Host, it does not overwrite Host.
+    Measured against production, an alert POSTed with
+
+        Host: evil2.example.test
+
+    put `http://evil2.example.test/alerts` behind the Open button of a card
+    delivered into the workspace's chat room, under this product's branding,
+    beside a title and body the same sender wrote. Holding the ingest token
+    is the only requirement, and that token is handed to third-party
+    monitoring on purpose — it is not a high-security secret.
+
+    Deriving a URL from the request is safe when the URL goes back to whoever
+    made the request: `webhooks.py::_public_base` shows an admin their own
+    origin, in their own browser, and is right to. It stops being safe the
+    moment the URL travels to somebody else. That difference, not the header
+    names, is what decides it.
+
+    So the address comes from configuration — the only party in this exchange
+    that is not the sender. Unset means NO link rather than a guessed one:
+    a card without a button still carries the alarm, and losing the alarm is
+    the one failure this feature cannot have. A relative path would be worse
+    than nothing; Google Chat rejects a card whose button is not an absolute
+    URL, and the rejected card is the alert.
     """
-    headers = request.headers
-    proto = headers.get("x-forwarded-proto") or request.url.scheme
-    host = headers.get("x-forwarded-host") or headers.get("host") or ""
-    return f"{proto}://{host}/alerts" if host else "/alerts"
+    from src.config import get_settings
+
+    base = (get_settings().public_base_url or "").strip().rstrip("/")
+    if not base:
+        logger.warning(
+            "alert_link_unset — set PUBLIC_BASE_URL to put an Open button on "
+            "alert notifications; sending them without one",
+        )
+        return None
+    if not base.startswith(("http://", "https://")):
+        logger.warning(
+            "alert_link_no_scheme PUBLIC_BASE_URL=%r — needs http:// or "
+            "https://; sending alerts without a link", base,
+        )
+        return None
+    return f"{base}/alerts"
 
 
 def _dispatch_alerts(
-    workspace_id: str, alerts: list[dict[str, Any]], link_url: str,
+    workspace_id: str, alerts: list[dict[str, Any]], link_url: str | None,
 ) -> None:
     """Hand each parsed alert to the channel dispatcher.
 
