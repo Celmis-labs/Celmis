@@ -1,22 +1,22 @@
 {
   "identifier": "celmis",
   "name": "Celmis",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "author": "Celmis Labs",
   "authorUrl": "https://github.com/Celmis-labs",
   "category": "developer",
   "homepage": "https://celmis-labs.github.io/mcp/",
   "icon": "◍",
-  "description": "Self-hosted code intelligence over a symbol graph. Search symbols and find consumers across repository boundaries, read API surfaces, route incidents to the repository that owns them, and read dependency audits and reviews — all over one index, under the same access rules as the rest of the product.",
+  "description": "Your monitoring already told you something broke; Celmis is what happens next. Eighteen tools over one symbol graph: route an incident to the repository and owner it belongs to, find consumers across repository boundaries, read API surfaces, and read dependency findings and reviews — under the same access rules as the rest of the platform.",
   "tags": [
+    "incident-routing",
+    "alerts",
     "code-intelligence",
     "symbol-graph",
     "cross-repository",
-    "code-review",
     "dependency-audit",
     "sbom",
-    "self-hosted",
-    "agpl"
+    "self-hosted"
   ],
   "tools": [
     {
