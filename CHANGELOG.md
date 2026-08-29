@@ -20,7 +20,35 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.10`.
+Nothing since `v0.1.11`.
+
+## [0.1.11] — 2026-08-29
+
+### Security
+
+- **The observability overlay published to every interface.** Prometheus,
+  Loki and Grafana had bare `PORT:PORT` mappings, and a mapping with no
+  address binds `0.0.0.0` — so switching on monitoring opened three ports,
+  including Loki, which has no authentication of its own and accepted
+  `POST /loki/api/v1/push` from anyone who could reach it. All three are on
+  `127.0.0.1` now, reached over `ssh -L`, which is what docker-compose.yml has
+  always done for postgres and says why in its own comment.
+- **Grafana no longer defaults to `admin`/`admin`.** The overlay refuses to
+  start without `GRAFANA_ADMIN_PASSWORD`; `init-env.sh` generates it.
+- **Alert bodies are redacted before they are stored, dispatched or sent to a
+  model.** An alert is somebody else's text about a failure, which is where a
+  connection string or an Authorization header turns up. The redactor existed
+  and this path did not call it. Fail-closed on the secret, not on the alert:
+  a redactor that breaks costs the text, never the alarm.
+- **Incoming alerts have a retention window** — 90 days by default, settable
+  with `CELMIS_ALERT_RETENTION_DAYS`, purged on the nightly loop. There was no
+  DELETE and no sweep, so a transient leak was a permanent one and an erasure
+  request had no answer.
+- **The alert ingest is rate-limited.** `/webhook/` was exempt because "HMAC +
+  dedup already guard these", which is true of the git webhooks and false of
+  `/webhook/alerts/{token}` — it has a compared token, not a signature over
+  the body, and no dedup. The exemption names the three provider routes it was
+  reasoned about.
 
 ## [0.1.10] — 2026-08-27
 
