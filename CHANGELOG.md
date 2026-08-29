@@ -20,6 +20,10 @@ derives it from there.
 
 ## [Unreleased]
 
+Nothing since `v0.1.16`.
+
+## [0.1.16] — 2026-08-30
+
 ### Fixed
 
 - **The incremental re-index could not move a single production clone.**
