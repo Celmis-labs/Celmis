@@ -254,5 +254,19 @@ jobs:
             gh release create "$tag" --title "$tag" --notes-file notes.md \
               --latest="$latest"
           fi
-          gh release view "$tag" --json tagName,isLatest
+          # `gh release view --json` has no isLatest field, so ask the API for
+          # the answer we actually care about: does /releases/latest resolve
+          # to this tag when we said it should. A decorative echo here would
+          # not have caught a --latest that silently did nothing.
+          if [ "$latest" = "true" ]; then
+            got=$(gh api "repos/${{ github.repository }}/releases/latest" \
+                    --jq .tag_name)
+            if [ "$got" != "$tag" ]; then
+              echo "::error::published $tag but /releases/latest is $got"
+              exit 1
+            fi
+            echo "  release $tag published and marked latest"
+          else
+            echo "  release $tag published; an older tag keeps latest"
+          fi
 
