@@ -82,7 +82,7 @@ the other repository open.
 | **You are a PM, a delivery lead or the client** and want to know what state a group of projects is in, or how something actually works | Ask it. From any device, anywhere, without booking time from an engineer and without a meeting whose only output is a paragraph → [Ask the code](#ask-the-code) |
 | **A new engineer has a question a senior would have to answer** | Every one of those pulls someone experienced out of flow, at the moment they are already covering. The codebase answers instead, with file:line citations → [Ask the code](#ask-the-code) |
 | **Two teams share an integration and neither can read the other's repository** | Load it, grant the right to ask, and deny the paths that must stay private. They get answers; the credentials are refused at the source → [Who can see what](#who-can-see-what) |
-| **A customer or an auditor asks for your SBOM** | One button, CycloneDX, plus an evidence pack whose manifest lets them verify it without trusting you → [Dependencies, SBOM and the evidence pack](#dependencies-sbom-and-the-evidence-pack) |
+| **A customer or an auditor asks for your SBOM** | One button, CycloneDX, plus an evidence pack whose manifest they recompute themselves — against a hash you publish where the pack is not → [Dependencies, SBOM and the evidence pack](#dependencies-sbom-and-the-evidence-pack) |
 | **A vulnerability lands in a dependency** | *Fix from here* hands an embedded session the repository, the package and the finding. It edits, the runner pushes a branch and opens a PR → [Fix from here](#fix-from-here) |
 | **A pull request needs reviewing** | Agents read the diff — and, where the graph is built, who else calls what is being changed, including from another repository → [Pull-request review](#pull-request-review) |
 | **Forty services need the same thing done to them** | Write the sentence. Celmis shows which repositories it resolves to and waits for a second press, rather than finding them among forty and pressing a button forty times → [Ask for work across repositories](#ask-for-work-across-repositories) |
@@ -154,7 +154,7 @@ Python or Node.js install is needed for the Docker flow.
 ### Start it
 
 ```bash
-git clone <your-fork-url> celmis
+git clone https://github.com/Celmis-labs/Celmis.git celmis
 cd celmis
 
 # Generates .env and fills every secret in the format each one needs.
@@ -763,9 +763,10 @@ The largest is an identifier declared in the same file but outside the excerpt
 the agent received: a method parameter 26 lines up, an import on line 3, an
 `attr_reader` on line 18.
 
-The full report gives the claim, the code at that commit, the verdict, the
-reasoning and a permalink for each of the 79, so any verdict can be disputed
-with the same evidence in front of you.
+[The full report](https://celmis-labs.github.io/writing/auditing-79-false-positives/)
+gives the claim, the code at that commit, the verdict, the reasoning and a
+permalink for each of the 79, so any verdict can be disputed with the same
+evidence in front of you.
 
 ## Test repositories
 
