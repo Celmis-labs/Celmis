@@ -1,9 +1,13 @@
 """HTTP middleware (Stage 21) — rate limiting + request-size limits.
 
 Rate limiting:
-    Sliding-window counters per (client_ip, path_class). In-memory by
-    default (single-instance deploys); if CELMIS_REDIS_URL is set the
-    limiter uses Redis INCR+EXPIRE so multiple API replicas share state.
+    FIXED-window counters per (client_ip, path_class) — both backends floor
+    the clock to the window and count inside it, so a caller can spend the
+    whole allowance at the end of one window and the whole allowance at the
+    start of the next. Twice the limit across a boundary is by design here;
+    this said "sliding", which promises the opposite. In-memory by default
+    (single-instance deploys); if CELMIS_REDIS_URL is set the limiter uses
+    Redis INCR+EXPIRE so multiple API replicas share state.
 
     Path classes + default limits (per minute, override via env):
         auth      (/oauth/token, /api/auth/login)      CELMIS_RL_AUTH=10
@@ -11,9 +15,18 @@ Rate limiting:
         mcp       (/mcp/*)                             CELMIS_RL_MCP=120
         default   (everything else under /api, /oauth) CELMIS_RL_DEFAULT=240
 
-    Exempt: /healthz, /readyz, /metrics, /docs, /openapi.json, webhooks
-    (webhooks have HMAC verification + dedup already; rate-limiting them
-    risks dropping legitimate burst deliveries from GitHub).
+    Exempt: /healthz, /readyz, /metrics, /docs, /openapi.json,
+    /.well-known/, and the three GIT webhook routes — /webhook/github,
+    /webhook/gitlab, /webhook/bitbucket — which have HMAC verification and
+    dedup already, so rate-limiting them risks dropping legitimate burst
+    deliveries from GitHub.
+
+    NOT "webhooks", which is what this said. `/webhook/alerts/{token}` has
+    neither a signature over the body nor dedup: the token in the path is
+    compared and every delivery is stored and fanned out. It is rate-limited
+    like anything else, and the list in `_EXEMPT_PREFIXES` names the routes
+    that were actually reasoned about rather than a prefix that swept in a
+    fourth.
 
 Request size:
     Requests with Content-Length above the per-class cap are rejected

@@ -7,8 +7,23 @@
 	email {$ACME_EMAIL}
 }
 
-# Browser-facing web app
+# Browser-facing web app.
+#
+# `/backend/*` IS NOT OPTIONAL HERE. The published web image is built with an
+# empty NEXT_PUBLIC_API_BASE, so its bundle calls the API at the relative
+# `/backend` — that is what lets one image serve every installation instead of
+# being pinned to one hostname at build time (web/lib/api.ts:16). This file
+# served only the app on APP_DOMAIN and put the API on a second domain, so a
+# browser loading the published image asked APP_DOMAIN/backend/... and got a
+# 404 from Next for every call, on an otherwise healthy stack.
+#
+# API_DOMAIN below stays: it is what an MCP client or a webhook sender uses,
+# and a bundle built with an absolute NEXT_PUBLIC_API_BASE can still point
+# there.
 {$APP_DOMAIN} {
+	handle_path /backend/* {
+		reverse_proxy api:8000
+	}
 	reverse_proxy web:3000
 }
 

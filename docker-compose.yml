@@ -370,6 +370,17 @@ services:
       # рев'ю виконувались двічі. Хендлер тепер продовжує оренду, поки
       # працює, — це стеля, а не здогад про тривалість.
       CELMIS_JOB_LEASE_SECONDS: "${CELMIS_JOB_LEASE_SECONDS:-600}"
+      # README documents this as settable and compose never passed it, so
+      # setting it in .env changed nothing: `env_file` is not used here — the
+      # container gets the variables this block names and no others — and
+      # `env | grep CELMIS_DEPLOYMENT_MODE` inside the running api returned
+      # nothing. A documented switch that cannot reach the process is worse
+      # than an undocumented one, because somebody sets it and believes it.
+      #
+      # Empty on purpose: `parse_mode` reads unset, "" and "   " all as
+      # single_tenant, so passing it through changes no existing installation
+      # until an operator writes a value.
+      CELMIS_DEPLOYMENT_MODE: "${CELMIS_DEPLOYMENT_MODE:-}"
       # Скільки клієнт чекає ПОНАД власний бюджет команди: черга sandbox-а,
       # завантаження tar і відповідь. Надсилається на дріт, щоб sandbox
       # обмежив своє очікування слота нашим терпінням, а не лише власною

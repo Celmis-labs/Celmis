@@ -129,6 +129,36 @@ def _run_ls_remote(url: str, ref: str, env_extra: dict[str, str] | None) -> str:
     raise RuntimeError(f"remote has no ref {wanted!r}")
 
 
+def _checked_out_branch(repo_slug: str) -> str | None:
+    """The branch the local clone is standing on, or None.
+
+    None for a clone that does not exist yet — there is nothing to be current
+    with — and for a detached HEAD, which names no branch. Both fall back to
+    the provider default, which is the best available answer when the checkout
+    cannot name one.
+
+    Never raises: this sits inside a check whose whole contract is that it
+    returns a result rather than an exception.
+    """
+    try:
+        from src.config import get_settings
+
+        path = get_settings().repo_path(repo_slug)
+        if not (path / ".git").exists():
+            return None
+        out = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        name = (out.stdout or "").strip()
+        if out.returncode != 0 or not name or name == "HEAD":
+            return None
+        return name
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("checked_out_branch_failed repo=%s err=%s", repo_slug, exc)
+        return None
+
+
 def remote_head(repo_slug: str, *, workspace_id: str, user_id: str = "default") -> str:
     """The sha the repo's tracked branch points at on the remote.
 
@@ -148,9 +178,22 @@ def remote_head(repo_slug: str, *, workspace_id: str, user_id: str = "default") 
     parsed = parse_repo_url(cfg.url or repo_slug)
     url = build_clone_url(parsed)
     # Fully qualified, so the remote cannot answer about a different branch:
-    # a bare `main` is a glob that also matches `feature/main`. None means the
-    # provider default, and HEAD is what a remote calls that.
-    branch = (getattr(cfg, "branch", None) or "").strip()
+    # a bare `main` is a glob that also matches `feature/main`.
+    #
+    # WHICH BRANCH, WHEN NOBODY SAID. Falling straight through to HEAD asked
+    # the remote about the PROVIDER DEFAULT while the clone on disk could be
+    # standing somewhere else — `RepoSync.clone_or_update` takes `branch="dev"`
+    # by default and only falls back to the default branch when `dev` does not
+    # exist. A repository that has a `dev` branch and was added without naming
+    # one is therefore indexed from `dev` and was being compared against
+    # `main`: two different shas that never converge, so it reads as behind for
+    # ever, re-indexes every day, and every re-index leaves it behind again.
+    #
+    # The clone is the authority on what was indexed, because it is the thing
+    # that was indexed. Asking it means this check and `_advance_to_remote`,
+    # which resets onto the checked-out branch's remote, name the same ref by
+    # construction rather than by both happening to guess the same way.
+    branch = (getattr(cfg, "branch", None) or "").strip() or _checked_out_branch(repo_slug)
     ref = f"refs/heads/{branch}" if branch else "HEAD"
 
     env_extra = None

@@ -1,15 +1,28 @@
-# Free CI/CD: GitHub Actions → Oracle Always Free
+# Running Celmis on an Oracle Always Free box
 
-Push to `main` → GitHub Actions rsyncs the repo to your Oracle box and runs
-`docker compose up -d --build` **on the box**. The ARM box builds arm64 images
-natively (no cross-build, no registry). GitHub's hosted runner only orchestrates
-over SSH, so it stays inside the free minutes and works for private repos too.
+**This page described a pipeline that no longer exists.** It said a push to
+`main` made GitHub Actions rsync the repository to the box and run
+`docker compose up -d --build` **there**. That is what
+`.github/workflows/release.yml` was written to replace: building on the
+production box took 485 seconds and 4.2GB of a disk with 4.2GB free, reused no
+cache, and the rented runner was billed for the minutes it spent watching over
+SSH — which is what exhausted the account's free Actions minutes. There is no
+rsync and no `--build` in any workflow now, and no "Deploy to Oracle" workflow
+to run.
+
+What happens instead: images are built **once, on a tag**, published to GHCR,
+and pulled by the box. Deploying is one command on the box.
 
 ```
-git push ──▶ GitHub Actions (free runner) ──rsync+ssh──▶ Oracle VM
-                                                         └─ docker compose build+up (arm64, native)
-                                                         └─ Caddy → HTTP
+git tag v0.1.x ──▶ Release images (GitHub-hosted, amd64+arm64) ──▶ ghcr.io
+                                                                     │
+                        on the box:  scripts/deploy-on-server.sh v0.1.x
+                                     └─ docker compose pull + up -d
+                                     └─ Caddy → HTTP
 ```
+
+A user installs by pulling three images rather than building them, which is
+the point of the change; the Oracle box is just one more place that pulls.
 
 Files in the repo: [scripts/deploy-on-server.sh](../scripts/deploy-on-server.sh),
 [deploy/oracle/caddy-http.yml](../deploy/oracle/caddy-http.yml),
@@ -122,8 +135,13 @@ CELMIS_CORS_ORIGINS=https://app.example.com
 CELMIS_TRUST_PROXY=1
 
 # --- keep web/api off the public interface; only Caddy is exposed ---
-API_HOST_PORT=127.0.0.1:8000
-WEB_HOST_PORT=127.0.0.1:3000
+# The PORT only. docker-compose.yml already writes the loopback address in
+# front of it — `"127.0.0.1:${API_HOST_PORT:-8000}:8000"` — so an address
+# here is a second one, and `docker compose config` refuses the file with
+# `invalid IP address: 127.0.0.1:127.0.0.1`. This page used to say
+# `API_HOST_PORT=127.0.0.1:8000`, which does not start.
+API_HOST_PORT=8000
+WEB_HOST_PORT=3000
 ```
 
 ---
@@ -150,20 +168,34 @@ At your DNS provider, point both subdomains at the box:
 | A | `api` | `<oracle-public-ip>` |
 | AAAA | `app` / `api` | `<oracle-ipv6>` (optional) |
 
-Set these **before** the first deploy so Caddy can obtain certs.
+Set these before the first deploy if you intend to put TLS in front of the
+box later; the overlay named above serves HTTP and obtains no certificate.
 
 ---
 
 ## 5. Go
 
 ```bash
-git push origin main         # or run the workflow manually (Actions → Deploy to Oracle → Run)
+# on your machine: cut the release, and let Actions build and publish it
+git tag -a v0.1.x -m v0.1.x && git push origin v0.1.x
+
+# on the box: pull that tag and bring the stack up
+cd /root/celmis && git fetch --tags && git reset --hard origin/main
+bash scripts/deploy-on-server.sh v0.1.x
 ```
 
-Watch **Actions** for the run, then `docker compose logs -f caddy` on the box for
-`certificate obtained`. Open `https://app.example.com/signup` — **the first user
-becomes admin** → Settings → LLM to add keys (they persist in the `/workspace`
-volume across redeploys).
+The script prints the version it settled on and waits for the API to report
+healthy, so a deploy that did not take says so rather than looking finished.
+Then open `http://<your-box>/signup` — **the first user becomes admin** →
+Settings → LLM to add keys (they persist in the `/workspace` volume across
+redeploys).
+
+**HTTP, not HTTPS.** The overlay this page names serves plain HTTP and the TLS
+overlays that used to sit beside it were deleted; `tests/security/
+test_no_service_faces_the_internet.py` reads the same overlay, which is what
+keeps the two from drifting again. Section 4's DNS records are worth setting
+anyway, but nothing here obtains a certificate — that needs a TLS overlay you
+supply.
 
 ---
 
@@ -176,6 +208,7 @@ volume across redeploys).
   (`runs-on: [self-hosted, ARM64]`) and skip SSH entirely. Great for a **private**
   repo; avoid on a public repo (fork PRs could run on your box).
 - **GitLab CI:** identical shape — a job that installs an SSH key from CI
-  variables and runs the same `rsync` + `ssh … compose up -d --build`.
-- **First-run tip:** on a fresh box `docker compose up --build` needs `.env`
-  present (step 2) or it fails on missing secrets. Create it before the first push.
+  variables and runs `ssh … scripts/deploy-on-server.sh <tag>`. Build once and
+  pull; building on the box is the thing this setup moved away from.
+- **First-run tip:** on a fresh box the deploy needs `.env` present (step 2) or
+  it fails on missing secrets. Create it before the first deploy.

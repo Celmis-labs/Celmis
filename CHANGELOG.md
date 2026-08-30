@@ -20,7 +20,59 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.16`.
+### Fixed
+
+- **Freshness asked the remote about a branch the clone was not on.** With no
+  branch configured, `remote_head` fell through to the provider default while
+  `RepoSync.clone_or_update` takes `branch="dev"` and `_advance_to_remote`
+  resets onto whatever branch the checkout is standing on. A repository with a
+  `dev` branch, added without naming one, was indexed from `dev` and compared
+  against `main`: two shas that never converge, so it read as behind for ever
+  and re-indexed daily to no effect. The check now asks the clone — the thing
+  that was actually indexed — so the check and the advance name the same ref
+  by construction.
+- **`CELMIS_DEPLOYMENT_MODE` could not reach the process.** README documents it
+  and `docker-compose.yml` never passed it; there is no `env_file`, so the
+  container gets the variables its block names and no others. Confirmed on a
+  running box: `env | grep CELMIS_DEPLOYMENT_MODE` returned nothing. Passed
+  through now, empty by default, which `parse_mode` reads as `single_tenant` —
+  so no existing installation changes.
+- **The Hetzner proxy served the app and not `/backend`.** The published web
+  image is built with an empty `NEXT_PUBLIC_API_BASE`, so its bundle calls the
+  relative `/backend`; that overlay routed only the app on `APP_DOMAIN` and put
+  the API on a second domain, so every API call from a browser 404'd on an
+  otherwise healthy stack. The test that exists for this read every Caddyfile
+  into one string and asked whether the prefix appeared anywhere, so one
+  correct file covered for the one that was wrong. It checks each file now.
+- **`docs/ORACLE_CICD.md` documented a pipeline that had been removed** — rsync
+  and `compose up --build` on the box, and an Actions workflow that does not
+  exist — and told the reader to set `API_HOST_PORT=127.0.0.1:8000`. Compose
+  already writes the address in front of that variable, so the documented value
+  produces `invalid IP address: 127.0.0.1:127.0.0.1` and the stack does not
+  start.
+- **The middleware docstring called webhooks exempt from rate limiting** after
+  the exemption was narrowed to the three git provider routes, and called a
+  fixed-window limiter sliding. Both matter to an operator: the first is how
+  the alert ingest came to be exempt in the first place, and the second
+  promises that a burst cannot cross a window boundary at twice the limit.
+- **`.env.example` told a new installer to fill in four secrets by hand.**
+  `init-env.sh` generates fourteen and asks for none of them.
+- **`src/ops/build.py` described deploys as rsync + build on the server**, and
+  said there was no image digest to read back — while the deploy script reads
+  exactly that OCI label to stamp the version.
+- **A compose comment promised a test that did not exist.**
+  `test_a_setting_the_deployment_drops_is_not_settable` was named in
+  `docker-compose.yml` as the thing that would catch a compose default
+  overriding a settings field. It has been written: it compares every
+  pass-through default against its field, and checks the other half too — that
+  a setting the README documents actually reaches a container.
+
+### Changed
+
+- **The README no longer promises a web push on every alert.** Web push is
+  real and two things send one — an agent turn finishing, and the test-send
+  endpoint. The alert path sends none; what it does is fan out to the
+  workspace's bound channels.
 
 ## [0.1.16] — 2026-08-30
 

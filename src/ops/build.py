@@ -1,13 +1,21 @@
 """What commit is this process actually running?
 
-Deploys are rsync + `compose up --build` on the server, so there is no image
-tag or registry digest to read back, and `.git` is excluded from the sync.
 Without a stamp, "did my push reach production?" can only be answered by
 watching log timestamps and hoping — which is exactly how a stale container
-goes unnoticed after a failed build.
+goes unnoticed after a failed deploy.
 
-The deploy workflow appends CELMIS_GIT_SHA/CELMIS_DEPLOYED_AT to the server's
-.env; locally both are empty and this degrades to a git call, then to nothing.
+WHERE THE ANSWER COMES FROM NOW. This said deploys were "rsync +
+`compose up --build` on the server, so there is no image tag or registry
+digest to read back". They have not been for some time: the images are built
+once on a tag, published to GHCR, and pulled. `scripts/deploy-on-server.sh`
+reads `org.opencontainers.image.revision` off the pulled api image and writes
+it to the server's .env as CELMIS_GIT_SHA, with CELMIS_DEPLOYED_AT beside it.
+So the digest the old text said did not exist is precisely what supplies the
+stamp — and a reader who believed the old paragraph would have gone looking
+for a git call that is only the local fallback.
+
+Locally both variables are empty and this degrades to that git call, then to
+nothing.
 """
 
 from __future__ import annotations

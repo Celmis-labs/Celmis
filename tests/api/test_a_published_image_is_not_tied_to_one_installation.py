@@ -96,16 +96,46 @@ def test_compose_does_not_pass_a_build_arg_it_no_longer_builds_with():
     assert "build" not in doc["services"]["web"]
 
 
-@pytest.mark.parametrize("path", ["/backend/api/capabilities", "/backend/healthz"])
-def test_the_relative_path_matches_what_the_proxy_serves(path):
-    """`/backend` is not a guess: it is the prefix the deployed reverse proxy
-    already maps to FastAPI, and every operational check in this repository
-    uses it."""
-    caddy = [p for p in (WEB.parent / "deploy").rglob("*")
-             if p.is_file() and "caddyfile" in p.name.lower()]
-    assert caddy, "no Caddyfile found — the proxy config moved"
-    text = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in caddy)
+def _caddyfiles():
+    return sorted(p for p in (WEB.parent / "deploy").rglob("*")
+                  if p.is_file() and "caddyfile" in p.name.lower())
 
+
+def _directives(path) -> str:
+    """The file without its comments.
+
+    A comment explaining why /backend matters is not a route. This test used
+    to search the text, and the file that needed the route the most is the one
+    whose comment would have satisfied the search.
+    """
+    return "\n".join(line for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                     if not line.lstrip().startswith("#"))
+
+
+def test_there_is_a_proxy_config_to_check():
+    assert _caddyfiles(), "no Caddyfile found — the proxy config moved"
+
+
+@pytest.mark.parametrize("caddyfile", _caddyfiles(), ids=lambda p: str(p.relative_to(p.parents[1])))
+def test_every_proxy_that_serves_the_app_serves_backend_too(caddyfile):
+    """`/backend` is not a guess: it is the prefix the published bundle calls.
+
+    EACH FILE, not all of them joined. This read every Caddyfile into one
+    string and asked whether the prefix appeared ANYWHERE, so one correct file
+    covered for the rest — and deploy/hetzner/Caddyfile, which had no such
+    route at all, passed. A browser loading the published image there asked
+    APP_DOMAIN/backend/... and got a 404 from Next for every call, on a stack
+    that was otherwise healthy.
+
+    Conditioned on serving the app: a proxy that only fronts the API has
+    nothing to answer for.
+    """
+    text = _directives(caddyfile)
+    if "reverse_proxy web:3000" not in text:
+        pytest.skip("does not serve the web app")
     assert "handle_path /backend/*" in text, (
-        "the proxy no longer serves the API under /backend"
+        f"{caddyfile.name} serves the web app and does not route /backend to "
+        f"the API. The published image is built with an empty "
+        f"NEXT_PUBLIC_API_BASE, so its bundle calls the relative /backend — "
+        f"every API call from a browser 404s here."
     )

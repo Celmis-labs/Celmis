@@ -60,7 +60,7 @@ the other repository open.
 | **A vulnerability lands in a dependency** | *Fix with Claude* hands an embedded session the repository, the package and the finding. It edits, the runner pushes a branch and opens a PR → [Fix with Claude](#fix-with-claude) |
 | **A pull request needs reviewing** | Agents read the diff — and, where the graph is built, who else calls what is being changed, including from another repository → [Pull-request review](#pull-request-review) |
 | **Forty services need the same thing done to them** | Write the sentence. Celmis shows which repositories it resolves to and waits for a second press, rather than finding them among forty and pressing a button forty times → [Ask for work across repositories](#ask-for-work-across-repositories) |
-| **An alert fires at 02:00 and you are not at a desk** | It lands in Celmis, a web push reaches your phone, and *Fix with Claude* opens a session already holding the alert. The runner opens the pull request → [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone) |
+| **An alert fires at 02:00 and you are not at a desk** | It lands in Celmis and goes out to the workspace's chat channel, and *Fix with Claude* opens a session already holding the alert. The runner opens the pull request → [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone) |
 | **Your own agent or editor needs to understand the codebase** | Point it at `/mcp/`. Eighteen tools over the same index, under the same access rules — no second copy of your code anywhere → [Connect Claude Code and other MCP clients](#connect-claude-code-and-other-mcp-clients) |
 
 The first three are the ones a code-review tool does not do at all, and they are
@@ -408,9 +408,10 @@ construction**: a token can only ever write into the workspace it belongs to.
 
 What that buys is the route with no laptop in it:
 
-1. An alert fires. It reaches Celmis and a web push notification reaches your phone
-   — real web push, VAPID and a service worker, so it arrives whether or not the tab
-   is open.
+1. An alert fires. It reaches Celmis and goes straight out to whatever channel the
+   workspace has bound — Slack, Discord, Google Chat or a plain webhook — so it
+   finds you where you already are rather than on a page you have to remember to
+   open.
 2. You open it. The alert carries its repository, because `route_incident` can take
    a stack trace and say which repository and which owner it belongs to.
 3. You press **Fix with Claude**. The session opens already holding the alert — not
