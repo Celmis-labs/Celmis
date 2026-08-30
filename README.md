@@ -18,14 +18,31 @@ Celmis does not watch your services. Grafana, or whatever you already run, does
 that and does it well. This is the part that comes after the alert: the walk from a
 firing rule to a diff someone can review.
 
-To be exact, because the distinction is easy to blur: Celmis has **no log-ingestion
-endpoint and no log store**. It starts from the alert your monitoring already sent,
-reads a log file only when a person attaches one to a session by hand, and embeds no
-Grafana. This repository does ship an *optional* Prometheus/Loki/Promtail/Grafana
-compose overlay — [`docker-compose.observability.yml`](docker-compose.observability.yml)
-— and if you enable it, Promtail tails that host's container logs into a Grafana **you**
-run, not into Celmis. Read its own header before enabling it: it publishes its ports on
-all interfaces, unlike the main compose file.
+To be exact, because the line is easy to blur. The application ingests no logs of its
+own — it starts from the alert. But **the repository ships an optional observability
+overlay**, and that does collect them:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+```
+
+That brings up Prometheus, Loki, Promtail and Grafana.
+[`docker-compose.observability.yml`](docker-compose.observability.yml) is deliberately
+**platform-wide rather than Celmis-only**: Promtail tails the Docker daemon's container
+logs and labels each stream by container name, so *every* service on that host — all
+thirty of them, if you run thirty — shows up in Grafana's Loki explorer, filterable by
+container. Prometheus scrapes `api:8000/metrics` for Celmis's own counters alongside.
+
+Every port binds to `127.0.0.1` and is reached over an SSH tunnel:
+
+```bash
+ssh -L 3100:localhost:3100 -L 9090:localhost:9090 you@your-server
+```
+
+That is not caution for its own sake. Loki has no authentication, so
+`POST /loki/api/v1/push` accepts writes from anyone who can reach it, and a log store
+strangers can write to is not a log store. `GRAFANA_ADMIN_PASSWORD` is required — the
+stack will not start without one.
 
 That loop is the product. It closes because everything sits on one index: a symbol
 graph Celmis builds from your repositories once. The same index answers questions
