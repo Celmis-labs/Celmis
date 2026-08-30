@@ -20,7 +20,20 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.19`.
+### Changed
+
+- **Two sentences kept the mark after the labels above them lost it.** The
+  navigation entry and the tour heading were renamed to "Agent"; the subtitle
+  and the tour's own description still said "Dispatch a bug straight to the
+  Claude agent" and "Claude agent: code-editing sessions on your repos". A scan
+  for "Claude agent" found seven locales of sixteen — the other nine inflect it
+  ("agentovi Claude", "à l'agent Claude", "al agente de Claude"), which is why
+  the first pass missed them. All thirty-two strings are fixed, and the guard
+  now covers the keys that name a section of ours, not only the button.
+
+  Naming Anthropic's product is untouched: "Claude Code agent — researches the
+  code" is an engine the operator picks between, and erasing the mark there
+  would leave them guessing what they chose.
 
 ## [0.1.19] — 2026-08-30
 
