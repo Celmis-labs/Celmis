@@ -20,6 +20,10 @@ derives it from there.
 
 ## [Unreleased]
 
+Nothing since `v0.1.17`.
+
+## [0.1.17] — 2026-08-30
+
 ### Fixed
 
 - **Freshness asked the remote about a branch the clone was not on.** With no
