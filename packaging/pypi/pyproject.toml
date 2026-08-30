@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=77"]        # >=77 understands the PEP 639 SPDX licence field
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "celmis"
+version = "0.1.0"
+description = "Offline verifier for a Celmis evidence pack: recompute every sha256 in the manifest. Not the Celmis platform."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+
+authors = [{ name = "Kostiantyn Makoid" }]
+
+keywords = [
+    "celmis",
+    "sbom",
+    "cyclonedx",
+    "evidence-pack",
+    "supply-chain",
+    "vulnerability",
+    "provenance",
+    "sha256",
+    "audit",
+]
+
+# No `License ::` classifier on purpose. Under PEP 639 a distribution carrying
+# both a License-Expression field and a License classifier is rejected on
+# upload; the SPDX expression above is the field PyPI renders in the sidebar.
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: System :: Archiving",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
+
+# Deliberate and load-bearing. The point of this package is that it installs
+# into a locked-down environment with nothing behind it.
+dependencies = []
+
+[project.scripts]
+celmis = "celmis.cli:main"
+
+[project.urls]
+Homepage      = "https://celmis-labs.github.io"
+Source        = "https://github.com/Celmis-labs/Celmis"
+Documentation = "https://celmis-labs.github.io/docs/guide/"
+Changelog     = "https://github.com/Celmis-labs/Celmis/blob/main/CHANGELOG.md"
+Issues        = "https://github.com/Celmis-labs/Celmis/issues"
+"MCP server"  = "https://celmis-labs.github.io/mcp/"
+"Benchmark audit" = "https://celmis-labs.github.io/writing/auditing-79-false-positives/"
+
+[tool.setuptools]
+packages = ["celmis"]
+
+[tool.setuptools.package-data]
+celmis = ["py.typed"]

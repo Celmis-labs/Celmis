@@ -1,5 +1,24 @@
 [project]
-name = "celmis"
+# `celmis-platform`, not `celmis`. The PyPI distribution named `celmis` is the
+# standalone evidence-pack verifier in packaging/pypi — a few hundred lines of
+# stdlib that an auditor installs to check a pack without trusting us. Two
+# things went wrong while both were called `celmis`:
+#
+#   * `python -m build && twine upload dist/*` run from this directory would
+#     publish the entire platform, working tree and all, under the verifier's
+#     name — and a PyPI version cannot be replaced afterwards.
+#   * `importlib.metadata.version("celmis")` in a shared environment would
+#     answer with the VERIFIER's version, which `src/vault/provenance.py`
+#     stamps into every generated document and `/api/capabilities` reports as
+#     the running platform. The comment in `src/__init__.py` about a version
+#     that is always the same string was written about exactly this shape of
+#     bug.
+#
+# `Private :: Do Not Upload` is not a real classifier — the word "Private"
+# appears nowhere in PyPI's 894-entry list — and an unknown classifier is
+# rejected on upload. A hard stop, not a note to the next person.
+name = "celmis-platform"
+classifiers = ["Private :: Do Not Upload"]
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
 # The version is NOT written here. `src/__init__.py.__version__` is the single

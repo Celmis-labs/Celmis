@@ -86,3 +86,9 @@ bench/results/.env-*
 # two lines is nothing against the cost of noticing later.
 nohup.out
 dirty_at_build.txt
+
+# Build artefacts of the standalone verifier published to PyPI. The package is
+# built from packaging/pypi/ and the outputs are not the source.
+packaging/pypi/dist/
+packaging/pypi/build/
+packaging/pypi/*.egg-info/

@@ -13,7 +13,7 @@
 #: used to be the BUG, back when the distribution was called something else.
 #: It is now the answer. A constant that changed meaning is worth saying out
 #: loud rather than leaving for the next reader to trip over.
-DISTRIBUTIONS = ("celmis", "code-analysis-system")
+DISTRIBUTIONS = ("celmis-platform", "celmis", "code-analysis-system")
 
 #: The single source of truth for the version, and a LITERAL on purpose.
 #:

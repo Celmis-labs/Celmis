@@ -20,7 +20,37 @@ derives it from there.
 
 ## [Unreleased]
 
+### Added
+
+- **`packaging/pypi/` — the evidence-pack verifier, as a standalone package.**
+  `summary.md` inside every pack tells a third party they can check it without
+  trusting the tool that made it, and until now the only way to reach
+  `verify_pack()` was to clone an AGPL repository and install forty
+  dependencies under Python 3.13. The claim was true and unexecutable. The
+  verifier is a few hundred lines of `hashlib`, `io`, `json` and `zipfile`, so
+  it lifts out with no dependencies at all and runs from Python 3.9 — which is
+  where a locked-down audit box usually is. Two commands, `verify` and `show`,
+  with exit codes an auditor's CI can read: 0 intact, 1 problems found, 2 could
+  not check.
+
+  A fixture pack is committed in both trees and a drift test builds a fresh
+  pack from `build_evidence_pack()` and runs the *packaged* verifier over it.
+  Without it, the day somebody adds a file to the producer every installed
+  `celmis verify` starts reporting `present but not in the manifest` — a false
+  accusation of tampering, produced by our own tooling, against the operator.
+
 ### Changed
+
+- **The platform's distribution is `celmis-platform`.** `celmis` on PyPI is the
+  verifier above, and while both were called the same thing two failures were
+  one command away: `python -m build` from the repository root would publish
+  the entire server under the verifier's name, and in a shared environment
+  `importlib.metadata.version("celmis")` would answer with the verifier's
+  version — which `src/vault/provenance.py` stamps into every generated
+  document and `/api/capabilities` reports as the running platform. Both
+  `DISTRIBUTIONS` tuples now ask for `celmis-platform` first, and the root
+  carries a `Private :: Do Not Upload` classifier, which is not a real
+  classifier and which PyPI therefore rejects — a hard stop rather than a note.
 
 - **Two sentences kept the mark after the labels above them lost it.** The
   navigation entry and the tour heading were renamed to "Agent"; the subtitle

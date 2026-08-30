@@ -49,7 +49,7 @@ GENERATOR = "celmis"
 #: The point the old comment was making still stands, which is why the
 #: fallback exists at all: a version field that is always the same string is
 #: worse than no field, because it looks like an answer.
-_DISTRIBUTIONS = ("celmis", "code-analysis-system")
+_DISTRIBUTIONS = ("celmis-platform", "celmis", "code-analysis-system")
 
 
 #: The value a broken build bakes into its own metadata.

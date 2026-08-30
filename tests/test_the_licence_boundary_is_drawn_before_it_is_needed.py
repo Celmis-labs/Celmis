@@ -143,15 +143,40 @@ def test_the_distribution_is_named_for_the_product():
     moment there is a tag, so it has to be right before the first one."""
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert 'name = "celmis"' in text
+    assert 'name = "celmis-platform"' in text, (
+        "the platform's distribution must not be called `celmis` — that name "
+        "belongs to the standalone verifier on PyPI, and building from this "
+        "directory would publish the whole server under it"
+    )
     assert "code-analysis-system" not in text
+    assert '"Private :: Do Not Upload"' in text, (
+        "the guard against uploading the platform is gone. That string is not "
+        "a real classifier, and PyPI rejects an unknown one — which is the "
+        "point: a hard stop rather than a note."
+    )
 
 
 def test_the_old_distribution_name_still_resolves():
-    """A container built before the rename carries the old name; a version
-    lookup that answers "unknown" during a rollout is a worse answer than a
-    two-element tuple."""
-    from src import DISTRIBUTIONS
+    """Older names keep resolving, and the ORDER is the part that matters.
 
-    assert DISTRIBUTIONS[0] == "celmis"
+    A container built before a rename carries the old name, and a version
+    lookup answering "unknown" during a rollout is worse than a longer tuple.
+    What is new is why the first element is load-bearing: `celmis` on PyPI is
+    the standalone verifier, so in an environment holding both,
+    `version("celmis")` returns the VERIFIER's version. Asking for
+    `celmis-platform` first is what stops the platform reporting it as its own
+    in /api/capabilities and stamping it into every generated document.
+    """
+    from src import DISTRIBUTIONS
+    from src.vault.provenance import _DISTRIBUTIONS
+
+    assert DISTRIBUTIONS[0] == "celmis-platform"
+    assert "celmis" in DISTRIBUTIONS
     assert "code-analysis-system" in DISTRIBUTIONS
+    assert DISTRIBUTIONS.index("celmis-platform") < DISTRIBUTIONS.index("celmis")
+
+    # A second, independent copy of the same tuple. Changing one and not the
+    # other reproduces the bug in half the codebase.
+    assert _DISTRIBUTIONS == DISTRIBUTIONS, (
+        "src/vault/provenance.py carries its own copy and it has drifted"
+    )
