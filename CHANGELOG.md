@@ -20,6 +20,10 @@ derives it from there.
 
 ## [Unreleased]
 
+Nothing since `v0.1.20`.
+
+## [0.1.20] — 2026-08-31
+
 ### Added
 
 - **`celmis` is on PyPI, and the pack now says so.** Published 0.1.0 and
