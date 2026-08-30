@@ -375,8 +375,16 @@ def _json(text: str) -> dict:
         return {}
 
 
-def lock_files(repo_path: Path) -> list[Path]:
-    """Every lock file worth reading, shallowest first."""
+def lock_files(repo_path: Path, notes: list[dict] | None = None) -> list[Path]:
+    """Every lock file worth reading, shallowest first.
+
+    `notes` collects what the cap below threw away. A partial inventory that
+    does not say it is partial is the thing this subsystem exists to avoid —
+    `document.py` states the rule in as many words, "count of what was dropped
+    is printed rather than silently truncated", and this walk was not keeping
+    it. A monorepo with 25 lock files produced an SBOM missing five, and
+    nothing anywhere said so.
+    """
     found: list[tuple[int, Path]] = []
     for path in repo_path.rglob("*"):
         if path.name not in _LOCK_READERS or not path.is_file():
@@ -386,13 +394,31 @@ def lock_files(repo_path: Path) -> list[Path]:
             continue
         found.append((len(rel_parts), path))
     found.sort(key=lambda t: (t[0], str(t[1])))
+    if len(found) > _MAX_LOCKFILES:
+        dropped = len(found) - _MAX_LOCKFILES
+        logger.warning(
+            "lock_files_truncated path=%s found=%d kept=%d dropped=%d",
+            repo_path, len(found), _MAX_LOCKFILES, dropped,
+        )
+        if notes is not None:
+            notes.append({
+                "what": "lock files",
+                "found": len(found),
+                "kept": _MAX_LOCKFILES,
+                "dropped": dropped,
+                "detail": "deepest paths first; the inventory below is partial",
+            })
     return [p for _, p in found[:_MAX_LOCKFILES]]
 
 
-def scan_locks(repo_path: Path) -> list[LockEntry]:
-    """All resolved dependencies across every lock file in a repo clone."""
+def scan_locks(repo_path: Path, notes: list[dict] | None = None) -> list[LockEntry]:
+    """All resolved dependencies across every lock file in a repo clone.
+
+    Two caps apply — how many lock files are read, and how many entries are
+    taken from each — and both record what they dropped into `notes`.
+    """
     out: list[LockEntry] = []
-    for path in lock_files(repo_path):
+    for path in lock_files(repo_path, notes):
         rel = str(path.relative_to(repo_path))
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -403,6 +429,20 @@ def scan_locks(repo_path: Path) -> list[LockEntry]:
         except Exception as exc:  # noqa: BLE001
             logger.debug("lock_parse_failed file=%s err=%s", rel, exc)
             continue
+        if len(entries) > _MAX_ENTRIES_PER_LOCK:
+            dropped = len(entries) - _MAX_ENTRIES_PER_LOCK
+            logger.warning(
+                "lock_entries_truncated file=%s found=%d kept=%d dropped=%d",
+                rel, len(entries), _MAX_ENTRIES_PER_LOCK, dropped,
+            )
+            if notes is not None:
+                notes.append({
+                    "what": f"packages in {rel}",
+                    "found": len(entries),
+                    "kept": _MAX_ENTRIES_PER_LOCK,
+                    "dropped": dropped,
+                    "detail": "this lock file is larger than the reader's cap",
+                })
         out.extend(entries[:_MAX_ENTRIES_PER_LOCK])
     return out
 

@@ -184,13 +184,22 @@ _SKIP_DIRS = {"node_modules", ".git", "vendor", "dist", "build", ".venv", "venv"
 _MAX_MANIFESTS_PER_REPO = 40
 
 
-def scan_repo(repo_path: Path) -> list[DeclaredDep]:
+def scan_repo(repo_path: Path, notes: list[dict] | None = None) -> list[DeclaredDep]:
     """All declared deps in a repo clone, deduplicated by (ecosystem, package)
-    keeping the first (shallowest manifest wins — root over sub-packages)."""
+    keeping the first (shallowest manifest wins — root over sub-packages).
+
+    `notes` collects what the cap dropped. The walk stops after
+    `_MAX_MANIFESTS_PER_REPO` manifests and used to stop in silence, so a
+    monorepo past that count produced an inventory that looked complete and
+    was not — the failure `document.py` already names: "count of what was
+    dropped is printed rather than silently truncated".
+    """
     found: list[tuple[int, DeclaredDep]] = []
     manifests = 0
+    truncated_at: str | None = None
     for path in sorted(repo_path.rglob("*")):
         if manifests >= _MAX_MANIFESTS_PER_REPO:
+            truncated_at = str(path.relative_to(repo_path))
             break
         if not path.is_file() or path.name not in _MANIFEST_SCANNERS:
             continue
@@ -202,6 +211,21 @@ def scan_repo(repo_path: Path) -> list[DeclaredDep]:
         if deps:
             manifests += 1
             found.extend((depth, d) for d in deps)
+
+    if truncated_at is not None:
+        logger.warning(
+            "manifests_truncated path=%s kept=%d stopped_at=%s",
+            repo_path, _MAX_MANIFESTS_PER_REPO, truncated_at,
+        )
+        if notes is not None:
+            notes.append({
+                "what": "manifests",
+                "found": None,          # the walk stopped; nobody counted the rest
+                "kept": _MAX_MANIFESTS_PER_REPO,
+                "dropped": None,
+                "detail": f"the walk stopped at {truncated_at}; anything after "
+                          f"it in path order was not read",
+            })
 
     found.sort(key=lambda t: t[0])
     seen: set[tuple[str, str]] = set()

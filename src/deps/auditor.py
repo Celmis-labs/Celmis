@@ -164,6 +164,9 @@ def run_audit(run_id: str, workspace_id: str, *,
         audited_commits: dict[str, str] = {}
         skipped: list[str] = []
         skip_reasons: dict[str, str] = {}
+        #: slug → what each cap dropped for that repository. Empty when
+        #: nothing was truncated, which is the common case.
+        truncated: dict[str, list[dict]] = {}
         all_deps: list[tuple[str, object]] = []            # (repo_slug, DeclaredDep)
         native_hits: list[tuple[str, object]] = []         # (repo_slug, NativeFinding)
         native_checks: list[dict] = []
@@ -215,7 +218,16 @@ def run_audit(run_id: str, workspace_id: str, *,
                     skipped.append(cfg.repo_slug)
                     skip_reasons[cfg.repo_slug] = "clone failed (no path after clone)"
                     continue
-            deps = scan_repo(repo_path)
+            # WHAT THE CAPS THREW AWAY, per repository. Four limits bound this
+            # audit — manifests read, lock files read, entries per lock file,
+            # transitive candidates kept — and every one of them used to stop
+            # in silence. A partial inventory that does not say it is partial
+            # is the exact failure `document.py` names: "count of what was
+            # dropped is printed rather than silently truncated". It reaches
+            # the run summary, the SBOM and the evidence pack, because a
+            # filing built on a short list must say the list was short.
+            repo_notes: list[dict] = []
+            deps = scan_repo(repo_path, repo_notes)
             scanned.append(cfg.repo_slug)
             # The sha of the tree we just READ, not the one the graph was
             # indexed at. The SBOM derives its serialNumber from the commit
@@ -303,7 +315,8 @@ def run_audit(run_id: str, workspace_id: str, *,
                 direct_names: dict[str, set[str]] = {}
                 for d in deps:
                     direct_names.setdefault(d.ecosystem, set()).add(d.package.lower())
-                entries = mark_transitive(scan_locks(repo_path), direct_names)
+                entries = mark_transitive(scan_locks(repo_path, repo_notes),
+                                          direct_names)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("dep_audit_locks_failed repo=%s err=%s", cfg.repo_slug, exc)
                 entries = []
@@ -317,7 +330,22 @@ def run_audit(run_id: str, workspace_id: str, *,
                 picked.add(key)
                 transitive_candidates.append((cfg.repo_slug, entry))
                 if len(picked) >= _MAX_TRANSITIVE_PER_REPO:
+                    logger.warning(
+                        "transitive_truncated repo=%s kept=%d candidates=%d",
+                        cfg.repo_slug, _MAX_TRANSITIVE_PER_REPO, len(entries),
+                    )
+                    repo_notes.append({
+                        "what": "transitive packages",
+                        "found": len(entries),
+                        "kept": _MAX_TRANSITIVE_PER_REPO,
+                        "dropped": None,
+                        "detail": "candidates past this point were not queried "
+                                  "for advisories",
+                    })
                     break
+
+            if repo_notes:
+                truncated[cfg.repo_slug] = repo_notes
 
         # ── Latest versions: one lookup per unique (eco, pkg), concurrent.
         unique: dict[tuple[str, str], str] = {}
@@ -535,6 +563,10 @@ def run_audit(run_id: str, workspace_id: str, *,
             "audited_commits": dict(audited_commits),
             "repos_skipped": skipped,
             "skip_reasons": skip_reasons,
+            #: What the four caps threw away, per repository. Present and
+            #: non-empty means this run read less than the repository holds,
+            #: and every artefact built from it says so.
+            "truncated": truncated,
             "packages": len(rows),
             "unique_packages": len(unique),
             "outdated": n_outdated,

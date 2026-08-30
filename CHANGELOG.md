@@ -20,7 +20,27 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.21`.
+### Fixed
+
+- **Four caps bounded a dependency audit in silence.** Twenty lock files, four
+  thousand entries per lock file, forty manifests, six hundred transitive
+  candidates — every one a plain slice or `break`, with nothing logged and
+  nothing recorded. A monorepo with twenty-five lock files produced an SBOM
+  missing five, and the evidence pack built from it read as a complete
+  inventory. The caps themselves are right; an audit has to end. Not saying
+  they bit is what turned a bounded read into a false statement about what is
+  installed — and `document.py` already writes the rule down: "count of what
+  was dropped is printed rather than silently truncated".
+
+  Each now logs what it dropped and records it, and the run summary carries
+  `truncated` per repository so the SBOM and the pack can say the list was
+  short. A test asserts the caps still bound the work, because lifting them
+  would turn a warning into an audit that never finishes.
+
+- **Two texts still promised verification without trust.** The README
+  scenarios table and `home.html` were missed when the evidence-pack claim was
+  corrected, and the site build reads README — so the old promise was live on
+  the published docs page.
 
 ## [0.1.21] — 2026-08-31
 
