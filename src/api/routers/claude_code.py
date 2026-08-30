@@ -290,12 +290,20 @@ def save_connection(
         # friendlier wording.
         raise HTTPException(
             status_code=400,
-            detail="That doesn't look like a Claude Code token — run "
-                   "`claude setup-token` and paste the sk-ant-oat… value.",
+            detail="That is neither a subscription token nor an API key — run "
+                   "`claude setup-token` for the sk-ant-oat… value, or paste "
+                   "an Anthropic API key (sk-ant-api…).",
         )
     if payload.scope == "workspace":
-        # Sharing one person's subscription across a workspace is the admin's
-        # explicit call (the UI shows the terms warning before this request).
+        # A shared slot takes an API KEY and `save_token` enforces that: usage
+        # bills to the key's owner, which Anthropic's terms allow, while a
+        # subscription belongs to one person and cannot be spent on their
+        # colleagues. This used to read "the admin's explicit call (the UI
+        # shows the terms warning before this request)" — a warning the UI
+        # showed and then saved past.
+        #
+        # Still an admin's call: a key that bills the workspace is not a thing
+        # any member should be able to install for everyone.
         _require_workspace_admin(
             user, workspace_id, "Only a workspace owner/admin may share a token")
     try:

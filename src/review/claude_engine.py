@@ -260,7 +260,10 @@ def resolve_auth(
 
     conn = resolve_connection(user_id, workspace_id)
     if conn is not None:
-        return ClaudeAuth(env={"CLAUDE_CODE_OAUTH_TOKEN": conn.token}, source=conn.source)
+        # `conn.env` rather than a hand-written variable: a workspace slot may
+        # now hold an API key, and the CLI does not treat the two variables as
+        # interchangeable.
+        return ClaudeAuth(env=dict(conn.env), source=conn.source)
 
     try:
         from src.llm.keys import resolve_api_key

@@ -25,6 +25,10 @@ from src.agent import connection as conn
 from src.api.routers import claude_code as routes
 
 TOKEN = "sk-ant-oat01-fake-token-for-tests-0000000000"
+#: What a shared slot may hold: a Console key, whose usage bills to its
+#: owner. A subscription token there would spend one person's plan on
+#: everybody else, which `save_token` now refuses.
+API_KEY = "sk-ant-api03-fake-key-for-tests-000000000000"
 WS = "ws-1"
 _ADMIN = SimpleNamespace(id="u-admin", email="admin@test", is_admin=True)
 _MEMBER = SimpleNamespace(id="u-dev", email="dev@test", is_admin=False)
@@ -51,6 +55,11 @@ class _FakeClient:
 
     def __exit__(self, *exc):
         return False
+
+    def get(self, url, *, headers):
+        # The API-key probe is a GET against the model list.
+        self.calls.append({"url": url, "headers": headers, "method": "GET"})
+        return self._responder()
 
     def post(self, url, *, headers, json):
         self.calls.append({"url": url, "headers": headers, "json": json})
@@ -102,9 +111,13 @@ def _refused():
         "type": "authentication_error", "message": "OAuth token has been revoked"}})
 
 
-def _save(user=_MEMBER, scope="personal"):
+def _save(user=_MEMBER, scope="personal", token=None):
     return routes.save_connection(
-        routes.ConnectionIn(token=TOKEN, scope=scope), user=user, workspace_id=WS)
+        routes.ConnectionIn(
+            token=token or (API_KEY if scope == "workspace" else TOKEN),
+            scope=scope,
+        ),
+        user=user, workspace_id=WS)
 
 
 def _test_connection(user=_MEMBER, scope="personal"):
@@ -249,3 +262,22 @@ def test_the_status_route_never_carries_the_token(store):
         _save()
     assert TOKEN not in routes.connection_status(
         user=_MEMBER, workspace_id=WS).model_dump_json()
+
+
+def test_the_api_refuses_to_share_a_subscription_with_a_workspace(store):
+    """The rule at the surface a person actually touches.
+
+    Anthropic's terms: "Customers may not pay for, resell, or intermediate
+    Claude usage on their end users' behalf. Each end user must authenticate
+    with their own... credentials." Sharing one subscription across a
+    workspace is that, exactly. An API key in the same slot is fine and is
+    what the endpoint asks for instead.
+    """
+    import pytest
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as caught:
+        _save(user=_ADMIN, scope="workspace", token=TOKEN)
+    assert caught.value.status_code == 400
+    assert "one person" in str(caught.value.detail)
+    assert not store.rows, "refused and stored anyway"

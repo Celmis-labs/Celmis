@@ -65,6 +65,38 @@ PROVIDER = "claude_code"
 # Long-lived OAuth tokens minted by `claude setup-token`.
 TOKEN_PREFIX = "sk-ant-oat"
 
+#: Console API keys. A different credential with a different rulebook — see
+#: `credential_kind` and `save_token`.
+API_KEY_PREFIX = "sk-ant-api"
+
+KIND_OAUTH = "oauth"
+KIND_API_KEY = "api_key"
+
+
+def credential_kind(secret: str) -> str | None:
+    """Which of the two credentials this is, or None if it is neither.
+
+    THE DIFFERENCE IS NOT COSMETIC. Anthropic's terms treat them as opposites:
+
+      * An OAuth token is one person's Claude subscription. "Each end user must
+        authenticate with their own... credentials" and a developer "may not
+        pay for, resell, or intermediate Claude usage on their end users'
+        behalf" — so it belongs to exactly one person and cannot be shared.
+
+      * An API key is the customer's own key, and the terms say so explicitly:
+        "configuring an API key in a development environment, secrets manager,
+        or machine image for use by the customer's own authorized users",
+        provided the usage bills to the key owner. A team may share one.
+
+    That is why the workspace slot accepts one and refuses the other.
+    """
+    value = (secret or "").strip()
+    if value.startswith(TOKEN_PREFIX):
+        return KIND_OAUTH
+    if value.startswith(API_KEY_PREFIX):
+        return KIND_API_KEY
+    return None
+
 #: Where the probe goes and what it carries — copied from the CLI, see above.
 VERIFY_URL = "https://api.anthropic.com/v1/messages"
 VERIFY_HOST = "api.anthropic.com"
@@ -120,6 +152,23 @@ class ClaudeConnection:
     token: str
     source: str          # "personal" | "workspace"
     saved_by: str | None
+    kind: str = KIND_OAUTH
+
+    @property
+    def env(self) -> dict[str, str]:
+        """The environment variable this credential is presented in.
+
+        One place, because three call sites each wrote
+        ``{"CLAUDE_CODE_OAUTH_TOKEN": conn.token}`` by hand and a fourth would
+        have too — and the CLI does NOT treat the two variables as
+        interchangeable. Measured against the binary: with both set, a broken
+        ANTHROPIC_API_KEY beside a working OAuth token fails the session
+        outright, while a working key beside a broken token succeeds. The key
+        wins, so handing one over in the other's variable is not a near miss.
+        """
+        if self.kind == KIND_API_KEY:
+            return {"ANTHROPIC_API_KEY": self.token}
+        return {"CLAUDE_CODE_OAUTH_TOKEN": self.token}
 
 
 @dataclass(frozen=True)
@@ -190,7 +239,7 @@ def token_looks_valid(token: str) -> bool:
     Still the FIRST check and no longer the only one — `save_token` asks
     Anthropic after this passes.
     """
-    return token.strip().startswith(TOKEN_PREFIX) and len(token.strip()) > 20
+    return credential_kind(token) is not None and len(token.strip()) > 20
 
 
 def _probe_client():
@@ -226,6 +275,59 @@ def _provider_reason(resp, token: str) -> str:
     return _scrub(message, token)[:400]
 
 
+#: A key is checked against the model list: it costs nothing, returns 200 for a
+#: live key and 401 for a dead one, and — usefully — 401 for an OAuth token, so
+#: it also tells the two credentials apart.
+MODELS_URL = "https://api.anthropic.com/v1/models"
+
+
+def _verify_api_key(key: str) -> VerificationResult:
+    """Ask Anthropic whether it accepts this API key.
+
+    The OAuth probe above cannot answer this question: it sends a bearer token
+    with the CLI's beta header, and `/v1/messages` refuses a Console key
+    presented that way. Same three-line classifier as the OAuth probe, for the
+    same reason — only a 200 may write "verified", and only a 401/403 may
+    write "refused"; everything else is "could not tell".
+    """
+    import httpx
+
+    from src.security.egress import EgressBlockedError
+
+    checked_at = _now_iso()
+    started = time.monotonic()
+    try:
+        with _probe_client() as client:
+            resp = client.get(
+                MODELS_URL,
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": ANTHROPIC_VERSION,
+                },
+            )
+    except (httpx.HTTPError, EgressBlockedError) as exc:
+        return VerificationResult(
+            ok=False, conclusive=False, checked_at=checked_at,
+            reason=f"could not reach Anthropic: {_scrub(str(exc), key)}"[:400],
+        )
+    latency_ms = int((time.monotonic() - started) * 1000)
+    if resp.status_code == 200:
+        return VerificationResult(
+            ok=True, reason="", conclusive=True,
+            checked_at=checked_at, latency_ms=latency_ms,
+        )
+    reason = _provider_reason(resp, key)
+    if resp.status_code in (401, 403):
+        return VerificationResult(
+            ok=False, reason=reason, conclusive=True,
+            checked_at=checked_at, latency_ms=latency_ms,
+        )
+    return VerificationResult(
+        ok=False, reason=f"could not verify: {reason}"[:400], conclusive=False,
+        checked_at=checked_at, latency_ms=latency_ms,
+    )
+
+
 def verify_token(token: str) -> VerificationResult:
     """Ask Anthropic whether it accepts this token, the way the CLI does.
 
@@ -245,6 +347,8 @@ def verify_token(token: str) -> VerificationResult:
     from src.security.egress import EgressBlockedError
 
     token = token.strip()
+    if credential_kind(token) == KIND_API_KEY:
+        return _verify_api_key(token)
     checked_at = _now_iso()
     started = time.monotonic()
     try:
@@ -305,8 +409,21 @@ def resolve_connection(user_id: str, workspace_id: str) -> ClaudeConnection | No
             logger.warning("claude_token_unreadable slot=%s err=%s", slot, exc)
             continue
         if row is not None and row.secret:
+            kind = credential_kind(row.secret)
+            if source == "workspace" and kind != KIND_API_KEY:
+                # Refused at READ time as well as at write time, because a slot
+                # filled before the write-time rule existed is still filled.
+                # Skipping it falls through to "not connected", which asks the
+                # member for their own credential — the outcome the terms
+                # require — instead of quietly spending somebody else's plan.
+                logger.warning(
+                    "claude_workspace_slot_refused ws=%s kind=%s — a shared "
+                    "slot may hold an API key only", workspace_id, kind,
+                )
+                continue
             saved_by = (row.metadata or {}).get("saved_by") if isinstance(row.metadata, dict) else None
-            return ClaudeConnection(token=row.secret, source=source, saved_by=saved_by)
+            return ClaudeConnection(token=row.secret, source=source, saved_by=saved_by,
+                                    kind=kind or KIND_OAUTH)
     return None
 
 
@@ -348,10 +465,39 @@ def save_token(
     from src.credentials import get_credential_store
 
     token = token.strip()
-    if not token_looks_valid(token):
+    kind = credential_kind(token)
+    if kind is None or not token_looks_valid(token):
         # The router says this in friendlier words before we get here; the
         # check is repeated so no future caller can reach the store around it.
-        raise TokenRejected("That is not a `claude setup-token` value (sk-ant-oat…).")
+        raise TokenRejected(
+            "That is neither a `claude setup-token` value (sk-ant-oat…) nor an "
+            "Anthropic API key (sk-ant-api…).",
+        )
+
+    # THE WORKSPACE SLOT TAKES AN API KEY AND NOTHING ELSE.
+    #
+    # A subscription token in a shared slot means one person's Claude plan runs
+    # everybody else's sessions, which is the thing Anthropic's terms name
+    # outright: "Customers may not pay for, resell, or intermediate Claude
+    # usage on their end users' behalf. Each end user must authenticate with
+    # their own Anthropic API key, Claude subscription plan credentials, or 3P
+    # inference provider credential."
+    #
+    # An API key in the same slot is explicitly fine — "configuring an API key
+    # in a development environment, secrets manager, or machine image for use
+    # by the customer's own authorized users" — because the bill lands on the
+    # key's owner under their own agreement. So the slot survives; only the
+    # credential that made it a violation is turned away.
+    #
+    # The UI used to carry a warning here instead. A warning is not a control:
+    # it told the operator they might be breaking the terms and then saved it.
+    if scope != "personal" and kind == KIND_OAUTH:
+        raise TokenRejected(
+            "A subscription token belongs to one person and cannot be shared "
+            "with a workspace — each member signs in with their own. Paste an "
+            "Anthropic API key (sk-ant-api…) here instead: its usage bills to "
+            "the key's owner, which the terms allow.",
+        )
 
     result = verify_token(token)
     if result.conclusive and not result.ok:
@@ -529,6 +675,9 @@ __all__ = [
     "delete_token",
     "recheck_token",
     "resolve_connection",
+    "credential_kind",
+    "KIND_API_KEY",
+    "KIND_OAUTH",
     "save_token",
     "status",
     "token_looks_valid",

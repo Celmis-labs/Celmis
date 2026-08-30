@@ -108,7 +108,7 @@ def _auth_env(workspace_id: str, user_id: str | None = None) -> dict | None:
 
             conn = resolve_connection(user_id, workspace_id)
             if conn is not None:
-                return {"CLAUDE_CODE_OAUTH_TOKEN": conn.token}
+                return dict(conn.env)
         except Exception as exc:  # noqa: BLE001
             logger.debug("claude_docs_connection_failed err=%s", exc)
     try:

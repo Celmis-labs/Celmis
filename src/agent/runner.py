@@ -964,7 +964,7 @@ async def _drive_agent(session_id: str, row, *,
     spec = get_spec(getattr(row, "mode", None))
 
     mcp_token = _mint_mcp_token(row.user_id)
-    options = _build_options(workspace, conn.token, mcp_token, resume=resume,
+    options = _build_options(workspace, conn.env, mcp_token, resume=resume,
                              spec=spec, model=getattr(row, "model", "") or "")
     logger.info("agent_session_options session=%s mode=%s model=%s effort=%s",
                 session_id, spec.name, options.model or "(cli default)", spec.effort)
@@ -1230,9 +1230,17 @@ def _record_agent_spend(row, message, prior=(0, 0, 0)) -> tuple[int, int, int]:
         return prior
 
 
-def _build_options(workspace, oauth_token: str, mcp_token: str,
+def _build_options(workspace, auth_env: dict[str, str], mcp_token: str,
                    *, resume: bool = False,
                    spec=None, model: str = ""):
+    """`auth_env` rather than a token, because there are two credentials.
+
+    A workspace slot may hold an Anthropic API key, which the CLI reads from
+    ANTHROPIC_API_KEY, while a personal subscription arrives in
+    CLAUDE_CODE_OAUTH_TOKEN. `ClaudeConnection.env` decides which; this
+    function only carries it. Measured against the binary, the two are not
+    interchangeable — with both set the API key wins outright.
+    """
     from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
     from src.agent.exec_tool import build_exec_server
@@ -1244,7 +1252,7 @@ def _build_options(workspace, oauth_token: str, mcp_token: str,
     env = {
         "HOME": str(workspace.home_dir),
         "CLAUDE_CONFIG_DIR": str(workspace.home_dir / ".claude"),
-        "CLAUDE_CODE_OAUTH_TOKEN": oauth_token,
+        **auth_env,
         "DISABLE_TELEMETRY": "1",
         "DISABLE_AUTOUPDATER": "1",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",

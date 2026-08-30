@@ -54,7 +54,7 @@ def _options(tmp_path: Path):
     ws = _Workspace(repo_dir=tmp_path / "repo", home_dir=tmp_path / "home")
     ws.repo_dir.mkdir(parents=True)
     ws.home_dir.mkdir(parents=True)
-    return _build_options(ws, "oauth-token", "mcp-token")
+    return _build_options(ws, {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-token"}, "mcp-token")
 
 
 def _run(hook, tool_name: str, tool_input: dict) -> dict:
@@ -265,18 +265,21 @@ def test_options_follow_the_mode(tmp_path):
     ws.repo_dir.mkdir(parents=True)
     ws.home_dir.mkdir(parents=True)
 
-    wf = _build_options(ws, "tok", "mcp", spec=get_spec("workflow"))
+    wf = _build_options(ws, {"CLAUDE_CODE_OAUTH_TOKEN": "tok"}, "mcp",
+                       spec=get_spec("workflow"))
     # An alias, not a pinned id — the CLI resolves it to the current Opus.
     assert wf.model == "opus"
     assert wf.effort == "high"
     assert wf.max_turns == get_spec("workflow").max_turns
 
     # An explicit model wins over the mode's default.
-    picked = _build_options(ws, "tok", "mcp", spec=get_spec("workflow"),
+    picked = _build_options(ws, {"CLAUDE_CODE_OAUTH_TOKEN": "tok"}, "mcp",
+                           spec=get_spec("workflow"),
                             model="sonnet")
     assert picked.model == "sonnet"
 
-    std = _build_options(ws, "tok", "mcp", spec=get_spec("standard"))
+    std = _build_options(ws, {"CLAUDE_CODE_OAUTH_TOKEN": "tok"}, "mcp",
+                        spec=get_spec("standard"))
     assert std.model is None          # let the CLI decide
     assert std.effort == "medium"
 
@@ -368,3 +371,35 @@ def test_symlink_out_of_the_tree_is_denied(tmp_path):
 
     out = _run(hook, "Read", {"file_path": str(root / "escape" / "key.txt")})
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_the_session_carries_whichever_credential_it_was_given(tmp_path: Path):
+    """`_build_options` must not re-decide which variable to use.
+
+    A workspace slot may hold an Anthropic API key, which the CLI reads from
+    ANTHROPIC_API_KEY, while a personal subscription arrives in
+    CLAUDE_CODE_OAUTH_TOKEN. Measured against the binary the two are NOT
+    interchangeable: with both set, a broken key beside a working token fails
+    the session outright, while a working key beside a broken token succeeds.
+    So the choice belongs to `ClaudeConnection.env`, and this function only
+    carries it — including not leaving the other variable lying around.
+    """
+    from src.agent.connection import KIND_API_KEY, KIND_OAUTH, ClaudeConnection
+
+    ws = _Workspace(repo_dir=tmp_path / "repo", home_dir=tmp_path / "home")
+    ws.repo_dir.mkdir(parents=True)
+    ws.home_dir.mkdir(parents=True)
+
+    for kind, mine, theirs in (
+        (KIND_OAUTH, "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
+        (KIND_API_KEY, "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"),
+    ):
+        credential = ClaudeConnection(token="secret", source="personal",
+                                      saved_by=None, kind=kind)
+        env = _build_options(ws, credential.env, "mcp-token").env
+        assert env[mine] == "secret", f"{kind} did not travel in {mine}"
+        assert theirs not in env, (
+            f"{kind} also set {theirs}; with both present the CLI presents the "
+            f"API key, so a stray one silently changes who pays"
+        )
+

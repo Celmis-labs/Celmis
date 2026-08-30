@@ -20,7 +20,41 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.17`.
+### Security
+
+- **A workspace could share one person's Claude subscription.** The shared slot
+  accepted the `sk-ant-oat…` token from `claude setup-token`, and
+  `resolve_connection` fell back to it for any member without one — so one
+  person's plan ran everybody else's sessions. Anthropic's terms name it
+  directly: "Customers may not pay for, resell, or intermediate Claude usage on
+  their end users' behalf. Each end user must authenticate with their own
+  Anthropic API key, Claude subscription plan credentials, or 3P inference
+  provider credential." The UI carried a warning about this and saved it
+  anyway; a warning is not a control.
+
+  The slot survives and now takes an **API key**, which the same terms permit —
+  "configuring an API key in a development environment, secrets manager, or
+  machine image for use by the customer's own authorized users" — because the
+  bill lands on the key's owner. Refused at write time and again at read time,
+  so an installation whose slot was filled before this rule stops using it
+  rather than keeping it for ever.
+
+### Added
+
+- **An Anthropic API key works everywhere a subscription did.** Measured
+  end to end against the CLI: a session driven by `ANTHROPIC_API_KEY` alone
+  starts, edits the checkout and reports success. `ClaudeConnection` now
+  carries which credential it holds and hands out the variable that belongs to
+  it — the two are not interchangeable, since with both set the API key wins
+  outright. A key is verified against `GET /v1/models`, which costs nothing and
+  also tells the two credential types apart.
+
+### Changed
+
+- **The agent section is no longer named after somebody else's product.**
+  "Claude agent" in the navigation and the tour is now just "Agent", in all
+  sixteen languages. Saying the product runs Claude Code stays — that is
+  accurate and permitted; naming your own section with the mark is not.
 
 ## [0.1.17] — 2026-08-30
 

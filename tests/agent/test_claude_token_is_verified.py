@@ -29,6 +29,8 @@ from src.agent import connection as conn
 
 # Obviously fake, and shaped like the real thing so the cheap gate passes.
 TOKEN = "sk-ant-oat01-fake-token-for-tests-0000000000"
+#: A Console key. Shaped like the real thing and just as fake.
+API_KEY = "sk-ant-api03-fake-key-for-tests-000000000000"
 USER = "user-1"
 WS = "ws-1"
 
@@ -67,6 +69,12 @@ class _FakeClient:
 
     def post(self, url, *, headers, json):
         self.calls.append({"url": url, "headers": headers, "json": json})
+        return self._responder()
+
+    def get(self, url, *, headers):
+        # The API-key probe is a GET against the model list. Same boundary,
+        # same recorded call, so the suite can say what actually went out.
+        self.calls.append({"url": url, "headers": headers, "method": "GET"})
         return self._responder()
 
 
@@ -292,9 +300,12 @@ def test_status_is_a_read_and_never_a_provider_call(store):
 
 
 def test_status_reports_the_workspace_slot_separately(store):
+    # An API KEY, because that is now the only thing a shared slot may hold —
+    # see the section at the end of this file. The property this test is named
+    # for is unchanged: the two slots are reported apart.
     patcher, _ = _transport(_accepted())
     with patcher:
-        conn.save_token(token=TOKEN, user_id=USER, workspace_id=WS,
+        conn.save_token(token=API_KEY, user_id=USER, workspace_id=WS,
                         scope="workspace", saved_by="admin@test")
 
     out = conn.status(USER, WS)
@@ -390,3 +401,105 @@ def test_a_status_payload_never_carries_the_token(store):
         conn.save_token(token=TOKEN, user_id=USER, workspace_id=WS,
                         scope="personal", saved_by="dev@test")
     assert TOKEN not in repr(conn.status(USER, WS))
+
+
+# ─── 5. Which credential may live in a shared slot ───────────────────
+#
+# Anthropic's terms make the two credentials opposites. A subscription token
+# is one person's: "Customers may not pay for, resell, or intermediate Claude
+# usage on their end users' behalf. Each end user must authenticate with their
+# own Anthropic API key, Claude subscription plan credentials, or 3P inference
+# provider credential." An API key is the customer's own, and sharing it is
+# named as allowed: "configuring an API key in a development environment,
+# secrets manager, or machine image for use by the customer's own authorized
+# users", provided the usage bills to the key's owner.
+#
+# The workspace slot used to take a subscription token behind a warning in the
+# UI. A warning is not a control — it told the operator they might be in
+# breach and then saved it anyway.
+
+
+def test_a_subscription_token_cannot_be_shared_with_a_workspace(store):
+    with pytest.raises(conn.TokenRejected) as caught:
+        conn.save_token(token=TOKEN, user_id=USER, workspace_id=WS,
+                        scope="workspace", saved_by="admin@test")
+    assert "one person" in str(caught.value)
+    assert not store.rows, "it was refused and stored anyway"
+
+
+def test_an_api_key_may_be_shared_with_a_workspace(store):
+    patcher, client = _transport(_accepted())
+    with patcher:
+        conn.save_token(token=API_KEY, user_id=USER, workspace_id=WS,
+                        scope="workspace", saved_by="admin@test")
+    assert store.rows, "the permitted credential was refused"
+    assert client.calls[0]["method"] == "GET"
+    assert client.calls[0]["url"] == conn.MODELS_URL
+    assert client.calls[0]["headers"]["x-api-key"] == API_KEY
+    assert "Authorization" not in client.calls[0]["headers"], (
+        "a Console key sent as a bearer token is refused by /v1/messages — "
+        "that is why this probe exists separately"
+    )
+
+
+def test_a_personal_slot_takes_either(store):
+    patcher, _ = _transport(_accepted())
+    with patcher:
+        conn.save_token(token=TOKEN, user_id=USER, workspace_id=WS,
+                        scope="personal", saved_by="dev@test")
+        conn.save_token(token=API_KEY, user_id="user-2", workspace_id=WS,
+                        scope="personal", saved_by="dev2@test")
+    assert len(store.rows) == 2
+
+
+def test_neither_shape_is_not_a_credential(store):
+    with pytest.raises(conn.TokenRejected):
+        conn.save_token(token="hunter2", user_id=USER, workspace_id=WS,
+                        scope="personal", saved_by="dev@test")
+    assert not store.rows
+
+
+def test_a_shared_slot_filled_before_the_rule_is_refused_on_read(store):
+    """The rule has to hold for slots that were filled when it did not exist.
+
+    Write-time enforcement alone leaves every existing installation running
+    members' sessions on one person's plan for ever.
+    """
+    store.save(provider=conn.PROVIDER, secret=TOKEN,
+               user_id=conn._ws_slot(WS), metadata={"saved_by": "admin@test"})
+    assert conn.resolve_connection(USER, WS) is None, (
+        "a subscription token already sitting in the shared slot was handed "
+        "out anyway"
+    )
+
+
+def test_a_shared_api_key_still_resolves(store):
+    store.save(provider=conn.PROVIDER, secret=API_KEY,
+               user_id=conn._ws_slot(WS), metadata={"saved_by": "admin@test"})
+    got = conn.resolve_connection(USER, WS)
+    assert got is not None and got.source == "workspace"
+    assert got.kind == conn.KIND_API_KEY
+
+
+def test_a_personal_token_still_wins_over_a_shared_key(store):
+    store.save(provider=conn.PROVIDER, secret=TOKEN, user_id=USER, metadata={})
+    store.save(provider=conn.PROVIDER, secret=API_KEY,
+               user_id=conn._ws_slot(WS), metadata={})
+    got = conn.resolve_connection(USER, WS)
+    assert got.source == "personal" and got.kind == conn.KIND_OAUTH
+
+
+def test_each_credential_travels_in_its_own_variable() -> None:
+    """The CLI does not treat the two as interchangeable.
+
+    Measured against the binary: with both set, a broken ANTHROPIC_API_KEY
+    beside a working OAuth token fails the session outright, while a working
+    key beside a broken token succeeds. The key wins, so putting one in the
+    other's variable is not a near miss.
+    """
+    oauth = conn.ClaudeConnection(token=TOKEN, source="personal", saved_by=None,
+                                  kind=conn.KIND_OAUTH)
+    key = conn.ClaudeConnection(token=API_KEY, source="workspace", saved_by=None,
+                                kind=conn.KIND_API_KEY)
+    assert oauth.env == {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}
+    assert key.env == {"ANTHROPIC_API_KEY": API_KEY}
