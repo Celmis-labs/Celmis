@@ -2,7 +2,7 @@
 
 /**
  * /alerts — monitoring alerts ingested from Grafana / any webhook.
- * Each alert has "Fix with Claude": jumps to /claude with the alert context
+ * Each alert has "Fix from here": jumps to /claude with the alert context
  * pre-filled so a bug can be dispatched to the agent from a phone.
  */
 
@@ -55,7 +55,7 @@ export default function AlertsPage() {
     onError: (e) => toast.error((e as Error).message),
   });
 
-  const fixWithClaude = (a: IncomingAlert) => {
+  const fixFromHere = (a: IncomingAlert) => {
     const prompt =
       `Fix this production alert:\n\n${a.title}\n\n${a.body}`.slice(0, 4000);
     const q = new URLSearchParams({ prompt });
@@ -105,8 +105,8 @@ export default function AlertsPage() {
               )}
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 {a.status !== "fixed" && (
-                  <Button size="sm" onClick={() => fixWithClaude(a)}>
-                    <BotIcon className="mr-1 h-3.5 w-3.5" /> {t("alerts.fixWithClaude")}
+                  <Button size="sm" onClick={() => fixFromHere(a)}>
+                    <BotIcon className="mr-1 h-3.5 w-3.5" /> {t("alerts.fixFromHere")}
                   </Button>
                 )}
                 {a.status === "new" && (

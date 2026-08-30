@@ -79,7 +79,7 @@ export default function ClaudePage() {
   // Onboarding "show me where" lands here for the connection card.
   useSpotlightOnMount();
 
-  // "Fix with Claude" hand-off: /claude?prompt=…&repo=…&alert=… pre-fills the
+  // "Fix from here" hand-off: /claude?prompt=…&repo=…&alert=… pre-fills the
   // new-session form with the alert context (client-only, no SSR concerns).
   const [prefill, setPrefill] = useState<{ prompt: string; repo: string; alert: string } | null>(null);
   useEffect(() => {

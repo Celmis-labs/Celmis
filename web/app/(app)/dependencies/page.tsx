@@ -572,7 +572,7 @@ export default function DependenciesPage() {
     router.push(`/claude?${new URLSearchParams({ prompt, repo: f.repo_slug })}`);
   };
 
-  const fixWithClaude = (repoSlug: string) => {
+  const fixFromHere = (repoSlug: string) => {
     const targets = rows
       .filter((r) => r.repo_slug === repoSlug && r.recommendation !== "ok")
       .slice(0, 25);
@@ -1529,8 +1529,8 @@ export default function DependenciesPage() {
                 <Select value={repoFilter} className="h-11 sm:h-8 min-w-0 flex-1 text-base sm:min-w-40 sm:flex-initial sm:text-xs"
                   onChange={setRepoFilter} options={repoOptions} />
                 {repoFilter ? (
-                  <Button size="sm" className="h-11 w-full sm:h-8 sm:w-auto" onClick={() => fixWithClaude(repoFilter)}>
-                    <BotIcon className="mr-1 h-3.5 w-3.5" /> {t("deps.fixWithClaude")}
+                  <Button size="sm" className="h-11 w-full sm:h-8 sm:w-auto" onClick={() => fixFromHere(repoFilter)}>
+                    <BotIcon className="mr-1 h-3.5 w-3.5" /> {t("deps.fixFromHere")}
                   </Button>
                 ) : (
                   <span className="text-xs text-[var(--color-muted-foreground)]">

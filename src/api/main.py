@@ -411,7 +411,7 @@ def build_app() -> FastAPI:
     app.include_router(jobs_router.router)
     # Embedded Claude Code agent (subscription auth)
     app.include_router(claude_code_router.router)
-    # Monitoring alert ingest + "Fix with Claude"
+    # Monitoring alert ingest + "Fix from here"
     app.include_router(alerts_router.router)
     # Dependency audit (versions + vulnerabilities)
     app.include_router(deps_router.router)

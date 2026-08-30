@@ -1,7 +1,7 @@
 """Monitoring alerts — inbound ingest + workspace alert list.
 
 Scenario: a Grafana (or any) alert fires → lands here → the user opens it on
-their phone and presses "Fix with Claude", which pre-fills an agent session
+their phone and presses "Fix from here", which pre-fills an agent session
 with the alert context.
 
 Ingest URL: POST /webhook/alerts/{workspace_id}.{secret}
@@ -238,7 +238,7 @@ def _redact_alert(title: str, body: str) -> tuple[str, str]:
     in a `could not connect to` line. An Authorization header in a dumped
     request. A token in an environment dump. It used to go three places
     verbatim: into `incoming_alerts`, out to a chat room, and into a model
-    prompt when somebody pressed Fix with Claude.
+    prompt when somebody pressed Fix from here.
 
     `mode="markdown"` rather than `"code"`: an alert is prose with fragments
     in it, and the code pipeline's entropy stage fires on ordinary sentences.
