@@ -20,6 +20,10 @@ derives it from there.
 
 ## [Unreleased]
 
+Nothing since `v0.1.18`.
+
+## [0.1.18] — 2026-08-30
+
 ### Security
 
 - **A workspace could share one person's Claude subscription.** The shared slot
