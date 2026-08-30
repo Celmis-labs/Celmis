@@ -83,10 +83,10 @@ the other repository open.
 | **A new engineer has a question a senior would have to answer** | Every one of those pulls someone experienced out of flow, at the moment they are already covering. The codebase answers instead, with file:line citations → [Ask the code](#ask-the-code) |
 | **Two teams share an integration and neither can read the other's repository** | Load it, grant the right to ask, and deny the paths that must stay private. They get answers; the credentials are refused at the source → [Who can see what](#who-can-see-what) |
 | **A customer or an auditor asks for your SBOM** | One button, CycloneDX, plus an evidence pack whose manifest lets them verify it without trusting you → [Dependencies, SBOM and the evidence pack](#dependencies-sbom-and-the-evidence-pack) |
-| **A vulnerability lands in a dependency** | *Fix with Claude* hands an embedded session the repository, the package and the finding. It edits, the runner pushes a branch and opens a PR → [Fix with Claude](#fix-with-claude) |
+| **A vulnerability lands in a dependency** | *Fix from here* hands an embedded session the repository, the package and the finding. It edits, the runner pushes a branch and opens a PR → [Fix from here](#fix-from-here) |
 | **A pull request needs reviewing** | Agents read the diff — and, where the graph is built, who else calls what is being changed, including from another repository → [Pull-request review](#pull-request-review) |
 | **Forty services need the same thing done to them** | Write the sentence. Celmis shows which repositories it resolves to and waits for a second press, rather than finding them among forty and pressing a button forty times → [Ask for work across repositories](#ask-for-work-across-repositories) |
-| **An alert fires at 02:00 and you are not at a desk** | It lands in Celmis and goes out to the workspace's chat channel, and *Fix with Claude* opens a session already holding the alert. The runner opens the pull request → [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone) |
+| **An alert fires at 02:00 and you are not at a desk** | It lands in Celmis and goes out to the workspace's chat channel, and *Fix from here* opens a session already holding the alert. The runner opens the pull request → [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone) |
 | **Your own agent or editor needs to understand the codebase** | Point it at `/mcp/`. Eighteen tools over the same index, under the same access rules — no second copy of your code anywhere → [Connect Claude Code and other MCP clients](#connect-claude-code-and-other-mcp-clients) |
 
 The first three are the ones a code-review tool does not do at all, and they are
@@ -119,7 +119,7 @@ of every finding it scored false, and the command that reproduces both are in
 - [Ask the code](#ask-the-code)
 - [Pull-request review](#pull-request-review)
 - [Dependencies, SBOM and the evidence pack](#dependencies-sbom-and-the-evidence-pack)
-- [Fix with Claude](#fix-with-claude)
+- [Fix from here](#fix-from-here)
 - [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone)
 - [Ask for work across repositories](#ask-for-work-across-repositories)
 - [Who can see what](#who-can-see-what)
@@ -321,7 +321,7 @@ looks for: **an ecosystem nobody scanned reports zero vulnerabilities exactly
 like a clean one.** Coverage is shown next to the findings — which auditor
 produced each result, and, more usefully, what went unchecked and why.
 
-## Fix with Claude
+## Fix from here
 
 Finding something is half a loop. An embedded Claude Code session runs **inside**
 the installation, edits the checkout, and the runner commits, pushes a branch and
@@ -355,7 +355,7 @@ you reach any service you run: because it is yours and it is up.
 That is the whole of [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone)
 — an alert arrives, and the fix starts from wherever you happened to read it.
 
-A vulnerability in the dependency audit carries a **Fix with Claude** button. It
+A vulnerability in the dependency audit carries a **Fix from here** button. It
 does not open an empty chat — it hands the session the repository, the package,
 both versions and the boundaries of the job, already written:
 
@@ -440,7 +440,7 @@ What that buys is the route with no laptop in it:
    open.
 2. You open it. The alert carries its repository, because `route_incident` can take
    a stack trace and say which repository and which owner it belongs to.
-3. You press **Fix with Claude**. The session opens already holding the alert — not
+3. You press **Fix from here**. The session opens already holding the alert — not
    an empty chat.
 4. The runner commits, pushes a branch and opens the pull request.
 
