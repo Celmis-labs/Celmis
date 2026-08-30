@@ -312,9 +312,12 @@ def save_connection(
             scope=payload.scope, saved_by=user.email,
         )
     except TokenRejected as exc:
+        # Say who refused it. Attributing our own rule to Anthropic sends the
+        # operator to look for a problem with their account that is not there.
         raise HTTPException(
             status_code=400,
-            detail=f"Anthropic rejected that token: {exc.reason}",
+            detail=(f"Anthropic rejected that token: {exc.reason}"
+                    if exc.by_provider else exc.reason),
         ) from None
     return ConnectionStatusOut(**status(user.id, workspace_id))
 

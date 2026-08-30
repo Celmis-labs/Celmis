@@ -329,3 +329,108 @@ def test_the_readme_does_not_claim_compliance():
     for overclaim in ("CRA compliant", "guarantees compliance",
                       "ensures compliance"):
         assert overclaim.lower() not in flat.lower()
+
+
+# ─── the pack says which format it is ────────────────────────────────
+#
+# "You can verify this without trusting us" is a claim the product makes in
+# `summary.md` inside every pack. A verifier that cannot tell "I am too old
+# for this" from "this has been altered" turns the first into the second, and
+# the accusation lands on whoever produced a perfectly good pack.
+
+
+# `_pack()` above is the shared fixture — it pins `generated_at`, which is
+# what makes two exports byte-identical. Defining a second one here shadowed
+# it and broke three tests that had nothing to do with this change.
+
+def test_the_manifest_declares_its_format() -> None:
+    import io
+    import json
+    import zipfile
+
+    from src.deps.evidence import MANIFEST_VERSION
+
+    with zipfile.ZipFile(io.BytesIO(_pack())) as zf:
+        manifest = json.loads(zf.read("MANIFEST.json"))
+    assert manifest["manifest_version"] == MANIFEST_VERSION
+
+
+def test_a_pack_from_a_newer_celmis_is_not_called_tampered() -> None:
+    """The whole reason the field exists."""
+    import io
+    import json
+    import zipfile
+
+    from src.deps.evidence import MANIFEST_VERSION, verify_pack
+
+    original = _pack()
+    with zipfile.ZipFile(io.BytesIO(original)) as zf:
+        entries = {n: zf.read(n) for n in zf.namelist()}
+    manifest = json.loads(entries["MANIFEST.json"])
+    manifest["manifest_version"] = MANIFEST_VERSION + 1
+    entries["MANIFEST.json"] = (
+        json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    ).encode()
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in sorted(entries):
+            zf.writestr(name, entries[name])
+
+    ok, problems = verify_pack(buf.getvalue())
+    assert ok is False
+    joined = " ".join(problems)
+    assert "upgrade the verifier" in joined
+    assert "altered" not in joined and "mismatch" not in joined, (
+        f"a newer format was reported as tampering: {problems}"
+    )
+
+
+def test_a_pack_without_the_field_is_still_version_one() -> None:
+    """Packs made before the field existed must keep verifying."""
+    import io
+    import json
+    import zipfile
+
+    from src.deps.evidence import verify_pack
+
+    with zipfile.ZipFile(io.BytesIO(_pack())) as zf:
+        entries = {n: zf.read(n) for n in zf.namelist()}
+    manifest = json.loads(entries["MANIFEST.json"])
+    del manifest["manifest_version"]
+    body = (json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+    # The manifest hashes the OTHER files, not itself, so dropping a key from
+    # it leaves every recorded digest correct.
+    entries["MANIFEST.json"] = body
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in sorted(entries):
+            zf.writestr(name, entries[name])
+
+    ok, problems = verify_pack(buf.getvalue())
+    assert ok is True, problems
+
+
+def test_a_changed_byte_is_still_reported() -> None:
+    """The version gate must not have swallowed the check it stands in front of."""
+    import io
+    import zipfile
+
+    from src.deps.evidence import verify_pack
+
+    with zipfile.ZipFile(io.BytesIO(_pack())) as zf:
+        entries = {n: zf.read(n) for n in zf.namelist()}
+    victim = next(n for n in entries if n != "MANIFEST.json")
+    entries[victim] = entries[victim] + b" "
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in sorted(entries):
+            zf.writestr(name, entries[name])
+
+    ok, problems = verify_pack(buf.getvalue())
+    assert ok is False
+    assert any(victim in p for p in problems), (
+        f"the altered file was not named: {problems}"
+    )

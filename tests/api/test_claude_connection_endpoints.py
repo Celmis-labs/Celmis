@@ -281,3 +281,28 @@ def test_the_api_refuses_to_share_a_subscription_with_a_workspace(store):
     assert caught.value.status_code == 400
     assert "one person" in str(caught.value.detail)
     assert not store.rows, "refused and stored anyway"
+
+
+def test_our_own_refusal_is_not_blamed_on_anthropic(store):
+    """Who said no is part of the answer.
+
+    Every TokenRejected used to reach the caller as "Anthropic rejected that
+    token: …". For a rule of ours — a shared slot may not hold a subscription —
+    that is a claim about the operator's Anthropic account, and it sends them
+    to look for a problem that is not there.
+    """
+    import pytest
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as ours:
+        _save(user=_ADMIN, scope="workspace", token=TOKEN)
+    assert "Anthropic rejected" not in str(ours.value.detail)
+
+    patcher, _ = _transport(_refused())
+    with patcher, pytest.raises(HTTPException) as theirs:
+        _save(user=_MEMBER, scope="personal")
+    assert "Anthropic rejected" in str(theirs.value.detail), (
+        "a real provider refusal must still say so — it is the operator's cue "
+        "to go and look at their account"
+    )
+

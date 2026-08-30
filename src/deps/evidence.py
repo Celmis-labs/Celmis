@@ -120,6 +120,17 @@ def _summary_md(
     return "\n".join(lines)
 
 
+#: The pack format, so a verifier can tell "I do not understand this" from
+#: "this has been altered". Those are opposite answers and a reader who cannot
+#: separate them will read the first as the second — an accusation of tampering
+#: aimed at whoever produced a perfectly good pack with a newer Celmis.
+#:
+#: Bump the MAJOR only when an existing verifier would compute the wrong
+#: answer; anything additive keeps this number. A pack written before this
+#: field existed is version 1, which is what `verify_pack` assumes.
+MANIFEST_VERSION = 1
+
+
 def build_evidence_pack(
     *,
     run: dict,
@@ -162,6 +173,7 @@ def build_evidence_pack(
     ).encode()
 
     manifest = {
+        "manifest_version": MANIFEST_VERSION,
         "product": PRODUCT,
         "generated_at": now.isoformat(),
         "run_id": run.get("id"),
@@ -198,6 +210,26 @@ def verify_pack(blob: bytes) -> tuple[bool, list[str]]:
             if "MANIFEST.json" not in names:
                 return False, ["MANIFEST.json is missing"]
             manifest = json.loads(zf.read("MANIFEST.json"))
+
+            # A pack from a newer Celmis is not a broken pack. Say which it is
+            # before checking a single hash: every problem reported below reads
+            # as "somebody changed this", and that is the wrong thing to tell
+            # a person holding a pack this verifier is simply too old for.
+            declared = manifest.get("manifest_version", 1)
+            try:
+                declared = int(declared)
+            except (TypeError, ValueError):
+                return False, [
+                    f"MANIFEST.json declares manifest_version {declared!r}, "
+                    f"which is not a version number",
+                ]
+            if declared > MANIFEST_VERSION:
+                return False, [
+                    f"this pack is format version {declared} and this verifier "
+                    f"understands {MANIFEST_VERSION} — it was produced by a "
+                    f"newer Celmis, so upgrade the verifier rather than "
+                    f"treating this as a failed check",
+                ]
             listed = manifest.get("files") or {}
             for name, expected in listed.items():
                 if name not in names:

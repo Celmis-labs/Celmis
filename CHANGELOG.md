@@ -20,7 +20,26 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.18`.
+### Fixed
+
+- **A refusal of ours was blamed on Anthropic.** Every `TokenRejected` reached
+  the caller as "Anthropic rejected that token: …", including the new rule that
+  a shared slot may not hold a subscription. That reads as a claim about the
+  operator's Anthropic account and sends them to look for a problem that is not
+  there. The refusal now carries who made it; a real provider verdict still
+  says so, because that one *is* the cue to go and check.
+
+### Added
+
+- **The evidence pack declares its format version.** The manifest carried
+  `product`, `generated_at`, `run_id`, `algorithm` and `files` — and nothing
+  about the shape of the thing. A verifier meeting a newer pack had no way to
+  tell "I do not understand this" from "this has been altered", and would have
+  reported the first as the second: an accusation of tampering aimed at
+  whoever produced a perfectly good pack. `verify_pack` now answers with
+  "upgrade the verifier" instead, reads a missing field as version 1 so packs
+  made before today keep verifying, and still names the changed file when one
+  really has changed.
 
 ## [0.1.18] — 2026-08-30
 

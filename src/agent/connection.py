@@ -194,11 +194,20 @@ class VerificationResult:
 
 
 class TokenRejected(Exception):
-    """Anthropic looked at this token and refused it. `reason` is its words."""
+    """A paste that will not be stored, and who decided that.
 
-    def __init__(self, reason: str) -> None:
+    `by_provider` is the difference between "Anthropic looked at this and
+    refused it" and "we did, before asking". The endpoint used to prefix every
+    one of these with "Anthropic rejected that token:", which turned a rule of
+    ours — a workspace slot may not hold a subscription — into a claim about
+    the operator's Anthropic account, and would send them to check something
+    that is not wrong.
+    """
+
+    def __init__(self, reason: str, *, by_provider: bool = False) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.by_provider = by_provider
 
 
 def _ws_slot(workspace_id: str) -> str:
@@ -505,7 +514,7 @@ def save_token(
             "claude_token_refused scope=%s ws=%s by=%s reason=%s",
             scope, workspace_id, saved_by, result.reason,
         )
-        raise TokenRejected(result.reason)
+        raise TokenRejected(result.reason, by_provider=True)
 
     get_credential_store().save(
         provider=PROVIDER,
