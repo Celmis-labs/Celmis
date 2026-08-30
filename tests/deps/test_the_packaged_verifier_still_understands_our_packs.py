@@ -131,3 +131,27 @@ def test_the_packaged_verifier_imports_nothing_of_ours() -> None:
             f"{PACKAGED.name} imports {module!r}, which is not in the standard "
             f"library set this package promises: {sorted(allowed)}"
         )
+
+
+def test_the_pack_tells_the_reader_how_to_check_it() -> None:
+    """"Recompute them and compare" needed an answer somebody can type.
+
+    The instruction was true and, until the verifier was published, had no
+    executable form: the only route to the checker was cloning an AGPL
+    repository and installing forty dependencies under Python 3.13. If the
+    package ever goes away this fails, which is the right time to find out —
+    a pack that names a tool nobody can install is worse than one that names
+    none.
+    """
+    import io
+
+    with zipfile.ZipFile(io.BytesIO(_fresh_pack())) as zf:
+        summary = zf.read("summary.md").decode("utf-8")
+
+    assert "pip install celmis" in summary
+    assert "celmis verify" in summary
+    assert "https://pypi.org/project/celmis/" in summary
+    # And it must not read as "you have to use ours". The manifest is plain
+    # JSON; the whole position is that checking us does not require trusting
+    # us, and a tool we hand out is not the only way to recompute a sha256.
+    assert "not required to use it" in summary

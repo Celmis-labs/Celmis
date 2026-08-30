@@ -116,6 +116,22 @@ def _summary_md(
         "and compare; any mismatch means the pack was altered after it was "
         "generated.",
         "",
+        # NAME THE COMMAND. "Recompute them and compare" was true and had no
+        # executable answer: the only route to the checker was cloning an AGPL
+        # repository and installing forty dependencies under Python 3.13. The
+        # verifier is now a dependency-free package that runs from 3.9, so the
+        # instruction can end in something the reader can actually type — and
+        # deliberately not in "ask us for a tool", since the whole point is
+        # that checking us must not require trusting us.
+        "    pip install celmis",
+        "    celmis verify <this-file>.zip",
+        "",
+        "That checker is a few hundred lines of Python standard library with "
+        "no dependencies and no network calls: <https://pypi.org/project/"
+        "celmis/>. Its source is in `packaging/pypi/` of the repository below, "
+        "and you are not required to use it — the manifest is plain JSON and "
+        "sha256 is sha256.",
+        "",
     ]
     return "\n".join(lines)
 

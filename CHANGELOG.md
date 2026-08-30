@@ -22,6 +22,17 @@ derives it from there.
 
 ### Added
 
+- **`celmis` is on PyPI, and the pack now says so.** Published 0.1.0 and
+  verified from the live index: installed on Python 3.9.25 in a clean
+  container, all five commands run against a real production pack, one flipped
+  bit reported as `findings.json: sha256 mismatch` with exit 1, a missing file
+  with exit 2. `summary.md` inside every pack said "recompute them and
+  compare", which was true and had no executable form; it now names
+  `pip install celmis` and `celmis verify`, and says in the same breath that
+  you are not required to use it — the manifest is plain JSON and sha256 is
+  sha256. A tool that made checking us require trusting us would defeat the
+  point of the pack.
+
 - **`packaging/pypi/` — the evidence-pack verifier, as a standalone package.**
   `summary.md` inside every pack tells a third party they can check it without
   trusting the tool that made it, and until now the only way to reach
