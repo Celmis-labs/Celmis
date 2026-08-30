@@ -18,6 +18,15 @@ Celmis does not watch your services. Grafana, or whatever you already run, does
 that and does it well. This is the part that comes after the alert: the walk from a
 firing rule to a diff someone can review.
 
+To be exact, because the distinction is easy to blur: Celmis has **no log-ingestion
+endpoint and no log store**. It starts from the alert your monitoring already sent,
+reads a log file only when a person attaches one to a session by hand, and embeds no
+Grafana. This repository does ship an *optional* Prometheus/Loki/Promtail/Grafana
+compose overlay — [`docker-compose.observability.yml`](docker-compose.observability.yml)
+— and if you enable it, Promtail tails that host's container logs into a Grafana **you**
+run, not into Celmis. Read its own header before enabling it: it publishes its ports on
+all interfaces, unlike the main compose file.
+
 That loop is the product. It closes because everything sits on one index: a symbol
 graph Celmis builds from your repositories once. The same index answers questions
 that cross repository boundaries, reviews pull requests, audits dependencies into a
