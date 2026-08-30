@@ -20,6 +20,10 @@ derives it from there.
 
 ## [Unreleased]
 
+Nothing since `v0.1.21`.
+
+## [0.1.21] — 2026-08-31
+
 ### Security
 
 - **The evidence pack's hashes prove consistency, not authenticity — and the
