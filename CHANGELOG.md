@@ -20,6 +20,10 @@ derives it from there.
 
 ## [Unreleased]
 
+Nothing since `v0.1.19`.
+
+## [0.1.19] — 2026-08-30
+
 ### Fixed
 
 - **A refusal of ours was blamed on Anthropic.** Every `TokenRejected` reached
