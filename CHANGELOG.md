@@ -20,7 +20,26 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.20`.
+### Security
+
+- **The evidence pack's hashes prove consistency, not authenticity — and the
+  product said otherwise.** `MANIFEST.json` records a sha256 for every other
+  file and none for itself, because a file cannot contain its own hash. So
+  anyone who opens the zip, edits a file and rewrites that file's entry in the
+  manifest passes verification. Demonstrated against a real production pack:
+  the edited archive verified as `OK` and exited 0.
+
+  README, the dependencies page and the onboarding tour all said a third party
+  could "check nothing was edited afterwards without trusting us". That is
+  false of an unsigned manifest that does not hash itself, and it is the
+  sentence a CRA filing would lean on.
+
+  The fix is the manifest's own hash, obtained from somewhere the sender does
+  not control. `GET /api/deps/{run_id}/evidence` now returns it in
+  `X-Celmis-Manifest-SHA256` and logs it; `celmis verify --manifest-sha256
+  <hex>` checks against it; and every text now says which of the two things it
+  establishes. A malformed hash is a usage error (exit 2), not a mismatch
+  (exit 1) — losing characters to a line wrap must not read as tampering.
 
 ## [0.1.20] — 2026-08-31
 

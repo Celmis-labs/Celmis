@@ -9,10 +9,11 @@ install that with pip. This package is one command:
     pip install celmis
     celmis verify evidence-pack.zip
 
-It takes an evidence-pack archive, recomputes the sha256 of every file listed in
-the manifest inside it, and tells you whether the pack is the one that was
-generated. It has no dependencies, makes no network calls, and never contacts a
-Celmis installation.
+It takes an evidence-pack archive and recomputes the sha256 of every file listed
+in the manifest inside it. With the manifest's own hash — supplied separately;
+see below — that answers whether the pack is the one that was generated. It has
+no dependencies, makes no network calls, and never contacts a Celmis
+installation.
 
 That isolation is the whole design. The person who has to check a pack is
 usually not the operator who produced it — an auditor, a customer's security
@@ -42,6 +43,29 @@ A Celmis evidence pack is a zip containing:
 
 The third matters as much as the second. An added file is content nobody signed.
 
+## What this proves, and what it does not
+
+`MANIFEST.json` records a hash for every other file and **none for itself** — a
+file cannot contain its own hash. So `celmis verify` on its own proves the
+archive is internally *consistent*: it catches a truncated download, a byte
+flipped in transit, a file swapped or added by somebody who did not know the
+format. It is not proof against forgery. Open the zip, edit a file, write its
+new sha256 into the manifest, repack — that passes.
+
+The missing piece is the manifest's own hash, obtained from somewhere the
+sender does not control. A Celmis installation returns it with the download, in
+the `X-Celmis-Manifest-SHA256` header; publish it where the pack is not, and:
+
+    celmis verify --manifest-sha256 <hash> pack.zip
+
+Now the manifest fixes every file and you fix the manifest. The unforgeability
+lives in that second channel, not in the archive — an unsigned manifest that
+does not hash itself cannot deliver it, and a tool that implied otherwise would
+be selling exactly the false confidence the pack exists to avoid.
+
+Run without the flag, `celmis verify` prints the manifest hash and says which
+of the two things it just checked.
+
 Packs are built deterministically — fixed archive timestamps, sorted entries,
 sorted-key JSON — so two exports of the same audit run produce identical bytes.
 That is what makes "this pack was not regenerated with different contents" a
@@ -55,6 +79,7 @@ the second is an accusation.
 ## Usage
 
     celmis verify pack.zip            # exit 0 if intact, 1 if not, 2 on a usage error
+    celmis verify --manifest-sha256 HEX pack.zip   # closes the chain; see above
     celmis verify --json pack.zip     # machine-readable, for a CI step
     celmis show pack.zip              # print the manifest
     celmis show --summary pack.zip    # print summary.md from inside the pack

@@ -10,6 +10,6 @@ from celmis.verify import MANIFEST_VERSION
 #: Versioned independently of the platform, because this changes only when the
 #: pack format does. Tying them would force a release here for every platform
 #: patch and imply a compatibility relationship that does not exist.
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["MANIFEST_VERSION", "__version__"]

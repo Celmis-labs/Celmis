@@ -17,7 +17,7 @@ import hashlib
 import io
 import json
 import zipfile
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 #: The pack format this verifier understands.
 #:
@@ -39,7 +39,7 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def read_manifest(blob: bytes) -> Dict[str, Any]:
+def read_manifest(blob: bytes) -> dict[str, Any]:
     """The manifest, as a dict. Raises :class:`PackError` if there is none."""
     try:
         with zipfile.ZipFile(io.BytesIO(blob)) as zf:
@@ -65,7 +65,26 @@ def read_member(blob: bytes, name: str) -> bytes:
         raise PackError(f"unreadable archive: {exc}") from None
 
 
-def verify_pack(blob: bytes) -> Tuple[bool, List[str]]:
+def manifest_sha256(blob: bytes) -> str:
+    """The sha256 of MANIFEST.json itself.
+
+    THE ONE NUMBER THE PACK CANNOT VOUCH FOR, because a file cannot contain
+    its own hash. It has to reach you by a different route than the pack did.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            if MANIFEST_NAME not in set(zf.namelist()):
+                raise PackError(f"{MANIFEST_NAME} is missing")
+            return _sha256(zf.read(MANIFEST_NAME))
+    except PackError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise PackError(f"unreadable archive: {exc}") from None
+
+
+def verify_pack(
+    blob: bytes, expected_manifest_sha256: str | None = None,
+) -> tuple[bool, list[str]]:
     """Recompute every hash in the manifest. Returns ``(ok, problems)``.
 
     Three kinds of problem, kept apart because they mean different things:
@@ -73,8 +92,24 @@ def verify_pack(blob: bytes) -> Tuple[bool, List[str]]:
     contents no longer hash to what was recorded, and a file present in the
     archive that the manifest does not vouch for. The third matters as much as
     the second — an added file is content nobody signed.
+
+    WHAT THIS PROVES ON ITS OWN, AND WHAT IT DOES NOT. The manifest records a
+    hash for every other file and none for itself. Recomputing them therefore
+    proves the archive is internally CONSISTENT — enough to catch a truncated
+    download, a byte flipped in transit, a file swapped or added by somebody
+    who did not know the format. It is not proof against forgery, and the
+    demonstration is three lines: open the zip, edit a file, write its new
+    sha256 into the manifest, repack. Measured against a real pack, that
+    verified as OK and exited 0.
+
+    Pass `expected_manifest_sha256` and the chain closes: the manifest fixes
+    every file, and you fix the manifest from a source the sender did not
+    control. The unforgeability lives in that second channel. An unsigned
+    manifest that does not hash itself cannot supply it, and a tool that
+    implied otherwise would be selling the false confidence the pack exists to
+    avoid.
     """
-    problems: List[str] = []
+    problems: list[str] = []
     try:
         with zipfile.ZipFile(io.BytesIO(blob)) as zf:
             names = set(zf.namelist())
@@ -90,30 +125,43 @@ def verify_pack(blob: bytes) -> Tuple[bool, List[str]]:
                 declared = int(declared)
             except (TypeError, ValueError):
                 return False, [
-                    "{0} declares manifest_version {1!r}, which is not a "
-                    "version number".format(MANIFEST_NAME, declared),
+                    f"{MANIFEST_NAME} declares manifest_version {declared!r}, which is not a "
+                    "version number",
                 ]
             if declared > MANIFEST_VERSION:
                 return False, [
-                    "this pack is format version {0} and this verifier "
-                    "understands {1} — it was produced by a newer Celmis, so "
+                    f"this pack is format version {declared} and this verifier "
+                    f"understands {MANIFEST_VERSION} — it was produced by a newer Celmis, so "
                     "upgrade the verifier rather than treating this as a "
-                    "failed check".format(declared, MANIFEST_VERSION),
+                    "failed check",
                 ]
+
+            # Before the per-file work: a manifest that is not the one you
+            # were promised makes every hash below beside the point, because
+            # they would all agree — with each other.
+            if expected_manifest_sha256 is not None:
+                actual = _sha256(zf.read(MANIFEST_NAME))
+                wanted = expected_manifest_sha256.strip().lower()
+                if actual != wanted:
+                    return False, [
+                        f"{MANIFEST_NAME}: sha256 is {actual}, expected {wanted} — this is not the "
+                        "manifest you were given the hash for, so the rest of "
+                        "the pack proves nothing",
+                    ]
 
             listed = manifest.get("files") or {}
             for name, expected in listed.items():
                 if name not in names:
-                    problems.append("{0}: listed but absent".format(name))
+                    problems.append(f"{name}: listed but absent")
                     continue
                 if _sha256(zf.read(name)) != expected:
-                    problems.append("{0}: sha256 mismatch".format(name))
+                    problems.append(f"{name}: sha256 mismatch")
             for name in sorted(names - set(listed) - {MANIFEST_NAME}):
                 problems.append(
-                    "{0}: present but not in the manifest".format(name),
+                    f"{name}: present but not in the manifest",
                 )
     except Exception as exc:  # noqa: BLE001
-        return False, ["unreadable archive: {0}".format(exc)]
+        return False, [f"unreadable archive: {exc}"]
     return (not problems), problems
 
 
@@ -121,6 +169,7 @@ __all__ = [
     "MANIFEST_NAME",
     "MANIFEST_VERSION",
     "PackError",
+    "manifest_sha256",
     "read_manifest",
     "read_member",
     "verify_pack",

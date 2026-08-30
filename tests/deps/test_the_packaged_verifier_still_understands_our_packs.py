@@ -155,3 +155,103 @@ def test_the_pack_tells_the_reader_how_to_check_it() -> None:
     # JSON; the whole position is that checking us does not require trusting
     # us, and a tool we hand out is not the only way to recompute a sha256.
     assert "not required to use it" in summary
+
+
+# ─── the manifest does not hash itself, and the product says so ──────
+
+
+def _forged_pack() -> bytes:
+    """Edit a file and rewrite its manifest entry — what an attacker does."""
+    import hashlib
+    import io
+
+    with zipfile.ZipFile(io.BytesIO(_fresh_pack())) as zf:
+        entries = {n: zf.read(n) for n in zf.namelist()}
+    entries["summary.md"] = entries["summary.md"] + b"\nquietly edited\n"
+    manifest = json.loads(entries["MANIFEST.json"])
+    manifest["files"]["summary.md"] = hashlib.sha256(entries["summary.md"]).hexdigest()
+    entries["MANIFEST.json"] = (
+        json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    ).encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in sorted(entries):
+            zf.writestr(name, entries[name])
+    return buf.getvalue()
+
+
+def test_a_forged_pack_passes_the_hashes_alone() -> None:
+    """The limit, pinned. Measured, not assumed.
+
+    If this ever starts failing somebody has made the pack self-authenticating,
+    and every sentence about what the pack proves should be revisited — that
+    would be good news rather than a broken test.
+    """
+    from src.deps.evidence import verify_pack
+
+    ok, problems = verify_pack(_forged_pack())
+    assert ok is True, problems
+
+
+def test_the_manifest_hash_is_what_catches_it() -> None:
+    from src.deps.evidence import manifest_sha256, verify_pack
+
+    genuine = manifest_sha256(_fresh_pack())
+    ok, problems = verify_pack(_forged_pack(), expected_manifest_sha256=genuine)
+    assert ok is False
+    assert any("proves nothing" in p for p in problems), problems
+
+
+def test_both_copies_compute_the_same_manifest_hash() -> None:
+    from src.deps.evidence import manifest_sha256
+
+    blob = _fresh_pack()
+    assert manifest_sha256(blob) == _packaged_verifier().manifest_sha256(blob)
+
+
+def test_the_pack_does_not_claim_more_than_it_proves() -> None:
+    """The wording is part of the artefact.
+
+    "a third party can check nothing was edited afterwards without trusting
+    us" was the claim, and it is false of a manifest that does not hash
+    itself. The pack now says which of the two things it establishes.
+    """
+    import io
+
+    with zipfile.ZipFile(io.BytesIO(_fresh_pack())) as zf:
+        summary = zf.read("summary.md").decode("utf-8")
+
+    assert "none for" in summary and "itself" in summary, (
+        "the pack no longer says the manifest omits its own hash"
+    )
+    assert "NOT PROOF" in summary.upper()
+    assert "X-Celmis-Manifest-SHA256" in summary
+    assert "--manifest-sha256" in summary
+
+
+def test_the_export_hands_over_the_second_channel() -> None:
+    """A hash nobody is given is a hash nobody can compare.
+
+    Read with ast, not searched for. The docstring above the code explains why
+    the header is there and therefore contains its name — a substring check
+    passed with the header itself deleted, which is the exact failure this
+    file's own subject is about.
+    """
+    import ast
+
+    tree = ast.parse((ROOT / "src" / "api" / "routers" / "deps.py").read_text("utf-8"))
+    export = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "export_evidence"
+    )
+    header_keys = {
+        key.value
+        for node in ast.walk(export) if isinstance(node, ast.Dict)
+        for key in node.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    assert "X-Celmis-Manifest-SHA256" in header_keys, (
+        f"the evidence export no longer returns the manifest hash, so there is "
+        f"no second channel for a recipient to check against. Header keys "
+        f"found: {sorted(header_keys)}"
+    )

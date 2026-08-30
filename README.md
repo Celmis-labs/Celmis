@@ -297,8 +297,13 @@ Two files come out of every audit, and neither needs an LLM key:
   and the vulnerabilities known against it. This is the file people mean when
   they say "send us your SBOM".
 - **Evidence pack** — the audit as a filing: every SBOM, every finding, the
-  timeline of past runs, and a sha256 of each file, so a third party can check
-  nothing was edited afterwards *without having to trust us*. A folder whose
+  timeline of past runs, and a sha256 of each file. Those hashes prove the
+  archive is internally consistent; they do not on their own prove it is the
+  archive that left here, because the manifest records no hash for itself and
+  anyone who edits a file can rewrite its entry. The export returns the
+  manifest's own sha256 in `X-Celmis-Manifest-SHA256` — publish that where the
+  pack is not, and a third party can then check it *without having to trust
+  us*, against a value you did not hand them with the file. A folder whose
   contents can be changed later proves nothing; the manifest is what makes it
   evidence.
 

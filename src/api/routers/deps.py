@@ -514,8 +514,14 @@ async def export_evidence(
     A different artefact from `/export`, for a different reader. That one is a
     document somebody reads. This is what gets attached to a filing: one
     CycloneDX SBOM per repository, every finding, the history of runs, and a
-    sha256 of each file so the holder can show it was not edited afterwards and
-    a third party can check that without trusting us.
+    sha256 of each file.
+
+    THE HASHES PROVE INTERNAL CONSISTENCY. They do not, by themselves, prove
+    the pack is the one that left here: the manifest records no hash for
+    itself, so somebody who edits a file and rewrites its entry passes the
+    check. `X-Celmis-Manifest-SHA256` on this response is the value that
+    closes it — publish it where the pack is not, and the recipient can check
+    against something the sender did not control.
 
     The 24-hour reporting clock in the Cyber Resilience Act starts on the day
     something is exploited, and the question asked then is about the past —
@@ -523,7 +529,7 @@ async def export_evidence(
     """
     from datetime import datetime
 
-    from src.deps.evidence import build_evidence_pack
+    from src.deps.evidence import build_evidence_pack, manifest_sha256
     from src.deps.sbom import build_sbom
 
     run = await session.get(DepAuditRun, run_id)
@@ -634,13 +640,26 @@ async def export_evidence(
         timeline=timeline,
     )
     stamp = datetime.now(UTC).strftime("%Y-%m-%d")
-    logger.info("deps_evidence_exported run=%s repos=%d findings=%d by=%s",
-                run_id, len(sboms), len(flat_vulns), user.email)
+
+    # THE SECOND CHANNEL STARTS HERE. `MANIFEST.json` records a hash for every
+    # other file and none for itself, so recomputing them proves the archive is
+    # internally consistent and nothing more: anyone who edits a file and
+    # rewrites its entry in the manifest passes that check. What they cannot do
+    # is make the manifest hash to a value the recipient got from somewhere
+    # else — so the export hands that value over separately, in a header and in
+    # the log, and the operator can publish it wherever the pack is not.
+    digest = manifest_sha256(blob)
+    logger.info("deps_evidence_exported run=%s repos=%d findings=%d "
+                "manifest_sha256=%s by=%s",
+                run_id, len(sboms), len(flat_vulns), digest, user.email)
     return Response(
         content=blob,
         media_type="application/zip",
-        headers={"Content-Disposition":
-                 f'attachment; filename="celmis-evidence-{stamp}.zip"'},
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="celmis-evidence-{stamp}.zip"',
+            "X-Celmis-Manifest-SHA256": digest,
+        },
     )
 
 

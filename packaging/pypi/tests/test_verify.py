@@ -12,7 +12,6 @@ import pathlib
 import zipfile
 
 import pytest
-
 from celmis.cli import EXIT_OK, EXIT_PROBLEMS, EXIT_USAGE, main
 from celmis.verify import MANIFEST_VERSION, PackError, read_manifest, verify_pack
 
@@ -211,9 +210,115 @@ def test_version_names_the_format_it_understands(capsys) -> None:
         main(["--version"])
     assert exit_.value.code == 0
     out = capsys.readouterr().out
-    assert "manifest version {0}".format(MANIFEST_VERSION) in out
+    assert f"manifest version {MANIFEST_VERSION}" in out
 
 
 def test_read_manifest_raises_on_rubbish() -> None:
     with pytest.raises(PackError):
         read_manifest(b"not a zip")
+
+
+# ─── the limit of a manifest that does not hash itself ───────────────
+#
+# `MANIFEST.json` records a hash for every other file and none for itself,
+# because a file cannot contain its own hash. So recomputing the listed hashes
+# proves the archive is internally CONSISTENT and nothing more. Anyone who
+# knows the format can edit a file, write its new sha256 into the manifest and
+# repack; measured against a real production pack, that verified as OK and
+# exited 0.
+#
+# The fix is not inside the archive — it cannot be. It is the manifest's own
+# hash, obtained from somewhere the sender does not control.
+
+
+def _forge(field: str = "summary.md") -> bytes:
+    """Edit a file and update its entry in the manifest, exactly as an attacker would."""
+    import hashlib
+
+    entries = _entries(_pack())
+    entries[field] = entries[field] + b"\nquietly edited\n"
+    manifest = json.loads(entries["MANIFEST.json"])
+    manifest["files"][field] = hashlib.sha256(entries[field]).hexdigest()
+    entries["MANIFEST.json"] = (
+        json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    ).encode()
+    return _rebuild(entries)
+
+
+def test_a_forged_pack_passes_without_the_manifest_hash() -> None:
+    """Pinned deliberately. This is the limit, and it must not be forgotten.
+
+    If this ever starts failing, somebody has made the pack self-authenticating
+    and the wording everywhere else should be revisited — that would be good
+    news, not a broken test.
+    """
+    ok, problems = verify_pack(_forge())
+    assert ok is True, problems
+
+
+def test_the_same_forgery_fails_against_the_real_manifest_hash() -> None:
+    """And this is why the flag exists."""
+    from celmis.verify import manifest_sha256
+
+    genuine = manifest_sha256(_pack())
+    ok, problems = verify_pack(_forge(), genuine)
+    assert ok is False
+    assert any("MANIFEST.json" in p and "sha256" in p for p in problems), problems
+    assert any("proves nothing" in p for p in problems), problems
+
+
+def test_an_untouched_pack_passes_against_its_own_hash() -> None:
+    from celmis.verify import manifest_sha256
+
+    ok, problems = verify_pack(_pack(), manifest_sha256(_pack()))
+    assert ok is True, problems
+
+
+def test_the_hash_is_reported_so_it_can_be_published(capsys) -> None:
+    """You cannot compare a number nobody printed."""
+    from celmis.verify import manifest_sha256
+
+    assert main(["verify", str(FIXTURE)]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert manifest_sha256(_pack()) in out
+    assert "internally" in out and "consistent" in out, (
+        "the OK line alone reads as 'genuine'; the caveat has to travel with it"
+    )
+
+
+def test_supplying_the_hash_changes_what_is_printed(capsys) -> None:
+    from celmis.verify import manifest_sha256
+
+    assert main(["verify", "--manifest-sha256", manifest_sha256(_pack()),
+                 str(FIXTURE)]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "matches the value you supplied" in out
+
+
+def test_a_truncated_hash_is_a_usage_error_not_an_accusation(capsys) -> None:
+    """Exit 2, not 1. Losing characters to a line wrap is not tampering."""
+    from celmis.verify import manifest_sha256
+
+    truncated = manifest_sha256(_pack())[:56]
+    assert main(["verify", "--manifest-sha256", truncated, str(FIXTURE)]) == EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "64 hex characters" in err
+    assert "rather than the pack" in err
+
+
+def test_a_hash_that_is_not_hex_is_also_a_usage_error() -> None:
+    assert main(["verify", "--manifest-sha256", "z" * 64, str(FIXTURE)]) == EXIT_USAGE
+
+
+def test_json_carries_the_hash_and_whether_it_was_checked(capsys) -> None:
+    from celmis.verify import manifest_sha256
+
+    assert main(["verify", "--json", str(FIXTURE)]) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["manifest_sha256"] == manifest_sha256(_pack())
+    assert payload["manifest_sha256_checked"] is False
+
+    assert main(["verify", "--json", "--manifest-sha256", manifest_sha256(_pack()),
+                 str(FIXTURE)]) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["manifest_sha256_checked"] is True

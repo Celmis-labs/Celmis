@@ -112,9 +112,17 @@ def _summary_md(
     lines += [
         "## Verifying this pack",
         "",
-        "`MANIFEST.json` lists a sha256 for every other file. Recompute them "
-        "and compare; any mismatch means the pack was altered after it was "
-        "generated.",
+        "`MANIFEST.json` lists a sha256 for every other file — and none for "
+        "itself, because a file cannot contain its own hash. Recompute them "
+        "and compare; any mismatch means this archive is not internally "
+        "consistent.",
+        "",
+        "THAT ALONE IS NOT PROOF THE PACK IS THE ONE YOU WERE SENT. Somebody "
+        "who edits a file and rewrites its entry in the manifest passes that "
+        "check. What they cannot do is make the manifest hash to a value you "
+        "obtained elsewhere, so ask whoever gave you the pack for the sha256 "
+        "of `MANIFEST.json` through a different channel — it is returned in "
+        "the `X-Celmis-Manifest-SHA256` header at export — and check it:",
         "",
         # NAME THE COMMAND. "Recompute them and compare" was true and had no
         # executable answer: the only route to the checker was cloning an AGPL
@@ -124,7 +132,7 @@ def _summary_md(
         # deliberately not in "ask us for a tool", since the whole point is
         # that checking us must not require trusting us.
         "    pip install celmis",
-        "    celmis verify <this-file>.zip",
+        "    celmis verify --manifest-sha256 <hash> <this-file>.zip",
         "",
         "That checker is a few hundred lines of Python standard library with "
         "no dependencies and no network calls: <https://pypi.org/project/"
@@ -213,11 +221,43 @@ def build_evidence_pack(
     return buf.getvalue()
 
 
-def verify_pack(blob: bytes) -> tuple[bool, list[str]]:
+def manifest_sha256(blob: bytes) -> str:
+    """The sha256 of MANIFEST.json itself.
+
+    THE ONE NUMBER THE PACK CANNOT VOUCH FOR. Everything else in the archive
+    is covered by a hash the manifest records; the manifest is not, because a
+    file cannot contain its own hash. So this has to travel by a different
+    route than the pack — read off at export, published, mailed, put in a
+    ticket — and that second channel is what turns the check into evidence.
+    """
+    return _sha256(_read_manifest_bytes(blob))
+
+
+def _read_manifest_bytes(blob: bytes) -> bytes:
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        return zf.read("MANIFEST.json")
+
+
+def verify_pack(
+    blob: bytes, *, expected_manifest_sha256: str | None = None,
+) -> tuple[bool, list[str]]:
     """Recompute every hash in MANIFEST.json. Returns (ok, problems).
 
-    Here rather than only in a document, because "you can verify this" is a
-    claim, and a claim nobody can execute is decoration.
+    WHAT THIS PROVES WITHOUT `expected_manifest_sha256`, AND WHAT IT DOES NOT.
+    The manifest lists a hash for every other file and no hash for itself, so
+    recomputing them proves the archive is internally CONSISTENT. It catches a
+    truncated download, a byte flipped in transit, a file swapped or added by
+    somebody who did not know the format. It does not catch forgery, and the
+    demonstration is three lines: open the zip, edit `summary.md`, write the
+    new sha256 into `MANIFEST.json`, repack. Measured against a real
+    production pack, that alteration verified as `OK` and exited 0.
+
+    With the expected hash supplied, the chain closes: the manifest fixes
+    every file, and the caller fixes the manifest from a source the person who
+    handed over the pack did not control. Unforgeability lives in that second
+    channel, not in the archive — an unsigned manifest that does not hash
+    itself cannot deliver it, and saying otherwise would be selling exactly
+    the false confidence this subsystem exists to avoid.
     """
     problems: list[str] = []
     try:
@@ -246,6 +286,19 @@ def verify_pack(blob: bytes) -> tuple[bool, list[str]]:
                     f"newer Celmis, so upgrade the verifier rather than "
                     f"treating this as a failed check",
                 ]
+            # Before the per-file work, because a manifest that is not the one
+            # you were promised makes every hash below beside the point: they
+            # would all agree, with each other.
+            if expected_manifest_sha256 is not None:
+                actual = _sha256(zf.read("MANIFEST.json"))
+                wanted = expected_manifest_sha256.strip().lower()
+                if actual != wanted:
+                    return False, [
+                        f"MANIFEST.json: sha256 is {actual}, expected {wanted} "
+                        f"— this is not the manifest you were given the hash "
+                        f"for, so the rest of the pack proves nothing",
+                    ]
+
             listed = manifest.get("files") or {}
             for name, expected in listed.items():
                 if name not in names:
@@ -264,4 +317,4 @@ def verify_pack(blob: bytes) -> tuple[bool, list[str]]:
     return (not problems), problems
 
 
-__all__ = ["build_evidence_pack", "verify_pack"]
+__all__ = ["build_evidence_pack", "manifest_sha256", "verify_pack"]
