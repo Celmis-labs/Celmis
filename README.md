@@ -302,6 +302,23 @@ Two files come out of every audit, and neither needs an LLM key:
   contents can be changed later proves nothing; the manifest is what makes it
   evidence.
 
+  That last sentence used to be a claim nobody could act on: checking a pack
+  meant cloning this repository and installing forty dependencies under Python
+  3.13 — the producer's whole toolchain, to check the producer's output. The
+  check is now its own package, with no dependencies and no network calls:
+
+  ```bash
+  pip install celmis
+  celmis verify evidence-pack.zip
+  ```
+
+  Any Python from 3.9, offline, on a machine that has never run Celmis. It
+  recomputes every sha256 the manifest lists and reports listed-but-absent,
+  mismatched and present-but-unlisted; exit 0 clean, 1 problems found. This is
+  the verifier only — the platform itself is six services under docker compose
+  and does not install with pip, and the package says so when run with no
+  arguments.
+
 Alongside them, the generated technical documentation — module PRDs, feature
 documents and integration guides written from the code — which is yours to keep
 and keeps working after any subscription ends.
