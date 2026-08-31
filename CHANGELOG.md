@@ -20,6 +20,10 @@ derives it from there.
 
 ## [Unreleased]
 
+Nothing since `v0.1.23`.
+
+## [0.1.23] — 2026-08-31
+
 ### Security
 
 - **`/healthz` handed out the installation's configuration, to anybody, now.**
