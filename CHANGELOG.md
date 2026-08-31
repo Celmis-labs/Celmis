@@ -20,7 +20,25 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.26`.
+Nothing since `v0.1.27`.
+
+## [0.1.27] — 2026-08-31
+
+### Fixed
+
+- **A recovery paged exactly as hard as the outage did.** Grafana sends the
+  same labels when an alert resolves as when it fires — the labels identify
+  the rule, not the event — and only `status` says which happened. The parser
+  read the labels and ignored `status`.
+
+  Reproduced end to end on production, not deduced: a test gateway came back
+  up at 14:45 and the workspace was paged `critical` with the title
+  `5xx rate 100% over 1m`, byte for byte the card it had sent at 14:30 when
+  the service actually broke. A false page is noise; a false page
+  indistinguishable from the real one teaches people that a critical card
+  might mean nothing. A resolved alert now says so in its title and arrives as
+  `info`. It still arrives — coming back is worth knowing — it just stops
+  impersonating an incident.
 
 ## [0.1.26] — 2026-08-31
 

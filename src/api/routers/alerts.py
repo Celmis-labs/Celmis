@@ -264,9 +264,34 @@ def _redact_alert(title: str, body: str) -> tuple[str, str]:
     return out[0], out[1]
 
 
+#: Severities this product understands. Anything else is a stranger's word.
+_SEVERITIES = ("info", "warning", "error", "critical")
+
+
 def _parse_alerts(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Grafana unified-alerting webhook or a generic single alert."""
+    """Grafana unified-alerting webhook or a generic single alert.
+
+    `status` IS READ, and it was not. Grafana sends the same labels when an
+    alert resolves as when it fires — that is the design, the labels identify
+    the rule — and only `status` says which of the two happened. This function
+    took `labels.severity` and ignored `status`, so a recovery arrived carrying
+    the outage's own severity and its own summary. Reproduced end to end on
+    production: a settlements gateway came back up and the workspace was paged
+    `critical` with the title "5xx rate 100% over 1m", identical to the page it
+    had sent fifteen minutes earlier when the thing actually broke.
+
+    Two harms, and the second is the one that matters. A false page is noise.
+    A false page that is INDISTINGUISHABLE from the real one teaches people
+    that a critical card might mean nothing — which is how the next real
+    outage gets scrolled past.
+
+    So a resolved alert says so in its title and drops to `info`. It still
+    arrives, because "it came back" is worth knowing, and it still routes
+    through the same bindings; what it no longer does is impersonate an
+    incident.
+    """
     out: list[dict[str, Any]] = []
+    outer = str(payload.get("status") or "").lower()
     if isinstance(payload.get("alerts"), list):
         for a in payload["alerts"][:20]:
             labels = a.get("labels") or {}
@@ -280,23 +305,31 @@ def _parse_alerts(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "\n".join(f"{k}={v}" for k, v in labels.items()),
             ]
             sev = (labels.get("severity") or "warning").lower()
+            sev = sev if sev in _SEVERITIES else "warning"
+            # Per-alert status first: a batch can carry both, and Grafana sets
+            # the outer one to "firing" if ANY member is firing.
+            resolved = str(a.get("status") or outer).lower() == "resolved"
             out.append({
                 "source": "grafana",
-                "title": str(title),
+                "title": f"Resolved: {title}" if resolved else str(title),
                 "body": "\n".join(p for p in body_parts if p).strip(),
-                "severity": sev if sev in ("info", "warning", "error", "critical") else "warning",
+                "severity": "info" if resolved else sev,
                 "repo_hint": labels.get("repo") or labels.get("service"),
+                "resolved": resolved,
             })
         return out
     title = payload.get("title") or payload.get("message")
     if title:
         sev = str(payload.get("severity") or "warning").lower()
+        sev = sev if sev in _SEVERITIES else "warning"
+        resolved = outer == "resolved"
         out.append({
             "source": str(payload.get("source") or "generic"),
-            "title": str(title),
+            "title": f"Resolved: {title}" if resolved else str(title),
             "body": str(payload.get("body") or payload.get("description") or ""),
-            "severity": sev if sev in ("info", "warning", "error", "critical") else "warning",
+            "severity": "info" if resolved else sev,
             "repo_hint": payload.get("repo"),
+            "resolved": resolved,
         })
     return out
 

@@ -34,4 +34,4 @@ DISTRIBUTIONS = ("celmis-platform", "celmis", "code-analysis-system")
 #:
 #: 0.1.0 is what the four duplicated copies said before they were collapsed
 #: into this one, and what `web/package.json` still says.
-__version__ = "0.1.26"
+__version__ = "0.1.27"
