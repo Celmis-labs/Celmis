@@ -867,7 +867,7 @@
   "claude.stopping": "Zatrzymywanie sesji…",
   "claude.streamLost": "Utracono połączenie — ponawianie",
   "claude.subtitle": "Uruchom agenta kodującego na swoich repozytoriach z dowolnego miejsca — sesje działają dalej po stronie serwera po zamknięciu karty.",
-  "claude.title": "Claude Code",
+  "claude.title": "Agent",
   "claude.waiting": "Oczekiwanie na agenta…",
   "claude.workspaceToken": "Token obszaru roboczego (współdzielony)",
   "claude.workspaceWarning": "Wspólny slot przyjmuje klucz API Anthropic (sk-ant-api…), a nie token subskrypcji. Zużycie obciąża właściciela klucza, na co pozwalają warunki Anthropic; subskrypcja należy do jednej osoby, więc każdy członek podłącza własną.",

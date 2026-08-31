@@ -94,9 +94,17 @@ def test_describing_what_the_product_runs_is_untouched() -> None:
 
     Saying a product runs Claude Code is explicitly allowed, and these
     strings are how a person finds out what they are connecting to.
+
+    THE FIRST SPECIMEN HERE USED TO BE `claude.title`, and it was the wrong
+    one. That key is the H1 of the agent page — a heading is what a feature
+    is CALLED, not a sentence about what it runs, and the sidebar entry
+    leading to it already said "Agent". Two names for one screen, both on
+    display in the guide's screenshot. The permitted half is still checked,
+    on the same page: `claude.helpTitle` names the engine in a sentence,
+    which is the form the terms describe.
     """
     data = json.loads((MESSAGES / "en.json").read_text(encoding="utf-8"))
-    assert data["claude.title"] == "Claude Code"
+    assert "Claude Code" in data["claude.helpTitle"]
     assert "Claude Code" in data["settings.llm.engineClaude"]
     assert "Claude" in data["claude.connectButton"]
 
@@ -150,3 +158,44 @@ def test_naming_anthropics_product_is_still_allowed() -> None:
     assert "Claude Code" in data["settings.llm.docsEngineAgent"]
     assert "Claude Code" in data["repositories.vaultEngineAgent"]
 
+
+
+@pytest.mark.parametrize("locale", LOCALES)
+def test_the_page_and_the_nav_entry_that_opens_it_agree(locale: str) -> None:
+    """The heading said "Claude Code" while the nav beside it said "Agent".
+
+    Both were on screen at once — sidebar, breadcrumb and H1 in a single
+    frame, disagreeing — and the frame was the screenshot published in the
+    guide. Two separate things are wrong with that and only one is about a
+    trademark: a page whose title contradicts the entry you clicked to reach
+    it is a bug at any name.
+
+    So the assertion is agreement, not a banned word. `nav.agent` opens
+    `/claude`; `claude.title` is that page's heading; they name one thing.
+    The engine still gets named all over that page — the connection card, the
+    walkthrough, the model picker — which the terms allow and this repository
+    relies on.
+    """
+    data = json.loads((MESSAGES / f"{locale}.json").read_text(encoding="utf-8"))
+    assert data["claude.title"] == data["nav.agent"], (
+        f"{locale}.json :: the agent page is headed {data['claude.title']!r} "
+        f"and reached from a nav entry called {data['nav.agent']!r}. One "
+        f"screen, two names for it."
+    )
+
+
+@pytest.mark.parametrize("locale", LOCALES)
+def test_the_page_heading_is_not_the_engines_name(locale: str) -> None:
+    """The heading is a feature name, whatever else is on the page.
+
+    Kept apart from the agreement check above on purpose: renaming both keys
+    to "Claude Code" would satisfy that one perfectly.
+    """
+    data = json.loads((MESSAGES / f"{locale}.json").read_text(encoding="utf-8"))
+    for key in ("claude.title", "nav.agent"):
+        assert "Claude" not in data[key], (
+            f"{locale}.json :: {key} is {data[key]!r}. Anthropic's terms allow "
+            f"saying the product RUNS Claude Code — which claude.subtitle, the "
+            f"connection card and the engine picker all do — but not naming a "
+            f"feature after it."
+        )

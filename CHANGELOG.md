@@ -20,7 +20,27 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.25`.
+Nothing since `v0.1.26`.
+
+## [0.1.26] — 2026-08-31
+
+### Changed
+
+- **The agent page was headed "Claude Code" while the sidebar entry that
+  opens it said "Agent".** Both were on screen at once — sidebar, breadcrumb
+  and H1 in one frame — and that frame is the screenshot published in the
+  guide. Two things were wrong and only one is about a trademark: a page whose
+  title contradicts the entry you clicked to reach it is a bug at any name.
+  `claude.title` now equals `nav.agent` in all sixteen locales.
+
+  Every descriptive mention stays, because the terms allow saying a product
+  runs Claude Code: the connection card, the token walkthrough, the engine
+  pickers, the MCP client list, `AI report: Claude Code` beside `off` and
+  `API`. The guard that was supposed to protect the permitted half had picked
+  `claude.title` as its specimen — a heading, not a sentence — so it asserted
+  the one string that had to change. It now watches `claude.helpTitle`, on the
+  same page, and two new guards hold the heading: it must agree with its nav
+  entry, and neither may carry the engine's name.
 
 ## [0.1.25] — 2026-08-31
 

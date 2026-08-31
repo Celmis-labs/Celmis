@@ -867,7 +867,7 @@
   "claude.stopping": "Relácia sa zastavuje…",
   "claude.streamLost": "Spojenie prerušené — skúšame znova",
   "claude.subtitle": "Spúšťajte kódovacieho agenta na svojich repozitároch odkiaľkoľvek — relácie bežia na serveri ďalej aj po zatvorení karty.",
-  "claude.title": "Claude Code",
+  "claude.title": "Agent",
   "claude.waiting": "Čaká sa na agenta…",
   "claude.workspaceToken": "Token pracovného priestoru (zdieľaný)",
   "claude.workspaceWarning": "Zdieľaný slot prijme API kľúč Anthropic (sk-ant-api…), nie token predplatného. Spotreba sa účtuje majiteľovi kľúča, čo podmienky Anthropic dovoľujú; predplatné patrí jednej osobe, takže každý člen pripojí svoje vlastné.",

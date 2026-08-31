@@ -867,7 +867,7 @@
   "claude.stopping": "Sitzung wird gestoppt…",
   "claude.streamLost": "Verbindung verloren — neuer Versuch",
   "claude.subtitle": "Führen Sie einen Coding-Agenten von überall auf Ihren Repos aus — Sitzungen laufen serverseitig weiter, auch nachdem Sie den Tab geschlossen haben.",
-  "claude.title": "Claude Code",
+  "claude.title": "Agent",
   "claude.waiting": "Warten auf den Agenten…",
   "claude.workspaceToken": "Workspace-Token (geteilt)",
   "claude.workspaceWarning": "Ein gemeinsamer Slot nimmt einen Anthropic-API-Schlüssel (sk-ant-api…), kein Abo-Token. Die Nutzung wird dem Inhaber des Schlüssels berechnet, was Anthropics Bedingungen erlauben; ein Abo gehört einer Person, deshalb verbindet jedes Mitglied sein eigenes.",

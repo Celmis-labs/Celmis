@@ -867,7 +867,7 @@
   "claude.stopping": "Sessie wordt gestopt…",
   "claude.streamLost": "Verbinding verbroken — nieuwe poging",
   "claude.subtitle": "Draai een codeeragent op je repositories, vanaf elke locatie — sessies blijven server-side actief nadat je het tabblad sluit.",
-  "claude.title": "Claude Code",
+  "claude.title": "Agent",
   "claude.waiting": "Wachten op de agent…",
   "claude.workspaceToken": "Werkruimtetoken (gedeeld)",
   "claude.workspaceWarning": "Een gedeeld slot neemt een Anthropic API-sleutel (sk-ant-api…), geen abonnementstoken. Het gebruik wordt de eigenaar van de sleutel in rekening gebracht, wat de voorwaarden van Anthropic toestaan; een abonnement hoort bij één persoon, dus elk lid koppelt het zijne.",

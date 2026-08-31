@@ -867,7 +867,7 @@
   "claude.stopping": "Se oprește sesiunea…",
   "claude.streamLost": "Conexiune pierdută — se reîncearcă",
   "claude.subtitle": "Rulează un agent de programare pe repository-urile tale de oriunde — sesiunile continuă pe server după ce închizi tabul.",
-  "claude.title": "Claude Code",
+  "claude.title": "Agent",
   "claude.waiting": "Se așteaptă agentul…",
   "claude.workspaceToken": "Token de workspace (partajat)",
   "claude.workspaceWarning": "Un slot partajat acceptă o cheie API Anthropic (sk-ant-api…), nu un token de abonament. Consumul se facturează proprietarului cheii, ceea ce termenii Anthropic permit; un abonament aparține unei singure persoane, așa că fiecare membru îl conectează pe al său.",

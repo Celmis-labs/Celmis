@@ -867,7 +867,7 @@
   "claude.stopping": "Parando sessão…",
   "claude.streamLost": "Conexão perdida — tentando novamente",
   "claude.subtitle": "Execute um agente de codificação nos seus repositórios de qualquer lugar — as sessões continuam rodando no servidor depois que você fecha a aba.",
-  "claude.title": "Claude Code",
+  "claude.title": "Agente",
   "claude.waiting": "Aguardando o agente…",
   "claude.workspaceToken": "Token do espaço de trabalho (compartilhado)",
   "claude.workspaceWarning": "Um slot compartilhado aceita uma chave de API da Anthropic (sk-ant-api…), não um token de assinatura. O uso é cobrado do dono da chave, o que os termos da Anthropic permitem; uma assinatura pertence a uma pessoa, então cada membro conecta a sua.",

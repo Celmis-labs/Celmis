@@ -867,7 +867,7 @@
   "claude.stopping": "Oturum durduruluyor…",
   "claude.streamLost": "Bağlantı koptu — yeniden deneniyor",
   "claude.subtitle": "Repolarınızda her yerden bir kodlama ajanı çalıştırın — sekmeyi kapatsanız da oturumlar sunucuda devam eder.",
-  "claude.title": "Claude Code",
+  "claude.title": "Ajan",
   "claude.waiting": "Ajan bekleniyor…",
   "claude.workspaceToken": "Çalışma alanı token'ı (paylaşılan)",
   "claude.workspaceWarning": "Paylaşılan slot, abonelik jetonu değil bir Anthropic API anahtarı (sk-ant-api…) alır. Kullanım anahtarın sahibine faturalanır — Anthropic'in koşulları buna izin verir; abonelik tek bir kişiye aittir, bu yüzden her üye kendi aboneliğini bağlar.",

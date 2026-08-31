@@ -867,7 +867,7 @@
   "claude.stopping": "セッションを停止中…",
   "claude.streamLost": "接続が切れました — 再試行中",
   "claude.subtitle": "どこからでも自分のリポジトリでコーディングエージェントを実行できます — タブを閉じても、セッションはサーバー側で動き続けます。",
-  "claude.title": "Claude Code",
+  "claude.title": "エージェント",
   "claude.waiting": "エージェントの応答を待っています…",
   "claude.workspaceToken": "ワークスペーストークン（共有）",
   "claude.workspaceWarning": "共有スロットに入れられるのは Anthropic の API キー（sk-ant-api…）で、サブスクリプションのトークンではありません。利用分はキーの所有者に請求され、これは Anthropic の規約が認めています。サブスクリプションは個人のものなので、メンバーはそれぞれ自分のものを接続してください。",

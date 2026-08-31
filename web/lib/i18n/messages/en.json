@@ -867,7 +867,7 @@
   "claude.stopping": "Stopping session…",
   "claude.streamLost": "Connection lost — retrying",
   "claude.subtitle": "Run a coding agent on your repos from anywhere — sessions keep running server-side after you close the tab.",
-  "claude.title": "Claude Code",
+  "claude.title": "Agent",
   "claude.waiting": "Waiting for the agent…",
   "claude.workspaceToken": "Workspace token (shared)",
   "claude.workspaceWarning": "A shared slot takes an Anthropic API key (sk-ant-api…), not a subscription token. Its usage bills to the key's owner, which Anthropic's terms allow; a subscription belongs to one person, so each member connects their own.",

@@ -867,7 +867,7 @@
   "claude.stopping": "Arrêt de la session…",
   "claude.streamLost": "Connexion perdue — nouvelle tentative",
   "claude.subtitle": "Exécutez un agent de code sur vos dépôts depuis n'importe où — les sessions continuent de tourner côté serveur après la fermeture de l'onglet.",
-  "claude.title": "Claude Code",
+  "claude.title": "Agent",
   "claude.waiting": "En attente de l'agent…",
   "claude.workspaceToken": "Jeton du workspace (partagé)",
   "claude.workspaceWarning": "Un emplacement partagé accepte une clé API Anthropic (sk-ant-api…), pas un jeton d'abonnement. L'usage est facturé au propriétaire de la clé, ce que les conditions d'Anthropic autorisent ; un abonnement appartient à une seule personne, donc chaque membre connecte le sien.",

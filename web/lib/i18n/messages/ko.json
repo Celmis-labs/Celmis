@@ -867,7 +867,7 @@
   "claude.stopping": "세션을 중지하는 중…",
   "claude.streamLost": "연결이 끊겼습니다 — 다시 시도 중",
   "claude.subtitle": "어디서든 내 저장소에서 코딩 에이전트를 실행하세요 — 탭을 닫아도 세션은 서버에서 계속 돌아갑니다.",
-  "claude.title": "Claude Code",
+  "claude.title": "에이전트",
   "claude.waiting": "에이전트를 기다리는 중…",
   "claude.workspaceToken": "워크스페이스 토큰 (공유)",
   "claude.workspaceWarning": "공유 슬롯에는 구독 토큰이 아니라 Anthropic API 키(sk-ant-api…)를 넣습니다. 사용량은 키 소유자에게 청구되며 Anthropic 약관이 이를 허용합니다. 구독은 개인의 것이므로 각 구성원이 자기 것을 연결하세요.",

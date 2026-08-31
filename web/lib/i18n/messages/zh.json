@@ -867,7 +867,7 @@
   "claude.stopping": "正在停止会话…",
   "claude.streamLost": "连接已断开 — 正在重试",
   "claude.subtitle": "随时随地在你的仓库上运行编码智能体 — 关闭标签页后，会话仍在服务端继续运行。",
-  "claude.title": "Claude Code",
+  "claude.title": "智能体",
   "claude.waiting": "正在等待智能体…",
   "claude.workspaceToken": "工作区令牌（共享）",
   "claude.workspaceWarning": "共享槽位接受 Anthropic API 密钥（sk-ant-api…），而不是订阅令牌。用量计入密钥所有者的账单，这是 Anthropic 条款允许的；订阅属于个人，因此每位成员各自连接自己的订阅。",
