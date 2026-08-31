@@ -381,7 +381,7 @@ A vulnerability in the dependency audit carries a **Fix from here** button. It
 does not open an empty chat — it hands the session the repository, the package,
 both versions and the boundaries of the job, already written:
 
-![The session, pre-filled from a dependency finding](docs/images/fix-with-claude-prefilled.png)
+![The session, pre-filled from a dependency finding](docs/images/session-prefilled-from-a-finding.png)
 
 Here is one such loop, end to end, on a real finding — `lodash 4.17.11` with a
 known vulnerability against it. **220 seconds** from *Start session* to an open
