@@ -20,7 +20,37 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.24`.
+Nothing since `v0.1.25`.
+
+## [0.1.25] — 2026-08-31
+
+### Security
+
+- **The sandbox firewall covered one of the two ways in.** The INPUT rule was
+  in place and the deploy logged "sandbox→host blocked"; probed from inside
+  the running container, `host:22` timed out and `host:80` answered. A
+  container port published on the host is destination-NAT'd and then
+  forwarded, so INPUT never sees it.
+
+  Nothing was exposed by it — the only `0.0.0.0` port is Caddy, which the
+  internet reaches anyway, and postgres, the api and the web app are bound to
+  `127.0.0.1`; cross-network isolation was probed too and holds. The rule is
+  here because the next published port is the one nobody re-checks. A second
+  rule in `DOCKER-USER` matches `--ctstate DNAT`: exactly the packets that
+  arrived through a published port, leaving the sandbox's internet egress and
+  the api on the sandbox network alone. Verified on production after applying
+  it — 22 blocked, 80 blocked, internet open, api open.
+
+### Fixed
+
+- **CI could not see the history it was asked about.** `actions/checkout`
+  fetches one commit and no tags. The guard that recomputes PROVENANCE.md's
+  numbers failed with "the record pins v0.1.23, which is not a tag in this
+  repository" — a true sentence about the clone and a false accusation against
+  the file — and the guard that no commit ever weakened that record and its
+  own test together walked a log of one commit and passed on nothing. Proven
+  on a `--depth 1` clone. `fetch-depth: 0`, and both now fail loudly on a
+  shallow clone rather than answering a question they cannot see.
 
 ## [0.1.24] — 2026-08-31
 
