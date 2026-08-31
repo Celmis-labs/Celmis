@@ -20,6 +20,10 @@ derives it from there.
 
 ## [Unreleased]
 
+Nothing since `v0.1.22`.
+
+## [0.1.22] — 2026-08-31
+
 ### Added
 
 - **A finding now says whether your own code names the package.** A findings
