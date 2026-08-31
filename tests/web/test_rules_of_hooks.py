@@ -71,7 +71,10 @@ def test_no_hook_is_called_conditionally_anywhere_in_the_app():
     )
 
 
-@pytest.mark.skipif(not _eslint_available(), reason="web deps not installed")
+# NO skipif: this one reads app-shell.tsx as text and needs no Node at all.
+# It carried the same decorator as the two above and therefore skipped in the
+# python job for a reason that never applied to it — one line, and the only
+# check of this family that ran anywhere.
 def test_the_switcher_calls_its_hooks_before_the_session_guard():
     """The specific shape that broke, pinned cheaply so a reader of this file
     sees what it is about without running eslint.

@@ -102,16 +102,24 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
-      # The rules-of-hooks violation that once took every authenticated page
-      # down was visible to eslint the whole time and nobody ran it. That rule
-      # is now enforced as a TEST — tests/web/test_rules_of_hooks.py, in the
-      # python job above — so it is blocking there rather than advisory here.
+      # THE PREVIOUS COMMENT HERE WAS FALSE, and it is worth saying why rather
+      # than deleting it. It read: the rules-of-hooks rule "is now enforced as
+      # a TEST — tests/web/test_rules_of_hooks.py, in the python job above — so
+      # it is blocking there rather than advisory here". Those tests carry
+      # `skipif(not _eslint_available())`, and the python job never runs
+      # `pnpm install`, so `web/node_modules` is absent and all of them report
+      # SKIPPED. The rule was blocking nowhere, and this step's `|| echo`
+      # ensured that too. A gate everybody believes in and nothing enforces is
+      # worse than an admitted absence.
       #
-      # This step is the rest of eslint, which has pre-existing errors of its
-      # own (`no-explicit-any` in three places). Reported, not enforced, and
-      # marked as such rather than quietly passing.
-      - name: Lint (advisory)
-        run: npx eslint . || echo "::warning::eslint reported findings — see above"
+      # `scripts/eslint_gate.py` is the enforcement, and it is two rules of
+      # different kinds: rules-of-hooks is fatal at any count — zero today,
+      # and it is the rule whose breach took every authenticated page down —
+      # while everything else ratchets from a measured baseline of 42, which
+      # may fall and may not rise. The number lives in that file so lowering
+      # it is a visible edit rather than a drifting threshold.
+      - name: Lint (rules-of-hooks fatal, the rest ratcheted)
+        run: python3 ../scripts/eslint_gate.py
 
       - name: Build
         env:
