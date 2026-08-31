@@ -127,6 +127,23 @@ done
 # traffic THROUGH it to the internet arrives on FORWARD. Dropping the first
 # leaves the second alone.
 #
+# INPUT IS NOT THE WHOLE STORY, and the first version of this said it was.
+# Measured from inside the running sandbox on the production box, with the
+# INPUT rule in place: `host:22` timed out and `host:80` ANSWERED. A container
+# port published on the host is destination-NAT'd in PREROUTING and then
+# FORWARDED, so it never passes INPUT at all. Nothing was exposed by it —
+# port 80 is Caddy, which the internet reaches anyway, and postgres, the api
+# and the web app are all bound to 127.0.0.1 — but the log line said
+# "sandbox→host blocked" and that was broader than the rule. The next port
+# somebody publishes is the one nobody re-checks.
+#
+# So a second rule, in DOCKER-USER, matching `--ctstate DNAT`: exactly the
+# packets that arrived through a published port. Not the host's address, which
+# is a list that changes; not the whole subnet, which would take the sandbox's
+# internet with it. Masqueraded egress is SNAT and does not match; the api on
+# the sandbox network is not NAT'd at all and does not match. Both were
+# re-probed from inside the container afterwards.
+#
 # Idempotent, and a missing iptables is a warning rather than a failure — a
 # deploy must not stop over a hardening rule on a host that does not use
 # iptables at all (nftables-only, a managed runtime, a rootless daemon).
@@ -151,34 +168,80 @@ SANDBOX_SUBNET="$(grep -E '^SANDBOX_NET_SUBNET=' .env 2>/dev/null \
 # operator who has thought about it says so out loud with
 # CELMIS_ALLOW_UNFIREWALLED_SANDBOX=1 — a typed decision rather than a warning
 # nobody reads.
-block_sandbox_to_host() {
+_nft_celmis_table() {
+  nft list table inet celmis >/dev/null 2>&1 && return 0
+  nft add table inet celmis 2>/dev/null
+}
+
+# The host's own sockets: ssh, and anything bound to the public address.
+_block_host_sockets() {
   local subnet="$1"
   if command -v iptables >/dev/null 2>&1; then
     if iptables -C INPUT -s "$subnet" -j DROP 2>/dev/null; then
-      log "sandbox→host already blocked ($subnet, iptables)"
       return 0
     fi
     if iptables -I INPUT 1 -s "$subnet" -j DROP 2>/dev/null; then
-      log "blocked sandbox→host ($subnet, iptables); internet egress untouched"
       return 0
     fi
   fi
-  if command -v nft >/dev/null 2>&1; then
-    nft list table inet celmis >/dev/null 2>&1 || \
-      nft add table inet celmis 2>/dev/null || true
+  if command -v nft >/dev/null 2>&1 && _nft_celmis_table; then
     nft list chain inet celmis input >/dev/null 2>&1 || \
       nft "add chain inet celmis input { type filter hook input priority 0; }" \
         2>/dev/null || true
     if nft list chain inet celmis input 2>/dev/null | grep -q "$subnet"; then
-      log "sandbox→host already blocked ($subnet, nft)"
       return 0
     fi
     if nft add rule inet celmis input ip saddr "$subnet" drop 2>/dev/null; then
-      log "blocked sandbox→host ($subnet, nft); internet egress untouched"
       return 0
     fi
   fi
   return 1
+}
+
+# Container ports published on the host. DNAT'd and forwarded, so INPUT never
+# sees them; DOCKER-USER is consulted before docker's own rules and is the one
+# chain docker leaves alone. `--ctstate DNAT` is the qualifier that keeps this
+# from being a blanket drop: without it the same rule would take the sandbox's
+# internet access with it, which is the thing the sandbox exists to have.
+_block_published_ports() {
+  local subnet="$1"
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -N DOCKER-USER 2>/dev/null || true
+    if iptables -C DOCKER-USER -s "$subnet" -m conntrack --ctstate DNAT -j DROP \
+         2>/dev/null; then
+      return 0
+    fi
+    if iptables -I DOCKER-USER 1 -s "$subnet" -m conntrack --ctstate DNAT -j DROP \
+         2>/dev/null; then
+      return 0
+    fi
+  fi
+  if command -v nft >/dev/null 2>&1 && _nft_celmis_table; then
+    nft list chain inet celmis published >/dev/null 2>&1 || \
+      nft "add chain inet celmis published { type filter hook forward priority -150; }" \
+        2>/dev/null || true
+    if nft list chain inet celmis published 2>/dev/null | grep -q "$subnet"; then
+      return 0
+    fi
+    if nft add rule inet celmis published ip saddr "$subnet" ct status dnat drop \
+         2>/dev/null; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+block_sandbox_to_host() {
+  local subnet="$1" missing=""
+  _block_host_sockets "$subnet"   || missing="$missing host-sockets"
+  _block_published_ports "$subnet" || missing="$missing published-ports"
+  if [ -n "$missing" ]; then
+    log "could not block:$missing"
+    return 1
+  fi
+  log "sandbox→host blocked ($subnet): host sockets and published container \
+ports; internet egress and the api on the sandbox network untouched"
+  return 0
 }
 
 if ! block_sandbox_to_host "$SANDBOX_SUBNET"; then
@@ -198,8 +261,10 @@ fi
 # nothing would reinstate it. The window after a restart is not "until the next
 # scheduled deploy", it is until somebody deploys by hand.
 #
-# Before=docker.service so the rule exists before anything can be started into
-# that subnet.
+# Before=docker.service so the rules exist before anything can be started into
+# that subnet. DOCKER-USER does not exist before docker does, so the unit
+# creates it — docker adds the FORWARD jump on start and leaves the chain's
+# contents alone, which is what that chain is for.
 if command -v systemctl >/dev/null 2>&1; then
   cat > /etc/systemd/system/celmis-sandbox-firewall.service <<UNIT
 [Unit]
@@ -212,6 +277,7 @@ Wants=network-pre.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/sh -c 'iptables -C INPUT -s ${SANDBOX_SUBNET} -j DROP 2>/dev/null || iptables -I INPUT 1 -s ${SANDBOX_SUBNET} -j DROP'
+ExecStart=/bin/sh -c 'iptables -N DOCKER-USER 2>/dev/null; iptables -C DOCKER-USER -s ${SANDBOX_SUBNET} -m conntrack --ctstate DNAT -j DROP 2>/dev/null || iptables -I DOCKER-USER 1 -s ${SANDBOX_SUBNET} -m conntrack --ctstate DNAT -j DROP'
 
 [Install]
 WantedBy=multi-user.target

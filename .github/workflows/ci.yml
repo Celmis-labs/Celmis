@@ -28,7 +28,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
+      # FULL HISTORY AND TAGS, because two tests in tests/ci read them and the
+      # default checkout is one commit with no tags. One of them said so —
+      # "the record pins v0.1.23, which is not a tag in this repository",
+      # which is a true sentence about the CLONE and a false one about the
+      # RECORD, so it looked like drift in PROVENANCE.md and was not. The
+      # other, the guard that no commit weakens the record and its guard
+      # together, walked a log holding a single commit and passed on nothing.
+      # A guard that cannot see is worse than one that fails.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:

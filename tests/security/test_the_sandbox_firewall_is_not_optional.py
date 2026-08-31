@@ -69,17 +69,76 @@ def test_there_is_a_typed_way_out_rather_than_a_silent_one() -> None:
     )
 
 
+def _blocking_functions() -> dict[str, str]:
+    """The helpers `block_sandbox_to_host` delegates to, by name.
+
+    Keyed on what they are called FROM rather than on their names: a helper
+    renamed out of this dict would take its assertions with it, and that is
+    the failure this file's neighbours keep being rewritten after.
+    """
+    code = _without_comments()
+    wrapper = re.search(r"block_sandbox_to_host\(\) \{.*?\n\}", code, re.S)
+    assert wrapper, "block_sandbox_to_host is gone"
+    called = re.findall(r"^\s*(_\w+) \"\$subnet\"", wrapper.group(0), re.M)
+    assert called, f"the wrapper delegates to nothing:\n{wrapper.group(0)}"
+
+    bodies = {}
+    for name in called:
+        found = re.search(rf"{name}\(\) \{{.*?\n\}}", code, re.S)
+        assert found, f"{name} is called and does not exist"
+        bodies[name] = found.group(0)
+    return bodies
+
+
 def test_both_backends_are_tried_before_giving_up() -> None:
-    """iptables is what the rule is written in; nft is what a modern host has.
+    """iptables is what the rules are written in; nft is what a modern host has.
 
     Measured on the production box: nftables v1.0.9 is installed.
     """
+    for name, body in _blocking_functions().items():
+        assert "iptables" in body and "nft " in body, (
+            f"{name} attempts only one firewall backend"
+        )
+
+
+def test_a_port_published_on_the_host_is_covered_too() -> None:
+    """INPUT does not see it, and the first version of this rule did not either.
+
+    Measured from inside the running sandbox with the INPUT rule in place:
+    `host:22` timed out, `host:80` answered. A published container port is
+    DNAT'd in PREROUTING and forwarded, so INPUT is never consulted. Nothing
+    was exposed by it — the only 0.0.0.0 port was Caddy, which the internet
+    reaches anyway — but the deploy logged "sandbox→host blocked", which was
+    broader than the rule, and the next published port is the one nobody
+    re-checks.
+    """
+    bodies = _blocking_functions()
+    covering = {name: body for name, body in bodies.items()
+                if "DOCKER-USER" in body or "hook forward" in body}
+    assert covering, (
+        "nothing the wrapper calls touches the forwarding path, so a container "
+        f"port published on the host stays reachable from the sandbox. "
+        f"Functions called: {sorted(bodies)}"
+    )
+    for name, body in covering.items():
+        assert "DNAT" in body.upper(), (
+            f"{name} filters forwarded traffic without matching the "
+            f"destination-NAT that identifies a published port"
+        )
+
+
+def test_the_wrapper_reports_a_partial_block_as_a_failure() -> None:
+    """Two rules, one answer. Half of them is not "blocked"."""
     code = _without_comments()
-    function = re.search(r"block_sandbox_to_host\(\) \{.*?\n\}", code, re.S)
-    assert function, "block_sandbox_to_host is gone"
-    body = function.group(0)
-    assert "iptables" in body and "nft " in body, (
-        "only one firewall backend is attempted"
+    wrapper = re.search(r"block_sandbox_to_host\(\) \{.*?\n\}", code, re.S).group(0)
+    assert re.search(r"return 1", wrapper), (
+        "the wrapper never returns failure, so the caller's `fail` is dead code"
+    )
+    calls = re.findall(r"^\s*(_\w+) \"\$subnet\"", wrapper, re.M)
+    assert len(calls) >= 2, (
+        f"the wrapper makes {len(calls)} blocking call(s); the host's own "
+        f"sockets and its published container ports are different chains and "
+        f"need both"
     )
 
 
@@ -96,16 +155,31 @@ def test_the_rule_is_reinstated_after_a_reboot() -> None:
     )
 
 
-@pytest.mark.parametrize("branch", ["iptables -I INPUT 1", "nft add rule"])
-def test_the_rule_targets_input_not_forward(branch: str) -> None:
-    """Traffic TO the host arrives on INPUT; traffic THROUGH it on FORWARD.
+def test_the_sandbox_keeps_its_way_out_to_the_internet() -> None:
+    """`npm ci` is the point of the container, and a blanket drop kills it.
 
-    Dropping the second would cut the sandbox's internet access, which it
-    needs — `npm install` is the whole point of the container.
+    The rule that covers published ports lives on the forwarding path, which
+    is also the sandbox's route to the internet. What separates them is the
+    qualifier: a drop matched on the source subnet ALONE would take both. So
+    this is keyed on the qualifier and not on the chain's name — the earlier
+    version asserted the string "FORWARD" never appeared anywhere, which a
+    rule in DOCKER-USER satisfies while doing precisely what was feared.
     """
     code = _without_comments()
-    assert branch in code
-    assert "FORWARD" not in code, (
-        "the deploy touches the FORWARD chain, which is the sandbox's route to "
-        "the internet rather than its route to this host"
-    )
+    for line in code.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(("iptables", "nft")) or " drop" not in \
+                f"{stripped.lower()} ":
+            if "-j DROP" not in stripped:
+                continue
+        forwarding = ("FORWARD" in stripped or "DOCKER-USER" in stripped
+                      or "hook forward" in stripped)
+        if not forwarding:
+            continue
+        qualified = ("DNAT" in stripped.upper() or "--dport" in stripped
+                     or "status dnat" in stripped)
+        assert qualified, (
+            f"this drops forwarded traffic from the sandbox with nothing but "
+            f"the source subnet to match on, which is also how it reaches the "
+            f"internet:\n    {stripped}"
+        )

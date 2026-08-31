@@ -54,6 +54,38 @@ def _git(*args: str) -> str:
     return out.stdout
 
 
+def _require_history() -> None:
+    """A clone that cannot answer must say so, not answer wrongly.
+
+    `actions/checkout` fetches one commit and no tags by default, and the two
+    tests below read both. The tag assertion failed with "the record pins
+    v0.1.23, which is not a tag in this repository" — a true sentence about
+    the clone, a false accusation against PROVENANCE.md. The history
+    assertion did worse: it walked a log of one commit and passed.
+
+    Same three states this repository keeps arriving at: the record is right,
+    the record is wrong, or nothing was checked. These are the third, and
+    they fail rather than skip because the fix is one line in the workflow.
+    """
+    if _git("rev-parse", "--is-shallow-repository").strip() == "true":
+        pytest.fail(
+            "this clone is shallow, so the history assertions below would pass "
+            "on a log they cannot see. Fetch history — `fetch-depth: 0` in the "
+            "workflow, `git fetch --unshallow` locally. Nothing is wrong with "
+            "the record; nothing was read."
+        )
+
+
+def _require_tags() -> None:
+    if not _git("tag", "--list").split():
+        pytest.fail(
+            "this clone holds no tags at all, so a pinned version cannot be "
+            "resolved and the failure would read as drift in PROVENANCE.md. "
+            "Fetch tags — `fetch-depth: 0` in the workflow, `git fetch --tags` "
+            "locally."
+        )
+
+
 def _authorship_section() -> str:
     body = PROVENANCE.read_text(encoding="utf-8")
     start = body.find("## Authorship")
@@ -170,6 +202,8 @@ def test_the_authorship_numbers_match_the_tag_they_name():
     wording at all. A count tied to an immutable tag cannot be satisfied by
     vagueness and cannot rot: the tag does not move, so the number stays true.
     """
+    _require_history()
+    _require_tags()
     section = _authorship_section()
 
     tags = re.findall(r"\bv\d+\.\d+\.\d+\b", section)
@@ -212,6 +246,7 @@ def test_the_record_and_its_guard_never_moved_in_one_commit():
 
     The root commit is exempt: it introduced every file in the tree.
     """
+    _require_history()
     roots = set(_git("rev-list", "--max-parents=0", "HEAD").split())
     log = _git("log", "--format=%H", "--name-only", "HEAD")
 
