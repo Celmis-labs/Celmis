@@ -20,6 +20,10 @@ derives it from there.
 
 ## [Unreleased]
 
+Nothing since `v0.1.24`.
+
+## [0.1.24] — 2026-08-31
+
 ### Security
 
 - **The sandbox firewall step said it was not optional and continued without
