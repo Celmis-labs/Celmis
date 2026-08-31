@@ -30,6 +30,14 @@ concurrency:
 permissions:
   contents: write                # to publish the GitHub Release for the tag
   packages: write
+  # BUILD PROVENANCE. Not the same mechanism as buildkit's `provenance:` below,
+  # which stays false on purpose — that one rewrites the manifest into an index
+  # and the comment there is right. This is a signed SLSA attestation stored
+  # beside the image and verifiable with `gh attestation verify`, which is what
+  # answers "was this image built from that commit, by that workflow" for
+  # somebody who has only the image.
+  id-token: write                # to mint the Sigstore identity for the attestation
+  attestations: write            # to store it against the repository
 
 jobs:
   images:
@@ -124,6 +132,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
+        id: build
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -157,8 +166,26 @@ jobs:
           build-args: |
             CELMIS_VERSION=${{ steps.img.outputs.version }}
 
-      # A tag that exists but cannot be pulled is worse than no tag: the deploy
-      # would fail on the server, after the release looked finished.
+      # WHAT THIS IMAGE WAS BUILT FROM, signed, for somebody who has only the
+      # image. `provenance: false` above stays — that is buildkit's own
+      # in-manifest attestation, which turns a plain image into an index, and
+      # the comment there is right about why we do not want it. This is the
+      # separate SLSA attestation stored beside the image in the registry and
+      # checked with:
+      #
+      #     gh attestation verify oci://ghcr.io/celmis-labs/celmis-api:vX.Y.Z \
+      #       --owner Celmis-labs
+      #
+      # Before it, every published image was unverifiable: the OCI `revision`
+      # label says which commit it CLAIMS, and a label is text anybody can
+      # write. The digest is the subject, not the tag, because a tag moves.
+      - name: Attest what this image was built from
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.img.outputs.repo }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
       # A tag that exists but cannot be pulled is worse than no tag: the deploy
       # would fail on the server, after the release looked finished. Inspect the
       # MANIFEST rather than pulling — a pull resolves to the runner's own

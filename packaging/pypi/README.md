@@ -205,6 +205,17 @@ installation metrics. Security controls are never enterprise-only.
 
 One person. A solo maintainer, still a student, graduating in 2027.
 
+## Checking what you installed
+
+Every published file's sha256 is recorded in
+[`packaging/pypi/DIGESTS.md`](https://github.com/Celmis-labs/Celmis/blob/main/packaging/pypi/DIGESTS.md)
+in the git repository — deliberately not only here, because this page is served
+by the same index that serves the files, and a hash published beside what it
+describes proves nothing. That is the same argument this tool makes about an
+evidence pack's manifest, applied to itself.
+
+    pip install --require-hashes -r requirements.txt
+
 ## Links
 
 - Site: https://celmis-labs.github.io

@@ -315,3 +315,45 @@ def test_the_two_copies_use_the_same_limits() -> None:
     packaged = _packaged_verifier()
     assert evidence.MAX_MEMBER_BYTES == packaged.MAX_MEMBER_BYTES
     assert evidence.MAX_UNCOMPRESSED_BYTES == packaged.MAX_UNCOMPRESSED_BYTES
+
+
+def test_every_published_version_has_its_digests_written_down() -> None:
+    """A hash published only by the index that serves the file proves nothing.
+
+    The verifier's own argument about an evidence-pack manifest, applied to the
+    verifier. `DIGESTS.md` is in the git repository — a different party with
+    different credentials — so a substitution on either side stops matching.
+    """
+    import re
+
+    digests = ROOT / "packaging" / "pypi" / "DIGESTS.md"
+    assert digests.is_file(), "the second channel is gone"
+    text = digests.read_text("utf-8")
+
+    version = re.search(
+        r'^version = "([^"]+)"',
+        (ROOT / "packaging" / "pypi" / "pyproject.toml").read_text("utf-8"),
+        re.M,
+    ).group(1)
+    published = re.findall(r"^## (\d+\.\d+\.\d+)", text, re.M)
+    assert published, "no version is recorded"
+
+    # Every hash is a full sha256, not a prefix somebody shortened for width.
+    for value in re.findall(r"`([0-9a-f]{8,})`", text):
+        assert len(value) == 64, f"{value} is not a full sha256"
+
+    assert version in published or version > max(published), (
+        f"packaging is at {version} and DIGESTS.md records {published} — after "
+        f"publishing, add the new release rather than leaving the record short"
+    )
+
+
+def test_the_record_does_not_claim_to_be_attestation() -> None:
+    """It is a ledger read from PyPI, not evidence minted independently.
+
+    Saying otherwise would be exactly the over-claim this project has spent the
+    week correcting in itself.
+    """
+    text = (ROOT / "packaging" / "pypi" / "DIGESTS.md").read_text("utf-8")
+    assert "not independent attestation" in text.lower()
+    assert "trust-on-first-use" in text

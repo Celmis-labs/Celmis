@@ -22,6 +22,53 @@ derives it from there.
 
 ### Security
 
+- **The sandbox firewall step said it was not optional and continued without
+  it.** Both failure branches logged a `WARNING:` and carried on, five lines
+  after a real `fail` on a missing `.env` — so a host without iptables shipped
+  a container that runs a tenant's own build commands with a route to the host.
+  It now tries iptables, then nft, then stops, with
+  `CELMIS_ALLOW_UNFIREWALLED_SANDBOX=1` as a typed decision for a host isolated
+  another way.
+
+  And it did not survive a reboot. Measured on the production box: the rule was
+  in place, `iptables-persistent` was absent and crontab was **empty** — so the
+  gap after a restart was not until the next scheduled deploy, it was until
+  somebody deployed by hand. A systemd unit ordered `Before=docker.service`
+  reinstates it at boot.
+
+### Added
+
+- **Publishing is a workflow now, not a person with a token.**
+  `publish-verifier.yml` uses PyPI Trusted Publishing, so upload rights belong
+  to this workflow in this repository for the length of a run. The tag prefix
+  is `pypi-`, and the first letter is the reason: `release.yml` triggers on the
+  glob `v*`, which `verifier-0.2.1` matches, because "verifier" starts with a
+  v — that tag would have built three container images.
+
+- **Images carry a signed build attestation.** `gh attestation verify` now
+  answers "built from which commit, by which workflow" for somebody holding
+  only the image; before this the OCI `revision` label was the only claim, and
+  a label is text anybody can write. Buildkit's own `provenance: false` stays —
+  different mechanism, and the comment there is right.
+
+- **`packaging/pypi/DIGESTS.md`** records the sha256 of every published file in
+  the git repository, because PyPI is the same channel that serves them. It
+  says plainly what it is: the 0.1.0 and 0.2.0 digests were read from PyPI and
+  written down, which is a trust-on-first-use anchor and not independent
+  attestation. From the first workflow-published release the digests are
+  printed before upload and the artefacts carry a PyPI attestation.
+
+### Fixed
+
+- **The lint gate everybody believed in enforced nothing.** `ci.yml` said the
+  rules-of-hooks rule was blocking as a test in the python job; those tests
+  carry `skipif(not _eslint_available())` and that job never installs
+  `web/node_modules`, so they reported SKIPPED in green — while this step ended
+  in `|| echo`. Measured for the first time: 42 findings, 31 errors, 24 of them
+  in the react-hooks family whose breach took every authenticated page down.
+  `scripts/eslint_gate.py` makes rules-of-hooks fatal at any count and ratchets
+  the rest from 42.
+
 - **The verifier read whatever an archive told it to.** A zip declares each
   member's size before you read it, and neither copy checked. Measured against
   the published `celmis 0.2.0`: an archive of 200 KB on disk declaring 200 MB

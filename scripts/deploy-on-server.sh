@@ -139,17 +139,92 @@ done
 SANDBOX_SUBNET="$(grep -E '^SANDBOX_NET_SUBNET=' .env 2>/dev/null \
                     | cut -d= -f2- | tr -d '[:space:]' || true)"
 : "${SANDBOX_SUBNET:=172.28.90.0/24}"
-if command -v iptables >/dev/null 2>&1; then
-  # -C tests for the rule; a non-zero exit means it is not there yet.
-  if iptables -C INPUT -s "$SANDBOX_SUBNET" -j DROP 2>/dev/null; then
-    log "sandbox→host already blocked ($SANDBOX_SUBNET)"
-  elif iptables -I INPUT 1 -s "$SANDBOX_SUBNET" -j DROP 2>/dev/null; then
-    log "blocked sandbox→host ($SANDBOX_SUBNET); internet egress untouched"
+# THIS STEP IS NOT OPTIONAL, and it used to say so while behaving otherwise:
+# both failure branches logged a WARNING and carried on, five lines after a
+# real `fail` on a missing .env. A deploy that cannot isolate the sandbox and
+# proceeds anyway ships a container that runs a tenant's own build commands
+# with a route to this host.
+#
+# Two backends, then a stop. `iptables` first because that is what the rule is
+# written in; `nft` because a modern host may have nothing else — measured on
+# this box: nftables v1.0.9 present. If neither works the deploy fails, and an
+# operator who has thought about it says so out loud with
+# CELMIS_ALLOW_UNFIREWALLED_SANDBOX=1 — a typed decision rather than a warning
+# nobody reads.
+block_sandbox_to_host() {
+  local subnet="$1"
+  if command -v iptables >/dev/null 2>&1; then
+    if iptables -C INPUT -s "$subnet" -j DROP 2>/dev/null; then
+      log "sandbox→host already blocked ($subnet, iptables)"
+      return 0
+    fi
+    if iptables -I INPUT 1 -s "$subnet" -j DROP 2>/dev/null; then
+      log "blocked sandbox→host ($subnet, iptables); internet egress untouched"
+      return 0
+    fi
+  fi
+  if command -v nft >/dev/null 2>&1; then
+    nft list table inet celmis >/dev/null 2>&1 || \
+      nft add table inet celmis 2>/dev/null || true
+    nft list chain inet celmis input >/dev/null 2>&1 || \
+      nft "add chain inet celmis input { type filter hook input priority 0; }" \
+        2>/dev/null || true
+    if nft list chain inet celmis input 2>/dev/null | grep -q "$subnet"; then
+      log "sandbox→host already blocked ($subnet, nft)"
+      return 0
+    fi
+    if nft add rule inet celmis input ip saddr "$subnet" drop 2>/dev/null; then
+      log "blocked sandbox→host ($subnet, nft); internet egress untouched"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+if ! block_sandbox_to_host "$SANDBOX_SUBNET"; then
+  if [ "${CELMIS_ALLOW_UNFIREWALLED_SANDBOX:-}" = "1" ]; then
+    log "WARNING: sandbox→host is NOT blocked and CELMIS_ALLOW_UNFIREWALLED_SANDBOX=1 \
+was set — continuing on the operator's explicit decision"
   else
-    log "WARNING: could not install the sandbox→host firewall rule"
+    fail "could not block sandbox→host ($SANDBOX_SUBNET) with iptables or nft. \
+The execution sandbox runs a tenant's own build and test commands; without \
+this rule it can reach this host. Install one of them, or set \
+CELMIS_ALLOW_UNFIREWALLED_SANDBOX=1 if this host isolates it another way."
+  fi
+fi
+
+# THE RULE DOES NOT SURVIVE A REBOOT. Measured on the production box: the rule
+# was present, `iptables-persistent` was not, and crontab was EMPTY — so
+# nothing would reinstate it. The window after a restart is not "until the next
+# scheduled deploy", it is until somebody deploys by hand.
+#
+# Before=docker.service so the rule exists before anything can be started into
+# that subnet.
+if command -v systemctl >/dev/null 2>&1; then
+  cat > /etc/systemd/system/celmis-sandbox-firewall.service <<UNIT
+[Unit]
+Description=Block the Celmis execution sandbox from reaching this host
+Before=docker.service
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'iptables -C INPUT -s ${SANDBOX_SUBNET} -j DROP 2>/dev/null || iptables -I INPUT 1 -s ${SANDBOX_SUBNET} -j DROP'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  if systemctl enable celmis-sandbox-firewall.service >/dev/null 2>&1; then
+    log "sandbox firewall will be reinstated at boot (systemd unit enabled)"
+  else
+    log "WARNING: could not enable celmis-sandbox-firewall.service — the rule \
+is in place now but will not survive a reboot"
   fi
 else
-  log "WARNING: no iptables — the sandbox can reach the host on this box"
+  log "WARNING: no systemctl — the sandbox firewall rule will not survive a reboot"
 fi
 
 # ─── 4. the stamp, and the migration ─────────────────────────────────

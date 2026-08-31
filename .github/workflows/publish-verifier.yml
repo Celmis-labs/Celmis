@@ -1,0 +1,151 @@
+name: Publish the verifier
+
+# The standalone evidence-pack verifier — packaging/pypi — to PyPI.
+#
+# THERE WAS NO PUBLISH WORKFLOW AT ALL. celmis 0.1.0 and 0.2.0 were uploaded by
+# hand with an API token, and PyPI reports `provenance=None` for both: nobody
+# holding those files can tell which commit built them, or that they came from
+# this repository rather than from whoever else held the token.
+#
+# THE TAG PREFIX IS `pypi-`, AND THE FIRST LETTER IS THE REASON. `release.yml`
+# triggers on `tags: ["v*"]`, which is a GLOB against the whole tag name — so
+# `verifier-0.2.1`, the obvious name, matches it, because "verifier" starts
+# with a v. Tagging a verifier release under that name would have built and
+# published three container images that have nothing to do with it. Checked
+# rather than assumed: fnmatch("verifier-0.2.1", "v*") is True.
+#
+# Glob, not regex, for the same reason a reader should know: `[0-9]+` in a
+# GitHub tag filter matches a digit or a literal plus. The shape is checked in
+# the job instead, against the package's own version, where a mismatch can say
+# what it found.
+#
+# TRUSTED PUBLISHING, not a token. The token would have to live in this
+# repository's secrets, be as long-lived as somebody remembers to rotate it,
+# and grant upload rights to anything that can read secrets. A trusted
+# publisher grants them to THIS workflow, in THIS repository, for THAT
+# environment, for the length of one run.
+#
+# It has to be registered once, by hand, by the account that owns the project:
+#   https://pypi.org/manage/project/celmis/settings/publishing/
+#     owner        Celmis-labs
+#     repository   Celmis
+#     workflow     publish-verifier.yml
+#     environment  pypi
+# Until that exists this workflow fails at the upload step, which is the right
+# way round: it cannot publish by accident.
+
+on:
+  push:
+    tags: ["pypi-*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. pypi-0.2.1)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-verifier-${{ github.ref }}
+  cancel-in-progress: false      # a half-published release is worse than a slow one
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # `build>=1.2.2`, `twine>=6.1` and `setuptools>=77`: anything older emits
+      # metadata without the PEP 639 licence expression, which PyPI refuses.
+      - name: Install the build tooling
+        run: python -m pip install --upgrade "build>=1.2.2" "twine>=6.1" "setuptools>=77"
+
+      # THE TAG AND THE PACKAGE'S OWN VERSION HAVE TO AGREE. Publishing
+      # `pypi-0.2.1` from a tree whose pyproject says 0.2.0 uploads 0.2.0 —
+      # and a PyPI version cannot be replaced, so the mistake is permanent.
+      - name: The tag and the literal must agree
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          want="${tag#pypi-}"
+          got=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('packaging/pypi/pyproject.toml').read_text())['project']['version'])")
+          if [ "$want" != "$got" ]; then
+            echo "::error::tag says $want, packaging/pypi/pyproject.toml says $got"
+            exit 1
+          fi
+          echo "  publishing $got"
+
+      - name: Build
+        run: python -m build
+        working-directory: packaging/pypi
+
+      # THE PLATFORM MUST NEVER LEAVE HERE UNDER THIS NAME. The root
+      # pyproject.toml is `celmis-platform` and carries `Private :: Do Not
+      # Upload` precisely so an accident is rejected — this is the second lock,
+      # because the first one only helps if the accident happens at the root.
+      - name: Nothing but the verifier is in dist/
+        working-directory: packaging/pypi
+        run: |
+          unexpected=$(find dist -type f ! -name 'celmis-*.whl' ! -name 'celmis-*.tar.gz' -print)
+          if [ -n "$unexpected" ]; then
+            echo "::error::dist/ holds files that are not the verifier:"
+            echo "$unexpected"
+            exit 1
+          fi
+          python - <<'PY'
+          import pathlib, zipfile
+          for wheel in pathlib.Path("dist").glob("*.whl"):
+              names = zipfile.ZipFile(wheel).namelist()
+              stray = [n for n in names
+                       if not n.startswith(("celmis/", "celmis-"))]
+              if stray:
+                  raise SystemExit(f"::error::{wheel.name} contains {stray[:5]}")
+              if any(n.startswith("src/") for n in names):
+                  raise SystemExit(f"::error::{wheel.name} contains platform source")
+          print("  dist/ holds the verifier and nothing else")
+          PY
+
+      - name: twine check
+        run: twine check --strict dist/*
+        working-directory: packaging/pypi
+
+      # The digests, in the log, before anything is uploaded. This is the value
+      # `--require-hashes` needs and the one PyPI cannot vouch for on its own
+      # behalf — it is the same channel that serves the files.
+      - name: Digests
+        working-directory: packaging/pypi
+        run: |
+          sha256sum dist/* | tee dist/SHA256SUMS
+          echo "::notice::publish these digests somewhere PyPI is not"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verifier-dist
+          path: packaging/pypi/dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write            # the whole point: no API token anywhere
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: verifier-dist
+          path: dist
+
+      # SHA256SUMS is ours, not a distribution. Uploading it would fail the
+      # index and is not what it is for.
+      - name: Keep only the distributions
+        run: rm -f dist/SHA256SUMS
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true
