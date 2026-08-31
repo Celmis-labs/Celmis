@@ -154,6 +154,65 @@ def _summary_md(
 #: field existed is version 1, which is what `verify_pack` assumes.
 MANIFEST_VERSION = 1
 
+#: A zip says how big each member is before you read it, and a verifier that
+#: ignores that is a decompression bomb waiting for somebody. Measured against
+#: the published verifier: 200 KB on disk declaring 200 MB verified as OK with
+#: a 215 MB peak. A real pack is kilobytes; these are three orders of
+#: magnitude of headroom, and the same numbers as the standalone copy.
+MAX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
+MAX_MEMBER_BYTES = 32 * 1024 * 1024
+_CHUNK = 1024 * 1024
+
+
+class PackRefused(Exception):
+    """The archive was not read at all — a size limit, or a manifest that is
+    not an object. Distinct from "read it and found problems"."""
+
+
+def _guard_sizes(zf: zipfile.ZipFile) -> None:
+    total = 0
+    for info in zf.infolist():
+        if info.file_size > MAX_MEMBER_BYTES:
+            raise PackRefused(
+                f"{info.filename}: declares {info.file_size} bytes, over the "
+                f"{MAX_MEMBER_BYTES}-byte limit for one file")
+        total += info.file_size
+    if total > MAX_UNCOMPRESSED_BYTES:
+        raise PackRefused(
+            f"this archive declares {total} bytes uncompressed, over the "
+            f"{MAX_UNCOMPRESSED_BYTES}-byte limit")
+
+
+def _as_manifest(raw: object) -> dict:
+    """A manifest that is valid JSON and not an object reached `.get()`."""
+    if not isinstance(raw, dict):
+        raise PackRefused(f"MANIFEST.json is {type(raw).__name__}, not an object")
+    files = raw.get("files")
+    if files is not None and not isinstance(files, dict):
+        raise PackRefused(
+            f"MANIFEST.json: 'files' is {type(files).__name__}, not an object")
+    return raw
+
+
+def _sha256_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> str:
+    """The member's hash, a megabyte at a time, never held whole."""
+    if info.file_size > MAX_MEMBER_BYTES:
+        raise PackRefused(
+            f"{info.filename}: declares {info.file_size} bytes, over the limit")
+    digest = hashlib.sha256()
+    seen = 0
+    with zf.open(info) as stream:
+        while True:
+            chunk = stream.read(_CHUNK)
+            if not chunk:
+                break
+            seen += len(chunk)
+            if seen > info.file_size:
+                raise PackRefused(
+                    f"{info.filename}: expands past its own declared size")
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 def build_evidence_pack(
     *,
@@ -265,7 +324,8 @@ def verify_pack(
             names = set(zf.namelist())
             if "MANIFEST.json" not in names:
                 return False, ["MANIFEST.json is missing"]
-            manifest = json.loads(zf.read("MANIFEST.json"))
+            _guard_sizes(zf)
+            manifest = _as_manifest(json.loads(zf.read("MANIFEST.json")))
 
             # A pack from a newer Celmis is not a broken pack. Say which it is
             # before checking a single hash: every problem reported below reads
@@ -304,7 +364,7 @@ def verify_pack(
                 if name not in names:
                     problems.append(f"{name}: listed but absent")
                     continue
-                actual = _sha256(zf.read(name))
+                actual = _sha256_member(zf, zf.getinfo(name))
                 if actual != expected:
                     problems.append(f"{name}: sha256 mismatch")
             extra = names - set(listed) - {"MANIFEST.json"}
@@ -312,9 +372,11 @@ def verify_pack(
                 # An unlisted file is as much a problem as a changed one: it is
                 # content the manifest does not vouch for.
                 problems.append(f"{name}: present but not in the manifest")
+    except PackRefused:
+        raise
     except Exception as exc:  # noqa: BLE001
         return False, [f"unreadable archive: {exc}"]
     return (not problems), problems
 
 
-__all__ = ["build_evidence_pack", "manifest_sha256", "verify_pack"]
+__all__ = ["PackRefused", "build_evidence_pack", "manifest_sha256", "verify_pack"]

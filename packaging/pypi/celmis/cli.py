@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from celmis import __version__
 from celmis.verify import (
     MANIFEST_VERSION,
+    MAX_ARCHIVE_BYTES,
     PackError,
     manifest_sha256,
     read_manifest,
@@ -47,6 +49,21 @@ operator who produced it.
 
 
 def _read(path: str) -> bytes:
+    """The archive, with a ceiling on how much of it reaches memory.
+
+    An evidence pack is kilobytes. Reading an arbitrary file whole because it
+    was named on the command line is the same mistake as trusting a declared
+    member size, one level out.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        raise PackError(f"cannot read {path}: {exc}") from None
+    if size > MAX_ARCHIVE_BYTES:
+        raise PackError(
+            f"{path} is {size} bytes, over the {MAX_ARCHIVE_BYTES}-byte limit "
+            f"for an evidence pack",
+        )
     try:
         with open(path, "rb") as handle:
             return handle.read()

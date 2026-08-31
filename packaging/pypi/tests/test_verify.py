@@ -322,3 +322,174 @@ def test_json_carries_the_hash_and_whether_it_was_checked(capsys) -> None:
                  str(FIXTURE)]) == EXIT_OK
     payload = json.loads(capsys.readouterr().out)
     assert payload["manifest_sha256_checked"] is True
+
+
+# ─── an archive is somebody else's file ──────────────────────────────
+#
+# The person running this got the pack from the party they are checking, and
+# is running it on their own laptop. A declared member size is therefore an
+# instruction from an adversary about how much memory to allocate. Measured
+# against celmis 0.2.0: 200 KB on disk declaring 200 MB verified as OK with a
+# 215 MB peak, and the number was the sender's to choose.
+
+
+def _bomb(declared_mb: int) -> bytes:
+    entries = {
+        "findings.json": b"[]\n",
+        "sbom/x.cdx.json": b"A" * (declared_mb * 1024 * 1024),
+    }
+    manifest = {
+        "manifest_version": 1, "algorithm": "sha256", "run_id": "bomb",
+        "files": {n: __import__("hashlib").sha256(b).hexdigest()
+                  for n, b in sorted(entries.items())},
+    }
+    entries["MANIFEST.json"] = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        for name in sorted(entries):
+            zf.writestr(name, entries[name])
+    return buf.getvalue()
+
+
+def test_a_decompression_bomb_is_refused_not_verified() -> None:
+    from celmis.verify import MAX_MEMBER_BYTES
+
+    blob = _bomb(64)
+    assert len(blob) < 1024 * 1024, "the point is that it is small on disk"
+    with pytest.raises(PackError) as caught:
+        verify_pack(blob)
+    assert str(MAX_MEMBER_BYTES) in str(caught.value)
+
+
+def test_the_refusal_is_could_not_check_not_found_problems(tmp_path) -> None:
+    """Exit 2. Refusing to read is not the same as reading and disliking."""
+    bomb = tmp_path / "bomb.zip"
+    bomb.write_bytes(_bomb(64))
+    assert main(["verify", str(bomb)]) == EXIT_USAGE
+
+
+def test_an_ordinary_pack_is_nowhere_near_the_limits() -> None:
+    """The headroom is three orders of magnitude, not a squeeze."""
+    from celmis.verify import MAX_UNCOMPRESSED_BYTES
+
+    with zipfile.ZipFile(io.BytesIO(_pack())) as zf:
+        total = sum(i.file_size for i in zf.infolist())
+    assert total * 1000 < MAX_UNCOMPRESSED_BYTES, (
+        f"a real pack is {total} bytes; the cap is {MAX_UNCOMPRESSED_BYTES}"
+    )
+
+
+def test_hashing_does_not_hold_a_member_whole() -> None:
+    """Chunked, so a member that slips the size check still cannot be held.
+
+    Read with ast: the function's own comment says `zf.read`, so a substring
+    search would pass on a version that had gone back to reading it whole.
+    """
+    import ast
+    import pathlib
+
+    source = pathlib.Path(__file__).resolve().parents[1] / "celmis" / "verify.py"
+    tree = ast.parse(source.read_text("utf-8"))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_sha256_member")
+    calls = {n.func.attr for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    assert "open" in calls, "_sha256_member no longer streams the member"
+    assert "read" not in {c for c in calls if c == "read"} or "update" in calls
+
+
+# ─── a manifest that is valid JSON and not an object ─────────────────
+
+
+def _manifest_is(raw: bytes) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("MANIFEST.json", raw)
+        zf.writestr("findings.json", b"[]\n")
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("body", [b'["a list"]\n', b'"a string"\n', b"42\n", b"null\n"])
+def test_a_manifest_that_is_not_an_object_is_refused_clearly(body: bytes) -> None:
+    with pytest.raises(PackError) as caught:
+        verify_pack(_manifest_is(body))
+    assert "not an object" in str(caught.value)
+
+
+def test_a_files_key_that_is_not_an_object_is_refused() -> None:
+    with pytest.raises(PackError):
+        verify_pack(_manifest_is(b'{"files": ["a", "b"]}\n'))
+
+
+def test_json_output_does_not_traceback_on_it(tmp_path, capsys) -> None:
+    """`--json` printed an AttributeError traceback and exited 1.
+
+    Exit 1 tells a CI step the pack was checked and is wrong. It was not
+    checked at all.
+    """
+    bad = tmp_path / "listmanifest.zip"
+    bad.write_bytes(_manifest_is(b'["not an object"]\n'))
+
+    assert main(["verify", "--json", str(bad)]) == EXIT_USAGE
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "AttributeError" not in captured.err
+    assert "not an object" in captured.err
+
+
+def test_both_output_modes_agree_on_the_verdict(tmp_path) -> None:
+    """They disagreed: plain said problems, --json crashed. Same input."""
+    bad = tmp_path / "listmanifest.zip"
+    bad.write_bytes(_manifest_is(b'["not an object"]\n'))
+    assert main(["verify", str(bad)]) == main(["verify", "--json", str(bad)]) == EXIT_USAGE
+
+
+def test_an_oversized_archive_is_not_read(tmp_path) -> None:
+    from celmis.verify import MAX_ARCHIVE_BYTES
+
+    huge = tmp_path / "huge.zip"
+    huge.write_bytes(b"\x00" * 1024)
+    import os as _os
+
+    real = _os.path.getsize
+
+    def lying(path):
+        return MAX_ARCHIVE_BYTES + 1 if str(path).endswith("huge.zip") else real(path)
+
+    _os.path.getsize = lying
+    try:
+        assert main(["verify", str(huge)]) == EXIT_USAGE
+    finally:
+        _os.path.getsize = real
+
+
+def test_many_medium_files_are_refused_by_their_total() -> None:
+    """What `_guard_sizes` catches and per-member checking cannot.
+
+    Each member sits under the per-file limit; together they are over the
+    total. Removing the up-front guard leaves the per-member check, which
+    passes every one of these individually and then reads them all.
+    """
+    from celmis.verify import MAX_MEMBER_BYTES, MAX_UNCOMPRESSED_BYTES
+
+    each = MAX_MEMBER_BYTES // 2
+    count = (MAX_UNCOMPRESSED_BYTES // each) + 2
+    entries = {f"sbom/{i:03d}.cdx.json": b"A" * each for i in range(count)}
+    assert all(len(b) < MAX_MEMBER_BYTES for b in entries.values())
+    assert sum(len(b) for b in entries.values()) > MAX_UNCOMPRESSED_BYTES
+
+    import hashlib
+
+    manifest = {
+        "manifest_version": 1, "algorithm": "sha256", "run_id": "spread",
+        "files": {n: hashlib.sha256(b).hexdigest() for n, b in sorted(entries.items())},
+    }
+    entries["MANIFEST.json"] = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        for name in sorted(entries):
+            zf.writestr(name, entries[name])
+
+    with pytest.raises(PackError) as caught:
+        verify_pack(buf.getvalue())
+    assert "uncompressed" in str(caught.value)

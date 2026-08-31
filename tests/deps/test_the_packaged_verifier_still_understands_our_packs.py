@@ -255,3 +255,63 @@ def test_the_export_hands_over_the_second_channel() -> None:
         f"no second channel for a recipient to check against. Header keys "
         f"found: {sorted(header_keys)}"
     )
+
+
+def test_both_copies_refuse_a_decompression_bomb() -> None:
+    """The producer's checker and the published one, held to one answer.
+
+    Measured against celmis 0.2.0 before this: 200 KB on disk declaring 200 MB
+    verified as OK with a 215 MB peak. The person running the published copy
+    got the file from the party they are checking.
+    """
+    import hashlib
+    import io
+
+    from src.deps.evidence import PackRefused, verify_pack
+
+    entries = {"findings.json": b"[]\n", "sbom/x.cdx.json": b"A" * (64 * 1024 * 1024)}
+    manifest = {
+        "manifest_version": 1, "algorithm": "sha256", "run_id": "bomb",
+        "files": {n: hashlib.sha256(b).hexdigest() for n, b in sorted(entries.items())},
+    }
+    entries["MANIFEST.json"] = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        for name in sorted(entries):
+            zf.writestr(name, entries[name])
+    blob = buf.getvalue()
+    assert len(blob) < 1024 * 1024, "the point is that it is small on disk"
+
+    with pytest.raises(PackRefused):
+        verify_pack(blob)
+
+    packaged = _packaged_verifier()
+    with pytest.raises(packaged.PackError):
+        packaged.verify_pack(blob)
+
+
+def test_both_copies_refuse_a_manifest_that_is_not_an_object() -> None:
+    import io
+
+    from src.deps.evidence import PackRefused, verify_pack
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("MANIFEST.json", b'["not an object"]\n')
+        zf.writestr("findings.json", b"[]\n")
+    blob = buf.getvalue()
+
+    with pytest.raises(PackRefused):
+        verify_pack(blob)
+    packaged = _packaged_verifier()
+    with pytest.raises(packaged.PackError):
+        packaged.verify_pack(blob)
+
+
+def test_the_two_copies_use_the_same_limits() -> None:
+    """Different numbers would mean one accepts what the other refuses."""
+    from src.deps import evidence
+
+    packaged = _packaged_verifier()
+    assert evidence.MAX_MEMBER_BYTES == packaged.MAX_MEMBER_BYTES
+    assert evidence.MAX_UNCOMPRESSED_BYTES == packaged.MAX_UNCOMPRESSED_BYTES

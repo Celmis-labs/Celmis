@@ -20,7 +20,26 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.23`.
+### Security
+
+- **The verifier read whatever an archive told it to.** A zip declares each
+  member's size before you read it, and neither copy checked. Measured against
+  the published `celmis 0.2.0`: an archive of 200 KB on disk declaring 200 MB
+  verified as `OK` with a 215 MB peak, and the number was the sender's to
+  choose. The person running that got the file from the party they are
+  checking, on their own laptop, precisely because they do not trust them.
+
+  Sizes are checked before anything is read — per member, and in total, which
+  is what a spread of medium files defeats — and hashing streams a megabyte at
+  a time, counting what actually arrives so a header that lies in the other
+  direction is refused too. Limits are three orders of magnitude above a real
+  pack, and identical in both copies, held so by a test.
+
+- **A manifest that was valid JSON and not an object crashed the verifier.**
+  `manifest.get(...)` on a list raised AttributeError: plain output reported it
+  as a problem found (exit 1) and `--json` printed a traceback, also exit 1.
+  Neither was true — nothing had been checked, which is exit 2. Both modes now
+  agree, and the refusal says what the manifest actually was.
 
 ## [0.1.23] — 2026-08-31
 
