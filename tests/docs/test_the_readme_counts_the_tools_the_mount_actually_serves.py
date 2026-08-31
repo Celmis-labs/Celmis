@@ -14,7 +14,6 @@ drifting apart is a security fact before it is a documentation one.
 from __future__ import annotations
 
 import ast
-import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -57,9 +56,10 @@ def _registered_tools() -> set[str]:
 
 def _scope_map() -> dict[str, str]:
     for node in ast.walk(_module()):
-        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            if node.target.id == "_TOOL_SCOPES":
-                return ast.literal_eval(node.value)
+        if (isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "_TOOL_SCOPES"):
+            return ast.literal_eval(node.value)
         if isinstance(node, ast.Assign):
             for t in node.targets:
                 if isinstance(t, ast.Name) and t.id == "_TOOL_SCOPES":
