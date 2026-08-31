@@ -10,6 +10,28 @@ build, run, audit or fork what is here. Every dependency is declared, no
 third-party source is vendored, and the licence below applies to the whole
 tree except where it says otherwise.
 
+## Authorship
+
+One author, working with an AI assistant. As of **v0.1.23** the published
+history is **84 commits**, of which **58** carry a `Co-Authored-By` trailer
+naming the model. The unpublished history before it was written the same way.
+The **2** e-mail addresses in the commit metadata are two git configurations on
+the author's machines, not two contributors.
+
+There is no second maintainer. Every merge is self-merged and releases are cut
+at one person's pace, which is why twenty-one of them landed in four days. A
+reader evaluating this project should weigh that directly rather than infer it
+from the shape of the log.
+
+The numbers above are pinned to a tag rather than left as a description, so
+they can be recomputed instead of taken on trust:
+
+```bash
+git rev-list v0.1.23 --count
+git log --format='%b' v0.1.23 | grep -ci 'co-authored-by:.*claude'
+git log --format='%ae' v0.1.23 | sort -u | wc -l
+```
+
 ## Rights — AGPL-3.0, with one exception
 
 This repository is licensed under the **GNU Affero General Public License
