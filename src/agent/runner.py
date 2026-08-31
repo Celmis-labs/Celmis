@@ -896,19 +896,21 @@ async def _notify_turn_done(row, session_id: str, result: dict) -> None:
     if not summary:
         return
     try:
-        from src.notifications.dispatch import notify
+        from src.notifications.dispatch import notify, public_link
 
         await asyncio.to_thread(
             notify,
             workspace_id=row.workspace_id,
             event="agent_turn_done",
             repo_slug=getattr(row, "repo_slug", None),
-            title="Claude Code finished a step",
+            # Named after what it is here, not after the engine that runs it —
+            # the page this links to is "Agent" in every locale.
+            title="The agent finished a step",
             # Trimmed hard: a chat card is glanced at, and the full transcript
             # is one click away in the session.
             body_md=summary[:1200],
             severity="info",
-            link_url=f"/claude/{session_id}",
+            link_url=public_link(f"/claude/{session_id}"),
             extra={"session_id": session_id,
                    "turns": result.get("turns"),
                    "cost_usd": result.get("cost_usd")},

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import html
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -58,6 +60,40 @@ def notify(
         logger.info("notif_delivered event=%s repo=%s severity=%s delivered=%d",
                     event, repo_slug, severity, delivered)
     return delivered
+
+
+def public_link(path: str) -> str | None:
+    """An absolute URL for a page of this installation, or nothing at all.
+
+    A RELATIVE URL IS NOT A SMALLER VERSION OF AN ABSOLUTE ONE — it is a card
+    that never arrives. Google Chat validates `openLink.url`, and a value like
+    `/claude/78dcfe6c` fails that validation, so the whole card is dropped:
+    what lands in the room is the bot's name with an empty body. Seen on a
+    real phone, between a firing alert and its recovery — a hole in the feed
+    where a notification should have been, delivered=1 in our own log.
+
+    So the rule is absolute-or-nothing, the same one the alerts path already
+    follows. A notification without a button still carries its message; a
+    notification Google Chat refuses to render carries nothing, and reports
+    success while doing it.
+
+    Nothing is guessed from a request: the address comes from configuration,
+    which is the only party in the exchange that is not the sender.
+    """
+    from src.config import get_settings
+
+    base = (get_settings().public_base_url or "").strip().rstrip("/")
+    if not base:
+        logger.warning(
+            "notify_link_unset — set PUBLIC_BASE_URL to put an Open button on "
+            "notifications; sending them without one")
+        return None
+    if not base.startswith(("http://", "https://")):
+        logger.warning(
+            "notify_link_no_scheme PUBLIC_BASE_URL=%r — needs http:// or "
+            "https://; sending notifications without a link", base)
+        return None
+    return f"{base}/{path.lstrip('/')}"
 
 
 def _matching_bindings(
@@ -176,6 +212,36 @@ def _post_discord(chan, *, title, body_md, severity, link_url):
     _post_json(chan["webhook_url"], {"embeds": [embed]})
 
 
+def _md_to_chat(text: str) -> str:
+    """Markdown into what Google Chat actually renders.
+
+    `body_md` IS MARKDOWN, and every other adapter here treats it as such:
+    Slack takes mrkdwn, Discord takes markdown. Google Chat takes neither — a
+    `textParagraph` renders a small HTML subset (`<b>`, `<i>`, `<code>`, `<a>`)
+    and prints anything else verbatim. So the review card that says
+
+        **0** critical · **4** error · **0** warn · **2** info
+
+    arrived in the room with the asterisks in it, on a phone, in front of the
+    person the notification exists to inform. Seen on a real screenshot; the
+    numbers were right and the punctuation was shouting.
+
+    Deliberately small. Bold, italic, inline code and links are what these
+    bodies use; a full markdown renderer here would be a second parser to keep
+    in step with the one nobody wrote. Anything not converted is escaped, so
+    text a sender controls cannot inject markup into the card — the same rule
+    the alert bodies follow.
+    """
+    out = html.escape(text, quote=False)
+    out = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)",
+                 r'<a href="\2">\1</a>', out)
+    out = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", out, flags=re.S)
+    out = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<i>\1</i>",
+                 out, flags=re.S)
+    out = re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
+    return out
+
+
 def _post_google_chat(chan, *, title, body_md, severity, link_url):
     # Google Chat webhook accepts either simple `text` OR cardsV2. Use
     # a card so the header + button render properly.
@@ -185,7 +251,7 @@ def _post_google_chat(chan, *, title, body_md, severity, link_url):
             "card": {
                 "header": {"title": f"{_sev_emoji(severity)} {title}"[:200]},
                 "sections": [{"widgets": [
-                    {"textParagraph": {"text": body_md[:4000]}},
+                    {"textParagraph": {"text": _md_to_chat(body_md)[:4000]}},
                 ]}],
             },
         }],

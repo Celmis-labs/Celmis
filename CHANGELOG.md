@@ -20,7 +20,36 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.27`.
+Nothing since `v0.1.28`.
+
+## [0.1.28] — 2026-08-31
+
+### Fixed
+
+- **A notification with a relative link arrived as an empty card.** Google
+  Chat validates `openLink.url`; `/claude/<session-id>` fails that validation
+  and the whole card is dropped, so what lands in the room is the bot's name
+  with nothing under it — while the log records `notif_delivered … delivered=1`.
+  Seen on a phone, as a hole in the feed between a firing alert and its
+  recovery, at the exact minute an agent session finished.
+
+  The alerts path already knew this rule and wrote it down; the agent path did
+  not. It now lives in one place — `dispatch.public_link`, absolute or nothing
+  — and a guard reads every `notify(link_url=…)` call site with `ast`.
+
+- **`**0** critical · **4** error` reached a chat card with the asterisks in
+  it.** `body_md` is markdown and every other adapter is right to treat it as
+  such — Slack takes mrkdwn, Discord takes markdown — but a Google Chat
+  `textParagraph` renders a small HTML subset and prints the rest verbatim.
+  Bold, italic, inline code and links are converted now, and the text is
+  escaped first: a notification body carries an alert title from somebody
+  else's monitoring, and that must not be able to put markup into a card sent
+  under this product's branding.
+
+### Changed
+
+- The agent's own notification was titled "Claude Code finished a step". The
+  page it links to is called **Agent** in all sixteen locales.
 
 ## [0.1.27] — 2026-08-31
 
