@@ -48,7 +48,7 @@ That loop is the product. It closes because everything sits on one index: a symb
 graph Celmis builds from your repositories once. The same index answers questions
 that cross repository boundaries, reviews pull requests, audits dependencies into a
 CycloneDX SBOM and a verifiable evidence pack, generates documentation, and serves
-eighteen tools over MCP — surfaces worth having, and none of them the point on
+twenty-three tools over MCP — surfaces worth having, and none of them the point on
 their own.
 
 It runs on one machine under `docker compose`, with the model provider of your
@@ -87,7 +87,7 @@ the other repository open.
 | **A pull request needs reviewing** | Agents read the diff — and, where the graph is built, who else calls what is being changed, including from another repository → [Pull-request review](#pull-request-review) |
 | **Forty services need the same thing done to them** | Write the sentence. Celmis shows which repositories it resolves to and waits for a second press, rather than finding them among forty and pressing a button forty times → [Ask for work across repositories](#ask-for-work-across-repositories) |
 | **An alert fires at 02:00 and you are not at a desk** | It lands in Celmis and goes out to the workspace's chat channel, and *Fix from here* opens a session already holding the alert. The runner opens the pull request → [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone) |
-| **Your own agent or editor needs to understand the codebase** | Point it at `/mcp/`. Eighteen tools over the same index, under the same access rules — no second copy of your code anywhere → [Connect Claude Code and other MCP clients](#connect-claude-code-and-other-mcp-clients) |
+| **Your own agent or editor needs to understand the codebase** | Point it at `/mcp/`. Twenty-three tools over the same index, eighteen of them read-only, under the same access rules — no second copy of your code anywhere → [Connect Claude Code and other MCP clients](#connect-claude-code-and-other-mcp-clients) |
 
 The first three are the ones a code-review tool does not do at all, and they are
 the reason this is a platform rather than a reviewer: index once, then read that
@@ -632,7 +632,12 @@ docker compose exec api analyzer mcp issue-token \
 
 ### What an agent can ask
 
-The HTTP mount serves **18 tools**. They answer the questions a grep cannot:
+The HTTP mount serves **23 tools**, and a client does not necessarily see all of
+them. Eighteen are read-only; the five that write — `add_repo`, `start_dep_audit`,
+`generate_docs`, `set_auto_review`, `migrate_consumers` — require a scope no
+read token carries, so they are absent from a read client's tool list rather than
+merely refused when called. This is what the read-only ones answer, and they are
+the questions a grep cannot:
 
 | | |
 |---|---|
@@ -666,8 +671,9 @@ repositories in two languages — to a client that has checked out neither. The
 boundary a diff never crosses is the one this makes ordinary.
 
 
-Eighteen tools, served over Streamable HTTP at `/mcp/` and authenticated with the
-same bearer token as `/api/`:
+Twenty-three tools, served over Streamable HTTP at `/mcp/` and authenticated with
+the same bearer token as `/api/`. Eighteen read, five write, and a token sees only
+the ones its scopes allow:
 
 | Tool | Answers |
 |---|---|
