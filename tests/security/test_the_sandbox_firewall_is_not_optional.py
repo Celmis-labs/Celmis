@@ -22,8 +22,6 @@ import re
 import subprocess
 from pathlib import Path
 
-import pytest
-
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "deploy-on-server.sh"
 
 
@@ -164,22 +162,20 @@ def test_the_sandbox_keeps_its_way_out_to_the_internet() -> None:
     this is keyed on the qualifier and not on the chain's name — the earlier
     version asserted the string "FORWARD" never appeared anywhere, which a
     rule in DOCKER-USER satisfies while doing precisely what was feared.
+
+    Read per function rather than per line, because the nft form puts the hook
+    on the chain and the drop on a different line: a line-by-line reading
+    would never notice that the second belongs to the first.
     """
-    code = _without_comments()
-    for line in code.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith(("iptables", "nft")) or " drop" not in \
-                f"{stripped.lower()} ":
-            if "-j DROP" not in stripped:
-                continue
-        forwarding = ("FORWARD" in stripped or "DOCKER-USER" in stripped
-                      or "hook forward" in stripped)
-        if not forwarding:
+    forwarding = ("FORWARD", "DOCKER-USER", "hook forward")
+    for name, body in _blocking_functions().items():
+        if not any(marker in body for marker in forwarding):
             continue
-        qualified = ("DNAT" in stripped.upper() or "--dport" in stripped
-                     or "status dnat" in stripped)
-        assert qualified, (
-            f"this drops forwarded traffic from the sandbox with nothing but "
-            f"the source subnet to match on, which is also how it reaches the "
-            f"internet:\n    {stripped}"
-        )
+        for stripped in (line.strip() for line in body.splitlines()):
+            if "-j DROP" not in stripped and " drop" not in f"{stripped} ":
+                continue
+            assert "dnat" in stripped.lower(), (
+                f"{name} filters the forwarding path, and this rule matches "
+                f"nothing but the source subnet — which is also how the "
+                f"sandbox reaches the internet:\n    {stripped}"
+            )
