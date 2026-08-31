@@ -20,7 +20,28 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.28`.
+Nothing since `v0.1.29`.
+
+## [0.1.29] — 2026-08-31
+
+### Fixed
+
+- **A paused session reconnected every two seconds, for as long as the tab was
+  open.** Measured on production: **36 event-stream connections in 75
+  seconds**, under an amber "Reconnecting…" badge, on a conversation that was
+  perfectly healthy and simply waiting for somebody to type.
+
+  Two causes that compound. The retry loop stopped only on `final` — "cannot
+  continue at all" — while a paused session reports `resumable`, which
+  continues when a person sends a turn and never on its own. And the backoff
+  reset on any frame, `stream_end` included, so every reconnect that found
+  nothing reset the counter it was supposed to grow.
+
+  What still reconnects is the state between the two: a RUNNING session whose
+  API restarted under it, which reports neither flag. That is the deploy case
+  the server comment describes, and stopping on any `stream_end` would strand
+  it. Sending a turn now wakes the stream, because stopping the loop is only
+  safe if typing restarts it.
 
 ## [0.1.28] — 2026-08-31
 

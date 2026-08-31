@@ -79,6 +79,9 @@ export default function AgentSessionPage({ params }: { params: Promise<{ id: str
     try {
       await claudeApi.sendMessage(token!, id, text);
       setDraft("");
+      // The stream stopped retrying when the session paused — deliberately,
+      // because nothing was coming. This turn is what makes something come.
+      wakeRef.current?.();
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -96,6 +99,9 @@ export default function AgentSessionPage({ params }: { params: Promise<{ id: str
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptRef = useRef(0);
   const lastFrameRef = useRef(0);
+  // Installed by the stream effect; called after a message is sent, because a
+  // paused session's stream is closed and only the person typing reopens it.
+  const wakeRef = useRef<(() => void) | null>(null);
 
   const session = useQuery({
     queryKey: ["agent-session", id],
@@ -136,7 +142,13 @@ export default function AgentSessionPage({ params }: { params: Promise<{ id: str
           onEvent: (ev, raw, evId) => {
             const n = Number(evId);
             if (Number.isFinite(n) && n > lastIdRef.current) lastIdRef.current = n;
-            attemptRef.current = 0;
+            // The backoff resets on PROGRESS, not on arrival. `stream_end`
+            // arrives on every reconnect that finds nothing — so counting it
+            // reset the attempt counter each time and the delay never grew
+            // past its 2s floor. Measured on a paused session: 36 connections
+            // in 75 seconds, one every two seconds, for as long as the tab
+            // stayed open.
+            if (ev !== "stream_end") attemptRef.current = 0;
             lastFrameRef.current = Date.now();
             setRetrying((r) => (r ? false : r));
             const data = (raw ?? {}) as Record<string, unknown>;
@@ -172,9 +184,30 @@ export default function AgentSessionPage({ params }: { params: Promise<{ id: str
             // API restart while the session is still running. Treating it as
             // terminal left the page permanently dead after every deploy. It
             // now carries the session's own status, and only that decides.
+            // STOP RETRYING WHEN NOTHING IS COMING. `final` means the
+            // session cannot continue at all; `resumable` means it continues
+            // only when somebody types. Neither will produce another frame on
+            // its own, and the retry loop treated only the first as a reason
+            // to stop — so a paused session reconnected every fifteen seconds
+            // for as long as the tab stayed open, showing an amber
+            // "Reconnecting…" badge over a conversation that was perfectly
+            // healthy and simply waiting.
+            //
+            // What must KEEP retrying is the third case: `stream_end` with
+            // neither flag, which is a running session whose API restarted
+            // under it. That is the deploy case the server comment describes,
+            // and it is why this cannot just stop on every stream_end.
+            const stopped =
+              ev === "done" || ev === "error" ||
+              (ev === "stream_end" &&
+                (data.final === true || data.resumable === true));
             const finished =
               ev === "done" || ev === "error" ||
               (ev === "stream_end" && data.final === true);
+            if (stopped) {
+              doneRef.current = true;
+              setRetrying(false);
+            }
             if (finished) {
               doneRef.current = true;
               void qc.invalidateQueries({ queryKey: ["agent-session", id] });
@@ -207,6 +240,10 @@ export default function AgentSessionPage({ params }: { params: Promise<{ id: str
       attemptRef.current = 0;
       void connect();
     };
+    wakeRef.current = () => {
+      doneRef.current = false;
+      wake();
+    };
     const onVisibility = () => {
       if (document.visibilityState === "visible") wake();
     };
@@ -215,6 +252,7 @@ export default function AgentSessionPage({ params }: { params: Promise<{ id: str
 
     return () => {
       deadRef.current = true;
+      wakeRef.current = null;
       clearTimer();
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("online", wake);
