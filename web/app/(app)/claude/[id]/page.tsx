@@ -184,19 +184,25 @@ export default function AgentSessionPage({ params }: { params: Promise<{ id: str
             // API restart while the session is still running. Treating it as
             // terminal left the page permanently dead after every deploy. It
             // now carries the session's own status, and only that decides.
-            // STOP RETRYING WHEN NOTHING IS COMING. `final` means the
-            // session cannot continue at all; `resumable` means it continues
-            // only when somebody types. Neither will produce another frame on
-            // its own, and the retry loop treated only the first as a reason
-            // to stop — so a paused session reconnected every fifteen seconds
-            // for as long as the tab stayed open, showing an amber
-            // "Reconnecting…" badge over a conversation that was perfectly
-            // healthy and simply waiting.
+            // STOP RETRYING WHEN NOTHING IS COMING. THREE STATES, and the
+            // middle one is what a simplification here always loses:
             //
-            // What must KEEP retrying is the third case: `stream_end` with
-            // neither flag, which is a running session whose API restarted
-            // under it. That is the deploy case the server comment describes,
-            // and it is why this cannot just stop on every stream_end.
+            //   final     — the session cannot continue at all. Stop.
+            //   resumable — it continues when somebody types, never on its
+            //               own. Stop, and let the composer restart it.
+            //   neither   — a RUNNING session whose API restarted under it
+            //               (live:false, final:false, resumable:false).
+            //               KEEP RETRYING. This is the deploy case, and a
+            //               version of this condition that stops on any
+            //               `stream_end` leaves every open session page dead
+            //               after every deploy — which already happened once,
+            //               and is why the server sends the status at all.
+            //
+            // The loop treated only the first as a reason to stop. Measured
+            // on a paused session before the fix: 36 connections in 75
+            // seconds, one every two, under an amber "Reconnecting…" badge
+            // over a conversation that was perfectly healthy and waiting. One
+            // connection in 75 seconds after.
             const stopped =
               ev === "done" || ev === "error" ||
               (ev === "stream_end" &&
