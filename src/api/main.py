@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -281,6 +282,93 @@ def _workspaces_with_llm_config() -> list[str]:
         return []
 
 
+async def readiness_checks() -> tuple[dict, bool]:
+    """Every hard dependency, and whether a critical one is down.
+
+    Split out of `/readyz` because the DETAIL and the VERDICT have
+    different audiences. A load balancer needs the verdict and the
+    status code. The detail carries a user count and `str(exc)[:200]`
+    from a failed connection, which on a bad DSN is a fragment of the
+    DSN — and `/readyz` was exempt from authentication and proxied at
+    `/backend/readyz`, so the detail was public.
+    """
+    checks: dict[str, dict[str, Any]] = {}
+    critical_down = False
+
+    # user store (SQLite)
+    try:
+        from src.users import get_user_store
+        checks["user_store"] = {"ok": True, "users": get_user_store().count()}
+    except Exception as exc:  # noqa: BLE001
+        checks["user_store"] = {"ok": False, "error": str(exc)[:200]}
+        critical_down = True
+
+    # Postgres
+    try:
+        from sqlalchemy import text
+
+        from src.db.session import async_engine
+        async with async_engine().connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        checks["postgres"] = {"ok": True}
+    except Exception as exc:  # noqa: BLE001
+        checks["postgres"] = {"ok": False, "error": str(exc)[:200]}
+        critical_down = True
+
+    # review-run store (SQLite)
+    try:
+        from src.api.review_runs import get_review_run_store
+        get_review_run_store()
+        checks["review_store"] = {"ok": True}
+    except Exception as exc:  # noqa: BLE001
+        checks["review_store"] = {"ok": False, "error": str(exc)[:200]}
+        critical_down = True
+
+    # Qdrant (non-fatal)
+    try:
+        from src.retrieval.vector_store import get_vector_client
+        client = get_vector_client()
+        cols = client.get_collections()
+        checks["qdrant"] = {"ok": True, "collections": len(cols.collections)}
+    except Exception as exc:  # noqa: BLE001
+        checks["qdrant"] = {"ok": False, "error": str(exc)[:200]}
+
+    # LLM config presence (non-fatal, no paid ping)
+    #
+    # Readiness is an INSTALLATION question and this probed exactly one
+    # tenant. `_load_workspace_config()` takes `workspace_id="default"`,
+    # and on a multi-tenant deployment every real key lives in a
+    # `ws:{id}` slot — so on production this reported
+    # `{"ok": false, "provider": null}` on a system that had just spent
+    # $0.94 on model calls. A readiness field that is false forever is a
+    # field an operator learns to ignore, which is worse than not having
+    # it.
+    #
+    # It now answers the question readiness actually asks: can ANY tenant
+    # here reach a model. `scope` says which answer you are reading, so a
+    # single-tenant install still sees its own provider name and a
+    # multi-tenant one is not told a number it must then interpret.
+    try:
+        from src.api.routers.llm import _load_workspace_config
+        cfg = _load_workspace_config()
+        if cfg.get("provider"):
+            checks["llm_config"] = {
+                "ok": True, "scope": "default",
+                "provider": cfg.get("provider"), "model": cfg.get("model"),
+            }
+        else:
+            configured = _workspaces_with_llm_config()
+            checks["llm_config"] = {
+                "ok": bool(configured),
+                "scope": "any_workspace",
+                "configured_workspaces": len(configured),
+            }
+    except Exception as exc:  # noqa: BLE001
+        checks["llm_config"] = {"ok": False, "error": str(exc)[:200]}
+
+    return checks, critical_down
+
+
 def build_app() -> FastAPI:
     # The interactive docs and the schema behind them are NOT public.
     #
@@ -454,8 +542,17 @@ def build_app() -> FastAPI:
         # after the main app had switched all three off. A route that arrives
         # by being copied from somewhere else is exactly the kind that no
         # audit of THIS file would ever find.
+        # "/healthz" IS IN THIS SET, and that is the fix rather than a tidy-up.
+        # The sub-app declares a detailed /healthz; copying it put that route
+        # into `app.router.routes` BEFORE the plain one declared below, and the
+        # first match wins — so the public /backend/healthz answered with every
+        # model name, deadline, budget and which backends are configured, to
+        # anybody, with middleware.py exempting it from authentication and
+        # Caddy proxying /backend/*. Observed answering exactly that in
+        # production. The payload it existed for is served from
+        # /api/ops/review-settings behind an admin instead.
         _generated = {"/docs", "/redoc", "/openapi.json",
-                      "/docs/oauth2-redirect"}
+                      "/docs/oauth2-redirect", "/healthz"}
         for route in webhook_app.router.routes:
             if getattr(route, "path", None) in _generated:
                 continue
@@ -476,96 +573,52 @@ def build_app() -> FastAPI:
         return {"ok": True, "service": "celmis"}
 
     @app.get("/metrics")
-    def metrics():  # noqa: ANN201
+    def metrics(request: Request):  # noqa: ANN201
+        """The Prometheus slice — to the scraper, not to the internet.
+
+        `_EXEMPT_PREFIXES` skips authentication here and Caddy proxies
+        `/backend/*`, so the whole series set was public: queue depths, spend,
+        review counts, error rates. That is an operational map of the
+        installation and of its customers' activity.
+
+        TWO WAYS IN, and neither is a header a caller can forge into existence.
+        `CELMIS_METRICS_TOKEN`, when the operator sets one; and the ABSENCE of
+        `X-Forwarded-For`, which means the request did not pass a proxy — the
+        bundled Prometheus scrapes `api:8000/metrics` directly over the compose
+        network (observability/prometheus.yml), so it never has one. A caller
+        can ADD that header, which only marks them as proxied; they cannot
+        remove it from a request that went through Caddy.
+        """
+        import os
+
+        wanted = (os.environ.get("CELMIS_METRICS_TOKEN") or "").strip()
+        offered = (request.headers.get("authorization") or "").removeprefix("Bearer ").strip()
+        proxied = request.headers.get("x-forwarded-for") is not None
+        if proxied and not (wanted and secrets.compare_digest(offered, wanted)):
+            # 404 rather than 401: an endpoint that answers "wrong token"
+            # confirms it is there and worth guessing at.
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
         from src.api.metrics import metrics_endpoint
         return metrics_endpoint()
 
     @app.get("/readyz")
     async def readyz() -> Any:
-        """Deep readiness (Stage 21) — checks every hard dependency.
+        """Ready or not, and the status code. Nothing else.
 
-        Returns per-dependency status; 503 when any CRITICAL dep is down
-        (Postgres, user store). Qdrant and LLM-key presence are reported
-        but non-fatal — Q&A degrades, reviews may still work.
+        The per-dependency detail moved to `/api/ops/readyz`, behind an admin.
+        It carries a user count and the first 200 characters of whatever
+        exception a failed connection raised — which for a bad DSN is part of
+        the DSN — and this endpoint is unauthenticated by design and proxied
+        to the internet at `/backend/readyz`.
+
+        A probe needs 200 or 503. That is the whole contract, and compose's
+        healthcheck reads only the code.
         """
-        checks: dict[str, dict[str, Any]] = {}
-        critical_down = False
-
-        # user store (SQLite)
-        try:
-            from src.users import get_user_store
-            checks["user_store"] = {"ok": True, "users": get_user_store().count()}
-        except Exception as exc:  # noqa: BLE001
-            checks["user_store"] = {"ok": False, "error": str(exc)[:200]}
-            critical_down = True
-
-        # Postgres
-        try:
-            from sqlalchemy import text
-
-            from src.db.session import async_engine
-            async with async_engine().connect() as conn:
-                await conn.execute(text("SELECT 1"))
-            checks["postgres"] = {"ok": True}
-        except Exception as exc:  # noqa: BLE001
-            checks["postgres"] = {"ok": False, "error": str(exc)[:200]}
-            critical_down = True
-
-        # review-run store (SQLite)
-        try:
-            from src.api.review_runs import get_review_run_store
-            get_review_run_store()
-            checks["review_store"] = {"ok": True}
-        except Exception as exc:  # noqa: BLE001
-            checks["review_store"] = {"ok": False, "error": str(exc)[:200]}
-            critical_down = True
-
-        # Qdrant (non-fatal)
-        try:
-            from src.retrieval.vector_store import get_vector_client
-            client = get_vector_client()
-            cols = client.get_collections()
-            checks["qdrant"] = {"ok": True, "collections": len(cols.collections)}
-        except Exception as exc:  # noqa: BLE001
-            checks["qdrant"] = {"ok": False, "error": str(exc)[:200]}
-
-        # LLM config presence (non-fatal, no paid ping)
-        #
-        # Readiness is an INSTALLATION question and this probed exactly one
-        # tenant. `_load_workspace_config()` takes `workspace_id="default"`,
-        # and on a multi-tenant deployment every real key lives in a
-        # `ws:{id}` slot — so on production this reported
-        # `{"ok": false, "provider": null}` on a system that had just spent
-        # $0.94 on model calls. A readiness field that is false forever is a
-        # field an operator learns to ignore, which is worse than not having
-        # it.
-        #
-        # It now answers the question readiness actually asks: can ANY tenant
-        # here reach a model. `scope` says which answer you are reading, so a
-        # single-tenant install still sees its own provider name and a
-        # multi-tenant one is not told a number it must then interpret.
-        try:
-            from src.api.routers.llm import _load_workspace_config
-            cfg = _load_workspace_config()
-            if cfg.get("provider"):
-                checks["llm_config"] = {
-                    "ok": True, "scope": "default",
-                    "provider": cfg.get("provider"), "model": cfg.get("model"),
-                }
-            else:
-                configured = _workspaces_with_llm_config()
-                checks["llm_config"] = {
-                    "ok": bool(configured),
-                    "scope": "any_workspace",
-                    "configured_workspaces": len(configured),
-                }
-        except Exception as exc:  # noqa: BLE001
-            checks["llm_config"] = {"ok": False, "error": str(exc)[:200]}
-
-        body = {"ok": not critical_down, "checks": checks}
+        _checks, critical_down = await readiness_checks()
         if critical_down:
-            return JSONResponse(status_code=503, content=body)
-        return body
+            return JSONResponse(status_code=503, content={"ok": False})
+        return {"ok": True}
 
     @app.on_event("startup")
     async def _startup() -> None:

@@ -443,3 +443,38 @@ async def agent_session_dump(
 
 
 __all__ = ["router"]
+
+
+@router.get("/review-settings")
+def review_settings(_user: User = Depends(require_admin)) -> dict:
+    """The deadlines and budgets as this process resolved them.
+
+    Was the body of the webhook sub-app's `/healthz`, whose routes are copied
+    into the main app — so it answered on the public `/backend/healthz`, ahead
+    of the plain one, to anybody who asked. Model names, deadlines, cache size
+    and which backends are configured are a map of the installation.
+
+    The need it served is real and unchanged: `env_file` points at a `.env`
+    that does not exist in the container, so a setting the compose file does
+    not forward silently takes the code default and nothing outside could tell
+    which had happened. An operator can still see it; a stranger cannot.
+    """
+    from src.review.webhook import resolved_review_settings
+
+    return {"review_settings": resolved_review_settings()}
+
+
+@router.get("/readyz")
+async def readyz_detail(_user: User = Depends(require_admin)) -> dict:
+    """Per-dependency readiness, with the errors.
+
+    The public `/readyz` answers ok/not-ok and a status code, which is the
+    whole contract a probe has. This carries the rest: a user count, and
+    `str(exc)[:200]` from whatever a failed connection raised — which for a
+    bad DSN is a fragment of the DSN. That was reachable unauthenticated at
+    `/backend/readyz`.
+    """
+    from src.api.main import readiness_checks
+
+    checks, critical_down = await readiness_checks()
+    return {"ok": not critical_down, "checks": checks}

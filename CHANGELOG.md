@@ -20,7 +20,34 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.22`.
+### Security
+
+- **`/healthz` handed out the installation's configuration, to anybody, now.**
+  `main.py` copies the webhook sub-app's routes into the main app; the sub-app
+  declares its own detailed `/healthz`, and a copied route lands ahead of the
+  plain one declared below — first match wins. `middleware.py` exempts the path
+  from authentication and Caddy proxies `/backend/*`, so the public answer
+  carried every model name, deadline, budget, the cache size and which backends
+  are configured. Observed answering exactly that on production.
+
+  The route is no longer copied. The reason the block existed is real and is
+  kept: `env_file` points at a `.env` that does not exist in the container, so
+  a setting the compose file does not forward silently takes the code default
+  and nothing outside could tell which had happened. It is served from
+  `/api/ops/review-settings`, behind an admin.
+
+- **`/readyz` and `/metrics` were public by the same route.** `/readyz`
+  returned per-dependency detail including a user count and `str(exc)[:200]`
+  from a failed connection — for a bad DSN, a fragment of the DSN. It now
+  answers `{"ok": …}` and the status code, which is a probe's whole contract;
+  the detail is at `/api/ops/readyz` behind an admin.
+
+  `/metrics` returned the entire Prometheus slice — queue depths, spend, review
+  counts, error rates. It now needs `CELMIS_METRICS_TOKEN` when the request
+  passed a proxy, and is served unconditionally when it did not: the bundled
+  Prometheus scrapes `api:8000/metrics` directly over the compose network and
+  keeps working. A caller can add `X-Forwarded-For` and lose access; they
+  cannot remove Caddy's, so the public path fails closed.
 
 ## [0.1.22] — 2026-08-31
 

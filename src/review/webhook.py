@@ -464,34 +464,30 @@ async def _dispatch_review(
 # ─── FastAPI app factory ───────────────────────────────────────
 
 
-def build_webhook_app(
-    settings: ReviewSettings | None = None,
-    *,
-    dedup_backend=None,
-) -> FastAPI:
-    """Create FastAPI webhook receiver app."""
-    settings = settings or get_review_settings()
-    dedup = dedup_backend or _build_dedup(settings)
+def resolved_review_settings() -> dict:
+    """The deadlines and budgets AS THIS PROCESS RESOLVED THEM.
 
-    app = FastAPI(
-        title="code-analyzer review webhook",
-        description="PR review webhook receiver — GitHub/GitLab/Bitbucket",
-        version=__import__("src").__version__,
-    )
+    Every one is enforced and every one is settable — but `env_file` points at
+    a `.env` that does not exist inside the container, so the only route in is
+    a name listed in docker-compose's `environment:` block. A setting the
+    deployment does not forward silently takes the code default, and there was
+    no way to tell from outside which had happened. That is not hypothetical:
+    the compose file forwarded one budget under its pre-rename spelling with a
+    hardcoded 300, so an installation could run the number a measurement
+    retired while the code said 900.
 
-    stats_counter = {
-        "received": 0,
-        "verified": 0,
-        "deduped": 0,
-        "dispatched": 0,
-        "rejected": 0,
-    }
+    BEHIND AN ADMIN NOW. This used to be the body of the webhook sub-app's
+    `/healthz`, and those routes are copied into the main app — so it answered
+    on the public `/backend/healthz`, ahead of the plain one, to anybody. The
+    old comment ended "the endpoint is already public", which was true and was
+    the problem: model names, deadlines, cache size and which backends are
+    configured are a map of the installation. Values, never secrets — and a
+    map is worth having anyway.
+    """
+    from src.review.settings import get_review_settings
 
-    @app.get("/healthz")
-    async def healthz() -> dict:
-        return {
-            "status": "ok",
-            "review_settings": {
+    settings = get_review_settings()
+    return {
                 "has_s3": settings.has_s3,
                 "has_redis": settings.has_redis,
                 "hot_cache_size": settings.hot_cache_size,
@@ -521,8 +517,41 @@ def build_webhook_app(
                 "max_diff_size_bytes": settings.max_diff_size_bytes,
                 "cve_lookup_timeout_seconds": settings.cve_lookup_timeout_seconds,
                 "verifier_enabled": settings.verifier_enabled,
-            },
-        }
+    }
+
+
+def build_webhook_app(
+    settings: ReviewSettings | None = None,
+    *,
+    dedup_backend=None,
+) -> FastAPI:
+    """Create FastAPI webhook receiver app."""
+    settings = settings or get_review_settings()
+    dedup = dedup_backend or _build_dedup(settings)
+
+    app = FastAPI(
+        title="code-analyzer review webhook",
+        description="PR review webhook receiver — GitHub/GitLab/Bitbucket",
+        version=__import__("src").__version__,
+    )
+
+    stats_counter = {
+        "received": 0,
+        "verified": 0,
+        "deduped": 0,
+        "dispatched": 0,
+        "rejected": 0,
+    }
+
+    @app.get("/healthz")
+    async def healthz() -> dict:
+        # NOT copied into the main app any more — see `_generated` in
+        # src/api/main.py. This answered on the public /backend/healthz,
+        # shadowing the plain one, and handed every model name, deadline
+        # and budget to anybody who asked. The reason the block exists is
+        # real and is kept: the same payload is served from
+        # /api/ops/review-settings, behind an admin.
+        return {"status": "ok", "review_settings": resolved_review_settings()}
 
     @app.get("/webhook/stats")
     async def webhook_stats() -> dict:
