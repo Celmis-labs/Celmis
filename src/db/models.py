@@ -1113,6 +1113,15 @@ class DepFinding(Base):
     severity: Mapped[str] = mapped_column(Text, nullable=False, server_default="none")
     # update_now | update_safe | plan_major | ok
     recommendation: Mapped[str] = mapped_column(Text, nullable=False, server_default="ok")
+    #: Whether this repository's own code names the package, with up to five
+    #: file:line sites. Three states — imported | not_found | unknown — because
+    #: a PyPI package name does not determine its module name and reporting
+    #: "not imported" for `beautifulsoup4` would be a silent zero.
+    #:
+    #: NOT reachability. See src/deps/imports.py for what that would require
+    #: and why this installation cannot answer it. Nullable: a row written
+    #: before the scan existed has no answer, which is not "no".
+    named_in_code: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         Index("ix_dep_findings_run", "run_id", "severity"),

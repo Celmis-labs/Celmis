@@ -45,6 +45,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 
 from src.deps.hygiene import check_repo as hygiene_check_repo
+from src.deps.imports import scan_imports
 from src.deps.locks import mark_transitive, scan_locks
 from src.deps.native import audit_repo as native_audit_repo
 from src.deps.native import detect_tools
@@ -167,6 +168,8 @@ def run_audit(run_id: str, workspace_id: str, *,
         #: slug → what each cap dropped for that repository. Empty when
         #: nothing was truncated, which is the common case.
         truncated: dict[str, list[dict]] = {}
+        #: (slug, ecosystem, package) → the import-position answer for it.
+        import_answers: dict[tuple[str, str, str], dict] = {}
         all_deps: list[tuple[str, object]] = []            # (repo_slug, DeclaredDep)
         native_hits: list[tuple[str, object]] = []         # (repo_slug, NativeFinding)
         native_checks: list[dict] = []
@@ -344,6 +347,26 @@ def run_audit(run_id: str, workspace_id: str, *,
                     })
                     break
 
+            # WHICH OF THESE THE REPOSITORY ACTUALLY MENTIONS. One pass over
+            # the source per ecosystem, after both dependency sources are
+            # known, so a findings list arrives already split into "our code
+            # names this" and "this came in transitively and nothing of ours
+            # mentions it". Not reachability — see src/deps/imports.py.
+            try:
+                pairs = sorted({(d.ecosystem, d.package) for d in deps}
+                               | {(e.ecosystem, e.package)
+                                  for _, e in transitive_candidates
+                                  if _ == cfg.repo_slug})
+                for (eco, pkg), answer in scan_imports(
+                    repo_path, pairs, repo_notes,
+                ).items():
+                    import_answers[(cfg.repo_slug, eco, pkg)] = answer.as_dict()
+            except Exception as exc:  # noqa: BLE001
+                # Never fatal. A missing import answer is a row with less on
+                # it; a crash here would cost the whole audit.
+                logger.warning("import_scan_failed repo=%s err=%s",
+                               cfg.repo_slug, exc)
+
             if repo_notes:
                 truncated[cfg.repo_slug] = repo_notes
 
@@ -432,6 +455,7 @@ def run_audit(run_id: str, workspace_id: str, *,
                     "severity": "none",
                     "recommendation": "ok",
                     "_transitive": transitive,
+                    "named_in_code": None,
                 }
                 rows_by_key[key] = row
                 return row
@@ -488,6 +512,9 @@ def run_audit(run_id: str, workspace_id: str, *,
         sources: dict[str, int] = {}
 
         for row in rows_by_key.values():
+            row["named_in_code"] = import_answers.get(
+                (row["repo_slug"], row["ecosystem"], row["package"]),
+            )
             transitive = bool(row.pop("_transitive"))
             vlist = row["vulns"]
             row["severity"] = worst_severity(vlist)

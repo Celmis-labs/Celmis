@@ -55,6 +55,14 @@ class FindingOut(BaseModel):
     vulns: list
     severity: str
     recommendation: str
+    #: Whether the repository's own code names this package, and where.
+    #: `None` on a row written before the scan existed — which is not the same
+    #: as "not imported", and the UI must not render it as one.
+    #:
+    #: NOT reachability: it reports import positions, not whether a vulnerable
+    #: function is called. See src/deps/imports.py for what reachability would
+    #: require and why this installation cannot answer it.
+    named_in_code: dict | None = None
 
 
 def _run_out(r: DepAuditRun) -> RunOut:
@@ -377,6 +385,7 @@ async def findings(
         current_version=r.current_version, latest_version=r.latest_version,
         outdated=r.outdated, is_dev=r.is_dev, vulns=list(r.vulns or []),
         severity=r.severity, recommendation=r.recommendation,
+        named_in_code=r.named_in_code,
     ) for r in rows]
 
 

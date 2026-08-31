@@ -20,6 +20,30 @@ derives it from there.
 
 ## [Unreleased]
 
+### Added
+
+- **A finding now says whether your own code names the package.** A findings
+  list is hundreds of rows and every one reads the same, so a direct dependency
+  the service imports on its hot path and a transitive package pulled in four
+  levels down by a build tool looked identical to whoever had to triage them.
+  `named_in_code` carries an import-position answer with up to five
+  `file:line` sites.
+
+  **Three states, and the third is the point.** `imported`, `not_found`, and
+  `unknown` — because a package name does not determine its module name.
+  `beautifulsoup4` imports as `bs4`, `pillow` as `PIL`; reporting those as "not
+  imported" would be the silent zero this subsystem is built to refuse. The
+  rule is exact for npm, Go and crates.io, so absence means something there;
+  for PyPI it is not, and the answer says so.
+
+  **This is not reachability, and nothing in it is named as though it were.**
+  Reachability would need the dependency's own source in the index — excluded
+  on purpose — advisories that name the vulnerable symbol, which OSV carries
+  for a small minority, and a notion of where execution starts, which does not
+  exist here. A test fails the build if any identifier in the feature is
+  called `reachable`, because a column name reaches an API response and
+  eventually a filing, where nobody reads the docstring that qualified it.
+
 ### Fixed
 
 - **Four caps bounded a dependency audit in silence.** Twenty lock files, four
