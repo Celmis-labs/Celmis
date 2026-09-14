@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.celmis-labs/celmis",
+  "name": "io.github.constantinemakoid/celmis",
   "description": "Self-hosted code intelligence: cross-repo Q&A, dependency audits and PR review, over MCP",
   "version": "0.1.29",
   "websiteUrl": "https://celmis-labs.github.io",

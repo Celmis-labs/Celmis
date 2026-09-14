@@ -80,6 +80,12 @@ RUN uv venv /opt/pip-audit \
 # ============================================================================
 FROM python:3.13-slim-trixie AS runtime
 
+# Required by the official MCP registry to prove this image is the one a
+# server.json package entry claims it is (checked at publish time against
+# ghcr.io, not just asserted in the JSON). One label, one namespace: the
+# registry rejects a mismatch rather than trusting the manifest.
+LABEL io.modelcontextprotocol.server.name="io.github.constantinemakoid/celmis"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     # Workspace + vault — mount points усередині container

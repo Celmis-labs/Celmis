@@ -20,7 +20,23 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.29`.
+Nothing since `v0.1.30`.
+
+## [0.1.30] — 2026-09-14
+
+### Added
+
+- **The runtime image now carries `LABEL io.modelcontextprotocol.server.name`.**
+  The official MCP registry checks this against the image itself before it
+  will accept a `server.json` package entry — a JSON claim alone isn't
+  enough, the image has to say the same thing GHCR is actually serving.
+  `server.json` is added at the repository root, published under
+  `io.github.constantinemakoid/celmis`. The `io.github.celmis-labs/*`
+  namespace is what the entry should carry, and could not be used this time:
+  the registry's GitHub-organization auth has an open upstream bug (public
+  membership confirmed, fresh tokens, no effect — several other reporters hit
+  the identical 403), not anything wrong on this repository's side. The
+  record moves to the org namespace once that is fixed.
 
 ## [0.1.29] — 2026-08-31
 
