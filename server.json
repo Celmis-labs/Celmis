@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.constantinemakoid/celmis",
   "description": "Self-hosted code intelligence: cross-repo Q&A, dependency audits and PR review, over MCP",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "websiteUrl": "https://celmis-labs.github.io",
   "repository": {
     "url": "https://github.com/Celmis-labs/Celmis",
@@ -11,7 +11,7 @@
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/celmis-labs/celmis-api:v0.1.29",
+      "identifier": "ghcr.io/celmis-labs/celmis-api:v0.1.30",
       "transport": {
         "type": "streamable-http",
         "url": "http://localhost:8000/mcp/",
