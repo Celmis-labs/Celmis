@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.celmis-labs/celmis",
+  "description": "Self-hosted code intelligence: cross-repo Q&A, dependency audits and PR review, over MCP",
+  "version": "0.1.29",
+  "websiteUrl": "https://celmis-labs.github.io",
+  "repository": {
+    "url": "https://github.com/Celmis-labs/Celmis",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/celmis-labs/celmis-api:v0.1.29",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://localhost:8000/mcp/",
+        "headers": [
+          {
+            "name": "Authorization",
+            "description": "Bearer token minted with 'docker compose exec api analyzer mcp issue-token --scopes \"read:graph read:groups\" --duration 86400'",
+            "isRequired": true,
+            "isSecret": true
+          }
+        ]
+      }
+    }
+  ]
+}
