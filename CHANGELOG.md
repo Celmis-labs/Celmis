@@ -20,7 +20,32 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.30`.
+Nothing since `v0.1.31`.
+
+## [0.1.31] — 2026-09-14
+
+### Fixed
+
+- **`celmis-web`'s release build failed on `v0.1.30`**, silently: the
+  `publish` job needs all three images, so no GitHub Release was cut for
+  that tag even though `celmis-api` and `celmis-sandbox` published fine
+  (`fail-fast: false` keeps a matrix leg's failure from hiding the others).
+
+  `pnpm install --frozen-lockfile` errored with `ERR_PNPM_IGNORED_BUILDS`.
+  Two things, and only the second one bit: `web/pnpm-workspace.yaml`
+  already named `sharp` and `unrs-resolver` under `allowBuilds`, correctly —
+  but `web/Dockerfile`'s `COPY` line never carried the file into the build
+  context, so pnpm never saw it. Fixed by copying it in. The second: the
+  Dockerfile's own fallback — `--config.dangerouslyAllowAllBuilds=true` —
+  stopped working in pnpm 12, which reads neither that flag nor
+  `package.json`'s old `pnpm.onlyBuiltDependencies` field, both silently,
+  with no error at parse time to say so. That second fact made the first
+  invisible: the flag used to cover for the missing `COPY` line, until
+  `corepack prepare pnpm@latest` picked up v12 on some build between
+  `v0.1.29` (31 August) and this one and the cover stopped working. Also
+  dropped `onlyBuiltDependencies` from `pnpm-workspace.yaml` itself — the
+  pre-v11 spelling of `allowBuilds`, dead since, kept alongside it in a way
+  that implied two mechanisms where there is now one.
 
 ## [0.1.30] — 2026-09-14
 

@@ -11,11 +11,17 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 
 WORKDIR /app
 
-COPY package.json pnpm-lock.yaml* ./
+COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml* ./
 # pnpm 10+ blocks postinstall scripts by default (sharp, unrs-resolver).
-# `--config.dangerouslyAllowAllBuilds=true` whitelists them — safe here
-# because we control the dependency tree.
-RUN pnpm install --frozen-lockfile --config.dangerouslyAllowAllBuilds=true
+# Until pnpm 12 this was a CLI flag: --config.dangerouslyAllowAllBuilds=true.
+# v12 stopped reading it — silently, no warning, no error, just ignored —
+# and moved the same switch into pnpm-workspace.yaml. A flag that no longer
+# does anything is worse than a missing one: this broke a `--frozen-lockfile`
+# CI build 14 days after the toolchain last touched it, because `corepack
+# prepare pnpm@latest` re-resolves on every build. The whitelist now lives in
+# ./pnpm-workspace.yaml, copied in above — safe here because we control the
+# dependency tree.
+RUN pnpm install --frozen-lockfile
 
 # ============================================================================
 # STAGE 2 — builder

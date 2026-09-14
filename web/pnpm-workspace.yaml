@@ -1,6 +1,14 @@
+# Not a monorepo — this file exists for one setting.
+#
+# pnpm 12 moved build-script approval out of package.json's `pnpm.
+# onlyBuiltDependencies` (silently ignored now, no warning at parse time,
+# just a note buried in `pnpm install` output) and into this file. This
+# file already existed with the right idea — `allowBuilds` naming the two
+# packages that need their postinstall to run — but the Dockerfile never
+# COPYed it into the build context, so pnpm never saw it and refused both
+# builds. `onlyBuiltDependencies` below was the pre-v11 spelling of the
+# same list and has been dead since; dropped rather than left to imply a
+# second mechanism is in effect.
 allowBuilds:
   sharp: true
   unrs-resolver: true
-onlyBuiltDependencies:
-  - sharp
-  - unrs-resolver
