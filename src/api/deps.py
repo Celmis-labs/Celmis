@@ -363,19 +363,13 @@ async def current_workspace_id(
         eng.dispose()
 
 
-async def require_workspace_admin(
-    user: User = Depends(get_current_user),
-    workspace_id: str = Depends(current_workspace_id),
-) -> User:
-    """Caller must be owner/admin of their ACTIVE workspace (or a global admin).
-
-    This replaces the global `require_admin` on workspace-scoped mutations
-    (LLM keys, git connections): every user is the admin of their OWN workspace,
-    so they can configure it without a platform admin — but they can never
-    mutate a workspace they don't own/administer.
+def is_workspace_admin(user: User, workspace_id: str) -> bool:
+    """Owner/admin of `workspace_id`, or a global admin. The one copy of the rule
+    behind :func:`require_workspace_admin`, for handlers that only need to
+    decide what to SHOW (e.g. the LiteLLM proxy host on GET /api/llm/config).
     """
     if user.is_admin:
-        return user
+        return True
 
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session as _Session
@@ -390,10 +384,24 @@ async def require_workspace_admin(
     try:
         with _Session(eng) as s:
             m = s.get(WorkspaceMember, (workspace_id, user.id))
-            if m is not None and m.role in ("owner", "admin"):
-                return user
+            return m is not None and m.role in ("owner", "admin")
     finally:
         eng.dispose()
+
+
+async def require_workspace_admin(
+    user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> User:
+    """Caller must be owner/admin of their ACTIVE workspace (or a global admin).
+
+    This replaces the global `require_admin` on workspace-scoped mutations
+    (LLM keys, git connections): every user is the admin of their OWN workspace,
+    so they can configure it without a platform admin — but they can never
+    mutate a workspace they don't own/administer.
+    """
+    if is_workspace_admin(user, workspace_id):
+        return user
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Requires owner/admin on this workspace",

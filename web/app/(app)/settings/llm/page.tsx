@@ -92,6 +92,10 @@ const SELF_HOSTED = "openai_compatible";
 // the embedder, so where it runs is decided by whoever controls the server.
 const SELF_HOSTED_INFO = "__self_hosted_info__";
 
+// A LiteLLM proxy the workspace brings (URL + virtual key, set on the keys
+// card). Not in PROVIDERS: its row needs a URL next to the key.
+const LITELLM = "litellm";
+
 // Review output languages — native names, no i18n needed.
 const REVIEW_LANGS = [
   { value: "en", label: "English" }, { value: "uk", label: "Українська" },
@@ -208,9 +212,7 @@ export default function LLMConfigPage() {
  */
 function GatewayModeBanner({ config }: { config: LLMConfig }) {
   const t = useT();
-  const viaGateway = Boolean(
-    (config as LLMConfig & { gateway_enabled?: boolean }).gateway_enabled,
-  );
+  const viaGateway = Boolean(config.gateway_enabled);
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-muted)]/40 px-4 py-3 text-xs text-[var(--color-muted-foreground)]">
       <ServerIcon className="h-4 w-4 shrink-0" />
@@ -377,6 +379,7 @@ function ProviderKeysCard({ config, isAdmin, onSaved }: { config: LLMConfig; isA
             </div>
           );
         })}
+        <LiteLLMProxyRow config={config} isAdmin={isAdmin} onSaved={onSaved} />
         <p className="text-[11px] text-[var(--color-muted-foreground)]">
           {t("settings.llm.getKey")}{" "}{PROVIDERS.map((p) => (
             <a key={p.id} className="underline mr-2" href={p.tokenUrl} target="_blank" rel="noreferrer">{p.id} ↗</a>
@@ -384,6 +387,130 @@ function ProviderKeysCard({ config, isAdmin, onSaved }: { config: LLMConfig; isA
         </p>
       </CardContent>
     </Card>
+  );
+}
+
+// ─── Workspace LiteLLM proxy ─────────────────────────────────────────
+
+/**
+ * A LiteLLM proxy the customer already runs: URL + virtual key, one
+ * credential, configured only here and only by a workspace admin.
+ *
+ * "Verify and save" sends both halves every time: the backend checks the URL
+ * (https, public address), lists the proxy's models with the key, and only
+ * then stores the pair — encrypted, URL included. The page never gets the key
+ * or the URL back: a masked key (last 4), its fingerprint, and — for admins —
+ * the host.
+ */
+function LiteLLMProxyRow({ config, isAdmin, onSaved }: { config: LLMConfig; isAdmin: boolean; onSaved: () => void }) {
+  const token = useToken();
+  const t = useT();
+  const qc = useQueryClient();
+  const st = config.litellm;
+  const [baseUrl, setBaseUrl] = useState("");
+  const [key, setKey] = useState("");
+  const [show, setShow] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedModels, setSavedModels] = useState<string[] | null>(null);
+
+  // The live model count for a saved proxy — the same list the profile
+  // dropdowns below are fed from.
+  const models = useQuery({
+    queryKey: ["provider-models", LITELLM, st?.connected ?? false, st?.fingerprint ?? ""],
+    queryFn: () => llmApi.providerModels(token!, LITELLM),
+    enabled: !!token && Boolean(st?.connected) && savedModels === null,
+    staleTime: 5 * 60_000,
+  });
+  const modelCount = savedModels !== null
+    ? savedModels.length
+    : models.data ? models.data.generation.length + models.data.embedding.length : null;
+
+  const save = useMutation({
+    mutationFn: () => llmApi.saveLiteLLM(token!, { base_url: baseUrl.trim(), api_key: key.trim() }),
+    onSuccess: (r) => {
+      toast.success(t("llm.litellm.saved"));
+      setKey("");
+      setBaseUrl("");
+      setError(null);
+      setSavedModels(r.models);
+      // A new URL or key is a different proxy: its model list replaces the
+      // cached one even though "connected" may have stayed true.
+      void qc.invalidateQueries({ queryKey: ["provider-models", LITELLM] });
+      onSaved();
+    },
+    onError: (e) => setError((e as Error).message),
+  });
+  const remove = useMutation({
+    mutationFn: () => llmApi.deleteLiteLLM(token!),
+    onSuccess: () => {
+      toast.success(t("llm.litellm.removed"));
+      setKey("");
+      setError(null);
+      setSavedModels(null);
+      void qc.invalidateQueries({ queryKey: ["provider-models", LITELLM] });
+      onSaved();
+    },
+    onError: (e) => toast.error(t("settings.llm.error", { message: (e as Error).message })),
+  });
+  const canSave = isAdmin && baseUrl.trim().length > 0 && key.trim().length > 0 && !save.isPending;
+
+  return (
+    <div className="space-y-2 border-t border-[var(--color-border)] pt-3">
+      <div className="grid grid-cols-1 gap-2 items-center sm:grid-cols-[140px_1fr_1fr_auto_auto]">
+        <div className="text-sm flex items-center gap-1.5">
+          {t("llm.litellm.rowName")}
+          {st?.connected && <Badge variant="outline" className="text-[9px]">{t("llm.litellm.connected")}</Badge>}
+        </div>
+        <Input
+          aria-label={t("llm.litellm.baseUrlLabel")}
+          placeholder={st?.host ? `https://${st.host}` : "https://litellm.example.com"}
+          value={baseUrl} disabled={!isAdmin} autoComplete="off"
+          onChange={(e) => setBaseUrl(e.target.value)}
+        />
+        <div className="relative">
+          <Input
+            type={show ? "text" : "password"}
+            aria-label={t("llm.litellm.keyLabel")}
+            value={key} autoComplete="off"
+            placeholder={st?.connected
+              ? t("settings.llm.savedMasked", { masked: st.masked })
+              : t("llm.litellm.keyPlaceholder")}
+            disabled={!isAdmin}
+            onChange={(e) => setKey(e.target.value)}
+          />
+          <button type="button" onClick={() => setShow((s) => !s)}
+            aria-label={t("llm.litellm.toggleKey")}
+            className="absolute right-2 top-1/2 -translate-y-1/2 opacity-60">
+            {show ? <EyeOffIcon className="h-3.5 w-3.5" /> : <EyeIcon className="h-3.5 w-3.5" />}
+          </button>
+        </div>
+        <Button size="sm" variant="outline" disabled={!canSave}
+          onClick={() => { setError(null); save.mutate(); }}>
+          {save.isPending ? t("llm.litellm.verifying") : t("llm.litellm.verifyAndSave")}
+        </Button>
+        <Button size="sm" variant="ghost"
+          disabled={!isAdmin || !st?.connected || remove.isPending}
+          onClick={() => {
+            if (window.confirm(t("llm.litellm.removeConfirm"))) remove.mutate();
+          }}>
+          {t("llm.litellm.remove")}
+        </Button>
+      </div>
+      {st?.connected && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--color-muted-foreground)]">
+          <span>{t("llm.litellm.savedSummary", { masked: st.masked, fingerprint: st.fingerprint ?? "—" })}</span>
+          {st.host && <span>{t("llm.litellm.hostLabel", { host: st.host })}</span>}
+          {modelCount !== null && <span>{t("llm.litellm.modelsAvailable", { count: modelCount })}</span>}
+          {models.data?.detail && savedModels === null && (
+            <span className="text-amber-600">{models.data.detail}</span>
+          )}
+        </div>
+      )}
+      <p className="text-[11px] text-[var(--color-muted-foreground)]">
+        {isAdmin ? t("llm.litellm.hint") : t("llm.litellm.adminOnly")}
+      </p>
+      {error && <TestResultPanel outcome={{ error }} />}
+    </div>
   );
 }
 
@@ -427,12 +554,21 @@ function ProfileCard({
   // a model served from a machine you run. Only what picking it leads to
   // differs — a form on three cards, instructions on the fourth.
   const selfHostedLabel = t("settings.llm.selfHostedOption");
+  // The workspace LiteLLM proxy. Offered on embeddings only where that
+  // profile is the shared one that runs (the backend refuses it elsewhere);
+  // kept in the list whenever a surface already uses it.
+  const litellmOption = { value: LITELLM, label: t("llm.litellm.option") };
+  const litellmOffered = embeddings
+    ? Boolean(config.litellm_embeddings_allowed) || prof.provider === LITELLM
+    : true;
+  const isLitellm = provider === LITELLM;
   const providerOptions = embeddings
     ? [...EMBEDDING_PROVIDER_OPTIONS,
+       ...(litellmOffered ? [litellmOption] : []),
        { value: SELF_HOSTED_INFO, label: selfHostedLabel }]
     : selfHostedAllowed
-      ? [...PROVIDER_OPTIONS, { value: SELF_HOSTED, label: selfHostedLabel }]
-      : PROVIDER_OPTIONS;
+      ? [...PROVIDER_OPTIONS, litellmOption, { value: SELF_HOSTED, label: selfHostedLabel }]
+      : [...PROVIDER_OPTIONS, litellmOption];
   // When the operator pinned embeddings in the server environment, the
   // editable profile below is not what runs — show the pinned one read-only
   // instead of a dropdown whose choice would silently be ignored.
@@ -443,7 +579,12 @@ function ProfileCard({
   const models = useQuery({
     // keyConnected is part of the key so saving a provider key automatically
     // refetches the model list (a keyless fetch caches an empty 200 otherwise).
-    queryKey: ["provider-models", provider, keyConnected],
+    // For the LiteLLM proxy the saved key's fingerprint is part of the
+    // identity too: re-saving keeps `connected` true and would otherwise show
+    // the old proxy's aliases.
+    queryKey: provider === LITELLM
+      ? ["provider-models", provider, keyConnected, config.litellm?.fingerprint ?? ""]
+      : ["provider-models", provider, keyConnected],
     queryFn: () => llmApi.providerModels(token!, provider),
     // Local model names are not in any catalog — a vendor /models call would
     // return nothing and its emptiness must not block this provider. The
@@ -492,6 +633,21 @@ function ProfileCard({
     // address that's the actionable EGRESS_ALLOW_PRIVATE_NETWORK explanation,
     // which a generic "failed" toast used to swallow.
     onError: (e) => setLocalTest({ error: (e as Error).message }),
+  });
+  // LiteLLM proxy embeddings: one /v1/embeddings call with the chosen model
+  // and `dimensions`, so a model that refuses or ignores the width shows up
+  // here rather than at index time.
+  const [proxyEmbTest, setProxyEmbTest] = useState<TestOutcome | null>(null);
+  const testProxyEmbeddings = useMutation({
+    mutationFn: () => llmApi.testConnection(token!, {
+      provider: LITELLM,
+      api_key: "use-saved",
+      model: model.trim() || null,
+      surface: "embeddings",
+      ...(Number(dims) > 0 ? { dimensions: Number(dims) } : {}),
+    }),
+    onSuccess: (r) => setProxyEmbTest({ result: r }),
+    onError: (e) => setProxyEmbTest({ error: (e as Error).message }),
   });
   const [effTest, setEffTest] = useState<TestOutcome | null>(null);
   const effKeyConnected = config.provider_keys.find((k) => k.provider === eff?.provider)?.connected;
@@ -653,7 +809,7 @@ function ProfileCard({
           </div>
           {isEmbeddingsInfo ? <div /> : (
           <div>
-            <Label>{t("settings.llm.modelLabel")} {!isLocal && !keyConnected && <span className="text-amber-600">{t("settings.llm.addKeyHint")}</span>}</Label>
+            <Label>{t("settings.llm.modelLabel")} {!isLocal && !keyConnected && <span className="text-amber-600">{isLitellm ? t("llm.litellm.notConfigured") : t("settings.llm.addKeyHint")}</span>}</Label>
             {isLocal ? (
               // Free text, not the catalog dropdown: the names a local server
               // serves exist nowhere but on that server, and an empty vendor
@@ -788,6 +944,18 @@ function ProfileCard({
               <RefreshCwIcon className="h-3.5 w-3.5 mr-1" /> {reindex.isPending ? "…" : t("settings.llm.reindexAll")}
             </Button>
           </div>
+        )}
+        {embeddings && isLitellm && !envManaged && (
+          <>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="outline"
+                disabled={!isAdmin || testProxyEmbeddings.isPending || !model || !keyConnected}
+                onClick={() => testProxyEmbeddings.mutate()}>
+                {testProxyEmbeddings.isPending ? "…" : t("settings.llm.testConnection")}
+              </Button>
+            </div>
+            <TestResultPanel outcome={proxyEmbTest} />
+          </>
         )}
         {embeddings && config.embeddings_reindex_needed && (
           <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">

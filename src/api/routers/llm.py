@@ -16,6 +16,9 @@ Everything a tech-lead needs to configure the AI reviewer lives here:
     POST /api/llm/test-connection    — verify {provider, key, [model]} works
                                        by pinging the provider's models list
                                        or making a 1-token completion.
+    PUT  /api/llm/litellm            — validate-then-save the workspace's
+                                       own LiteLLM proxy (URL + virtual key)
+    DELETE /api/llm/litellm          — remove it
     GET  /api/llm/local-setup-guide  — static instructions for pointing a
                                        surface at a self-hosted server.
     GET  /api/llm/model-capabilities — what the INSTALLED litellm knows about
@@ -85,7 +88,12 @@ _BASE_URL_SURFACES = ("chat", "review", "agent")
 # one of those fails at index time, hours after the person who chose it left
 # this page. Refuse at save time instead. openai_compatible is refused
 # separately below, with the EMBEDDING_* env guidance.
-_EMBEDDINGS_PROVIDERS = ("google", "gemini", "openai", "mistral")
+_EMBEDDINGS_PROVIDERS = ("google", "gemini", "openai", "mistral", "litellm")
+# A workspace's own LiteLLM proxy (src/llm/litellm_proxy.py): URL + virtual
+# key stored as ONE encrypted credentials row, set ONLY via PUT /api/llm/litellm
+# (validate-then-save) and usable by every surface. Embeddings only where the
+# embeddings profile is actually read — see _litellm_embeddings_allowed.
+_LITELLM_PROVIDER = "litellm"
 
 # What one agent's entry may carry. Anything else is a 422: "max_tokens"
 # instead of "max_output_tokens", saved silently, is the failure this whole
@@ -138,6 +146,41 @@ class ProviderKeyOut(BaseModel):
     connected: bool
     masked: str
     source: str                                 # "ui" | "env" | "none"
+
+
+class LiteLLMProxyOut(BaseModel):
+    """The workspace's own LiteLLM proxy as the settings page shows it.
+
+    Never the key, never the full URL. `masked` is the last 4 characters and
+    `fingerprint` the first 12 hex of sha256(key) — enough to tell two keys
+    apart. `host` is filled only for a workspace admin; members see that a
+    proxy is connected, not where it is.
+    """
+
+    connected: bool                             # a complete (URL + key) pair resolves
+    host: str | None = None                     # admins only
+    masked: str = ""
+    fingerprint: str | None = None
+    source: str = "none"                        # "ui" | "none"
+
+
+class LiteLLMProxyIn(BaseModel):
+    """Body for PUT /api/llm/litellm: both halves, every time.
+
+    There is no "keep the saved key" form: a stored key paired with a newly
+    typed URL is how someone who never saw the key would send it to a host
+    they control.
+    """
+
+    base_url: str = Field(min_length=1, max_length=500)
+    api_key: str = Field(min_length=1, max_length=500)
+
+
+class LiteLLMSaveOut(BaseModel):
+    """PUT /api/llm/litellm answer: what is saved now, and the proxy's models."""
+
+    litellm: LiteLLMProxyOut
+    models: list[str]
 
 
 class AgentSettingsOut(BaseModel):
@@ -232,6 +275,17 @@ class LLMConfigOut(BaseModel):
     # Set when EMBEDDING_PROVIDER=openai_compatible is active: the UI must
     # render THIS as the embeddings surface (read-only), not the profile above.
     effective_embeddings: EffectiveEmbeddingsOut | None = None
+    # Whether LLM traffic goes through the installation's LiteLLM gateway
+    # (src/llm/gateway.py). The mode banner on /settings/llm reads it; it was
+    # read there long before the API sent it, so the banner always said
+    # "direct keys".
+    gateway_enabled: bool = False
+    # The workspace's own LiteLLM proxy (provider "litellm").
+    litellm: LiteLLMProxyOut = Field(
+        default_factory=lambda: LiteLLMProxyOut(connected=False))
+    # Whether the embeddings surface may be pointed at a LiteLLM proxy from
+    # THIS workspace — see _litellm_embeddings_allowed.
+    litellm_embeddings_allowed: bool = False
 
 
 class LLMConfigIn(BaseModel):
@@ -291,6 +345,9 @@ class TestConnectionIn(BaseModel):
     # Self-hosted (OpenAI-compatible) only:
     base_url: str | None = Field(default=None, max_length=500)
     surface: str = Field(default="chat", pattern="^(chat|embeddings)$")
+    # LiteLLM proxy embeddings probe only: the width the profile will ask
+    # for (`dimensions` rides along on every real embeddings call).
+    dimensions: int | None = Field(default=None, ge=1, le=65536)
 
 
 class TestConnectionOut(BaseModel):
@@ -307,6 +364,9 @@ class TestConnectionOut(BaseModel):
     # A caution that is not a failure (e.g. the width differs from the
     # existing collection's) — rendered as a warning, apart from `detail`.
     warning: str | None = None
+    # LiteLLM proxy only: the model ids the virtual key may call, so the page
+    # can show the alias names next to "N models available".
+    models: list[str] | None = None
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────
@@ -394,6 +454,114 @@ def _current_key(provider: str, workspace_id: str = "default") -> str | None:
     if row is None:
         return None
     return row.secret
+
+
+# ─── Workspace LiteLLM proxy (provider "litellm") ────────────────────
+
+
+def _litellm_embeddings_allowed(workspace_id: str) -> bool:
+    """May this workspace point the embeddings surface at a LiteLLM proxy?
+
+    Only the default workspace. Embeddings are workspace-SHARED: one Qdrant
+    collection, so `resolve_profile("embeddings", ws)` reads the default
+    tenant's profile whoever calls (src/llm/profiles.py). A profile saved in
+    any other workspace is never read — and a proxy alias only means
+    something on the proxy that defines it. Refused rather than ignored.
+    """
+    return workspace_id == "default"
+
+
+def _litellm_out(workspace_id: str, *, show_host: bool = False) -> LiteLLMProxyOut:
+    """What the settings page shows for the LiteLLM proxy row (no secrets)."""
+    from src.llm import litellm_proxy
+
+    ep = litellm_proxy.resolve_endpoint(workspace_id)
+    if ep is None:
+        return LiteLLMProxyOut(connected=False)
+    return LiteLLMProxyOut(
+        connected=True, host=ep.host if show_host else None,
+        masked=litellm_proxy.mask_key(ep.api_key), fingerprint=ep.fingerprint,
+        source=ep.source,
+    )
+
+
+def _can_see_proxy_host(user: User, workspace_id: str) -> bool:
+    """Workspace admin (owner/admin) or global admin — the require_workspace_admin rule."""
+    from src.api import deps
+
+    try:
+        return bool(deps.is_workspace_admin(user, workspace_id))
+    except Exception:  # noqa: BLE001 — unknown → the member view
+        return False
+
+
+def _litellm_http_error(exc: Exception) -> HTTPException:
+    """A proxy failure as a 422 whose text never carries the key or the URL."""
+    return HTTPException(status_code=422, detail=str(exc))
+
+
+class _ProxyModels:
+    """The proxy's model ids, fetched at most once per request and target."""
+
+    def __init__(self) -> None:
+        self._ids: dict[str, list[str]] = {}
+
+    def ids(self, workspace_id: str) -> list[str]:
+        from src.llm import litellm_proxy
+
+        if workspace_id not in self._ids:
+            ep = litellm_proxy.resolve_endpoint(workspace_id)
+            if ep is None:
+                raise HTTPException(status_code=422, detail=(
+                    "no LiteLLM proxy configured for this workspace — a "
+                    "workspace admin saves its URL and key in Settings → LLM "
+                    "first"
+                ))
+            try:
+                _target, ids = litellm_proxy.list_models(ep.base_url, ep.api_key)
+            except litellm_proxy.LiteLLMProxyError as exc:
+                raise HTTPException(status_code=422, detail=(
+                    f"cannot verify the model against the LiteLLM proxy: {exc}"
+                )) from exc
+            self._ids[workspace_id] = ids
+        return self._ids[workspace_id]
+
+    def require(self, model: str, workspace_id: str, what: str) -> None:
+        if not model:
+            raise HTTPException(status_code=422, detail=(
+                f"{what}: choose a model from the LiteLLM proxy's list"
+            ))
+        if model not in self.ids(workspace_id):
+            raise HTTPException(status_code=422, detail=(
+                f"{what}: model '{model[:120]}' is not offered by the LiteLLM "
+                "proxy — choose one from its /v1/models list"
+            ))
+
+
+def _check_litellm_profile(surface: str, workspace_id: str) -> str:
+    """422 unless `surface` may be set to provider "litellm" here.
+
+    Returns the workspace whose proxy the surface will call (embeddings: the
+    shared default tenant's).
+    """
+    from src.llm import litellm_proxy
+
+    if surface == "embeddings":
+        if not _litellm_embeddings_allowed(workspace_id):
+            raise HTTPException(status_code=422, detail=(
+                "embeddings are shared by every workspace and configured in "
+                "the default workspace; a LiteLLM proxy for embeddings can be "
+                "chosen only there"
+            ))
+        target = "default"
+    else:
+        target = workspace_id
+    if litellm_proxy.resolve_endpoint(target) is None:
+        raise HTTPException(status_code=422, detail=(
+            "no LiteLLM proxy configured for this workspace — a workspace "
+            "admin saves its URL and key in Settings → LLM first"
+        ))
+    return target
 
 
 # ─── Per-agent configuration: capabilities in, overrides out ─────────
@@ -813,7 +981,8 @@ def get_config(
 
     keys_out: list[ProviderKeyOut] = []
     for prov in sorted({"google", "openai", "anthropic", "openrouter", "groq",
-                        "mistral", _LOCAL_PROVIDER} | used_providers):
+                        "mistral", _LOCAL_PROVIDER, _LITELLM_PROVIDER}
+                       | used_providers):
         from src.llm.profiles import get_provider_key
         if prov == _LOCAL_PROVIDER:
             # Keyless by design. A row may still exist (vLLM/TEI can require a
@@ -826,6 +995,15 @@ def get_config(
                 provider=prov, connected=bool(wk),
                 masked=_mask_key(real) if real else "",
                 source="ui" if wk else "none",
+            ))
+            continue
+        if prov == _LITELLM_PROVIDER:
+            # One row with the proxy card's answer, so `connected` means the
+            # same thing on both: a complete (URL + key) pair resolves.
+            lo = _litellm_out(workspace_id)
+            keys_out.append(ProviderKeyOut(
+                provider=prov, connected=lo.connected, masked=lo.masked,
+                source=lo.source,
             ))
             continue
         wk = _current_key(prov, workspace_id) if prov not in ("google", "gemini") else None
@@ -884,6 +1062,12 @@ def get_config(
             source="env",
         )
 
+    try:
+        from src.llm import gateway
+        gateway_enabled = bool(gateway.is_enabled())
+    except Exception:  # noqa: BLE001 — the page still renders, as direct keys
+        gateway_enabled = False
+
     return LLMConfigOut(
         provider=provider,
         model=cfg.get("model"),
@@ -906,6 +1090,10 @@ def get_config(
         docs_engine=str(cfg.get("docs_engine") or "api"),
         embeddings_reindex_needed=reindex_needed,
         effective_embeddings=effective_embeddings,
+        gateway_enabled=gateway_enabled,
+        litellm=_litellm_out(
+            workspace_id, show_host=_can_see_proxy_host(user, workspace_id)),
+        litellm_embeddings_allowed=_litellm_embeddings_allowed(workspace_id),
     )
 
 
@@ -925,6 +1113,15 @@ def put_config(
     # credential, and three separate audit rows for one request would make a
     # single form submission look like three events.
     keys_saved: list[str] = []
+    # The LiteLLM proxy is saved ONLY through PUT /api/llm/litellm, which
+    # validates the URL and lists the models before anything is written. A
+    # key arriving here would skip all of that.
+    if (payload.api_key and payload.provider == _LITELLM_PROVIDER) or \
+            (payload.provider_keys or {}).get(_LITELLM_PROVIDER):
+        raise HTTPException(status_code=422, detail=(
+            "the LiteLLM proxy URL and key are saved with PUT /api/llm/litellm "
+            "(Settings → LLM → LiteLLM proxy), never as a bare key"
+        ))
     # Persist the primary provider api_key first (if provided) — under the
     # workspace's OWN slot so it is both readable (get_config reads ws:{id})
     # and isolated from other tenants.
@@ -963,6 +1160,7 @@ def put_config(
                 logger.info("provider_key_saved provider=%s workspace=%s user=%s", prov, workspace_id, user.email)
 
     prev = _load_workspace_config(workspace_id)
+    proxy_models = _ProxyModels()
 
     # PATCH semantics, not PUT. This handler was written when every caller sent
     # the whole form, and then partial callers appeared: the settings page saves
@@ -1030,10 +1228,17 @@ def put_config(
                 raise HTTPException(status_code=422, detail=(
                     f"provider '{entry['provider']}' has no embeddings API "
                     "LiteLLM can route to — embeddings can use google, openai "
-                    "or mistral. For a self-hosted embedder, set the "
+                    "or mistral, or the LiteLLM proxy. For a self-hosted embedder, set the "
                     "EMBEDDING_* env variables — see "
                     "GET /api/llm/local-setup-guide."
                 ))
+            if cur.get("provider") == _LITELLM_PROVIDER and (
+                    entry.get("provider") or entry.get("model")):
+                # Fail closed at save time: the proxy must exist, and the
+                # model must be one it lists — never free text.
+                proxy_ws = _check_litellm_profile(name, workspace_id)
+                proxy_models.require(str(cur.get("model") or ""), proxy_ws,
+                                     f"profile '{name}'")
             if "base_url" in entry:
                 if name not in _BASE_URL_SURFACES:
                     raise HTTPException(status_code=422, detail=(
@@ -1081,6 +1286,22 @@ def put_config(
     # primary this save ends up with — whichever of the pair this request
     # changed (see _validated_review_fallback).
     cfg["review_fallback_model"] = _validated_review_fallback(cfg, workspace_id)
+    if cfg.get("provider") == _LITELLM_PROVIDER and ({"provider", "model"} & sent) \
+            and "review" not in (payload.profiles or {}):
+        # The legacy top-level pair (mirrors the review profile).
+        _check_litellm_profile("review", workspace_id)
+        proxy_models.require(str(cfg.get("model") or ""), workspace_id, "review model")
+    review_provider, _review_model = _review_selection(cfg, workspace_id)
+    if review_provider == _LITELLM_PROVIDER:
+        # The fallback and per-agent models run on the review surface's
+        # proxy, so they too must be aliases it lists.
+        if "review_fallback_model" in payload.model_fields_set and cfg["review_fallback_model"]:
+            proxy_models.require(str(cfg["review_fallback_model"]), workspace_id,
+                                 "review fallback model")
+        for agent_name, agent_entry in (payload.agents or {}).items():
+            if isinstance(agent_entry, dict) and str(agent_entry.get("model") or "").strip():
+                proxy_models.require(str(agent_entry["model"]).strip(), workspace_id,
+                                     f"agent '{agent_name}'")
     # Per-agent overrides last, so they are validated against the profile this
     # same request is saving rather than the one it replaced.
     if payload.agents is not None:
@@ -1162,6 +1383,10 @@ def test_connection(
     # the same statement.
     if provider == _LOCAL_PROVIDER:
         return _test_local_connection(payload, user=user, workspace_id=workspace_id)
+    # A workspace LiteLLM proxy: the address is part of the credential, so it
+    # has its own probe (and its own rule about saved keys and new URLs).
+    if provider == _LITELLM_PROVIDER:
+        return _test_litellm_connection(payload, user=user, workspace_id=workspace_id)
 
     api_key = payload.api_key
     if not api_key:
@@ -1235,15 +1460,222 @@ def test_connection(
         )
 
     if resp.status_code in (401, 403):
+        detail = f"invalid API key ({resp.status_code})"
+        if provider == "openai":
+            # The OpenAI field is where a LiteLLM virtual key ("sk-…", same
+            # shape) lands when nobody knows the proxy row exists — and
+            # api.openai.com rejects a key it never issued.
+            detail += (
+                ". If this is a LiteLLM/proxy key, use the LiteLLM proxy row."
+            )
         return TestConnectionOut(
-            ok=False, provider=provider,
-            detail=f"invalid API key ({resp.status_code})",
-            latency_ms=latency_ms,
+            ok=False, provider=provider, detail=detail, latency_ms=latency_ms,
         )
     return TestConnectionOut(
         ok=False, provider=provider,
         detail=f"provider returned {resp.status_code}",
         latency_ms=latency_ms,
+    )
+
+
+# ─── Workspace LiteLLM proxy: save / delete / probe ──────────────────
+
+
+@router.put("/litellm", response_model=LiteLLMSaveOut)
+def put_litellm_proxy(
+    payload: LiteLLMProxyIn,
+    request: Request,
+    user: User = Depends(require_workspace_admin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> LiteLLMSaveOut:
+    """Validate-then-save the workspace's LiteLLM proxy (URL + virtual key).
+
+    Every check runs before anything is written — URL rules, DNS/address
+    rules, GET {base}/v1/models with the key returning 200 and a non-empty
+    model list (src.llm.litellm_proxy.validate_proxy). Any failure is a 422
+    and the stored row (if any) is untouched.
+    """
+    from src.llm import litellm_proxy
+
+    try:
+        endpoint, ids = litellm_proxy.validate_proxy(payload.base_url, payload.api_key)
+    except litellm_proxy.LiteLLMProxyError as exc:
+        logger.info("litellm_proxy_rejected workspace=%s user=%s reason=%s",
+                    workspace_id, user.email, type(exc).__name__)
+        raise _litellm_http_error(exc) from exc
+    litellm_proxy.save_endpoint(workspace_id, endpoint)
+    try:
+        from src.llm.completion import reset_caches
+        reset_caches()
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info("litellm_proxy_saved workspace=%s user=%s fingerprint=%s models=%d",
+                workspace_id, user.email, endpoint.fingerprint, len(ids))
+    record_action(
+        action="llm_key.saved", actor=user.email, actor_id=user.id,
+        workspace_id=workspace_id, target=_LITELLM_PROVIDER,
+        ip=client_ip(request),
+        detail={"providers": [_LITELLM_PROVIDER], "slot": workspace_slot(workspace_id),
+                "fingerprint": endpoint.fingerprint, "host": endpoint.host,
+                "models": len(ids)},
+    )
+    return LiteLLMSaveOut(
+        litellm=_litellm_out(workspace_id, show_host=True), models=ids,
+    )
+
+
+@router.delete("/litellm", response_model=LLMConfigOut)
+def delete_litellm_proxy(
+    request: Request,
+    user: User = Depends(require_workspace_admin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> LLMConfigOut:
+    """Remove this workspace's LiteLLM proxy row (URL + virtual key).
+
+    Always allowed, even while a surface still selects provider "litellm": a
+    revoked or leaked key must be removable. Those surfaces then fail closed
+    (no address → refuse) until a proxy is saved again.
+    """
+    from src.llm import litellm_proxy
+
+    before = litellm_proxy.stored_endpoint(workspace_id)
+    deleted = litellm_proxy.delete_endpoint(workspace_id)
+    logger.info("litellm_proxy_deleted workspace=%s user=%s existed=%s",
+                workspace_id, user.email, deleted)
+    if deleted:
+        record_action(
+            action="llm_key.deleted", actor=user.email, actor_id=user.id,
+            workspace_id=workspace_id, target=_LITELLM_PROVIDER,
+            ip=client_ip(request),
+            detail={"providers": [_LITELLM_PROVIDER],
+                    "slot": workspace_slot(workspace_id),
+                    "fingerprint": before.fingerprint if before else None,
+                    "host": before.host if before else None},
+        )
+    return get_config(user=user, workspace_id=workspace_id)
+
+
+def _test_litellm_connection(
+    payload: TestConnectionIn, *, user: User, workspace_id: str,
+) -> TestConnectionOut:
+    """Check a proxy WITHOUT saving: the typed URL + key, or the saved pair.
+
+    A typed key needs a typed URL and vice versa — a saved key is never sent
+    to a new address. Same validation and pinned transport as the save.
+    """
+    import time
+
+    from src.llm import litellm_proxy
+
+    prov = _LITELLM_PROVIDER
+    typed_key = (payload.api_key or "").strip()
+    typed_url = (payload.base_url or "").strip()
+    if typed_key and typed_key != "use-saved":
+        if not typed_url:
+            return TestConnectionOut(ok=False, provider=prov, detail=(
+                "enter the proxy URL together with the key"
+            ))
+        base, key = typed_url, typed_key
+    else:
+        if typed_url:
+            return TestConnectionOut(ok=False, provider=prov, detail=(
+                "enter the key to test a different URL — a saved key is "
+                "never sent to a new address"
+            ))
+        saved = litellm_proxy.resolve_endpoint(workspace_id)
+        if saved is None:
+            return TestConnectionOut(ok=False, provider=prov, detail=(
+                "no LiteLLM proxy saved — enter its URL and virtual key"
+            ))
+        base, key = saved.base_url, saved.api_key
+
+    t0 = time.time()
+    try:
+        endpoint, ids = litellm_proxy.validate_proxy(base, key)
+    except litellm_proxy.LiteLLMProxyError as exc:
+        return TestConnectionOut(ok=False, provider=prov, detail=str(exc),
+                                 latency_ms=int((time.time() - t0) * 1000))
+    latency_ms = int((time.time() - t0) * 1000)
+    logger.info("litellm_probe workspace=%s fingerprint=%s models=%d",
+                workspace_id, endpoint.fingerprint, len(ids))
+    model = (payload.model or "").strip()
+    if payload.surface == "embeddings" and model:
+        if model not in ids:
+            return TestConnectionOut(
+                ok=False, provider=prov, models_available=len(ids), models=ids,
+                detail=f"model '{model[:120]}' is not offered by the LiteLLM proxy",
+            )
+        probe = _probe_litellm_embeddings(endpoint, model, payload.dimensions)
+        probe.models_available, probe.models = len(ids), ids
+        return probe
+    return TestConnectionOut(
+        ok=True, provider=prov, latency_ms=latency_ms,
+        detail="connected — LiteLLM proxy",
+        models_available=len(ids), models=ids,
+    )
+
+
+def _probe_litellm_embeddings(
+    endpoint: Any, model: str, dimensions: int | None,
+) -> TestConnectionOut:
+    """POST {root}/v1/embeddings once; report the vector width.
+
+    Same validated, pinned transport as the model listing. Warns when the
+    width differs from the requested `dimensions` (the proxy's model ignored
+    it) or from the existing collection's.
+    """
+    import time
+
+    from src.llm import litellm_proxy
+
+    prov = _LITELLM_PROVIDER
+    body: dict[str, Any] = {"model": model, "input": ["celmis connection probe"]}
+    if dimensions:
+        body["dimensions"] = int(dimensions)
+    t0 = time.time()
+    try:
+        target = litellm_proxy.validate_target(endpoint.base_url)
+        status, data = litellm_proxy.request_json(
+            target, "POST", "/v1/embeddings", endpoint.api_key, json_body=body,
+        )
+    except litellm_proxy.LiteLLMProxyError as exc:
+        return TestConnectionOut(ok=False, provider=prov, detail=str(exc))
+    latency_ms = int((time.time() - t0) * 1000)
+    if status != 200:
+        hint = (" — the model may not accept `dimensions`; clear it or pick "
+                "another width") if dimensions and status in (400, 422) else ""
+        return TestConnectionOut(
+            ok=False, provider=prov, latency_ms=latency_ms,
+            detail=f"proxy returned {status} for /v1/embeddings with model '{model}'{hint}",
+        )
+    try:
+        vector = (data.get("data") or [{}])[0].get("embedding") or []
+    except Exception:  # noqa: BLE001 — shape surprise = not an embeddings model
+        vector = []
+    width = len(vector) if isinstance(vector, list) else 0
+    if not width:
+        return TestConnectionOut(
+            ok=False, provider=prov, latency_ms=latency_ms,
+            detail=f"'{model}' returned no embedding vector — is it an embeddings model?",
+        )
+    warnings: list[str] = []
+    if dimensions and width != int(dimensions):
+        warnings.append(
+            f"asked for {dimensions} dimensions, got {width} — the proxy's "
+            "model does not honour `dimensions`; set the profile to "
+            f"{width} or pick another model"
+        )
+    known = _known_collection_width()
+    if known is not None and known != width:
+        warnings.append(
+            f"the existing vector collection is {known}-wide — indexing with "
+            "this model requires a full re-index (the collection is rebuilt "
+            "for the new width)"
+        )
+    return TestConnectionOut(
+        ok=True, provider=prov, latency_ms=latency_ms,
+        detail=f"connected — LiteLLM proxy, '{model}' embedding width {width}",
+        vector_width=width, warning="; ".join(warnings) or None,
     )
 
 
@@ -1581,6 +2013,8 @@ def provider_models(
             detail="self-hosted provider — use POST /api/llm/test-connection "
                    "with the base_url; the probe reports the server's models",
         )
+    if provider == _LITELLM_PROVIDER:
+        return _litellm_models(workspace_id)
     key = get_provider_key(provider, workspace_id)
     if not key:
         return ProviderModelsOut(provider=provider, generation=[], embedding=[],
@@ -1619,6 +2053,37 @@ def provider_models(
             (emb if "embed" in mid.lower() else gen).append(mid)
     return ProviderModelsOut(
         provider=provider, generation=sorted(set(gen)), embedding=sorted(set(emb)),
+    )
+
+
+def _litellm_models(workspace_id: str) -> ProviderModelsOut:
+    """The proxy's model list, split generation / embedding.
+
+    The split uses /model/info's `mode` when the virtual key may read it, and
+    the name otherwise ("embed" in the id). Every alias lands in one of the
+    two lists, never dropped.
+    """
+    from src.llm import litellm_proxy
+
+    prov = _LITELLM_PROVIDER
+    ep = litellm_proxy.resolve_endpoint(workspace_id)
+    if ep is None:
+        return ProviderModelsOut(provider=prov, generation=[], embedding=[],
+                                 detail="no LiteLLM proxy configured")
+    try:
+        _target, ids = litellm_proxy.list_models(ep.base_url, ep.api_key)
+    except litellm_proxy.LiteLLMProxyError as exc:
+        return ProviderModelsOut(provider=prov, generation=[], embedding=[],
+                                 detail=str(exc))
+    modes = {a: (v or {}).get("mode") for a, v in litellm_proxy.cached_model_info(ep).items()}
+    gen: list[str] = []
+    emb: list[str] = []
+    for mid in ids:
+        mode = modes.get(mid)
+        is_emb = mode == "embedding" if mode else "embed" in mid.lower()
+        (emb if is_emb else gen).append(mid)
+    return ProviderModelsOut(
+        provider=prov, generation=sorted(set(gen)), embedding=sorted(set(emb)),
     )
 
 

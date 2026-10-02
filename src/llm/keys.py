@@ -84,7 +84,14 @@ _ENV_FALLBACK: Final[dict[str, str]] = {
     "openai_compatible": "OPENAI_COMPATIBLE_API_KEY",
 }
 
-_KNOWN_PROVIDERS: Final[frozenset[str]] = frozenset(_ENV_FALLBACK.keys())
+#: Providers with NO env fallback: configured only through the UI.
+#: "litellm" = a workspace's own LiteLLM proxy; its key and URL are one
+#: credential, resolved as a pair in src/llm/litellm_proxy.py.
+_UI_ONLY_PROVIDERS: Final[frozenset[str]] = frozenset({"litellm"})
+
+_KNOWN_PROVIDERS: Final[frozenset[str]] = (
+    frozenset(_ENV_FALLBACK.keys()) | _UI_ONLY_PROVIDERS
+)
 
 #: What "openai_compatible" resolves to when nobody stored a key. Local
 #: servers usually run without auth, but every layer between here and litellm
@@ -134,6 +141,19 @@ def resolve_api_key(
         raise LLMCredentialError(
             f"unsupported provider {provider!r}; known: "
             f"{sorted(_KNOWN_PROVIDERS)}"
+        )
+
+    if provider == "litellm":
+        # Resolved as (base URL, key) together: a key without its address is
+        # not a usable credential, and must not make has_key() say otherwise.
+        from src.llm.litellm_proxy import resolve_endpoint
+
+        ep = resolve_endpoint(workspace_id, user_id)
+        if ep is not None:
+            return ep.api_key
+        raise LLMCredentialError(
+            f"no LiteLLM proxy (URL + key) for workspace {workspace_id!r}. "
+            "A workspace admin sets it in Settings → LLM."
         )
 
     # ── Tier 1 + 2: credentials store (user-scoped, then default user) ──
@@ -223,10 +243,23 @@ def has_key(
 def list_configured_providers(
     user_id: str = "default", *, workspace_id: str = "default",
 ) -> list[str]:
-    """Return providers that have a resolvable key for this workspace. Sorted."""
-    return sorted(
-        p for p in _KNOWN_PROVIDERS if has_key(p, user_id, workspace_id=workspace_id)
-    )
+    """Return providers that have a resolvable key for this workspace. Sorted.
+
+    `openai_compatible` counts only with a REAL key: the keyless sentinel makes
+    `has_key` answer True for every workspace, and "configured" here feeds the
+    model catalog's `available` flag — every install used to report a
+    self-hosted server it never had.
+    """
+    out: list[str] = []
+    for p in _KNOWN_PROVIDERS:
+        try:
+            key = resolve_api_key(p, user_id, workspace_id=workspace_id)
+        except LLMCredentialError:
+            continue
+        if p == "openai_compatible" and key == LOCAL_NO_KEY:
+            continue
+        out.append(p)
+    return sorted(out)
 
 
 __all__ = [

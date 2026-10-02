@@ -551,7 +551,9 @@ def trigger_generate_vault(
     if not (
         any(
             has_key(prov, workspace_id=ws)
-            for prov in ("google", "openai", "anthropic")
+            # "litellm" = a workspace LiteLLM proxy; has_key answers only for
+            # a complete (base URL + key) pair.
+            for prov in ("google", "openai", "anthropic", "litellm")
             for ws in dict.fromkeys((workspace_id, "default"))
         )
         or _self_hosted_generation_ready(workspace_id)

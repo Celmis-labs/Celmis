@@ -27,7 +27,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import socket
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 from urllib.parse import urlparse
 
@@ -128,11 +128,29 @@ class _WhitelistPolicy:
         allowed_hosts: Iterable[str],
         *args,
         allow_private_network: bool = False,
+        pinned_addresses: Mapping[str, str] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._allowed = {h.lower() for h in allowed_hosts}
         self._allow_private = allow_private_network
+        self._pins = {h.lower(): ip for h, ip in (pinned_addresses or {}).items()}
+
+    def _pin(self, request: httpx.Request) -> None:
+        """Connect a pinned host to its pre-validated IP (DNS-rebinding guard).
+
+        The URL's host becomes the IP, so no second DNS lookup happens; TLS
+        SNI (and therefore certificate verification) and the Host header
+        stay the hostname. Called AFTER the allowlist check, which judged the
+        hostname. The request is changed in place, so httpx's own request log
+        line names the IP, not the configured hostname.
+        """
+        host = (request.url.host or "").lower()
+        ip = self._pins.get(host)
+        if ip is None:
+            return
+        request.url = request.url.copy_with(host=ip)
+        request.extensions = {**request.extensions, "sni_hostname": host}
 
     def _refuse_unless_allowed(self, request: httpx.Request) -> None:
         """Raise :class:`EgressBlockedError` unless this request may go out.
@@ -156,6 +174,7 @@ class WhitelistTransport(_WhitelistPolicy, httpx.HTTPTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         self._refuse_unless_allowed(request)
+        self._pin(request)
         return super().handle_request(request)
 
 
@@ -171,6 +190,7 @@ class AsyncWhitelistTransport(_WhitelistPolicy, httpx.AsyncHTTPTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self._refuse_unless_allowed(request)
+        self._pin(request)
         return await super().handle_async_request(request)
 
 
@@ -200,6 +220,7 @@ def build_http_client(
     timeout: float | httpx.Timeout = 60.0,
     *,
     allow_private_network: bool = False,
+    pinned_addresses: Mapping[str, str] | None = None,
     **client_kwargs,
 ) -> httpx.Client:
     """Create an httpx Client with the whitelist transport.
@@ -217,6 +238,11 @@ def build_http_client(
     entirely to loopback/RFC1918 (never link-local). Off by default so every
     existing caller keeps the behaviour it had.
 
+    `pinned_addresses` maps a hostname to the IP the caller already validated
+    (see :func:`src.llm.litellm_proxy.validate_target`): requests to that host
+    connect to that IP with SNI/Host kept as the hostname — no second lookup a
+    rebinding DNS server could answer differently.
+
     `client_kwargs` are handed to `httpx.Client` untouched — `headers`,
     `base_url`, `auth`, `follow_redirects`, everything the real call sites
     need — EXCEPT the two that would replace the transport we just installed.
@@ -228,6 +254,7 @@ def build_http_client(
     _refuse_kwargs_that_route_around_the_whitelist("build_http_client", client_kwargs)
     transport = WhitelistTransport(
         allowed_hosts=allowed_hosts, allow_private_network=allow_private_network,
+        pinned_addresses=pinned_addresses,
     )
     return httpx.Client(transport=transport, timeout=timeout, **client_kwargs)
 
@@ -237,6 +264,7 @@ def build_async_http_client(
     timeout: float | httpx.Timeout = 60.0,
     *,
     allow_private_network: bool = False,
+    pinned_addresses: Mapping[str, str] | None = None,
     **client_kwargs,
 ) -> httpx.AsyncClient:
     """:func:`build_http_client` for `await`ing call sites.
@@ -258,6 +286,7 @@ def build_async_http_client(
     _refuse_kwargs_that_route_around_the_whitelist("build_async_http_client", client_kwargs)
     transport = AsyncWhitelistTransport(
         allowed_hosts=allowed_hosts, allow_private_network=allow_private_network,
+        pinned_addresses=pinned_addresses,
     )
     return httpx.AsyncClient(transport=transport, timeout=timeout, **client_kwargs)
 

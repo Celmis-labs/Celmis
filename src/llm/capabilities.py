@@ -344,6 +344,18 @@ def resolve_litellm_model(model: str, provider: str | None = None) -> str:
     vendor and a ceiling that belongs to somebody else's model.
     """
     name = (model or "").strip()
+    if name and (provider or "").strip() == "litellm":
+        # A workspace LiteLLM proxy: the name is the PROXY's alias, routed by
+        # the SDK's litellm_proxy/ prefix (src/llm/litellm_proxy.py). Like the
+        # self-hosted case, the profile's vendor outranks the name's shape —
+        # "gpt-4o" behind the proxy is not a call to OpenAI. Checked BEFORE the
+        # "already has a prefix" rule: proxy aliases are routinely named
+        # "openai/gpt-4o" or "gemini/gemini-2.5-flash" (that is what /v1/models
+        # lists), and returning those untouched sends the call straight to the
+        # vendor on whatever env key LiteLLM finds.
+        if name.startswith("litellm_proxy/"):
+            return name
+        return f"litellm_proxy/{name}"
     if not name or "/" in name:
         return name
     if (provider or "").strip() == _SELF_HOSTED_PROVIDER:

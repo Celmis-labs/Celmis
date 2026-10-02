@@ -51,6 +51,12 @@ _LITELLM_PREFIX = {
     # call to api.openai.com — see _attach_gateway for why that must never
     # happen implicitly.
     "openai_compatible": "openai",
+    # A workspace's own LiteLLM proxy (src/llm/litellm_proxy.py). The SDK's
+    # `litellm_proxy/` route strips the prefix and posts the alias to the
+    # proxy's OpenAI routes — at Profile.api_base. Without that api_base it
+    # reads LITELLM_PROXY_API_BASE, the INSTALLATION's gateway, so callers
+    # refuse instead (litellm_proxy.require_api_base).
+    "litellm": "litellm_proxy",
 }
 
 # Sensible defaults per surface when nothing is configured yet.
@@ -73,7 +79,7 @@ def litellm_prefix(provider: str) -> str:
 @dataclass(frozen=True)
 class Profile:
     surface: str          # chat | review | embeddings
-    provider: str         # google | openai | anthropic | openrouter | groq | mistral | openai_compatible
+    provider: str         # google | openai | anthropic | openrouter | groq | mistral | openai_compatible | litellm
     model: str            # bare model id, e.g. "gemini-3-flash-preview"
     api_key: str          # key to call with — the LiteLLM virtual key when routed
     dimensions: int | None = None   # embeddings only
@@ -214,12 +220,29 @@ def resolve_profile(surface: str, workspace_id: str = "default") -> Profile:
     # but the KEY may come from the calling workspace when the default tenant
     # has none — a BYOK tenant can then generate/search vectors with its own
     # key while writing into the shared collection.
-    api_key = get_provider_key(prov, effective_ws)
-    if not api_key and surface == "embeddings" and workspace_id != "default":
-        api_key = get_provider_key(prov, workspace_id)
-    # Self-hosted profiles carry their server address in the per-surface dict
-    # ("base_url" in the UI). Hosted providers never have one.
-    api_base = str(entry.get("base_url") or "").strip() or None
+    if prov == "litellm":
+        # Key and address are ONE credential here (litellm_proxy module doc):
+        # both halves come from the same row.
+        #
+        # No embeddings fallback to the calling workspace, unlike the vendor
+        # keys below. A vendor model id names one model whoever's key calls
+        # it; a proxy alias names whatever THAT proxy maps it to. Letting a
+        # tenant's own proxy answer for "embedding-2-test" could write vectors
+        # from a different model into the shared collection. So the shared
+        # embeddings profile uses the default tenant's proxy (or the env pair)
+        # and nothing else.
+        from src.llm.litellm_proxy import resolve_endpoint
+
+        ep = resolve_endpoint(effective_ws)
+        api_key = ep.api_key if ep is not None else ""
+        api_base = ep.base_url if ep is not None else None
+    else:
+        api_key = get_provider_key(prov, effective_ws)
+        if not api_key and surface == "embeddings" and workspace_id != "default":
+            api_key = get_provider_key(prov, workspace_id)
+        # Self-hosted profiles carry their server address in the per-surface
+        # dict ("base_url" in the UI). Hosted providers never have one.
+        api_base = str(entry.get("base_url") or "").strip() or None
     profile = Profile(
         surface=surface, provider=prov, model=model,
         api_key=api_key, dimensions=dims, raw_api_key=api_key,
@@ -240,6 +263,18 @@ def _attach_gateway(profile: Profile, workspace_id: str) -> Profile:
     triggered explicitly from :mod:`src.llm.completion`, so rendering the
     settings page can't block on the proxy.
     """
+    if profile.provider == "litellm":
+        # NEVER attached either: the key is already a virtual key on the
+        # workspace's OWN proxy. Wrapping it in a gateway deployment would
+        # present it to the installation's proxy as if it were a vendor key —
+        # nested proxies, a guaranteed 401, and the tenant's key handed to a
+        # second operator. gateway._plan refuses the same profiles.
+        logger.debug(
+            "gateway_attach_refused surface=%s provider=litellm — a workspace "
+            "proxy profile is never routed through the installation gateway",
+            profile.surface,
+        )
+        return profile
     if profile.provider == "openai_compatible":
         # NEVER attached, even when the gateway is on. The provisioning POST
         # (gateway._upsert_deployment) writes litellm_params with the model and

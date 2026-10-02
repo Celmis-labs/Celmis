@@ -869,6 +869,30 @@ export type LLMConfig = {
    *  cosmetic — the page shows this block read-only instead, so nobody
    *  edits a dropdown that does not run. */
   effective_embeddings?: EffectiveEmbeddings | null;
+  /** True when traffic leaves through the installation's LiteLLM gateway. */
+  gateway_enabled?: boolean;
+  /** The workspace's own LiteLLM proxy (provider "litellm"). Optional only
+   *  for an API that predates it. */
+  litellm?: LiteLLMProxyStatus;
+  /** Whether the embeddings card may offer the LiteLLM proxy — only in the
+   *  workspace whose embeddings profile is the shared one that runs. */
+  litellm_embeddings_allowed?: boolean;
+};
+
+/** Never the key or the full URL: last 4 of the key, its sha256
+ *  fingerprint (12 hex), and the host for workspace admins only. */
+export type LiteLLMProxyStatus = {
+  connected: boolean;
+  host: string | null;
+  masked: string;
+  fingerprint: string | null;
+  source: "ui" | "none" | string;
+};
+
+/** PUT /api/llm/litellm — validated, saved, and the proxy's model ids. */
+export type LiteLLMSaveResult = {
+  litellm: LiteLLMProxyStatus;
+  models: string[];
 };
 
 export type EffectiveEmbeddings = {
@@ -916,6 +940,8 @@ export type TestConnectionResult = {
   /** Server-side caution that is not a failure — e.g. the returned vector
    *  width differs from the configured dimensions. */
   warning?: string | null;
+  /** LiteLLM proxy only: the model ids the virtual key may call. */
+  models?: string[] | null;
 };
 
 /** GET /api/llm/local-setup-guide — how to stand up a self-hosted
@@ -946,12 +972,16 @@ export const llmApi = {
        *  hosted providers still refuse without one (readable detail, not 422). */
       api_key?: string;
       model?: string | null;
-      /** Self-hosted (OpenAI-compatible) only — which server to ping. */
+      /** Self-hosted (OpenAI-compatible) and LiteLLM proxy only — which
+       *  server to ping. */
       base_url?: string;
       /** "chat" (generation surfaces, review included) or "embeddings" —
        *  an embeddings test reports the vector width, which is what
        *  actually matters there. The backend accepts only these two. */
       surface?: "chat" | "embeddings";
+      /** LiteLLM proxy embeddings test only — the width the profile asks
+       *  for, sent as `dimensions` exactly as indexing will. */
+      dimensions?: number;
     },
   ) =>
     api<TestConnectionResult>("/api/llm/test-connection", {
@@ -959,6 +989,13 @@ export const llmApi = {
       method: "POST",
       json: body,
     }),
+  /** Validate-then-save the workspace LiteLLM proxy. Both halves every
+   *  time; a 422 means nothing was saved. Workspace admins only. */
+  saveLiteLLM: (token: string, body: { base_url: string; api_key: string }) =>
+    api<LiteLLMSaveResult>("/api/llm/litellm", { token, method: "PUT", json: body }),
+  /** Remove this workspace's LiteLLM proxy row (URL + virtual key). */
+  deleteLiteLLM: (token: string) =>
+    api<LLMConfig>("/api/llm/litellm", { token, method: "DELETE" }),
   localSetupGuide: (token: string) =>
     api<LocalSetupGuide>("/api/llm/local-setup-guide", { token }),
   providerModels: (token: string, provider: string) =>
