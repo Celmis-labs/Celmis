@@ -2422,5 +2422,18 @@
   "agentWidget.q.github": "Ce permisiuni are nevoie un token GitHub?",
   "agentWidget.q.reviewPrompt": "Unde schimb promptul de review?",
   "agentWidget.q.llmKey": "Unde adaug cheia LLM sau un proxy LiteLLM?",
-  "agentWidget.q.repos": "Ce depozite am?"
+  "agentWidget.q.repos": "Ce depozite am?",
+  "enterprise.analytics.title": "Disponibil în Celmis Enterprise",
+  "enterprise.analytics.desc": "Analizele de review fac parte din Celmis Enterprise. Cereți administratorului acestui server să adauge o licență care include analize.",
+  "edition.title": "Ediție",
+  "edition.community": "Community",
+  "edition.enterprise": "Enterprise",
+  "edition.customer": "Licențiat către",
+  "edition.expires": "Expiră",
+  "edition.expired": "expirată — reînnoiți licența",
+  "edition.features": "Funcționalități",
+  "edition.feature.sso": "Autentificare unică (SSO)",
+  "edition.feature.analytics": "Analize",
+  "edition.communityHint": "Autentificarea unică și analizele necesită o licență enterprise: setați CELMIS_LICENSE_KEY sau CELMIS_LICENSE_FILE pentru API și reporniți-l.",
+  "edition.unknown": "Necunoscut — API-ul nu a răspuns."
 }

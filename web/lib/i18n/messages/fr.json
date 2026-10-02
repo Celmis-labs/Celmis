@@ -2422,5 +2422,18 @@
   "agentWidget.q.github": "De quels droits un jeton GitHub a-t-il besoin ?",
   "agentWidget.q.reviewPrompt": "Où modifier le prompt de revue ?",
   "agentWidget.q.llmKey": "Où ajouter ma clé LLM ou un proxy LiteLLM ?",
-  "agentWidget.q.repos": "Quels dépôts ai-je ?"
+  "agentWidget.q.repos": "Quels dépôts ai-je ?",
+  "enterprise.analytics.title": "Disponible dans Celmis Enterprise",
+  "enterprise.analytics.desc": "Les analyses de revue font partie de Celmis Enterprise. Demandez à l'administrateur de ce serveur d'ajouter une licence incluant les analyses.",
+  "edition.title": "Édition",
+  "edition.community": "Community",
+  "edition.enterprise": "Enterprise",
+  "edition.customer": "Licence accordée à",
+  "edition.expires": "Expire le",
+  "edition.expired": "expirée — renouvelez la licence",
+  "edition.features": "Fonctionnalités",
+  "edition.feature.sso": "Authentification unique (SSO)",
+  "edition.feature.analytics": "Analyses",
+  "edition.communityHint": "L'authentification unique et les analyses nécessitent une licence entreprise : définissez CELMIS_LICENSE_KEY ou CELMIS_LICENSE_FILE pour l'API et redémarrez-la.",
+  "edition.unknown": "Inconnu — l'API n'a pas répondu."
 }

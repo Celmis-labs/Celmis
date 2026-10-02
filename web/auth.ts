@@ -5,7 +5,9 @@
  *   - Credentials (email + password) → calls FastAPI /api/auth/login
  *   - Google     → calls FastAPI /api/auth/google with the Google id_token
  *   - OIDC (Keycloak or any OpenID provider, id "oidc") → calls FastAPI
- *     /api/auth/oidc with the provider's id_token. Registered only when
+ *     /api/auth/oidc with the provider's id_token. Enterprise: the provider
+ *     lives in web/ee/sso (LICENSE_EE) and the API endpoint in src/ee/sso,
+ *     mounted only under a licence that grants "sso". Registered only when
  *     AUTH_OIDC_ISSUER + AUTH_OIDC_CLIENT_ID + AUTH_OIDC_CLIENT_SECRET are set.
  *
  * The FastAPI backend is the source of truth for the user record. NextAuth
@@ -15,10 +17,10 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import Google from "next-auth/providers/google";
-import Keycloak from "next-auth/providers/keycloak";
 
 import { api, type TokenResponse, type UserOut } from "@/lib/api";
-import { oidcConfigured, oidcProviderName, passwordLoginEnabled } from "@/lib/auth-options";
+import { passwordLoginEnabled } from "@/lib/auth-options";
+import { OIDC_EXCHANGE_PATH, OIDC_PROVIDER_ID, oidcProviders } from "@/ee/sso/oidc-provider";
 
 /** How often the jwt callback re-reads /api/auth/me (is_admin). */
 const ME_RECHECK_MS = 5 * 60 * 1000;
@@ -90,22 +92,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           }),
         ]
       : []),
-    // Company SSO (Keycloak realm or any OIDC issuer). Same rule as Google:
-    // registered only when fully configured. The Keycloak provider is a plain
-    // OIDC provider with discovery from `issuer`, so it serves both cases;
-    // the id is "oidc", making the redirect URI /api/auth/callback/oidc.
-    ...(oidcConfigured()
-      ? [
-          Keycloak({
-            id: "oidc",
-            name: oidcProviderName(),
-            issuer: process.env.AUTH_OIDC_ISSUER,
-            clientId: process.env.AUTH_OIDC_CLIENT_ID,
-            clientSecret: process.env.AUTH_OIDC_CLIENT_SECRET,
-            authorization: { params: { scope: "openid email profile" } },
-          }),
-        ]
-      : []),
+    // Company SSO (Keycloak realm or any OIDC issuer) — enterprise, see
+    // web/ee/sso/oidc-provider.ts. Same rule as Google: registered only when
+    // fully configured, so this is an empty list otherwise.
+    ...oidcProviders(),
   ],
   callbacks: {
     jwt: async ({ token, user, account }) => {
@@ -124,8 +114,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       const exchangePath =
         account?.provider === "google"
           ? "/api/auth/google"
-          : account?.provider === "oidc"
-            ? "/api/auth/oidc"
+          : account?.provider === OIDC_PROVIDER_ID
+            ? OIDC_EXCHANGE_PATH
             : null;
       if (exchangePath && account?.id_token) {
         try {

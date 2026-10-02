@@ -2422,5 +2422,18 @@
   "agentWidget.q.github": "GitHub 토큰에는 어떤 권한이 필요한가요?",
   "agentWidget.q.reviewPrompt": "리뷰 프롬프트는 어디서 바꾸나요?",
   "agentWidget.q.llmKey": "LLM 키나 LiteLLM 프록시는 어디에 추가하나요?",
-  "agentWidget.q.repos": "어떤 저장소가 있나요?"
+  "agentWidget.q.repos": "어떤 저장소가 있나요?",
+  "enterprise.analytics.title": "Celmis Enterprise에서 사용 가능",
+  "enterprise.analytics.desc": "리뷰 분석은 Celmis Enterprise 기능입니다. 이 서버 관리자에게 분석이 포함된 라이선스를 추가해 달라고 요청하세요.",
+  "edition.title": "에디션",
+  "edition.community": "Community",
+  "edition.enterprise": "Enterprise",
+  "edition.customer": "라이선스 대상",
+  "edition.expires": "만료일",
+  "edition.expired": "만료됨 — 라이선스를 갱신하세요",
+  "edition.features": "기능",
+  "edition.feature.sso": "통합 인증(SSO)",
+  "edition.feature.analytics": "분석",
+  "edition.communityHint": "통합 인증과 분석에는 Enterprise 라이선스가 필요합니다. API에 CELMIS_LICENSE_KEY 또는 CELMIS_LICENSE_FILE을 설정하고 다시 시작하세요.",
+  "edition.unknown": "알 수 없음 — API가 응답하지 않았습니다."
 }

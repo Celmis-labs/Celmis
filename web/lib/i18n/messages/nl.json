@@ -2422,5 +2422,18 @@
   "agentWidget.q.github": "Welke rechten heeft een GitHub-token nodig?",
   "agentWidget.q.reviewPrompt": "Waar wijzig ik de reviewprompt?",
   "agentWidget.q.llmKey": "Waar voeg ik mijn LLM-sleutel of een LiteLLM-proxy toe?",
-  "agentWidget.q.repos": "Welke repository's heb ik?"
+  "agentWidget.q.repos": "Welke repository's heb ik?",
+  "enterprise.analytics.title": "Beschikbaar in Celmis Enterprise",
+  "enterprise.analytics.desc": "Review-analyses zijn onderdeel van Celmis Enterprise. Vraag de beheerder van deze server een licentie met analyses toe te voegen.",
+  "edition.title": "Editie",
+  "edition.community": "Community",
+  "edition.enterprise": "Enterprise",
+  "edition.customer": "Gelicentieerd aan",
+  "edition.expires": "Verloopt",
+  "edition.expired": "verlopen — vernieuw de licentie",
+  "edition.features": "Functies",
+  "edition.feature.sso": "Single sign-on",
+  "edition.feature.analytics": "Analyses",
+  "edition.communityHint": "Single sign-on en analyses vereisen een enterprise-licentie: stel CELMIS_LICENSE_KEY of CELMIS_LICENSE_FILE in voor de API en herstart die.",
+  "edition.unknown": "Onbekend — de API gaf geen antwoord."
 }

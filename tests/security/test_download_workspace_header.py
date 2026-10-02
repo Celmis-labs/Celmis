@@ -30,7 +30,9 @@ WORKSPACE_AGNOSTIC = ("/api/workspaces",)
 
 def _sources() -> list[Path]:
     out: list[Path] = []
-    for sub in ("app", "components", "lib"):
+    # `ee` is the enterprise half of the web app (LICENSE_EE): its fetches
+    # are held to the same header rule as everybody else's.
+    for sub in ("app", "components", "lib", "ee"):
         root = WEB / sub
         if root.exists():
             out += [p for p in root.rglob("*.tsx")] + [p for p in root.rglob("*.ts")]

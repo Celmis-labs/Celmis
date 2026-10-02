@@ -2422,5 +2422,18 @@
   "agentWidget.q.github": "¿Qué permisos necesita un token de GitHub?",
   "agentWidget.q.reviewPrompt": "¿Dónde cambio el prompt de revisión?",
   "agentWidget.q.llmKey": "¿Dónde añado mi clave de LLM o un proxy LiteLLM?",
-  "agentWidget.q.repos": "¿Qué repositorios tengo?"
+  "agentWidget.q.repos": "¿Qué repositorios tengo?",
+  "enterprise.analytics.title": "Disponible en Celmis Enterprise",
+  "enterprise.analytics.desc": "La analítica de revisiones forma parte de Celmis Enterprise. Pide a quien administra este servidor que añada una licencia que incluya analítica.",
+  "edition.title": "Edición",
+  "edition.community": "Community",
+  "edition.enterprise": "Enterprise",
+  "edition.customer": "Licenciado a",
+  "edition.expires": "Caduca",
+  "edition.expired": "caducada — renueva la licencia",
+  "edition.features": "Funciones",
+  "edition.feature.sso": "Inicio de sesión único (SSO)",
+  "edition.feature.analytics": "Analítica",
+  "edition.communityHint": "El inicio de sesión único y la analítica requieren una licencia enterprise: define CELMIS_LICENSE_KEY o CELMIS_LICENSE_FILE en la API y reiníciala.",
+  "edition.unknown": "Desconocido — la API no respondió."
 }

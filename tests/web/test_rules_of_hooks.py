@@ -48,7 +48,7 @@ def _eslint_available() -> bool:
 def test_no_hook_is_called_conditionally_anywhere_in_the_app():
     proc = subprocess.run(
         [str(WEB / "node_modules" / ".bin" / "eslint"),
-         "app", "components", "lib", "--format", "json"],
+         "app", "components", "lib", "ee", "--format", "json"],
         cwd=WEB, capture_output=True, text=True, timeout=900,
     )
     # eslint exits non-zero when it reports anything at all, including the

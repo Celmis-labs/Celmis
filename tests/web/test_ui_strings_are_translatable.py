@@ -60,7 +60,11 @@ def _strings(path: Path) -> list[str]:
 
 
 #: Everything a person reads, wherever it happens to live this week.
-RENDERED = sorted(APP.rglob("*.tsx")) + sorted(COMPONENTS.rglob("*.tsx"))
+#: `ee/` is the enterprise half of the web app (LICENSE_EE) — the analytics
+#: dashboard moved there from app/, and its strings did not stop being read.
+EE = WEB / "ee"
+RENDERED = (sorted(APP.rglob("*.tsx")) + sorted(COMPONENTS.rglob("*.tsx"))
+            + sorted(EE.rglob("*.tsx")))
 
 
 def test_there_are_files_to_check():

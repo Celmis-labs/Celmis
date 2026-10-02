@@ -2422,5 +2422,18 @@
   "agentWidget.q.github": "Jaká oprávnění potřebuje token GitHubu?",
   "agentWidget.q.reviewPrompt": "Kde změním prompt pro review?",
   "agentWidget.q.llmKey": "Kam přidám klíč LLM nebo proxy LiteLLM?",
-  "agentWidget.q.repos": "Jaké mám repozitáře?"
+  "agentWidget.q.repos": "Jaké mám repozitáře?",
+  "enterprise.analytics.title": "K dispozici v Celmis Enterprise",
+  "enterprise.analytics.desc": "Analytika revizí je součástí Celmis Enterprise. Požádejte správce tohoto serveru o přidání licence s analytikou.",
+  "edition.title": "Edice",
+  "edition.community": "Community",
+  "edition.enterprise": "Enterprise",
+  "edition.customer": "Držitel licence",
+  "edition.expires": "Platí do",
+  "edition.expired": "vypršela — obnovte licenci",
+  "edition.features": "Funkce",
+  "edition.feature.sso": "Jednotné přihlášení (SSO)",
+  "edition.feature.analytics": "Analytika",
+  "edition.communityHint": "Jednotné přihlášení a analytika vyžadují enterprise licenci: nastavte CELMIS_LICENSE_KEY nebo CELMIS_LICENSE_FILE pro API a restartujte ho.",
+  "edition.unknown": "Neznámé — API neodpovědělo."
 }

@@ -1,6 +1,12 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Enterprise components (web/ee, LICENSE_EE) are scanned for classes too.
+ * Automatic detection already covers them while Next runs from web/; this
+ * says so explicitly, so a change of build root cannot silently drop their
+ * styles. */
+@source "../ee";
+
 /* `dark:` follows the theme toggle, not the operating system.
  *
  * Tailwind 4's default `dark` variant is `prefers-color-scheme: dark`, while

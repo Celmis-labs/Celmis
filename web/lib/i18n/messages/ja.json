@@ -2422,5 +2422,18 @@
   "agentWidget.q.github": "GitHub トークンにはどの権限が必要？",
   "agentWidget.q.reviewPrompt": "レビュープロンプトはどこで変更できる？",
   "agentWidget.q.llmKey": "LLM キーや LiteLLM プロキシはどこに追加する？",
-  "agentWidget.q.repos": "どのリポジトリがありますか？"
+  "agentWidget.q.repos": "どのリポジトリがありますか？",
+  "enterprise.analytics.title": "Celmis Enterprise で利用可能",
+  "enterprise.analytics.desc": "レビュー分析は Celmis Enterprise の機能です。このサーバーの管理者に、分析を含むライセンスの追加を依頼してください。",
+  "edition.title": "エディション",
+  "edition.community": "Community",
+  "edition.enterprise": "Enterprise",
+  "edition.customer": "ライセンス先",
+  "edition.expires": "有効期限",
+  "edition.expired": "期限切れ — ライセンスを更新してください",
+  "edition.features": "機能",
+  "edition.feature.sso": "シングルサインオン",
+  "edition.feature.analytics": "分析",
+  "edition.communityHint": "シングルサインオンと分析には Enterprise ライセンスが必要です。API に CELMIS_LICENSE_KEY または CELMIS_LICENSE_FILE を設定し、再起動してください。",
+  "edition.unknown": "不明 — API から応答がありません。"
 }

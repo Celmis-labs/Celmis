@@ -13,6 +13,7 @@ import { ActivitySquareIcon, DownloadIcon, GaugeIcon } from "lucide-react";
 
 import { downloadWithAuth, integrationsHealthApi, opsApi, type IntegrationCard, type ResourceSampleOut } from "@/lib/api";
 import { AdminGate } from "@/components/admin-gate";
+import { EditionCard } from "@/components/edition-card";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { useToken } from "@/lib/use-token";
@@ -76,6 +77,8 @@ export default function HealthPage() {
         description={t("admin.health.description")}
         tabs={<SectionTabs set="admin" />}
       />
+
+      <EditionCard />
 
       <QueryState query={q}>
         {(data) => {

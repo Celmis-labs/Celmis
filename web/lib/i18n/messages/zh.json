@@ -2422,5 +2422,18 @@
   "agentWidget.q.github": "GitHub 令牌需要哪些权限？",
   "agentWidget.q.reviewPrompt": "在哪里修改评审提示词？",
   "agentWidget.q.llmKey": "在哪里添加 LLM 密钥或 LiteLLM 代理？",
-  "agentWidget.q.repos": "我有哪些仓库？"
+  "agentWidget.q.repos": "我有哪些仓库？",
+  "enterprise.analytics.title": "Celmis 企业版提供",
+  "enterprise.analytics.desc": "审查分析属于 Celmis 企业版功能。请联系此服务器的管理员添加包含分析功能的许可证。",
+  "edition.title": "版本",
+  "edition.community": "社区版",
+  "edition.enterprise": "企业版",
+  "edition.customer": "授权给",
+  "edition.expires": "到期",
+  "edition.expired": "已过期 — 请续订许可证",
+  "edition.features": "功能",
+  "edition.feature.sso": "单点登录",
+  "edition.feature.analytics": "分析",
+  "edition.communityHint": "单点登录和分析需要企业版许可证：为 API 设置 CELMIS_LICENSE_KEY 或 CELMIS_LICENSE_FILE 并重启。",
+  "edition.unknown": "未知 — API 没有响应。"
 }

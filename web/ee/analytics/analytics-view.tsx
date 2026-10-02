@@ -1,7 +1,14 @@
 "use client";
 
+// Celmis Enterprise Edition. Licensed under LICENSE_EE, not the AGPL —
+// see LICENSING.md and ee/README.md in the repository root.
+
 /**
  * /analytics — what the reviewer did for this workspace, and what came of it.
+ *
+ * Enterprise: rendered by the AGPL route `app/(app)/analytics/page.tsx` only
+ * when /api/capabilities does not report `review_analytics` off — the API
+ * mounts /api/analytics only under a licence that grants "analytics".
  *
  * Owner, admin or editor of the workspace (or a global admin): it reports
  * cost and how often the team merged what the reviewer flagged. The API
@@ -44,7 +51,7 @@ function seconds(v: number | null | undefined): string {
   return `${(v / 60).toFixed(1)}m`;
 }
 
-export default function AnalyticsPage() {
+export function AnalyticsView() {
   const t = useT();
   const token = useToken();
   const allowed = useCanViewAnalytics();

@@ -2422,5 +2422,18 @@
   "agentWidget.q.github": "Bir GitHub token'ı hangi izinlere ihtiyaç duyar?",
   "agentWidget.q.reviewPrompt": "İnceleme istemini nerede değiştiririm?",
   "agentWidget.q.llmKey": "LLM anahtarımı veya LiteLLM proxy'sini nereye eklerim?",
-  "agentWidget.q.repos": "Hangi depolarım var?"
+  "agentWidget.q.repos": "Hangi depolarım var?",
+  "enterprise.analytics.title": "Celmis Enterprise'da mevcut",
+  "enterprise.analytics.desc": "İnceleme analitiği Celmis Enterprise'ın bir parçasıdır. Bu sunucuyu yöneten kişiden analitik içeren bir lisans eklemesini isteyin.",
+  "edition.title": "Sürüm",
+  "edition.community": "Community",
+  "edition.enterprise": "Enterprise",
+  "edition.customer": "Lisans sahibi",
+  "edition.expires": "Bitiş tarihi",
+  "edition.expired": "süresi doldu — lisansı yenileyin",
+  "edition.features": "Özellikler",
+  "edition.feature.sso": "Tek oturum açma (SSO)",
+  "edition.feature.analytics": "Analitik",
+  "edition.communityHint": "Tek oturum açma ve analitik bir enterprise lisansı gerektirir: API için CELMIS_LICENSE_KEY veya CELMIS_LICENSE_FILE ayarlayın ve yeniden başlatın.",
+  "edition.unknown": "Bilinmiyor — API yanıt vermedi."
 }

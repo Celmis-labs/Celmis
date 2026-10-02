@@ -2422,5 +2422,18 @@
   "agentWidget.q.github": "Які дозволи потрібні токену GitHub?",
   "agentWidget.q.reviewPrompt": "Де змінити промпт для рев'ю?",
   "agentWidget.q.llmKey": "Куди додати ключ LLM або проксі LiteLLM?",
-  "agentWidget.q.repos": "Які в мене є репозиторії?"
+  "agentWidget.q.repos": "Які в мене є репозиторії?",
+  "enterprise.analytics.title": "Доступно в Celmis Enterprise",
+  "enterprise.analytics.desc": "Аналітика рев'ю входить до Celmis Enterprise. Попросіть того, хто обслуговує цей сервер, додати ліцензію з аналітикою.",
+  "edition.title": "Редакція",
+  "edition.community": "Community",
+  "edition.enterprise": "Enterprise",
+  "edition.customer": "Ліцензіат",
+  "edition.expires": "Діє до",
+  "edition.expired": "термін минув — поновіть ліцензію",
+  "edition.features": "Можливості",
+  "edition.feature.sso": "Єдиний вхід (SSO)",
+  "edition.feature.analytics": "Аналітика",
+  "edition.communityHint": "Єдиний вхід і аналітика потребують enterprise-ліцензії: задайте CELMIS_LICENSE_KEY або CELMIS_LICENSE_FILE для API і перезапустіть його.",
+  "edition.unknown": "Невідомо — API не відповів."
 }

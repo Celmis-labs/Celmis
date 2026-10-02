@@ -2422,5 +2422,18 @@
   "agentWidget.q.github": "Welche Berechtigungen braucht ein GitHub-Token?",
   "agentWidget.q.reviewPrompt": "Wo ändere ich den Review-Prompt?",
   "agentWidget.q.llmKey": "Wo füge ich meinen LLM-Schlüssel oder einen LiteLLM-Proxy hinzu?",
-  "agentWidget.q.repos": "Welche Repositories habe ich?"
+  "agentWidget.q.repos": "Welche Repositories habe ich?",
+  "enterprise.analytics.title": "Verfügbar in Celmis Enterprise",
+  "enterprise.analytics.desc": "Review-Analysen sind Teil von Celmis Enterprise. Bitten Sie den Betreiber dieses Servers, eine Lizenz mit Analysen hinzuzufügen.",
+  "edition.title": "Edition",
+  "edition.community": "Community",
+  "edition.enterprise": "Enterprise",
+  "edition.customer": "Lizenziert für",
+  "edition.expires": "Gültig bis",
+  "edition.expired": "abgelaufen — Lizenz erneuern",
+  "edition.features": "Funktionen",
+  "edition.feature.sso": "Single Sign-On",
+  "edition.feature.analytics": "Analysen",
+  "edition.communityHint": "Single Sign-On und Analysen erfordern eine Enterprise-Lizenz: CELMIS_LICENSE_KEY oder CELMIS_LICENSE_FILE für die API setzen und sie neu starten.",
+  "edition.unknown": "Unbekannt — die API hat nicht geantwortet."
 }

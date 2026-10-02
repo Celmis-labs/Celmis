@@ -19,6 +19,7 @@ import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useT } from "@/lib/i18n";
 import { useCanViewAnalytics } from "@/lib/use-analytics-access";
+import { useFeatureOff } from "@/lib/use-capabilities";
 import { cn } from "@/lib/utils";
 
 export type TabDef = {
@@ -32,7 +33,9 @@ export type TabDef = {
    * section that is otherwise workspace-scoped. */
   adminOnly?: boolean;
   /** Hidden unless the person may read review analytics — global admin, or
-   * owner / admin / editor of the active workspace (useCanViewAnalytics). */
+   * owner / admin / editor of the active workspace (useCanViewAnalytics) —
+   * and also when /api/capabilities explicitly reports `review_analytics`
+   * off: an enterprise feature this installation is not licensed for. */
   analyticsOnly?: boolean;
 };
 
@@ -186,7 +189,10 @@ export function SectionTabs({
   const isAdmin = Boolean(session?.isAdmin);
   // `undefined` while loading counts as no: a tab that appears late is
   // better than one that appears and is then taken away.
-  const canAnalytics = useCanViewAnalytics() === true;
+  // Only an explicit `false` from the server hides it (the capabilities
+  // contract): no answer keeps today's behaviour.
+  const analyticsOff = useFeatureOff("review_analytics");
+  const canAnalytics = useCanViewAnalytics() === true && !analyticsOff;
   // The section this route belongs to wins over the one the page asked for;
   // see sectionOwning(). Explicit `items` are never second-guessed.
   const key = items ? undefined : sectionOwning(pathname) ?? set;

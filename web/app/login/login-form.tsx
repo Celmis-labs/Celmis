@@ -4,7 +4,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState, useTransition } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { KeyRoundIcon, ShieldCheckIcon } from "lucide-react";
+import { KeyRoundIcon } from "lucide-react";
 import { BrandMark, BrandWord } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,11 +17,20 @@ import { LanguageSwitcher } from "@/components/language-switcher";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useT } from "@/lib/i18n";
+import { SsoButton } from "@/ee/sso/sso-button";
 
-export function LoginForm({ passwordLogin }: { passwordLogin: boolean }) {
+export function LoginForm({
+  passwordLogin,
+  ssoName,
+}: {
+  passwordLogin: boolean;
+  /** Company SSO display name, or null when SSO is not offered — decided on
+   *  the server (page.tsx) from the web config AND the API's capabilities. */
+  ssoName: string | null;
+}) {
   return (
     <Suspense fallback={null}>
-      <LoginInner passwordLogin={passwordLogin} />
+      <LoginInner passwordLogin={passwordLogin} ssoName={ssoName} />
     </Suspense>
   );
 }
@@ -41,7 +50,7 @@ function OrDivider({ label }: { label: string }) {
   );
 }
 
-function LoginInner({ passwordLogin }: { passwordLogin: boolean }) {
+function LoginInner({ passwordLogin, ssoName }: { passwordLogin: boolean; ssoName: string | null }) {
   const router = useRouter();
   const params = useSearchParams();
   const t = useT();
@@ -61,8 +70,6 @@ function LoginInner({ passwordLogin }: { passwordLogin: boolean }) {
   // Ask NextAuth which providers are actually configured. Showing a Google
   // button when GOOGLE_CLIENT_ID is unset sends users to a 400 from Google.
   const [googleEnabled, setGoogleEnabled] = useState(false);
-  // Company SSO (Keycloak / OIDC): the provider's display name, or null.
-  const [ssoName, setSsoName] = useState<string | null>(null);
   // With password login off, the credentials form is only the break-glass
   // recovery login and stays folded away.
   const [showAdminLogin, setShowAdminLogin] = useState(false);
@@ -70,11 +77,9 @@ function LoginInner({ passwordLogin }: { passwordLogin: boolean }) {
     getProviders()
       .then((providers) => {
         setGoogleEnabled(Boolean(providers && "google" in providers));
-        setSsoName(providers?.oidc?.name ?? null);
       })
       .catch(() => {
         setGoogleEnabled(false);
-        setSsoName(null);
       });
   }, []);
 
@@ -115,10 +120,6 @@ function LoginInner({ passwordLogin }: { passwordLogin: boolean }) {
     void signIn("google", { callbackUrl: callback });
   };
 
-  const onSso = () => {
-    void signIn("oidc", { callbackUrl: callback });
-  };
-
   const loginForm = (
     <form method="post" onSubmit={onCredentials} className="flex flex-col gap-3">
       <div className="grid gap-2">
@@ -149,11 +150,10 @@ function LoginInner({ passwordLogin }: { passwordLogin: boolean }) {
     </form>
   );
 
+  // Enterprise (web/ee/sso). `ssoName` is null unless the server decided
+  // SSO is both configured here and licensed on the API.
   const ssoButton = ssoName ? (
-    <Button type="button" onClick={onSso} variant={passwordLogin ? "outline" : "default"}>
-      <ShieldCheckIcon className="h-4 w-4" aria-hidden />
-      {t("auth.sso.signInWith", { name: ssoName })}
-    </Button>
+    <SsoButton name={ssoName} callbackUrl={callback} primary={!passwordLogin} />
   ) : null;
 
   const googleButton = googleEnabled ? (
