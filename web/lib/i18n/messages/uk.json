@@ -2279,13 +2279,19 @@
   "llm.litellm.option": "Проксі LiteLLM",
   "llm.litellm.baseUrlLabel": "URL проксі",
   "llm.litellm.keyPlaceholder": "Віртуальний ключ (sk-…)",
-  "llm.litellm.hint": "Проксі LiteLLM, який розгорнула ваша компанія: його URL і віртуальний ключ. Після збереження всі поверхні нижче можуть використовувати моделі проксі. Щоб змінити URL, ключ треба ввести ще раз.",
+  "llm.litellm.hint": "Проксі LiteLLM вашої компанії: введіть його https-URL і віртуальний ключ, потім натисніть «Перевірити і зберегти». URL має бути публічним; ключ і URL перевіряються за списком моделей проксі й зберігаються зашифрованими. Під час зміни потрібні обидва.",
   "llm.litellm.saved": "Проксі LiteLLM збережено",
   "llm.litellm.modelsAvailable": "Доступно моделей: {count}",
-  "llm.litellm.reenterKey": "Введіть ключ ще раз, щоб використати новий URL.",
-  "llm.litellm.notConfigured": "Спершу збережіть проксі LiteLLM (URL і ключ) у картці ключів провайдерів.",
+  "llm.litellm.notConfigured": "Спершу адміністратор робочого простору має зберегти проксі LiteLLM (URL і ключ) у картці ключів провайдерів.",
   "llm.litellm.remove": "Видалити",
   "llm.litellm.removed": "LiteLLM-проксі видалено",
   "llm.litellm.removeConfirm": "Видалити збережені URL і ключ LiteLLM-проксі? Функції, налаштовані на проксі, перестануть працювати, доки проксі не збережуть знову.",
-  "llm.litellm.envManaged": "Задано на сервері (LITELLM_API_BASE)"
+  "llm.litellm.keyLabel": "Віртуальний ключ",
+  "llm.litellm.toggleKey": "Показати або сховати ключ",
+  "llm.litellm.adminOnly": "Змінювати проксі LiteLLM можуть лише власники та адміністратори робочого простору.",
+  "llm.litellm.verifyAndSave": "Перевірити і зберегти",
+  "llm.litellm.verifying": "Перевірка…",
+  "llm.litellm.connected": "підключено",
+  "llm.litellm.savedSummary": "Ключ {masked} · відбиток {fingerprint}",
+  "llm.litellm.hostLabel": "Хост: {host}"
 }

@@ -2279,13 +2279,19 @@
   "llm.litellm.option": "LiteLLM proxy",
   "llm.litellm.baseUrlLabel": "Proxy URL",
   "llm.litellm.keyPlaceholder": "Virtual key (sk-…)",
-  "llm.litellm.hint": "A LiteLLM proxy your company runs: its URL plus a virtual key. Once saved, every surface below can use the proxy's models. Changing the URL requires entering the key again.",
+  "llm.litellm.hint": "A LiteLLM proxy your company runs: enter its https URL and a virtual key, then verify and save. The URL must be public; the key and URL are checked against the proxy's model list and stored encrypted. Both are required every time you change them.",
   "llm.litellm.saved": "LiteLLM proxy saved",
   "llm.litellm.modelsAvailable": "{count} models available",
-  "llm.litellm.reenterKey": "Enter the key again to use a new URL.",
-  "llm.litellm.notConfigured": "Save the LiteLLM proxy (URL and key) in the provider keys card first.",
+  "llm.litellm.notConfigured": "A workspace admin must save the LiteLLM proxy (URL and key) in the provider keys card first.",
   "llm.litellm.remove": "Remove",
   "llm.litellm.removed": "LiteLLM proxy removed",
   "llm.litellm.removeConfirm": "Remove the saved LiteLLM proxy URL and key? Features set to the proxy stop working until a proxy is saved again.",
-  "llm.litellm.envManaged": "Set by the server (LITELLM_API_BASE)"
+  "llm.litellm.keyLabel": "Virtual key",
+  "llm.litellm.toggleKey": "Show or hide the key",
+  "llm.litellm.adminOnly": "Only workspace owners and admins can change the LiteLLM proxy.",
+  "llm.litellm.verifyAndSave": "Verify and save",
+  "llm.litellm.verifying": "Verifying…",
+  "llm.litellm.connected": "connected",
+  "llm.litellm.savedSummary": "Key {masked} · fingerprint {fingerprint}",
+  "llm.litellm.hostLabel": "Host: {host}"
 }

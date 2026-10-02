@@ -2279,13 +2279,19 @@
   "llm.litellm.option": "Proxy de LiteLLM",
   "llm.litellm.baseUrlLabel": "URL del proxy",
   "llm.litellm.keyPlaceholder": "Clave virtual (sk-…)",
-  "llm.litellm.hint": "Un proxy de LiteLLM que gestiona tu empresa: su URL y una clave virtual. Una vez guardado, todas las superficies de abajo pueden usar los modelos del proxy. Para cambiar la URL hay que volver a introducir la clave.",
+  "llm.litellm.hint": "Un proxy LiteLLM de su empresa: introduzca su URL https y una clave virtual, luego verifique y guarde. La URL debe ser pública; la clave y la URL se comprueban con la lista de modelos del proxy y se guardan cifradas. Ambas son obligatorias cada vez que las cambie.",
   "llm.litellm.saved": "Proxy de LiteLLM guardado",
   "llm.litellm.modelsAvailable": "{count} modelos disponibles",
-  "llm.litellm.reenterKey": "Vuelve a introducir la clave para usar una URL nueva.",
-  "llm.litellm.notConfigured": "Primero guarda el proxy de LiteLLM (URL y clave) en la tarjeta de claves de proveedores.",
+  "llm.litellm.notConfigured": "Un administrador del espacio de trabajo debe guardar primero el proxy LiteLLM (URL y clave) en la tarjeta de claves de proveedores.",
   "llm.litellm.remove": "Eliminar",
   "llm.litellm.removed": "Proxy de LiteLLM eliminado",
   "llm.litellm.removeConfirm": "¿Eliminar la URL y la clave guardadas del proxy de LiteLLM? Las funciones que usan el proxy dejarán de funcionar hasta que se guarde otro.",
-  "llm.litellm.envManaged": "Definido por el servidor (LITELLM_API_BASE)"
+  "llm.litellm.keyLabel": "Clave virtual",
+  "llm.litellm.toggleKey": "Mostrar u ocultar la clave",
+  "llm.litellm.adminOnly": "Solo los propietarios y administradores del espacio de trabajo pueden cambiar el proxy LiteLLM.",
+  "llm.litellm.verifyAndSave": "Verificar y guardar",
+  "llm.litellm.verifying": "Verificando…",
+  "llm.litellm.connected": "conectado",
+  "llm.litellm.savedSummary": "Clave {masked} · huella {fingerprint}",
+  "llm.litellm.hostLabel": "Host: {host}"
 }

@@ -394,133 +394,122 @@ function ProviderKeysCard({ config, isAdmin, onSaved }: { config: LLMConfig; isA
 
 /**
  * A LiteLLM proxy the customer already runs: URL + virtual key, one
- * credential. Its own row because a virtual key pasted into the OpenAI field
- * is sent to api.openai.com, which answers 401 for a key it never issued.
+ * credential, configured only here and only by a workspace admin.
  *
- * Changing the URL needs the key typed again — the backend refuses to send a
- * saved key to a new address, on save and on Test alike.
+ * "Verify and save" sends both halves every time: the backend checks the URL
+ * (https, public address), lists the proxy's models with the key, and only
+ * then stores the pair — encrypted, URL included. The page never gets the key
+ * or the URL back: a masked key (last 4), its fingerprint, and — for admins —
+ * the host.
  */
 function LiteLLMProxyRow({ config, isAdmin, onSaved }: { config: LLMConfig; isAdmin: boolean; onSaved: () => void }) {
   const token = useToken();
   const t = useT();
   const qc = useQueryClient();
   const st = config.litellm;
-  const [baseUrl, setBaseUrl] = useState(st?.base_url ?? "");
+  const [baseUrl, setBaseUrl] = useState("");
   const [key, setKey] = useState("");
   const [show, setShow] = useState(false);
-  const [outcome, setOutcome] = useState<TestOutcome | null>(null);
-  // Resync the URL when the saved one changes (a save, another tab) — during
-  // render, like ReviewAgentsCard, not in an effect.
-  const [syncedUrl, setSyncedUrl] = useState(st?.base_url ?? "");
-  if (syncedUrl !== (st?.base_url ?? "")) {
-    setSyncedUrl(st?.base_url ?? "");
-    setBaseUrl(st?.base_url ?? "");
-  }
+  const [error, setError] = useState<string | null>(null);
+  const [savedModels, setSavedModels] = useState<string[] | null>(null);
 
-  const trimmedUrl = baseUrl.trim().replace(/\/+$/, "");
-  const urlChanged = Boolean(st?.base_url) && trimmedUrl !== (st?.base_url ?? "");
-  // A saved key may be reused only against the URL it was saved with.
-  const needsKey = !key.trim() && (!st?.connected || urlChanged);
+  // The live model count for a saved proxy — the same list the profile
+  // dropdowns below are fed from.
+  const models = useQuery({
+    queryKey: ["provider-models", LITELLM, st?.connected ?? false, st?.fingerprint ?? ""],
+    queryFn: () => llmApi.providerModels(token!, LITELLM),
+    enabled: !!token && Boolean(st?.connected) && savedModels === null,
+    staleTime: 5 * 60_000,
+  });
+  const modelCount = savedModels !== null
+    ? savedModels.length
+    : models.data ? models.data.generation.length + models.data.embedding.length : null;
 
   const save = useMutation({
-    mutationFn: () => llmApi.saveConfig(token!, {
-      litellm: { base_url: trimmedUrl, ...(key.trim() ? { api_key: key.trim() } : {}) },
-    }),
-    onSuccess: () => {
+    mutationFn: () => llmApi.saveLiteLLM(token!, { base_url: baseUrl.trim(), api_key: key.trim() }),
+    onSuccess: (r) => {
       toast.success(t("llm.litellm.saved"));
       setKey("");
-      setOutcome(null);
+      setBaseUrl("");
+      setError(null);
+      setSavedModels(r.models);
       // A new URL or key is a different proxy: its model list replaces the
-      // cached one even though "connected" stayed true.
+      // cached one even though "connected" may have stayed true.
       void qc.invalidateQueries({ queryKey: ["provider-models", LITELLM] });
       onSaved();
     },
-    onError: (e) => toast.error(t("settings.llm.error", { message: (e as Error).message })),
+    onError: (e) => setError((e as Error).message),
   });
-  // A stored row only — an env-pair proxy is the operator's and is not ours
-  // to remove from here.
-  const canRemove = Boolean(st?.connected && st.source === "ui") || Boolean(!st?.connected && st?.base_url);
   const remove = useMutation({
     mutationFn: () => llmApi.deleteLiteLLM(token!),
     onSuccess: () => {
       toast.success(t("llm.litellm.removed"));
       setKey("");
-      setOutcome(null);
+      setError(null);
+      setSavedModels(null);
       void qc.invalidateQueries({ queryKey: ["provider-models", LITELLM] });
       onSaved();
     },
     onError: (e) => toast.error(t("settings.llm.error", { message: (e as Error).message })),
   });
-  const test = useMutation({
-    mutationFn: () => llmApi.testConnection(token!, {
-      provider: "litellm",
-      api_key: key.trim() || "use-saved",
-      ...(trimmedUrl ? { base_url: trimmedUrl } : {}),
-    }),
-    onSuccess: (r) => setOutcome({ result: r }),
-    onError: (e) => setOutcome({ error: (e as Error).message }),
-  });
-  const models = outcome?.result?.ok ? outcome.result.models ?? [] : [];
+  const canSave = isAdmin && baseUrl.trim().length > 0 && key.trim().length > 0 && !save.isPending;
 
   return (
     <div className="space-y-2 border-t border-[var(--color-border)] pt-3">
-      <div className="grid grid-cols-[140px_1fr_1fr_auto_auto_auto] gap-2 items-center">
+      <div className="grid grid-cols-1 gap-2 items-center sm:grid-cols-[140px_1fr_1fr_auto_auto]">
         <div className="text-sm flex items-center gap-1.5">
           {t("llm.litellm.rowName")}
-          {st?.connected && <Badge variant="outline" className="text-[9px]">{st.source}</Badge>}
+          {st?.connected && <Badge variant="outline" className="text-[9px]">{t("llm.litellm.connected")}</Badge>}
         </div>
         <Input
           aria-label={t("llm.litellm.baseUrlLabel")}
-          placeholder={st?.connected && st.source === "env" && !st.base_url
-            ? t("llm.litellm.envManaged")
-            : "https://litellm.example.com"}
-          value={baseUrl} disabled={!isAdmin}
+          placeholder={st?.host ? `https://${st.host}` : "https://litellm.example.com"}
+          value={baseUrl} disabled={!isAdmin} autoComplete="off"
           onChange={(e) => setBaseUrl(e.target.value)}
         />
         <div className="relative">
           <Input
             type={show ? "text" : "password"}
-            value={key}
-            placeholder={st?.connected && !urlChanged
+            aria-label={t("llm.litellm.keyLabel")}
+            value={key} autoComplete="off"
+            placeholder={st?.connected
               ? t("settings.llm.savedMasked", { masked: st.masked })
               : t("llm.litellm.keyPlaceholder")}
             disabled={!isAdmin}
             onChange={(e) => setKey(e.target.value)}
           />
           <button type="button" onClick={() => setShow((s) => !s)}
+            aria-label={t("llm.litellm.toggleKey")}
             className="absolute right-2 top-1/2 -translate-y-1/2 opacity-60">
             {show ? <EyeOffIcon className="h-3.5 w-3.5" /> : <EyeIcon className="h-3.5 w-3.5" />}
           </button>
         </div>
-        <Button size="sm" variant="outline"
-          disabled={!isAdmin || !trimmedUrl || needsKey || save.isPending
-            || (!key.trim() && !urlChanged)}
-          onClick={() => save.mutate()}>
-          {t("settings.llm.saveButton")}
+        <Button size="sm" variant="outline" disabled={!canSave}
+          onClick={() => { setError(null); save.mutate(); }}>
+          {save.isPending ? t("llm.litellm.verifying") : t("llm.litellm.verifyAndSave")}
         </Button>
         <Button size="sm" variant="ghost"
-          disabled={!isAdmin || test.isPending || !trimmedUrl || needsKey}
-          onClick={() => test.mutate()}>
-          {t("settings.llm.testButton")}
-        </Button>
-        <Button size="sm" variant="ghost"
-          disabled={!isAdmin || !canRemove || remove.isPending}
+          disabled={!isAdmin || !st?.connected || remove.isPending}
           onClick={() => {
             if (window.confirm(t("llm.litellm.removeConfirm"))) remove.mutate();
           }}>
           {t("llm.litellm.remove")}
         </Button>
       </div>
-      <p className="text-[11px] text-[var(--color-muted-foreground)]">
-        {urlChanged && !key.trim() ? t("llm.litellm.reenterKey") : t("llm.litellm.hint")}
-      </p>
-      <TestResultPanel outcome={outcome} />
-      {models.length > 0 && (
-        <div className="text-[11px] text-[var(--color-muted-foreground)]">
-          {t("llm.litellm.modelsAvailable", { count: models.length })}:{" "}
-          {models.map((m) => <code key={m} className="mr-1.5">{m}</code>)}
+      {st?.connected && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--color-muted-foreground)]">
+          <span>{t("llm.litellm.savedSummary", { masked: st.masked, fingerprint: st.fingerprint ?? "—" })}</span>
+          {st.host && <span>{t("llm.litellm.hostLabel", { host: st.host })}</span>}
+          {modelCount !== null && <span>{t("llm.litellm.modelsAvailable", { count: modelCount })}</span>}
+          {models.data?.detail && savedModels === null && (
+            <span className="text-amber-600">{models.data.detail}</span>
+          )}
         </div>
       )}
+      <p className="text-[11px] text-[var(--color-muted-foreground)]">
+        {isAdmin ? t("llm.litellm.hint") : t("llm.litellm.adminOnly")}
+      </p>
+      {error && <TestResultPanel outcome={{ error }} />}
     </div>
   );
 }
@@ -590,11 +579,11 @@ function ProfileCard({
   const models = useQuery({
     // keyConnected is part of the key so saving a provider key automatically
     // refetches the model list (a keyless fetch caches an empty 200 otherwise).
-    // For the LiteLLM proxy the address and key are part of the identity too:
-    // re-pointing it keeps `connected` true and would otherwise show the old
-    // proxy's aliases.
+    // For the LiteLLM proxy the saved key's fingerprint is part of the
+    // identity too: re-saving keeps `connected` true and would otherwise show
+    // the old proxy's aliases.
     queryKey: provider === LITELLM
-      ? ["provider-models", provider, keyConnected, config.litellm?.base_url ?? "", config.litellm?.masked ?? ""]
+      ? ["provider-models", provider, keyConnected, config.litellm?.fingerprint ?? ""]
       : ["provider-models", provider, keyConnected],
     queryFn: () => llmApi.providerModels(token!, provider),
     // Local model names are not in any catalog — a vendor /models call would

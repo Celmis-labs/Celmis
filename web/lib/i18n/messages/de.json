@@ -2279,13 +2279,19 @@
   "llm.litellm.option": "LiteLLM-Proxy",
   "llm.litellm.baseUrlLabel": "Proxy-URL",
   "llm.litellm.keyPlaceholder": "Virtueller Schlüssel (sk-…)",
-  "llm.litellm.hint": "Ein LiteLLM-Proxy, den Ihr Unternehmen betreibt: seine URL plus ein virtueller Schlüssel. Nach dem Speichern können alle Bereiche unten die Modelle des Proxys nutzen. Wer die URL ändert, muss den Schlüssel erneut eingeben.",
+  "llm.litellm.hint": "Ein LiteLLM-Proxy Ihres Unternehmens: https-URL und virtuellen Schlüssel eingeben, dann prüfen und speichern. Die URL muss öffentlich sein; Schlüssel und URL werden gegen die Modellliste des Proxys geprüft und verschlüsselt gespeichert. Bei jeder Änderung sind beide erforderlich.",
   "llm.litellm.saved": "LiteLLM-Proxy gespeichert",
   "llm.litellm.modelsAvailable": "{count} Modelle verfügbar",
-  "llm.litellm.reenterKey": "Geben Sie den Schlüssel erneut ein, um eine neue URL zu verwenden.",
-  "llm.litellm.notConfigured": "Speichern Sie zuerst den LiteLLM-Proxy (URL und Schlüssel) in der Karte der Anbieterschlüssel.",
+  "llm.litellm.notConfigured": "Ein Workspace-Admin muss zuerst den LiteLLM-Proxy (URL und Schlüssel) in der Karte der Anbieterschlüssel speichern.",
   "llm.litellm.remove": "Entfernen",
   "llm.litellm.removed": "LiteLLM-Proxy entfernt",
   "llm.litellm.removeConfirm": "Gespeicherte URL und Schlüssel des LiteLLM-Proxys entfernen? Funktionen, die den Proxy nutzen, funktionieren erst wieder, wenn ein Proxy gespeichert wird.",
-  "llm.litellm.envManaged": "Vom Server festgelegt (LITELLM_API_BASE)"
+  "llm.litellm.keyLabel": "Virtueller Schlüssel",
+  "llm.litellm.toggleKey": "Schlüssel ein- oder ausblenden",
+  "llm.litellm.adminOnly": "Nur Eigentümer und Admins des Workspace können den LiteLLM-Proxy ändern.",
+  "llm.litellm.verifyAndSave": "Prüfen und speichern",
+  "llm.litellm.verifying": "Wird geprüft…",
+  "llm.litellm.connected": "verbunden",
+  "llm.litellm.savedSummary": "Schlüssel {masked} · Fingerabdruck {fingerprint}",
+  "llm.litellm.hostLabel": "Host: {host}"
 }

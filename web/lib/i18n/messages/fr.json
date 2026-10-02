@@ -2279,13 +2279,19 @@
   "llm.litellm.option": "Proxy LiteLLM",
   "llm.litellm.baseUrlLabel": "URL du proxy",
   "llm.litellm.keyPlaceholder": "Clé virtuelle (sk-…)",
-  "llm.litellm.hint": "Un proxy LiteLLM géré par votre entreprise : son URL et une clé virtuelle. Une fois enregistré, chaque surface ci-dessous peut utiliser les modèles du proxy. Changer l'URL exige de saisir à nouveau la clé.",
+  "llm.litellm.hint": "Un proxy LiteLLM de votre entreprise : saisissez son URL https et une clé virtuelle, puis vérifiez et enregistrez. L’URL doit être publique ; la clé et l’URL sont vérifiées avec la liste des modèles du proxy et stockées chiffrées. Les deux sont requises à chaque modification.",
   "llm.litellm.saved": "Proxy LiteLLM enregistré",
   "llm.litellm.modelsAvailable": "{count} modèles disponibles",
-  "llm.litellm.reenterKey": "Saisissez à nouveau la clé pour utiliser une nouvelle URL.",
-  "llm.litellm.notConfigured": "Enregistrez d'abord le proxy LiteLLM (URL et clé) dans la carte des clés des fournisseurs.",
+  "llm.litellm.notConfigured": "Un administrateur de l’espace de travail doit d’abord enregistrer le proxy LiteLLM (URL et clé) dans la carte des clés fournisseurs.",
   "llm.litellm.remove": "Supprimer",
   "llm.litellm.removed": "Proxy LiteLLM supprimé",
   "llm.litellm.removeConfirm": "Supprimer l'URL et la clé enregistrées du proxy LiteLLM ? Les fonctions qui l'utilisent cesseront de fonctionner jusqu'à ce qu'un proxy soit de nouveau enregistré.",
-  "llm.litellm.envManaged": "Défini par le serveur (LITELLM_API_BASE)"
+  "llm.litellm.keyLabel": "Clé virtuelle",
+  "llm.litellm.toggleKey": "Afficher ou masquer la clé",
+  "llm.litellm.adminOnly": "Seuls les propriétaires et administrateurs de l’espace de travail peuvent modifier le proxy LiteLLM.",
+  "llm.litellm.verifyAndSave": "Vérifier et enregistrer",
+  "llm.litellm.verifying": "Vérification…",
+  "llm.litellm.connected": "connecté",
+  "llm.litellm.savedSummary": "Clé {masked} · empreinte {fingerprint}",
+  "llm.litellm.hostLabel": "Hôte : {host}"
 }

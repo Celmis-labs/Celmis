@@ -2279,13 +2279,19 @@
   "llm.litellm.option": "LiteLLM プロキシ",
   "llm.litellm.baseUrlLabel": "プロキシ URL",
   "llm.litellm.keyPlaceholder": "仮想キー (sk-…)",
-  "llm.litellm.hint": "社内で運用している LiteLLM プロキシ: その URL と仮想キーです。保存すると、下のすべての項目でプロキシのモデルを使えます。URL を変更するにはキーを再入力する必要があります。",
+  "llm.litellm.hint": "社内で運用している LiteLLM プロキシ: https の URL と仮想キーを入力し、検証して保存します。URL は公開アドレスである必要があります。キーと URL はプロキシのモデル一覧で検証され、暗号化して保存されます。変更時は両方が必要です。",
   "llm.litellm.saved": "LiteLLM プロキシを保存しました",
   "llm.litellm.modelsAvailable": "{count} 個のモデルが利用可能",
-  "llm.litellm.reenterKey": "新しい URL を使うにはキーを再入力してください。",
-  "llm.litellm.notConfigured": "先にプロバイダーキーのカードで LiteLLM プロキシ (URL とキー) を保存してください。",
+  "llm.litellm.notConfigured": "まずワークスペース管理者がプロバイダーキーのカードで LiteLLM プロキシ (URL とキー) を保存する必要があります。",
   "llm.litellm.remove": "削除",
   "llm.litellm.removed": "LiteLLM プロキシを削除しました",
   "llm.litellm.removeConfirm": "保存された LiteLLM プロキシの URL とキーを削除しますか？プロキシを使う機能は、再度保存されるまで動作しません。",
-  "llm.litellm.envManaged": "サーバーで設定済み (LITELLM_API_BASE)"
+  "llm.litellm.keyLabel": "仮想キー",
+  "llm.litellm.toggleKey": "キーの表示/非表示",
+  "llm.litellm.adminOnly": "LiteLLM プロキシを変更できるのはワークスペースのオーナーと管理者のみです。",
+  "llm.litellm.verifyAndSave": "検証して保存",
+  "llm.litellm.verifying": "検証中…",
+  "llm.litellm.connected": "接続済み",
+  "llm.litellm.savedSummary": "キー {masked} · フィンガープリント {fingerprint}",
+  "llm.litellm.hostLabel": "ホスト: {host}"
 }

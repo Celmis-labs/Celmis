@@ -2279,13 +2279,19 @@
   "llm.litellm.option": "Proxy LiteLLM",
   "llm.litellm.baseUrlLabel": "URL proxy",
   "llm.litellm.keyPlaceholder": "Virtuální klíč (sk-…)",
-  "llm.litellm.hint": "Proxy LiteLLM, které provozuje vaše firma: jeho URL a virtuální klíč. Po uložení mohou všechny oblasti níže používat modely proxy. Změna URL vyžaduje znovu zadat klíč.",
+  "llm.litellm.hint": "LiteLLM proxy vaší firmy: zadejte její https URL a virtuální klíč a pak ověřte a uložte. URL musí být veřejná; klíč i URL se ověří proti seznamu modelů proxy a uloží se šifrovaně. Při každé změně jsou nutné obě hodnoty.",
   "llm.litellm.saved": "Proxy LiteLLM uloženo",
   "llm.litellm.modelsAvailable": "Dostupné modely: {count}",
-  "llm.litellm.reenterKey": "Zadejte klíč znovu, chcete-li použít nové URL.",
-  "llm.litellm.notConfigured": "Nejprve uložte proxy LiteLLM (URL a klíč) na kartě klíčů poskytovatelů.",
+  "llm.litellm.notConfigured": "Správce pracovního prostoru musí nejprve uložit LiteLLM proxy (URL a klíč) v kartě klíčů poskytovatelů.",
   "llm.litellm.remove": "Odebrat",
   "llm.litellm.removed": "Proxy LiteLLM odebráno",
   "llm.litellm.removeConfirm": "Odebrat uloženou URL a klíč proxy LiteLLM? Funkce, které ho používají, přestanou fungovat, dokud se proxy znovu neuloží.",
-  "llm.litellm.envManaged": "Nastaveno serverem (LITELLM_API_BASE)"
+  "llm.litellm.keyLabel": "Virtuální klíč",
+  "llm.litellm.toggleKey": "Zobrazit nebo skrýt klíč",
+  "llm.litellm.adminOnly": "LiteLLM proxy mohou měnit jen vlastníci a správci pracovního prostoru.",
+  "llm.litellm.verifyAndSave": "Ověřit a uložit",
+  "llm.litellm.verifying": "Ověřuje se…",
+  "llm.litellm.connected": "připojeno",
+  "llm.litellm.savedSummary": "Klíč {masked} · otisk {fingerprint}",
+  "llm.litellm.hostLabel": "Hostitel: {host}"
 }

@@ -2279,13 +2279,19 @@
   "llm.litellm.option": "LiteLLM 代理",
   "llm.litellm.baseUrlLabel": "代理 URL",
   "llm.litellm.keyPlaceholder": "虚拟密钥 (sk-…)",
-  "llm.litellm.hint": "贵公司运行的 LiteLLM 代理：其 URL 和一个虚拟密钥。保存后，下方每个功能都可以使用该代理的模型。更改 URL 需要重新输入密钥。",
+  "llm.litellm.hint": "贵公司运行的 LiteLLM 代理：输入其 https URL 和虚拟密钥，然后验证并保存。URL 必须是公网地址；密钥和 URL 会通过代理的模型列表进行验证，并加密存储。每次修改都需要同时提供两者。",
   "llm.litellm.saved": "LiteLLM 代理已保存",
   "llm.litellm.modelsAvailable": "{count} 个模型可用",
-  "llm.litellm.reenterKey": "请重新输入密钥以使用新的 URL。",
-  "llm.litellm.notConfigured": "请先在提供商密钥卡片中保存 LiteLLM 代理（URL 和密钥）。",
+  "llm.litellm.notConfigured": "需要工作区管理员先在提供商密钥卡片中保存 LiteLLM 代理（URL 和密钥）。",
   "llm.litellm.remove": "移除",
   "llm.litellm.removed": "LiteLLM 代理已移除",
   "llm.litellm.removeConfirm": "移除已保存的 LiteLLM 代理 URL 和密钥？使用该代理的功能将停止工作，直到再次保存代理。",
-  "llm.litellm.envManaged": "由服务器设置 (LITELLM_API_BASE)"
+  "llm.litellm.keyLabel": "虚拟密钥",
+  "llm.litellm.toggleKey": "显示或隐藏密钥",
+  "llm.litellm.adminOnly": "只有工作区所有者和管理员可以修改 LiteLLM 代理。",
+  "llm.litellm.verifyAndSave": "验证并保存",
+  "llm.litellm.verifying": "正在验证…",
+  "llm.litellm.connected": "已连接",
+  "llm.litellm.savedSummary": "密钥 {masked} · 指纹 {fingerprint}",
+  "llm.litellm.hostLabel": "主机：{host}"
 }

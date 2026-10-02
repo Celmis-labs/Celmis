@@ -2279,13 +2279,19 @@
   "llm.litellm.option": "LiteLLM proxy",
   "llm.litellm.baseUrlLabel": "Proxy URL'si",
   "llm.litellm.keyPlaceholder": "Sanal anahtar (sk-…)",
-  "llm.litellm.hint": "Şirketinizin çalıştırdığı bir LiteLLM proxy: URL'si ve bir sanal anahtar. Kaydedildikten sonra aşağıdaki her alan proxy'nin modellerini kullanabilir. URL'yi değiştirmek için anahtarı yeniden girmeniz gerekir.",
+  "llm.litellm.hint": "Şirketinizin işlettiği bir LiteLLM proxy'si: https URL'sini ve sanal anahtarı girin, ardından doğrulayıp kaydedin. URL herkese açık olmalıdır; anahtar ve URL proxy'nin model listesiyle doğrulanır ve şifrelenmiş olarak saklanır. Her değişiklikte ikisi de gereklidir.",
   "llm.litellm.saved": "LiteLLM proxy kaydedildi",
   "llm.litellm.modelsAvailable": "{count} model kullanılabilir",
-  "llm.litellm.reenterKey": "Yeni bir URL kullanmak için anahtarı yeniden girin.",
-  "llm.litellm.notConfigured": "Önce LiteLLM proxy'yi (URL ve anahtar) sağlayıcı anahtarları kartında kaydedin.",
+  "llm.litellm.notConfigured": "Önce bir çalışma alanı yöneticisi, sağlayıcı anahtarları kartında LiteLLM proxy'sini (URL ve anahtar) kaydetmelidir.",
   "llm.litellm.remove": "Kaldır",
   "llm.litellm.removed": "LiteLLM proxy kaldırıldı",
   "llm.litellm.removeConfirm": "Kayıtlı LiteLLM proxy URL'si ve anahtarı kaldırılsın mı? Proxy'yi kullanan özellikler yeniden bir proxy kaydedilene kadar çalışmaz.",
-  "llm.litellm.envManaged": "Sunucu tarafından ayarlandı (LITELLM_API_BASE)"
+  "llm.litellm.keyLabel": "Sanal anahtar",
+  "llm.litellm.toggleKey": "Anahtarı göster veya gizle",
+  "llm.litellm.adminOnly": "LiteLLM proxy'sini yalnızca çalışma alanı sahipleri ve yöneticileri değiştirebilir.",
+  "llm.litellm.verifyAndSave": "Doğrula ve kaydet",
+  "llm.litellm.verifying": "Doğrulanıyor…",
+  "llm.litellm.connected": "bağlı",
+  "llm.litellm.savedSummary": "Anahtar {masked} · parmak izi {fingerprint}",
+  "llm.litellm.hostLabel": "Ana makine: {host}"
 }

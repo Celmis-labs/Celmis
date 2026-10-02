@@ -2279,13 +2279,19 @@
   "llm.litellm.option": "LiteLLM-proxy",
   "llm.litellm.baseUrlLabel": "Proxy-URL",
   "llm.litellm.keyPlaceholder": "Virtuele sleutel (sk-…)",
-  "llm.litellm.hint": "Een LiteLLM-proxy die je bedrijf draait: de URL plus een virtuele sleutel. Na opslaan kan elk onderdeel hieronder de modellen van de proxy gebruiken. Wie de URL wijzigt, moet de sleutel opnieuw invoeren.",
+  "llm.litellm.hint": "Een LiteLLM-proxy van uw bedrijf: voer de https-URL en een virtuele sleutel in en kies daarna controleren en opslaan. De URL moet openbaar zijn; sleutel en URL worden gecontroleerd tegen de modellenlijst van de proxy en versleuteld opgeslagen. Bij elke wijziging zijn beide nodig.",
   "llm.litellm.saved": "LiteLLM-proxy opgeslagen",
   "llm.litellm.modelsAvailable": "{count} modellen beschikbaar",
-  "llm.litellm.reenterKey": "Voer de sleutel opnieuw in om een nieuwe URL te gebruiken.",
-  "llm.litellm.notConfigured": "Sla eerst de LiteLLM-proxy (URL en sleutel) op in de kaart met providersleutels.",
+  "llm.litellm.notConfigured": "Een werkruimtebeheerder moet eerst de LiteLLM-proxy (URL en sleutel) opslaan in de kaart met providersleutels.",
   "llm.litellm.remove": "Verwijderen",
   "llm.litellm.removed": "LiteLLM-proxy verwijderd",
   "llm.litellm.removeConfirm": "Opgeslagen URL en sleutel van de LiteLLM-proxy verwijderen? Functies die de proxy gebruiken werken pas weer als er opnieuw een proxy is opgeslagen.",
-  "llm.litellm.envManaged": "Ingesteld door de server (LITELLM_API_BASE)"
+  "llm.litellm.keyLabel": "Virtuele sleutel",
+  "llm.litellm.toggleKey": "Sleutel tonen of verbergen",
+  "llm.litellm.adminOnly": "Alleen eigenaren en beheerders van de werkruimte kunnen de LiteLLM-proxy wijzigen.",
+  "llm.litellm.verifyAndSave": "Controleren en opslaan",
+  "llm.litellm.verifying": "Controleren…",
+  "llm.litellm.connected": "verbonden",
+  "llm.litellm.savedSummary": "Sleutel {masked} · vingerafdruk {fingerprint}",
+  "llm.litellm.hostLabel": "Host: {host}"
 }

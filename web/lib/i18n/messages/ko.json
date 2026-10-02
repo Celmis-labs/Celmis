@@ -2279,13 +2279,19 @@
   "llm.litellm.option": "LiteLLM 프록시",
   "llm.litellm.baseUrlLabel": "프록시 URL",
   "llm.litellm.keyPlaceholder": "가상 키 (sk-…)",
-  "llm.litellm.hint": "회사에서 운영하는 LiteLLM 프록시: URL과 가상 키입니다. 저장하면 아래의 모든 영역에서 프록시의 모델을 사용할 수 있습니다. URL을 바꾸려면 키를 다시 입력해야 합니다.",
+  "llm.litellm.hint": "회사에서 운영하는 LiteLLM 프록시: https URL과 가상 키를 입력한 뒤 확인하고 저장하세요. URL은 공개 주소여야 하며, 키와 URL은 프록시의 모델 목록으로 확인된 후 암호화되어 저장됩니다. 변경할 때마다 둘 다 필요합니다.",
   "llm.litellm.saved": "LiteLLM 프록시를 저장했습니다",
   "llm.litellm.modelsAvailable": "사용 가능한 모델 {count}개",
-  "llm.litellm.reenterKey": "새 URL을 사용하려면 키를 다시 입력하세요.",
-  "llm.litellm.notConfigured": "먼저 공급자 키 카드에서 LiteLLM 프록시(URL과 키)를 저장하세요.",
+  "llm.litellm.notConfigured": "먼저 워크스페이스 관리자가 공급자 키 카드에서 LiteLLM 프록시(URL과 키)를 저장해야 합니다.",
   "llm.litellm.remove": "삭제",
   "llm.litellm.removed": "LiteLLM 프록시가 삭제되었습니다",
   "llm.litellm.removeConfirm": "저장된 LiteLLM 프록시 URL과 키를 삭제할까요? 프록시를 사용하는 기능은 다시 저장할 때까지 작동하지 않습니다.",
-  "llm.litellm.envManaged": "서버에서 설정됨 (LITELLM_API_BASE)"
+  "llm.litellm.keyLabel": "가상 키",
+  "llm.litellm.toggleKey": "키 표시 또는 숨기기",
+  "llm.litellm.adminOnly": "워크스페이스 소유자와 관리자만 LiteLLM 프록시를 변경할 수 있습니다.",
+  "llm.litellm.verifyAndSave": "확인 후 저장",
+  "llm.litellm.verifying": "확인 중…",
+  "llm.litellm.connected": "연결됨",
+  "llm.litellm.savedSummary": "키 {masked} · 지문 {fingerprint}",
+  "llm.litellm.hostLabel": "호스트: {host}"
 }

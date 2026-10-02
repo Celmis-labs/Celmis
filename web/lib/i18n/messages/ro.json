@@ -2279,13 +2279,19 @@
   "llm.litellm.option": "Proxy LiteLLM",
   "llm.litellm.baseUrlLabel": "URL proxy",
   "llm.litellm.keyPlaceholder": "Cheie virtuală (sk-…)",
-  "llm.litellm.hint": "Un proxy LiteLLM administrat de compania ta: URL-ul lui plus o cheie virtuală. După salvare, fiecare secțiune de mai jos poate folosi modelele proxy-ului. Schimbarea URL-ului cere reintroducerea cheii.",
+  "llm.litellm.hint": "Un proxy LiteLLM al companiei: introduceți URL-ul https și o cheie virtuală, apoi verificați și salvați. URL-ul trebuie să fie public; cheia și URL-ul sunt verificate cu lista de modele a proxy-ului și stocate criptat. Ambele sunt necesare la fiecare modificare.",
   "llm.litellm.saved": "Proxy LiteLLM salvat",
   "llm.litellm.modelsAvailable": "{count} modele disponibile",
-  "llm.litellm.reenterKey": "Reintrodu cheia pentru a folosi un URL nou.",
-  "llm.litellm.notConfigured": "Salvează mai întâi proxy-ul LiteLLM (URL și cheie) în cardul cheilor de furnizor.",
+  "llm.litellm.notConfigured": "Un administrator al spațiului de lucru trebuie mai întâi să salveze proxy-ul LiteLLM (URL și cheie) în cardul cheilor de furnizor.",
   "llm.litellm.remove": "Elimină",
   "llm.litellm.removed": "Proxy LiteLLM eliminat",
   "llm.litellm.removeConfirm": "Elimini URL-ul și cheia salvate ale proxy-ului LiteLLM? Funcțiile care îl folosesc nu vor mai merge până când se salvează din nou un proxy.",
-  "llm.litellm.envManaged": "Setat de server (LITELLM_API_BASE)"
+  "llm.litellm.keyLabel": "Cheie virtuală",
+  "llm.litellm.toggleKey": "Afișează sau ascunde cheia",
+  "llm.litellm.adminOnly": "Doar proprietarii și administratorii spațiului de lucru pot modifica proxy-ul LiteLLM.",
+  "llm.litellm.verifyAndSave": "Verifică și salvează",
+  "llm.litellm.verifying": "Se verifică…",
+  "llm.litellm.connected": "conectat",
+  "llm.litellm.savedSummary": "Cheie {masked} · amprentă {fingerprint}",
+  "llm.litellm.hostLabel": "Gazdă: {host}"
 }

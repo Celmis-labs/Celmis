@@ -871,11 +871,20 @@ export type LLMConfig = {
   litellm_embeddings_allowed?: boolean;
 };
 
+/** Never the key or the full URL: last 4 of the key, its sha256
+ *  fingerprint (12 hex), and the host for workspace admins only. */
 export type LiteLLMProxyStatus = {
   connected: boolean;
-  base_url: string | null;
+  host: string | null;
   masked: string;
-  source: "ui" | "env" | "none" | string;
+  fingerprint: string | null;
+  source: "ui" | "none" | string;
+};
+
+/** PUT /api/llm/litellm — validated, saved, and the proxy's model ids. */
+export type LiteLLMSaveResult = {
+  litellm: LiteLLMProxyStatus;
+  models: string[];
 };
 
 export type EffectiveEmbeddings = {
@@ -904,9 +913,6 @@ export type LLMConfigUpdate = {
    *  way to say "clear this override", since absent already means inherit. */
   agents?: Partial<Record<ReviewAgent, AgentLLMOverride>>;
   provider_keys?: Record<string, string>;
-  /** The workspace LiteLLM proxy. `api_key` may be omitted only when the
-   *  URL is unchanged — a saved key is never re-pointed at a new address. */
-  litellm?: { base_url: string; api_key?: string };
 };
 
 export type ProviderModels = {
@@ -975,6 +981,10 @@ export const llmApi = {
       method: "POST",
       json: body,
     }),
+  /** Validate-then-save the workspace LiteLLM proxy. Both halves every
+   *  time; a 422 means nothing was saved. Workspace admins only. */
+  saveLiteLLM: (token: string, body: { base_url: string; api_key: string }) =>
+    api<LiteLLMSaveResult>("/api/llm/litellm", { token, method: "PUT", json: body }),
   /** Remove this workspace's LiteLLM proxy row (URL + virtual key). */
   deleteLiteLLM: (token: string) =>
     api<LLMConfig>("/api/llm/litellm", { token, method: "DELETE" }),
