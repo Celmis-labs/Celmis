@@ -40,12 +40,13 @@ from src.api.deps import (
 from src.db.models import Workspace, WorkspaceInvite, WorkspaceMember
 from src.db.session import get_async_session
 from src.users import User, UserStore
+from src.users.roles import VALID_WORKSPACE_ROLES
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/invites", tags=["invites"])
 
-_VALID_ROLES = {"owner", "admin", "member", "viewer"}
+_VALID_ROLES = VALID_WORKSPACE_ROLES
 DEFAULT_TTL_DAYS = 14
 
 
