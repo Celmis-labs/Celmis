@@ -31,7 +31,7 @@ def test_the_ranks_are_the_agreed_order():
 
 def test_editor_is_not_a_workspace_admin_role():
     assert "editor" not in WORKSPACE_ADMIN_ROLES
-    assert WORKSPACE_ADMIN_ROLES == {"owner", "admin"}
+    assert {"owner", "admin"} == WORKSPACE_ADMIN_ROLES
 
 
 def test_every_consumer_uses_the_shared_table():
