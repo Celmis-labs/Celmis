@@ -1,11 +1,14 @@
 "use client";
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { usePathname } from "next/navigation";
 import { signOut, useSession } from "next-auth/react";
-import { ActivityIcon, BotIcon, WandIcon, BuildingIcon, GaugeIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, FolderGit2Icon, GitPullRequestIcon, LayoutDashboardIcon, LogOutIcon, MessagesSquareIcon, PanelLeftIcon, PlusIcon, SettingsIcon, ShieldIcon, UsersIcon } from "lucide-react";
+import { AnimatePresence, useReducedMotion } from "motion/react";
+import * as m from "motion/react-m";
+import { ActivityIcon, BotIcon, BuildingIcon, GaugeIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, FolderGit2Icon, GitPullRequestIcon, LayoutDashboardIcon, LogOutIcon, MessagesSquareIcon, PanelLeftIcon, PlusIcon, SettingsIcon, ShieldIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
+import { AgentWidget } from "@/components/agent-widget";
 import { BrandMark, BrandWord } from "@/components/brand-mark";
 import { SECTION_TABS, type TabDef } from "@/components/section-tabs";
 import { Button } from "@/components/ui/button";
@@ -14,9 +17,11 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { FloatingTooltip } from "@/components/ui/tooltip";
 import { LanguageSwitcher } from "@/components/language-switcher";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { API_BASE } from "@/lib/api";
+import { SIDEBAR_COOKIE } from "@/lib/sidebar";
 import { useT } from "@/lib/i18n";
 import { startMainTour, TOUR_DONE_KEY } from "@/lib/tour";
 import { cn } from "@/lib/utils";
@@ -45,15 +50,11 @@ const NAV_SECTIONS: NavSection[] = [
   { href: "/reviews", labelKey: "nav.codeReview", icon: GitPullRequestIcon, pages: SECTION_TABS.review },
   { href: "/projects", labelKey: "nav.qa", icon: MessagesSquareIcon, pages: SECTION_TABS.qa },
   { href: "/claude", labelKey: "nav.agent", icon: BotIcon, pages: SECTION_TABS.agent },
-  // No sub-tabs: one page, one job. A section with a single tab is a tab bar
-  // that never changes — but `pages` is not only the tab row, it is also what
-  // marks the nav entry active and what the breadcrumb is read from, so a
-  // section with no sub-pages still has to list its own route. The empty list
-  // meant the entry never highlighted and the page had no breadcrumb at all.
-  {
-    href: "/automation", labelKey: "nav.automation", icon: WandIcon,
-    pages: [{ href: "/automation", labelKey: "nav.automation" }],
-  },
+  // The Celmis agent has no row here any more. It is the round button in the
+  // bottom-right corner of every page (components/agent-widget.tsx), which
+  // opens it over whatever you were looking at; its full view, /automation,
+  // is one press from that panel and is named by the breadcrumb through
+  // UNLISTED_PAGES below.
   // Alerts, the channels that deliver them, the job queue, the audit trail,
   // and the server log tail — one section, because "is it working, and what
   // did it just do" is one question. The last two arrived here from
@@ -330,35 +331,166 @@ function WorkspaceSwitcher() {
   );
 }
 
+const RAIL_WIDTH = 48;
+const SIDEBAR_WIDTH = 240;
 
-/** Icon-only link for the collapsed w-12 sidebar rail. */
-function RailLink({
-  href, labelKey, icon: Icon, active,
+/** Fast out, soft landing — the curve the width and the labels share, so the
+ *  column and its contents arrive together. */
+const SIDEBAR_EASE = [0.32, 0.72, 0, 1] as const;
+
+function noSubscribe(): () => void {
+  return () => {};
+}
+
+/** ⌘ on a Mac, Ctrl everywhere else — for the tooltip only. The binding
+ *  itself answers to both, because a Mac with an external PC keyboard is a
+ *  real thing and the cost of accepting either is nothing. */
+function useShortcutLabel(): string {
+  const mac = useSyncExternalStore(
+    noSubscribe,
+    () => /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent),
+    () => false,
+  );
+  return mac ? "⌘B" : "Ctrl+B";
+}
+
+/** One sidebar row: icon always, label beside it while there is room.
+ *
+ *  The same element in both states, so collapsing animates rather than swaps:
+ *  the column narrows, the label fades and is clipped, and the icon does not
+ *  move — it sits at the rail's centre line in both widths. In the rail the
+ *  label is still in the DOM (it is the link's accessible name) and a
+ *  tooltip carries it for a pointer. */
+function NavLink({
+  section, pathname, expanded,
 }: {
-  href: string; labelKey: string; icon: typeof LayoutDashboardIcon; active: boolean;
+  section: NavSection; pathname: string; expanded: boolean;
 }) {
   const t = useT();
-  const label = t(labelKey);
+  const active = isSectionActive(pathname, section);
+  const Icon = section.icon;
+  const label = t(section.labelKey);
   return (
-    <Link
-      href={href}
-      title={label}
-      aria-label={label}
-      data-tour={NAV_TOUR[href]}
-      className={cn(
-        // `shrink-0`: the rail is a column flex container, and a flex item
-        // whose only height is `h-9` shrinks below it — on a short window all
-        // eleven icons squeezed themselves into the available space instead of
-        // the rail scrolling, so they got smaller the more sections there were
-        // and the hit target went with them.
-        "flex h-9 w-9 shrink-0 items-center justify-center rounded-md transition-colors",
-        active
-          ? "bg-[var(--color-brand-muted)] text-[var(--color-brand)]"
-          : "text-[var(--color-muted-foreground)] hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)]",
+    <FloatingTooltip label={label} disabled={expanded}>
+      <Link
+        href={section.href}
+        data-tour={NAV_TOUR[section.href]}
+        aria-current={active ? "page" : undefined}
+        className={cn(
+          // `shrink-0`: the nav is a column flex container, and a flex item
+          // whose only height is `h-9` shrinks below it — on a short window
+          // every row squeezed itself into the available space instead of
+          // the nav scrolling, and the hit target went with it.
+          // px-2.5 inside the nav's px-1.5 puts a 16px icon's centre at 24px,
+          // the middle of the 48px rail — so it does not jump on collapse.
+          "group/nav relative flex min-h-11 w-full shrink-0 items-center gap-2.5 overflow-hidden rounded-md px-2.5 text-sm transition-colors sm:h-9 sm:min-h-0",
+          active
+            ? "bg-[var(--color-brand-muted)] font-medium text-[var(--color-brand)]"
+            : "text-[var(--color-muted-foreground)] hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)]",
+        )}
+      >
+        <Icon className="h-4 w-4 shrink-0 transition-transform duration-150 group-hover/nav:scale-110" />
+        <m.span
+          initial={false}
+          animate={{ opacity: expanded ? 1 : 0 }}
+          transition={{ duration: expanded ? 0.18 : 0.08, delay: expanded ? 0.06 : 0 }}
+          className="truncate whitespace-nowrap"
+        >
+          {label}
+        </m.span>
+      </Link>
+    </FloatingTooltip>
+  );
+}
+
+/** The rail's footer: theme, and one round button for everything about the
+ *  account — name, language, sign out. The expanded footer shows all of that
+ *  at once; 48px cannot, and the rail used to offer Sign out and nothing else,
+ *  so switching language meant expanding the sidebar first. The menu is a
+ *  portal for the reason the workspace menu is: the column clips. */
+function RailAccount() {
+  const { data } = useSession();
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [anchor, setAnchor] = useState<{ bottom: number; left: number } | null>(null);
+  const boxRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (boxRef.current?.contains(target)) return;
+      if (menuRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const toggle = () => {
+    const r = boxRef.current?.getBoundingClientRect();
+    if (r) setAnchor({ bottom: window.innerHeight - r.bottom, left: r.right + 8 });
+    setOpen((v) => !v);
+  };
+  const name = data?.user?.name || data?.user?.email || t("shell.signedIn");
+  const initial = name.trim().charAt(0).toUpperCase() || "?";
+
+  return (
+    <>
+      <FloatingTooltip label={t("shell.account")} disabled={open}>
+        <button
+          ref={boxRef}
+          type="button"
+          onClick={toggle}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label={t("shell.account")}
+          className="grid size-8 place-items-center rounded-full bg-[var(--color-brand-muted)] text-xs font-semibold text-[var(--color-brand)] ring-offset-2 ring-offset-[var(--color-card)] transition-shadow hover:ring-2 hover:ring-[var(--color-ring)]/40"
+        >
+          {initial}
+        </button>
+      </FloatingTooltip>
+      {open && anchor && createPortal(
+        // Opacity only: a transform on this box would make it the containing
+        // block for the language list's fixed click-away layer.
+        <m.div
+          ref={menuRef}
+          role="menu"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.12 }}
+          style={{ position: "fixed", bottom: anchor.bottom, left: anchor.left }}
+          className="z-50 w-60 rounded-lg border border-[var(--color-border)] bg-[var(--color-popover)] p-1 shadow-[var(--shadow-lg)]"
+        >
+          <div className="px-2.5 py-2 text-xs">
+            <div className="truncate font-medium text-[var(--color-foreground)]">
+              {data?.user?.name || t("shell.signedIn")}
+            </div>
+            <div className="truncate text-[var(--color-muted-foreground)]">{data?.user?.email}</div>
+          </div>
+          <div className="flex items-center justify-between gap-1 border-y border-[var(--color-border)] px-1 py-1">
+            <LanguageSwitcher />
+            <ThemeToggle />
+          </div>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => signOut({ callbackUrl: "/login" })}
+            className="mt-1 flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-[var(--color-accent)]"
+          >
+            <LogOutIcon className="h-3.5 w-3.5" />
+            {t("shell.signOut")}
+          </button>
+        </m.div>,
+        document.body,
       )}
-    >
-      <Icon className="h-4 w-4" />
-    </Link>
+    </>
   );
 }
 
@@ -373,51 +505,49 @@ function isSectionActive(pathname: string, section: NavSection) {
   return section.pages.some((p) => matchesPage(pathname, p));
 }
 
-function NavLink({ section, pathname }: { section: NavSection; pathname: string }) {
-  const t = useT();
-  const active = isSectionActive(pathname, section);
-  const Icon = section.icon;
-  return (
-    <Link
-      href={section.href}
-      data-tour={NAV_TOUR[section.href]}
-      className={cn(
-        "flex min-h-11 items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors sm:min-h-0",
-        active
-          ? "bg-[var(--color-brand-muted)] text-[var(--color-brand)] font-medium"
-          : "text-[var(--color-muted-foreground)] hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)]",
-      )}
-    >
-      <Icon className="h-4 w-4 shrink-0" />
-      {t(section.labelKey)}
-    </Link>
-  );
-}
-
+/** Pages reachable on purpose without a sidebar entry, still named in the
+ *  breadcrumb. /automation is the agent's full view: the agent itself is the
+ *  round button in the corner of every page now, and an entry in the list as
+ *  well would be two ways in to one thing, one of them a whole row. */
+const UNLISTED_PAGES: readonly TabDef[] = [
+  { href: "/automation", labelKey: "nav.automation" },
+];
 
 /** Breadcrumb «Section > Page» derived from the section map — orients the
  * user now that sub-pages live behind horizontal tabs, without duplicating
- * each page's own <h1>. */
-function useBreadcrumb(pathname: string) {
-  return useMemo(() => {
-    for (const section of NAV_SECTIONS) {
-      const page = section.pages.find((p) => matchesPage(pathname, p));
-      if (page) {
-        return {
-          groupKey: page.labelKey === section.labelKey ? null : section.labelKey,
-          itemKey: page.labelKey,
-        };
-      }
+ * each page's own <h1>.
+ *
+ * A plain function: it walks a few dozen entries, and the React Compiler
+ * memoizes the call anyway — a hand-written useMemo here was one it could not
+ * preserve, and said so in the lint report. */
+function breadcrumbFor(pathname: string) {
+  for (const section of NAV_SECTIONS) {
+    const page = section.pages.find((p) => matchesPage(pathname, p));
+    if (page) {
+      return {
+        groupKey: page.labelKey === section.labelKey ? null : section.labelKey,
+        itemKey: page.labelKey,
+      };
     }
-    return null;
-  }, [pathname]);
+  }
+  const loose = UNLISTED_PAGES.find((p) => matchesPage(pathname, p));
+  return loose ? { groupKey: null, itemKey: loose.labelKey } : null;
 }
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({
+  children,
+  initialSidebarOpen = true,
+}: {
+  children: React.ReactNode;
+  /** From the sidebar cookie, read by the server — see SIDEBAR_COOKIE. */
+  initialSidebarOpen?: boolean;
+}) {
   const pathname = usePathname();
   const { data } = useSession();
   const t = useT();
-  const crumb = useBreadcrumb(pathname);
+  const crumb = breadcrumbFor(pathname);
+  const shortcut = useShortcutLabel();
+  const reduceMotion = useReducedMotion();
 
   // Global-admin-only sections stay out of sight for regular members.
   const isAdmin = Boolean(data?.isAdmin);
@@ -426,20 +556,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     [isAdmin],
   );
 
-  // Sidebar collapse — persisted so it survives navigation and reloads.
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  useEffect(() => {
-    setSidebarOpen(localStorage.getItem("celmis:sidebar") !== "closed");
-  }, []);
+  // Sidebar collapse — persisted so it survives navigation and reloads, and
+  // known to the server so the first paint is already the right width.
+  const [sidebarOpen, setSidebarOpen] = useState(initialSidebarOpen);
 
   // Below md the sidebar is an off-canvas drawer instead of a column: 240px of
   // a 390px screen left every page with a ~70px content well. Not persisted —
-  // a drawer that reopens on every load is a phone anti-pattern.
-  const [mobileOpen, setMobileOpen] = useState(false);
-  useEffect(() => { setMobileOpen(false); }, [pathname]);
-  // The drawer must never render the icon-only rail: `sidebarOpen` comes from
-  // localStorage, so someone who collapsed it on desktop would otherwise open
-  // a 240px-wide strip of icons on their phone.
+  // a drawer that reopens on every load is a phone anti-pattern. Closed on
+  // navigation by remembering which path it was opened on, rather than by an
+  // effect that sets state after every route change.
+  const [mobileOpenOn, setMobileOpenOn] = useState<string | null>(null);
+  const mobileOpen = mobileOpenOn === pathname;
+  const setMobileOpen = useCallback(
+    (open: boolean) => setMobileOpenOn(open ? pathname : null),
+    [pathname],
+  );
+  // The drawer must never render the icon-only rail: `sidebarOpen` is the
+  // desktop preference, so someone who collapsed it on desktop would
+  // otherwise open a 240px-wide strip of icons on their phone.
   const expanded = sidebarOpen || mobileOpen;
 
   // Confirmation toast after a workspace switch (set right before the
@@ -454,12 +588,34 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     // Once on mount only — `t` is stable enough for a one-shot toast.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const toggleSidebar = () =>
+
+  const toggleSidebar = useCallback(() => {
     setSidebarOpen((v) => {
       const next = !v;
-      localStorage.setItem("celmis:sidebar", next ? "open" : "closed");
+      const value = next ? "open" : "closed";
+      document.cookie = `${SIDEBAR_COOKIE}=${value}; path=/; max-age=31536000; SameSite=Lax`;
+      try { localStorage.setItem("celmis:sidebar", value); } catch { /* ignore */ }
       return next;
     });
+  }, []);
+
+  // ⌘B / Ctrl+B — the binding editors and most dashboards already use for
+  // the side panel. Below md it opens and closes the drawer instead, since
+  // that is what the sidebar is there. Not inside an editable rich-text
+  // region, where the same keys mean bold; a plain textarea has no bold, so
+  // the shortcut still works from the composer.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "b" || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el?.isContentEditable) return;
+      e.preventDefault();
+      if (window.matchMedia("(min-width: 768px)").matches) toggleSidebar();
+      else setMobileOpenOn((at) => (at === pathname ? null : pathname));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toggleSidebar, pathname]);
 
   // First-visit product tour. Lives in the shell (not the dashboard page)
   // because every tour target — nav list, nav items, workspace badge — is
@@ -484,15 +640,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
+  const toggleLabel = sidebarOpen ? t("shell.collapseSidebar") : t("shell.expandSidebar");
+
   return (
     <div className="min-h-screen flex">
-      {mobileOpen && (
-        <div
-          className="fixed inset-0 z-30 bg-black/60 md:hidden"
-          onClick={() => setMobileOpen(false)}
-          aria-hidden
-        />
-      )}
+      <AnimatePresence>
+        {mobileOpen && (
+          <m.div
+            key="backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="fixed inset-0 z-30 bg-black/60 backdrop-blur-[2px] md:hidden"
+            onClick={() => setMobileOpen(false)}
+            aria-hidden
+          />
+        )}
+      </AnimatePresence>
       {/* Sign out sat at the bottom of a column that was as tall as the PAGE,
           because `md:static` let the aside stretch to the flex row's height.
           On a long page — the repository list, a review diff — the account
@@ -511,53 +676,87 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
           Below md nothing about the drawer's geometry changes: it was already
           fixed and viewport-tall, which is why the footer was reachable there
-          all along. */}
-      <aside
+          all along.
+
+          The desktop width is a CSS variable that Motion animates, not an
+          inline `width`: the same element is a 240px drawer on a phone, and an
+          inline width would override that class at every size. `initial` is
+          off, so the server-rendered width is the one that paints first. */}
+      <m.aside
+        id="app-sidebar"
+        aria-label={t("shell.navigation")}
+        initial={false}
+        animate={{ "--sb-w": `${expanded ? SIDEBAR_WIDTH : RAIL_WIDTH}px` } as never}
+        style={{ "--sb-w": `${expanded ? SIDEBAR_WIDTH : RAIL_WIDTH}px` } as React.CSSProperties}
+        transition={{ duration: reduceMotion ? 0 : 0.26, ease: SIDEBAR_EASE }}
         className={cn(
-          "fixed inset-y-0 left-0 z-40 w-60 shrink-0 overflow-hidden border-r border-[var(--color-border)] bg-[var(--color-card)] flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] transition-transform duration-200",
+          "fixed inset-y-0 left-0 z-40 w-60 shrink-0 overflow-hidden border-r border-[var(--color-border)] bg-[var(--color-card)] flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
           // Above md it is a plain in-flow column again, still one viewport
-          // tall, that animates its width. `bottom-auto` retires the drawer's
-          // `inset-y-0` bottom edge: top + bottom + an explicit height is
-          // three constraints for two, and which one a sticky box drops is
-          // not worth finding out per browser.
-          "md:sticky md:top-0 md:bottom-auto md:h-[100dvh] md:z-auto md:visible md:translate-x-0 md:pt-0 md:pb-0 md:transition-[width]",
+          // tall, whose width follows --sb-w. `bottom-auto` retires the
+          // drawer's `inset-y-0` bottom edge: top + bottom + an explicit
+          // height is three constraints for two, and which one a sticky box
+          // drops is not worth finding out per browser.
+          "md:sticky md:top-0 md:bottom-auto md:h-[100dvh] md:w-[var(--sb-w)] md:z-auto md:visible md:translate-x-0 md:pt-0 md:pb-0",
           // `invisible` as well as the transform: an off-screen drawer that is
           // still focusable means the first Tab on every page lands in a menu
           // nobody can see.
-          mobileOpen ? "translate-x-0" : "-translate-x-full invisible",
-          sidebarOpen ? "md:w-60" : "md:w-12",
+          mobileOpen ? "translate-x-0 shadow-[var(--shadow-lg)]" : "-translate-x-full invisible",
         )}
       >
-        {expanded ? (
-          <>
-            <Link href="/dashboard" className="flex shrink-0 items-center gap-2 px-5 py-4">
-              <BrandMark size="sm" />
-              <BrandWord className="text-base" />
-            </Link>
+        <Link
+          href="/dashboard"
+          aria-label="Celmis"
+          className="flex h-14 shrink-0 items-center gap-2 overflow-hidden px-2.5"
+        >
+          {/* Same 28px mark at the same x in both widths: px-2.5 centres it
+              on the rail, and the word fades in beside it. */}
+          <BrandMark size="sm" className="shrink-0" />
+          <m.span
+            initial={false}
+            animate={{ opacity: expanded ? 1 : 0 }}
+            transition={{ duration: 0.16, delay: expanded ? 0.06 : 0 }}
+          >
+            <BrandWord className="text-base" />
+          </m.span>
+        </Link>
 
-            {/* The only part that scrolls. `min-h-0` because a flex item's
-                automatic minimum size is its content, which would push the
-                footer off the bottom instead of scrolling; `overscroll-contain`
-                so reaching the end of the nav does not start scrolling the
-                page behind it. */}
-            <nav className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">
-              <ul className="flex flex-col gap-0.5" data-tour="nav">
-                {navSections.map((section) => (
-                  <li key={section.href}>
-                    <NavLink section={section} pathname={pathname} />
-                  </li>
-                ))}
-              </ul>
-            </nav>
+        {/* The only part that scrolls. `min-h-0` because a flex item's
+            automatic minimum size is its content, which would push the
+            footer off the bottom instead of scrolling; `overscroll-contain`
+            so reaching the end of the nav does not start scrolling the
+            page behind it. The rail hides the scrollbar: a 10px bar in a
+            48px column leaves the icons off-centre. */}
+        <nav
+          className={cn(
+            "min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 py-2",
+            !expanded && "[scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+          )}
+        >
+          <ul className="flex flex-col gap-0.5" data-tour="nav">
+            {navSections.map((section) => (
+              <li key={section.href}>
+                <NavLink section={section} pathname={pathname} expanded={expanded} />
+              </li>
+            ))}
+          </ul>
+        </nav>
 
-            {/* Pinned footer. `shrink-0` on the whole block, not on its two
-                halves: flex items shrink before a sibling scrolls, so on a
-                short viewport the language row and the account block would be
-                squeezed instead of the nav being scrolled. The top border is
-                new too — with the nav scrolling underneath it, the boundary
-                has to be drawn or a half-clipped nav row reads as part of the
-                footer. */}
-            <div className="shrink-0 border-t border-[var(--color-border)]">
+        {/* Pinned footer. `shrink-0` on the whole block, not on its two
+            halves: flex items shrink before a sibling scrolls, so on a
+            short viewport the language row and the account block would be
+            squeezed instead of the nav being scrolled. The top border is
+            new too — with the nav scrolling underneath it, the boundary
+            has to be drawn or a half-clipped nav row reads as part of the
+            footer. */}
+        <div className="shrink-0 border-t border-[var(--color-border)]">
+          {expanded ? (
+            <m.div
+              key="full"
+              initial={reduceMotion ? false : { opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.18, delay: 0.08 }}
+              className="w-60"
+            >
               <div className="flex items-center justify-between gap-1 px-2 py-2">
                 <LanguageSwitcher />
                 <ThemeToggle />
@@ -579,42 +778,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   {t("shell.signOut")}
                 </Button>
               </div>
-            </div>
-          </>
-        ) : (
-          /* Collapsed rail — the same sections, icon-only. */
-          <>
-            <Link href="/dashboard" className="flex shrink-0 items-center justify-center py-4">
-              <BrandMark size="sm" />
-            </Link>
-            <nav
-              className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto overscroll-contain py-1"
-              data-tour="nav"
+            </m.div>
+          ) : (
+            /* The rail's footer — theme and the account menu, icon-only. */
+            <m.div
+              key="rail"
+              initial={reduceMotion ? false : { opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.14 }}
+              className="flex flex-col items-center gap-1.5 py-2"
             >
-              {navSections.map((section) => (
-                <RailLink
-                  key={section.href}
-                  href={section.href}
-                  labelKey={section.labelKey}
-                  icon={section.icon}
-                  active={isSectionActive(pathname, section)}
-                />
-              ))}
-            </nav>
-            <div className="flex shrink-0 flex-col items-center gap-1 border-t border-[var(--color-border)] py-2">
-              <button
-                type="button"
-                title={t("shell.signOut")}
-                aria-label={t("shell.signOut")}
-                onClick={() => signOut({ callbackUrl: "/login" })}
-                className="flex h-9 w-9 items-center justify-center rounded-md text-[var(--color-muted-foreground)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)]"
-              >
-                <LogOutIcon className="h-4 w-4" />
-              </button>
-            </div>
-          </>
-        )}
-      </aside>
+              <FloatingTooltip label={t("shell.theme")}>
+                <ThemeToggle compact />
+              </FloatingTooltip>
+              <RailAccount />
+            </m.div>
+          )}
+        </div>
+      </m.aside>
 
       <main className="flex-1 flex flex-col min-w-0">
         {/* The inset has to be part of the bar's HEIGHT, not just its padding:
@@ -633,19 +814,27 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             type="button"
             onClick={() => setMobileOpen(true)}
             aria-label={t("shell.expandSidebar")}
+            aria-controls="app-sidebar"
+            aria-expanded={mobileOpen}
             className="-ml-1.5 grid size-11 shrink-0 place-items-center rounded-md text-[var(--color-muted-foreground)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)] md:hidden"
           >
             <PanelLeftIcon className="h-5 w-5" />
           </button>
-          <button
-            type="button"
-            onClick={toggleSidebar}
-            aria-label={sidebarOpen ? t("shell.collapseSidebar") : t("shell.expandSidebar")}
-            title={sidebarOpen ? t("shell.collapseSidebar") : t("shell.expandSidebar")}
-            className="hidden shrink-0 rounded-md p-1.5 text-[var(--color-muted-foreground)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)] md:block"
-          >
-            <PanelLeftIcon className="h-4 w-4" />
-          </button>
+          <span className="hidden md:inline-flex">
+            <FloatingTooltip label={toggleLabel} shortcut={shortcut} side="bottom">
+              <button
+                type="button"
+                onClick={toggleSidebar}
+                aria-label={toggleLabel}
+                aria-controls="app-sidebar"
+                aria-expanded={sidebarOpen}
+                aria-keyshortcuts="Meta+B Control+B"
+                className="shrink-0 rounded-md p-1.5 text-[var(--color-muted-foreground)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)]"
+              >
+                <PanelLeftIcon className="h-4 w-4" />
+              </button>
+            </FloatingTooltip>
+          </span>
           {crumb && (
             <nav className="flex min-w-0 items-center gap-1.5 text-xs" aria-label="Breadcrumb">
               {crumb.groupKey && (
@@ -664,6 +853,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {children}
         <LicenseFooter />
       </main>
+
+      {/* Outside <main> on purpose: the top bar's backdrop-filter makes it the
+          containing block for fixed descendants, and a floating button inside
+          it would be positioned against a 44px strip. A sibling of <main> is
+          positioned against the viewport. */}
+      <AgentWidget />
     </div>
   );
 }
