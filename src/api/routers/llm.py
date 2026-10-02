@@ -336,6 +336,9 @@ class TestConnectionIn(BaseModel):
     # Self-hosted (OpenAI-compatible) only:
     base_url: str | None = Field(default=None, max_length=500)
     surface: str = Field(default="chat", pattern="^(chat|embeddings)$")
+    # LiteLLM proxy embeddings probe only: the width the profile will ask
+    # for (`dimensions` rides along on every real embeddings call).
+    dimensions: int | None = Field(default=None, ge=1, le=65536)
 
 
 class TestConnectionOut(BaseModel):
@@ -462,8 +465,16 @@ def _litellm_embeddings_allowed(workspace_id: str) -> bool:
     return workspace_id == "default"
 
 
-def _litellm_out(workspace_id: str) -> LiteLLMProxyOut:
-    """What the settings page shows for the LiteLLM proxy row."""
+def _litellm_out(workspace_id: str, *, reveal_env_base: bool = False) -> LiteLLMProxyOut:
+    """What the settings page shows for the LiteLLM proxy row.
+
+    An env-sourced address (LITELLM_API_BASE) is the OPERATOR's — often an
+    internal hostname — and GET /config is readable by every member of every
+    workspace. It is shown only to a global admin in the default workspace
+    (`reveal_env_base`); everyone else sees that a proxy is connected and from
+    where, not its address. A workspace's own saved URL is its own data and is
+    always shown.
+    """
     from src.llm import litellm_proxy
 
     ep = litellm_proxy.resolve_endpoint(workspace_id)
@@ -472,10 +483,17 @@ def _litellm_out(workspace_id: str) -> LiteLLMProxyOut:
         # is half way through setting it up.
         stored = _litellm_stored_base(workspace_id)
         return LiteLLMProxyOut(connected=False, base_url=stored, source="none")
+    base: str | None = ep.base_url
+    if ep.source == "env" and not reveal_env_base:
+        base = None
     return LiteLLMProxyOut(
-        connected=True, base_url=ep.base_url, masked=_mask_key(ep.api_key),
+        connected=True, base_url=base, masked=_mask_key(ep.api_key),
         source=ep.source,
     )
+
+
+def _reveal_env_base(user: User, workspace_id: str) -> bool:
+    return workspace_id == "default" and bool(getattr(user, "is_admin", False))
 
 
 def _litellm_stored_base(workspace_id: str) -> str | None:
@@ -536,6 +554,13 @@ def _save_litellm(
             "that does not look like a LiteLLM virtual key (too short or a "
             "placeholder)"
         ))
+    try:
+        # Real chat/review/embeddings calls go through the litellm SDK's own
+        # HTTP client, not the guarded one — so the egress rule is applied
+        # HERE, once, to the address every later call will use.
+        litellm_proxy.check_base_url_egress(base)
+    except litellm_proxy.LiteLLMProxyError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     litellm_proxy.save_endpoint(workspace_id, base_url=base, api_key=key)
 
 
@@ -1093,7 +1118,8 @@ def get_config(
         embeddings_reindex_needed=reindex_needed,
         effective_embeddings=effective_embeddings,
         gateway_enabled=gateway_enabled,
-        litellm=_litellm_out(workspace_id),
+        litellm=_litellm_out(
+            workspace_id, reveal_env_base=_reveal_env_base(user, workspace_id)),
         litellm_embeddings_allowed=_litellm_embeddings_allowed(workspace_id),
     )
 
@@ -1467,6 +1493,35 @@ def test_connection(
 # ─── Workspace LiteLLM proxy probe ───────────────────────────────────
 
 
+@router.delete("/litellm", response_model=LLMConfigOut)
+def delete_litellm_proxy(
+    request: Request,
+    user: User = Depends(require_workspace_admin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> LLMConfigOut:
+    """Remove this workspace's LiteLLM proxy row (URL + virtual key).
+
+    Always allowed, even while a surface still selects provider "litellm": a
+    revoked or leaked key must be removable. Those surfaces then fail closed
+    (no address → refuse) until a proxy is saved again or the env pair
+    applies; the page shows the proxy as not connected.
+    """
+    from src.llm import litellm_proxy
+
+    deleted = litellm_proxy.delete_endpoint(workspace_id)
+    logger.info("litellm_proxy_deleted workspace=%s user=%s existed=%s",
+                workspace_id, user.email, deleted)
+    if deleted:
+        record_action(
+            action="llm_key.deleted", actor=user.email, actor_id=user.id,
+            workspace_id=workspace_id, target=_LITELLM_PROVIDER,
+            ip=client_ip(request),
+            detail={"providers": [_LITELLM_PROVIDER],
+                    "slot": workspace_slot(workspace_id)},
+        )
+    return get_config(user=user, workspace_id=workspace_id)
+
+
 def _test_litellm_connection(
     payload: TestConnectionIn, *, user: User, workspace_id: str,
 ) -> TestConnectionOut:
@@ -1559,12 +1614,100 @@ def _test_litellm_connection(
             ok=False, provider=prov, latency_ms=latency_ms,
             detail="proxy answered /v1/models with something that is not JSON",
         )
+    model = (payload.model or "").strip()
+    if payload.surface == "embeddings" and model:
+        # Listing the models proves the key, not the embeddings setup. One
+        # tiny /v1/embeddings call with the same `dimensions` the index will
+        # send shows the width — or the refusal — now instead of at index time.
+        probe = _probe_litellm_embeddings(base, key, model, payload.dimensions)
+        if not probe.ok:
+            probe.models_available, probe.models = len(ids), ids
+            return probe
+        _record_verified(user_email=user.email, provider=prov,
+                         workspace_id=workspace_id, set_default_provider=False)
+        probe.models_available, probe.models = len(ids), ids
+        return probe
     _record_verified(user_email=user.email, provider=prov,
                      workspace_id=workspace_id, set_default_provider=False)
     return TestConnectionOut(
         ok=True, provider=prov, latency_ms=latency_ms,
         detail="connected — LiteLLM proxy",
         models_available=len(ids), models=ids,
+    )
+
+
+def _probe_litellm_embeddings(
+    base: str, key: str, model: str, dimensions: int | None,
+) -> TestConnectionOut:
+    """POST {root}/v1/embeddings once; report the vector width.
+
+    Same transport and egress rule as the model listing. Warns when the width
+    differs from the requested `dimensions` (the proxy's model ignored it) or
+    from the existing collection's.
+    """
+    import time
+
+    import httpx
+
+    from src.llm import litellm_proxy
+    from src.security.egress import EgressBlockedError
+
+    prov = _LITELLM_PROVIDER
+    body: dict[str, Any] = {"model": model, "input": ["celmis connection probe"]}
+    if dimensions:
+        body["dimensions"] = int(dimensions)
+    t0 = time.time()
+    try:
+        with litellm_proxy.ping_client(base, timeout=15.0) as client:
+            resp = client.post(
+                litellm_proxy.embeddings_url(base),
+                headers={"Authorization": f"Bearer {key}"}, json=body,
+            )
+    except EgressBlockedError as exc:
+        return TestConnectionOut(ok=False, provider=prov, detail=(
+            f"egress to the LiteLLM proxy is blocked: {exc}"
+        ))
+    except httpx.HTTPError as exc:
+        return TestConnectionOut(ok=False, provider=prov,
+                                 detail=f"network error: {exc}")
+    latency_ms = int((time.time() - t0) * 1000)
+    if resp.status_code != 200:
+        snippet = (resp.text or "")[:200]
+        hint = (" — the model may not accept `dimensions`; clear it or pick "
+                "another width") if dimensions and resp.status_code in (400, 422) else ""
+        return TestConnectionOut(
+            ok=False, provider=prov, latency_ms=latency_ms,
+            detail=(f"proxy returned {resp.status_code} for /v1/embeddings "
+                    f"with model '{model}'{hint}: {snippet}"),
+        )
+    try:
+        vector = (resp.json().get("data") or [{}])[0].get("embedding") or []
+    except Exception:  # noqa: BLE001 — shape surprise = not an embeddings model
+        vector = []
+    width = len(vector) if isinstance(vector, list) else 0
+    if not width:
+        return TestConnectionOut(
+            ok=False, provider=prov, latency_ms=latency_ms,
+            detail=f"'{model}' returned no embedding vector — is it an embeddings model?",
+        )
+    warnings: list[str] = []
+    if dimensions and width != int(dimensions):
+        warnings.append(
+            f"asked for {dimensions} dimensions, got {width} — the proxy's "
+            "model does not honour `dimensions`; set the profile to "
+            f"{width} or pick another model"
+        )
+    known = _known_collection_width()
+    if known is not None and known != width:
+        warnings.append(
+            f"the existing vector collection is {known}-wide — indexing with "
+            "this model requires a full re-index (the collection is rebuilt "
+            "for the new width)"
+        )
+    return TestConnectionOut(
+        ok=True, provider=prov, latency_ms=latency_ms,
+        detail=f"connected — LiteLLM proxy, '{model}' embedding width {width}",
+        vector_width=width, warning="; ".join(warnings) or None,
     )
 
 

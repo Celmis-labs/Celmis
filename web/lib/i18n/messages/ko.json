@@ -2283,5 +2283,9 @@
   "llm.litellm.saved": "LiteLLM 프록시를 저장했습니다",
   "llm.litellm.modelsAvailable": "사용 가능한 모델 {count}개",
   "llm.litellm.reenterKey": "새 URL을 사용하려면 키를 다시 입력하세요.",
-  "llm.litellm.notConfigured": "먼저 공급자 키 카드에서 LiteLLM 프록시(URL과 키)를 저장하세요."
+  "llm.litellm.notConfigured": "먼저 공급자 키 카드에서 LiteLLM 프록시(URL과 키)를 저장하세요.",
+  "llm.litellm.remove": "삭제",
+  "llm.litellm.removed": "LiteLLM 프록시가 삭제되었습니다",
+  "llm.litellm.removeConfirm": "저장된 LiteLLM 프록시 URL과 키를 삭제할까요? 프록시를 사용하는 기능은 다시 저장할 때까지 작동하지 않습니다.",
+  "llm.litellm.envManaged": "서버에서 설정됨 (LITELLM_API_BASE)"
 }

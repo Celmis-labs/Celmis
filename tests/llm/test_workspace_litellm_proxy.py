@@ -260,6 +260,67 @@ def test_the_review_client_refuses_without_an_address():
     call.assert_not_called()
 
 
+def _review_call(profile, *, monkeypatch, model=None, resolver=None):
+    """Run one review-client call against `profile`; return litellm's kwargs."""
+    from src.llm.client import build_llm_client
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-operator-openai-key-000000")
+    captured: dict = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return _response("ok")
+
+    with patch("src.llm.completion._routed", return_value=profile), \
+         patch("litellm.completion", side_effect=fake), \
+         patch("src.llm.litellm_proxy.cached_model_info", return_value={}), \
+         patch("src.llm.budget.record_spend"):
+        client = build_llm_client("u1", "ws-a", surface="review",
+                                  resolve_model=resolver)
+        client.generate(agent="architect", model=model, prompt="hi",
+                        mode="review", operation="t")
+    return captured
+
+
+def test_an_explicit_review_model_still_goes_to_the_proxy(monkeypatch):
+    # The review agents name the model themselves (the mirrored review model,
+    # the fallback) — that must not skip the proxy for api.openai.com.
+    kw = _review_call(_proxy_profile("review"), monkeypatch=monkeypatch, model=ALIAS)
+    assert kw["model"] == f"litellm_proxy/{ALIAS}"
+    assert kw["api_base"] == BASE
+    assert kw["api_key"] == KEY
+
+
+@pytest.mark.parametrize("alias", ["openai/gpt-4o", "gemini/gemini-2.5-flash",
+                                   "anthropic/claude-x"])
+def test_a_slash_alias_goes_to_the_proxy(monkeypatch, alias):
+    for kw in (
+        _review_call(_proxy_profile("review"), monkeypatch=monkeypatch,
+                     resolver=lambda _a: alias),
+        _review_call(_proxy_profile("review"), monkeypatch=monkeypatch, model=alias),
+    ):
+        assert kw["model"] == f"litellm_proxy/{alias}"
+        assert kw["api_base"] == BASE
+        assert kw["api_key"] == KEY
+
+
+def test_the_capability_lookup_prefixes_a_slash_alias():
+    from src.llm.capabilities import resolve_litellm_model
+
+    assert resolve_litellm_model("openai/gpt-4o", "litellm") == "litellm_proxy/openai/gpt-4o"
+    assert resolve_litellm_model(f"litellm_proxy/{ALIAS}", "litellm") == f"litellm_proxy/{ALIAS}"
+    # Off the proxy, a prefixed name is still left alone.
+    assert resolve_litellm_model("openai/gpt-4o", "openai") == "openai/gpt-4o"
+
+
+def test_an_explicit_model_off_the_proxy_is_untouched(monkeypatch):
+    p = Profile(surface="review", provider="openai", model="gpt-4o",
+                api_key="sk-x", raw_api_key="sk-x")
+    kw = _review_call(p, monkeypatch=monkeypatch, model="gpt-4o")
+    assert kw["model"] == "gpt-4o"
+    assert "api_base" not in kw or kw["api_base"] is None
+
+
 # ─── 3. The installation gateway keeps out ───────────────────────────
 
 
@@ -356,3 +417,53 @@ def test_only_a_public_proxy_host_extends_the_allowlist(host, allowed):
         litellm_proxy.ping_client(f"http://{host}:4000", timeout=1.0)
     extra = bc.call_args.kwargs["extra_allowed_hosts"]
     assert (host in extra) is allowed
+
+
+def test_the_gateway_cost_is_not_estimated(monkeypatch):
+    """Installation-gateway calls keep recording an unknown cost, as before;
+    only a workspace proxy is priced off its alias."""
+    from src.llm.client import build_llm_client
+
+    gw = Profile(surface="review", provider="google", model="gemini-3-flash",
+                 api_key="sk-gw", raw_api_key="sk-gw",
+                 gateway_model="celmis-ws-a-review", gateway_url="http://litellm:4000",
+                 gateway_underlying="gemini/gemini-2.5-flash")
+    no_cost = patch("src.llm.pricing.extract_actual_cost_usd",
+                    return_value=(None, "unknown"))
+    with patch("src.llm.completion._routed", return_value=gw), \
+         patch("litellm.completion", return_value=_response("ok")), \
+         no_cost, patch("src.llm.budget.record_spend") as spend:
+        client = build_llm_client("u1", "ws-a", surface="review",
+                                  resolve_model=lambda _a: "x")
+        client.generate(agent="architect", prompt="hi", mode="review", operation="t")
+    assert spend.call_args.kwargs["cost_source"] == "unknown"
+    assert spend.call_args.kwargs["cost_usd"] in (None, 0, 0.0)
+
+    info = {ALIAS: {"underlying": "gemini/gemini-2.5-flash", "mode": "chat"}}
+    with patch("src.llm.completion._routed", return_value=_proxy_profile("review")), \
+         patch("litellm.completion", return_value=_response("ok")), \
+         patch("src.llm.litellm_proxy.cached_model_info", return_value=info), \
+         patch("src.llm.pricing.extract_actual_cost_usd",
+               return_value=(None, "unknown")), \
+         patch("src.llm.budget.record_spend") as spend:
+        client = build_llm_client("u1", "ws-a", surface="review",
+                                  resolve_model=lambda _a: ALIAS)
+        client.generate(agent="architect", prompt="hi", mode="review", operation="t")
+    assert spend.call_args.kwargs["cost_source"] == "litellm_estimate"
+
+
+def test_an_empty_model_info_is_retried_soon(monkeypatch):
+    ep = litellm_proxy.Endpoint(base_url=BASE, api_key=KEY, source="ui")
+    clock = [1000.0]
+    monkeypatch.setattr(litellm_proxy.time, "monotonic", lambda: clock[0])
+    answers = [{}, {ALIAS: {"underlying": "u", "mode": "chat"}}]
+    with patch("src.llm.litellm_proxy.fetch_model_info",
+               side_effect=lambda *_a, **_k: answers.pop(0)) as fetch:
+        assert litellm_proxy.cached_model_info(ep) == {}
+        clock[0] += 30
+        assert litellm_proxy.cached_model_info(ep) == {}       # still cached
+        clock[0] += 60
+        assert ALIAS in litellm_proxy.cached_model_info(ep)    # retried
+        clock[0] += 1800
+        assert ALIAS in litellm_proxy.cached_model_info(ep)    # positive: 1 h
+    assert fetch.call_count == 2

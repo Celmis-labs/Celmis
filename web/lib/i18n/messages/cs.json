@@ -2283,5 +2283,9 @@
   "llm.litellm.saved": "Proxy LiteLLM uloženo",
   "llm.litellm.modelsAvailable": "Dostupné modely: {count}",
   "llm.litellm.reenterKey": "Zadejte klíč znovu, chcete-li použít nové URL.",
-  "llm.litellm.notConfigured": "Nejprve uložte proxy LiteLLM (URL a klíč) na kartě klíčů poskytovatelů."
+  "llm.litellm.notConfigured": "Nejprve uložte proxy LiteLLM (URL a klíč) na kartě klíčů poskytovatelů.",
+  "llm.litellm.remove": "Odebrat",
+  "llm.litellm.removed": "Proxy LiteLLM odebráno",
+  "llm.litellm.removeConfirm": "Odebrat uloženou URL a klíč proxy LiteLLM? Funkce, které ho používají, přestanou fungovat, dokud se proxy znovu neuloží.",
+  "llm.litellm.envManaged": "Nastaveno serverem (LITELLM_API_BASE)"
 }

@@ -2283,5 +2283,9 @@
   "llm.litellm.saved": "LiteLLM プロキシを保存しました",
   "llm.litellm.modelsAvailable": "{count} 個のモデルが利用可能",
   "llm.litellm.reenterKey": "新しい URL を使うにはキーを再入力してください。",
-  "llm.litellm.notConfigured": "先にプロバイダーキーのカードで LiteLLM プロキシ (URL とキー) を保存してください。"
+  "llm.litellm.notConfigured": "先にプロバイダーキーのカードで LiteLLM プロキシ (URL とキー) を保存してください。",
+  "llm.litellm.remove": "削除",
+  "llm.litellm.removed": "LiteLLM プロキシを削除しました",
+  "llm.litellm.removeConfirm": "保存された LiteLLM プロキシの URL とキーを削除しますか？プロキシを使う機能は、再度保存されるまで動作しません。",
+  "llm.litellm.envManaged": "サーバーで設定済み (LITELLM_API_BASE)"
 }

@@ -2283,5 +2283,9 @@
   "llm.litellm.saved": "Proxy LiteLLM salvato",
   "llm.litellm.modelsAvailable": "{count} modelli disponibili",
   "llm.litellm.reenterKey": "Reinserisci la chiave per usare un nuovo URL.",
-  "llm.litellm.notConfigured": "Salva prima il proxy LiteLLM (URL e chiave) nella scheda delle chiavi dei provider."
+  "llm.litellm.notConfigured": "Salva prima il proxy LiteLLM (URL e chiave) nella scheda delle chiavi dei provider.",
+  "llm.litellm.remove": "Rimuovi",
+  "llm.litellm.removed": "Proxy LiteLLM rimosso",
+  "llm.litellm.removeConfirm": "Rimuovere URL e chiave salvati del proxy LiteLLM? Le funzioni che lo usano smetteranno di funzionare finché non verrà salvato un nuovo proxy.",
+  "llm.litellm.envManaged": "Impostato dal server (LITELLM_API_BASE)"
 }

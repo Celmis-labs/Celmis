@@ -2283,5 +2283,9 @@
   "llm.litellm.saved": "LiteLLM-Proxy gespeichert",
   "llm.litellm.modelsAvailable": "{count} Modelle verfügbar",
   "llm.litellm.reenterKey": "Geben Sie den Schlüssel erneut ein, um eine neue URL zu verwenden.",
-  "llm.litellm.notConfigured": "Speichern Sie zuerst den LiteLLM-Proxy (URL und Schlüssel) in der Karte der Anbieterschlüssel."
+  "llm.litellm.notConfigured": "Speichern Sie zuerst den LiteLLM-Proxy (URL und Schlüssel) in der Karte der Anbieterschlüssel.",
+  "llm.litellm.remove": "Entfernen",
+  "llm.litellm.removed": "LiteLLM-Proxy entfernt",
+  "llm.litellm.removeConfirm": "Gespeicherte URL und Schlüssel des LiteLLM-Proxys entfernen? Funktionen, die den Proxy nutzen, funktionieren erst wieder, wenn ein Proxy gespeichert wird.",
+  "llm.litellm.envManaged": "Vom Server festgelegt (LITELLM_API_BASE)"
 }

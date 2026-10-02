@@ -97,6 +97,11 @@ def models_url(base_url: str) -> str:
     return f"{_root(base_url)}/v1/models"
 
 
+def embeddings_url(base_url: str) -> str:
+    """OpenAI-compatible embeddings: ``{root}/v1/embeddings``."""
+    return f"{_root(base_url)}/v1/embeddings"
+
+
 def model_info_url(base_url: str) -> str:
     """LiteLLM's own ``/model/info`` (alias → litellm_params.model, mode)."""
     return f"{_root(base_url)}/model/info"
@@ -202,7 +207,25 @@ def save_endpoint(workspace_id: str, *, base_url: str, api_key: str) -> None:
         metadata={"saved_via": "llm_profiles", "base_url": base},
         user_id=workspace_slot(workspace_id), account_label=_LABEL,
     )
-    _MODEL_INFO_CACHE.clear()
+    reset_cache()
+
+
+def delete_endpoint(workspace_id: str) -> bool:
+    """Remove this workspace's ``ws:{id}`` row. True if there was one.
+
+    A revoked or leaked virtual key must be removable, not only overwritable.
+    The env pair (if any) is untouched — it is the operator's, not the
+    workspace's.
+    """
+    from src.credentials import get_credential_store
+    from src.llm.keys import workspace_slot
+
+    store = get_credential_store()
+    deleted = bool(store.delete(
+        provider=PROVIDER, user_id=workspace_slot(workspace_id), account_label=_LABEL,
+    ))
+    reset_cache()
+    return deleted
 
 
 # ─── HTTP ────────────────────────────────────────────────────────────
@@ -240,6 +263,41 @@ def _is_public_host(host: str) -> bool:
         if not ip.is_global:
             return False
     return True
+
+
+def check_base_url_egress(base_url: str) -> None:
+    """Refuse a proxy address the egress policy would not let us reach.
+
+    Real chat, review and embeddings calls go through the litellm SDK's own
+    HTTP client, which no allowlist transport wraps. So the rule is applied
+    when the address is SAVED: a public host is fine (it is what
+    :func:`ping_client` allowlists too); a private, loopback or unresolvable
+    one only when the operator opted in with ``EGRESS_ALLOW_PRIVATE_NETWORK=1``
+    (link-local, i.e. 169.254.169.254, stays refused even then) or listed it
+    in ``EGRESS_ALLOWED_HOSTS``. Same policy :func:`src.http.build_client`
+    applies to Test.
+
+    Residual risk, stated: this is a check at save time. A name that later
+    re-resolves somewhere else (DNS rebinding) is not re-checked per call.
+    """
+    host = host_of(base_url)
+    if _is_public_host(host):
+        return
+    from src.config import get_settings
+    from src.http import allowed_hosts
+    from src.security.egress import host_is_allowed
+
+    if host_is_allowed(
+        host, allowed_hosts(()),
+        allow_private_network=bool(get_settings().egress_allow_private_network),
+    ):
+        return
+    raise LiteLLMProxyError(
+        f"the LiteLLM proxy host '{host}' is not a public address (or does not "
+        "resolve) and the egress policy does not allow it — a proxy on a "
+        "private network needs EGRESS_ALLOW_PRIVATE_NETWORK=1 or its host in "
+        "EGRESS_ALLOWED_HOSTS"
+    )
 
 
 def ping_client(base_url: str, *, timeout: float):
@@ -299,6 +357,10 @@ def fetch_model_info(ep: Endpoint, *, timeout: float = 8.0) -> dict[str, dict]:
 # the spend path asks on every call and must not turn into one HTTP round trip
 # per completion against a proxy that refuses /model/info.
 _MODEL_INFO_TTL = 3600.0
+# An EMPTY answer (refused route, network blip, 5xx) is remembered only
+# briefly: long enough not to hammer a proxy that refuses /model/info on every
+# completion, short enough that one blip does not cost an hour of pricing.
+_MODEL_INFO_EMPTY_TTL = 60.0
 _MODEL_INFO_CACHE: dict[tuple[str, str], tuple[float, dict[str, dict]]] = {}
 _CACHE_LOCK = threading.Lock()
 
@@ -314,7 +376,8 @@ def cached_model_info(ep: Endpoint) -> dict[str, dict]:
     now = time.monotonic()
     with _CACHE_LOCK:
         hit = _MODEL_INFO_CACHE.get(key)
-        if hit is not None and now - hit[0] < _MODEL_INFO_TTL:
+        ttl = _MODEL_INFO_TTL if (hit is not None and hit[1]) else _MODEL_INFO_EMPTY_TTL
+        if hit is not None and now - hit[0] < ttl:
             return hit[1]
     info = fetch_model_info(ep, timeout=5.0)
     with _CACHE_LOCK:
@@ -364,6 +427,9 @@ __all__ = [
     "env_endpoint",
     "resolve_endpoint",
     "save_endpoint",
+    "delete_endpoint",
+    "check_base_url_egress",
+    "embeddings_url",
     "ping_client",
     "model_ids",
     "fetch_model_info",

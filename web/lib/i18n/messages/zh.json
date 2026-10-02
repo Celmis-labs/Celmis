@@ -2283,5 +2283,9 @@
   "llm.litellm.saved": "LiteLLM 代理已保存",
   "llm.litellm.modelsAvailable": "{count} 个模型可用",
   "llm.litellm.reenterKey": "请重新输入密钥以使用新的 URL。",
-  "llm.litellm.notConfigured": "请先在提供商密钥卡片中保存 LiteLLM 代理（URL 和密钥）。"
+  "llm.litellm.notConfigured": "请先在提供商密钥卡片中保存 LiteLLM 代理（URL 和密钥）。",
+  "llm.litellm.remove": "移除",
+  "llm.litellm.removed": "LiteLLM 代理已移除",
+  "llm.litellm.removeConfirm": "移除已保存的 LiteLLM 代理 URL 和密钥？使用该代理的功能将停止工作，直到再次保存代理。",
+  "llm.litellm.envManaged": "由服务器设置 (LITELLM_API_BASE)"
 }

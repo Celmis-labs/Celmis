@@ -403,6 +403,7 @@ function ProviderKeysCard({ config, isAdmin, onSaved }: { config: LLMConfig; isA
 function LiteLLMProxyRow({ config, isAdmin, onSaved }: { config: LLMConfig; isAdmin: boolean; onSaved: () => void }) {
   const token = useToken();
   const t = useT();
+  const qc = useQueryClient();
   const st = config.litellm;
   const [baseUrl, setBaseUrl] = useState(st?.base_url ?? "");
   const [key, setKey] = useState("");
@@ -428,6 +429,24 @@ function LiteLLMProxyRow({ config, isAdmin, onSaved }: { config: LLMConfig; isAd
     onSuccess: () => {
       toast.success(t("llm.litellm.saved"));
       setKey("");
+      setOutcome(null);
+      // A new URL or key is a different proxy: its model list replaces the
+      // cached one even though "connected" stayed true.
+      void qc.invalidateQueries({ queryKey: ["provider-models", LITELLM] });
+      onSaved();
+    },
+    onError: (e) => toast.error(t("settings.llm.error", { message: (e as Error).message })),
+  });
+  // A stored row only — an env-pair proxy is the operator's and is not ours
+  // to remove from here.
+  const canRemove = Boolean(st?.connected && st.source === "ui") || Boolean(!st?.connected && st?.base_url);
+  const remove = useMutation({
+    mutationFn: () => llmApi.deleteLiteLLM(token!),
+    onSuccess: () => {
+      toast.success(t("llm.litellm.removed"));
+      setKey("");
+      setOutcome(null);
+      void qc.invalidateQueries({ queryKey: ["provider-models", LITELLM] });
       onSaved();
     },
     onError: (e) => toast.error(t("settings.llm.error", { message: (e as Error).message })),
@@ -445,14 +464,16 @@ function LiteLLMProxyRow({ config, isAdmin, onSaved }: { config: LLMConfig; isAd
 
   return (
     <div className="space-y-2 border-t border-[var(--color-border)] pt-3">
-      <div className="grid grid-cols-[140px_1fr_1fr_auto_auto] gap-2 items-center">
+      <div className="grid grid-cols-[140px_1fr_1fr_auto_auto_auto] gap-2 items-center">
         <div className="text-sm flex items-center gap-1.5">
           {t("llm.litellm.rowName")}
           {st?.connected && <Badge variant="outline" className="text-[9px]">{st.source}</Badge>}
         </div>
         <Input
           aria-label={t("llm.litellm.baseUrlLabel")}
-          placeholder="https://litellm.example.com"
+          placeholder={st?.connected && st.source === "env" && !st.base_url
+            ? t("llm.litellm.envManaged")
+            : "https://litellm.example.com"}
           value={baseUrl} disabled={!isAdmin}
           onChange={(e) => setBaseUrl(e.target.value)}
         />
@@ -481,6 +502,13 @@ function LiteLLMProxyRow({ config, isAdmin, onSaved }: { config: LLMConfig; isAd
           disabled={!isAdmin || test.isPending || !trimmedUrl || needsKey}
           onClick={() => test.mutate()}>
           {t("settings.llm.testButton")}
+        </Button>
+        <Button size="sm" variant="ghost"
+          disabled={!isAdmin || !canRemove || remove.isPending}
+          onClick={() => {
+            if (window.confirm(t("llm.litellm.removeConfirm"))) remove.mutate();
+          }}>
+          {t("llm.litellm.remove")}
         </Button>
       </div>
       <p className="text-[11px] text-[var(--color-muted-foreground)]">
@@ -562,7 +590,12 @@ function ProfileCard({
   const models = useQuery({
     // keyConnected is part of the key so saving a provider key automatically
     // refetches the model list (a keyless fetch caches an empty 200 otherwise).
-    queryKey: ["provider-models", provider, keyConnected],
+    // For the LiteLLM proxy the address and key are part of the identity too:
+    // re-pointing it keeps `connected` true and would otherwise show the old
+    // proxy's aliases.
+    queryKey: provider === LITELLM
+      ? ["provider-models", provider, keyConnected, config.litellm?.base_url ?? "", config.litellm?.masked ?? ""]
+      : ["provider-models", provider, keyConnected],
     queryFn: () => llmApi.providerModels(token!, provider),
     // Local model names are not in any catalog — a vendor /models call would
     // return nothing and its emptiness must not block this provider. The
@@ -611,6 +644,21 @@ function ProfileCard({
     // address that's the actionable EGRESS_ALLOW_PRIVATE_NETWORK explanation,
     // which a generic "failed" toast used to swallow.
     onError: (e) => setLocalTest({ error: (e as Error).message }),
+  });
+  // LiteLLM proxy embeddings: one /v1/embeddings call with the chosen model
+  // and `dimensions`, so a model that refuses or ignores the width shows up
+  // here rather than at index time.
+  const [proxyEmbTest, setProxyEmbTest] = useState<TestOutcome | null>(null);
+  const testProxyEmbeddings = useMutation({
+    mutationFn: () => llmApi.testConnection(token!, {
+      provider: LITELLM,
+      api_key: "use-saved",
+      model: model.trim() || null,
+      surface: "embeddings",
+      ...(Number(dims) > 0 ? { dimensions: Number(dims) } : {}),
+    }),
+    onSuccess: (r) => setProxyEmbTest({ result: r }),
+    onError: (e) => setProxyEmbTest({ error: (e as Error).message }),
   });
   const [effTest, setEffTest] = useState<TestOutcome | null>(null);
   const effKeyConnected = config.provider_keys.find((k) => k.provider === eff?.provider)?.connected;
@@ -907,6 +955,18 @@ function ProfileCard({
               <RefreshCwIcon className="h-3.5 w-3.5 mr-1" /> {reindex.isPending ? "…" : t("settings.llm.reindexAll")}
             </Button>
           </div>
+        )}
+        {embeddings && isLitellm && !envManaged && (
+          <>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="outline"
+                disabled={!isAdmin || testProxyEmbeddings.isPending || !model || !keyConnected}
+                onClick={() => testProxyEmbeddings.mutate()}>
+                {testProxyEmbeddings.isPending ? "…" : t("settings.llm.testConnection")}
+              </Button>
+            </div>
+            <TestResultPanel outcome={proxyEmbTest} />
+          </>
         )}
         {embeddings && config.embeddings_reindex_needed && (
           <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">

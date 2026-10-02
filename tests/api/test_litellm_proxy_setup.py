@@ -41,6 +41,9 @@ class _FakeStore:
     def load(self, *, provider, user_id="", account_label="default"):
         return self.rows.get((provider, user_id, account_label))
 
+    def delete(self, provider, *, user_id="", account_label="default"):
+        return self.rows.pop((provider, user_id, account_label), None) is not None
+
 
 @pytest.fixture
 def store(monkeypatch):
@@ -51,7 +54,12 @@ def store(monkeypatch):
     from src.llm import litellm_proxy
     litellm_proxy.reset_cache()
     fake = _FakeStore()
-    with patch("src.credentials.get_credential_store", return_value=fake):
+    # Hermetic DNS: *.example.com counts as public, everything else goes
+    # through the real (literal-IP) classification.
+    real_public = litellm_proxy._is_public_host
+    with patch("src.credentials.get_credential_store", return_value=fake), \
+         patch("src.llm.litellm_proxy._is_public_host",
+               side_effect=lambda h: h.endswith("example.com") or real_public(h)):
         yield fake
 
 
@@ -63,10 +71,19 @@ class _Proxy:
         self.status = status
         self.models = list(models)
         self.info = info
+        self.embed_status = 200
+        self.embed_width: int | None = None   # None → honour `dimensions`
         self.requests: list[httpx.Request] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if request.url.path == "/v1/embeddings":
+            import json as _json
+            if self.embed_status != 200:
+                return httpx.Response(self.embed_status, json={"error": "dimensions"})
+            body = _json.loads(request.content)
+            width = self.embed_width or body.get("dimensions") or 3072
+            return httpx.Response(200, json={"data": [{"embedding": [0.0] * width}]})
         if request.url.path == "/model/info":
             if self.info is None:
                 return httpx.Response(403, json={})
@@ -305,3 +322,107 @@ def test_the_config_reports_gateway_mode(store):
         assert get_config(user=_ADMIN, workspace_id="default").gateway_enabled is True
     with patch("src.llm.gateway.is_enabled", return_value=False):
         assert get_config(user=_ADMIN, workspace_id="default").gateway_enabled is False
+
+
+# ─── 7. Review fixes: egress at save, env URL, delete, embeddings Test ──
+
+
+def _settings(*, private: bool = False, hosts=()):
+    """The real Settings with only the two egress fields replaced."""
+    from src.config import get_settings
+
+    return get_settings().model_copy(update={
+        "egress_allowed_hosts": list(hosts),
+        "egress_allow_private_network": private,
+    })
+
+
+@pytest.mark.parametrize("url", ["http://10.0.0.5:4000", "http://127.0.0.1:4000",
+                                 "http://169.254.169.254"])
+def test_a_private_proxy_host_is_refused_at_save(store, url):
+    with patch("src.config.get_settings", return_value=_settings()), \
+            pytest.raises(HTTPException) as exc:
+        _put("ws-a", litellm={"base_url": url, "api_key": KEY})
+    assert exc.value.status_code == 422
+    assert "EGRESS_ALLOW_PRIVATE_NETWORK" in exc.value.detail
+    assert ("litellm", "ws:ws-a", "default") not in store.rows
+
+
+def test_a_private_proxy_host_is_saved_when_the_operator_allows_it(store):
+    with patch("src.config.get_settings", return_value=_settings(private=True)):
+        _put("ws-a", litellm={"base_url": "http://10.0.0.5:4000", "api_key": KEY})
+    assert ("litellm", "ws:ws-a", "default") in store.rows
+    # Link-local stays refused even with the private network allowed.
+    with patch("src.config.get_settings", return_value=_settings(private=True)), \
+            pytest.raises(HTTPException):
+        _put("ws-b", litellm={"base_url": "http://169.254.169.254", "api_key": KEY})
+    # An explicitly allowlisted host is fine without the private flag.
+    with patch("src.config.get_settings",
+               return_value=_settings(hosts=["litellm.internal"])):
+        _put("ws-c", litellm={"base_url": "http://litellm.internal:4000", "api_key": KEY})
+    assert ("litellm", "ws:ws-c", "default") in store.rows
+
+
+def test_the_env_proxy_url_is_shown_only_to_a_global_admin_in_default(store, monkeypatch):
+    from src.api.routers.llm import get_config
+
+    monkeypatch.setenv("LITELLM_API_KEY", KEY)
+    monkeypatch.setenv("LITELLM_API_BASE", "http://litellm.corp.internal:4000")
+    member = SimpleNamespace(id="u-m", email="m@test", is_admin=False)
+
+    other = get_config(user=_ADMIN, workspace_id="ws-b").litellm
+    assert other.connected is True and other.source == "env"
+    assert other.base_url is None
+    assert get_config(user=member, workspace_id="default").litellm.base_url is None
+    assert (get_config(user=_ADMIN, workspace_id="default").litellm.base_url
+            == "http://litellm.corp.internal:4000")
+    # A workspace's OWN saved URL is its own data and stays visible.
+    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
+    assert get_config(user=member, workspace_id="ws-a").litellm.base_url == BASE
+
+
+def test_the_proxy_row_can_be_deleted(store):
+    from src.api.routers.llm import delete_litellm_proxy
+
+    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
+    _put("ws-b", litellm={"base_url": BASE, "api_key": KEY})
+    out = delete_litellm_proxy(_request(), user=_ADMIN, workspace_id="ws-a")
+    assert ("litellm", "ws:ws-a", "default") not in store.rows
+    assert ("litellm", "ws:ws-b", "default") in store.rows
+    assert out.litellm.connected is False
+    # Idempotent.
+    delete_litellm_proxy(_request(), user=_ADMIN, workspace_id="ws-a")
+
+
+def test_an_embeddings_test_reports_the_width(store, proxy):
+    r = _test(api_key=KEY, base_url=BASE, surface="embeddings",
+              model="embedding-2-test", dimensions=768)
+    assert r.ok is True
+    assert r.vector_width == 768
+    emb = [q for q in proxy.requests if q.url.path == "/v1/embeddings"]
+    assert len(emb) == 1
+    import json as _json
+    body = _json.loads(emb[0].content)
+    assert body["model"] == "embedding-2-test" and body["dimensions"] == 768
+    assert emb[0].headers["authorization"] == f"Bearer {KEY}"
+
+
+def test_an_embeddings_test_warns_when_dimensions_are_ignored(store, proxy):
+    proxy.embed_width = 3072
+    r = _test(api_key=KEY, base_url=BASE, surface="embeddings",
+              model="embedding-2-test", dimensions=768)
+    assert r.ok is True and r.vector_width == 3072
+    assert r.warning and "768" in r.warning
+
+
+def test_an_embeddings_test_reports_a_refused_dimensions(store, proxy):
+    proxy.embed_status = 400
+    r = _test(api_key=KEY, base_url=BASE, surface="embeddings",
+              model="embedding-2-test", dimensions=768)
+    assert r.ok is False
+    assert "/v1/embeddings" in r.detail and "dimensions" in r.detail
+
+
+def test_a_chat_test_makes_no_embeddings_call(store, proxy):
+    _test(api_key=KEY, base_url=BASE, model="chat-a")
+    assert all(q.url.path != "/v1/embeddings" for q in proxy.requests)

@@ -2283,5 +2283,9 @@
   "llm.litellm.saved": "LiteLLM proxy saved",
   "llm.litellm.modelsAvailable": "{count} models available",
   "llm.litellm.reenterKey": "Enter the key again to use a new URL.",
-  "llm.litellm.notConfigured": "Save the LiteLLM proxy (URL and key) in the provider keys card first."
+  "llm.litellm.notConfigured": "Save the LiteLLM proxy (URL and key) in the provider keys card first.",
+  "llm.litellm.remove": "Remove",
+  "llm.litellm.removed": "LiteLLM proxy removed",
+  "llm.litellm.removeConfirm": "Remove the saved LiteLLM proxy URL and key? Features set to the proxy stop working until a proxy is saved again.",
+  "llm.litellm.envManaged": "Set by the server (LITELLM_API_BASE)"
 }

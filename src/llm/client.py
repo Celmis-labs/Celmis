@@ -134,6 +134,8 @@ class LLMClient:
         resolve_api_base: Callable[[str], str | None] | None = None,
         resolve_billing_model: Callable[[str], str] | None = None,
         user_id: str | None = None,
+        map_explicit_model: Callable[[str], str] | None = None,
+        estimate_proxy_cost: Callable[[], bool] | None = None,
     ) -> None:
         self._resolve_key = resolve_key
         self._resolve_model = resolve_model  # optional — callers can pass model directly
@@ -157,6 +159,27 @@ class LLMClient:
         # call made through this client to nobody — 95% of the workspace's
         # spend in one row labelled "—".
         self._user_id = user_id
+        # Applied to a model the CALLER names (`generate(model=...)`), which
+        # otherwise skips `resolve_model` entirely. The review agents always
+        # name one — the workspace's mirrored review model, or the fallback —
+        # so on a workspace LiteLLM proxy the bare alias reached
+        # `_provider_of`, read as "openai", and went to api.openai.com on the
+        # operator's OPENAI_API_KEY with no api_base.
+        self._map_explicit_model = map_explicit_model
+        # Whether a `litellm_proxy/` call with no cost in the response may be
+        # priced off the model behind the alias. Only a WORKSPACE proxy: the
+        # installation gateway has always recorded such calls as unknown, and
+        # turning them into estimates would start feeding budgets that never
+        # fired before.
+        self._estimate_proxy_cost_hook = estimate_proxy_cost
+
+    def _estimate_proxy_cost(self) -> bool:
+        if not self._estimate_proxy_cost_hook:
+            return False
+        try:
+            return bool(self._estimate_proxy_cost_hook())
+        except Exception:  # noqa: BLE001 — pricing never fails a call
+            return False
 
     def _capability_model(self, resolved: str) -> str:
         """The name to ask LiteLLM about the ceiling and the reasoning shape.
@@ -285,6 +308,8 @@ class LLMClient:
         redaction, audit and billing, and there is no second one to forget to
         update.
         """
+        if model and self._map_explicit_model:
+            model = self._map_explicit_model(model) or model
         resolved_model = model or (self._resolve_model(agent) if (agent and self._resolve_model) else None)
         if not resolved_model:
             raise RuntimeError(
@@ -626,7 +651,8 @@ class LLMClient:
 
             from src.llm.pricing import cost_for, extract_actual_cost_usd
             cost_usd, cost_source = extract_actual_cost_usd(response)
-            if cost_usd is None and provider == "litellm_proxy" and self._resolve_billing_model:
+            if (cost_usd is None and provider == "litellm_proxy"
+                    and self._resolve_billing_model and self._estimate_proxy_cost()):
                 # A proxy alias / deployment name is in no price table; the
                 # model behind it usually is. Estimate off that — still None
                 # when nobody knows, never a made-up number.
@@ -993,6 +1019,19 @@ def build_llm_client(
         # here and nowhere else.
         return resolve_litellm_model(m or "", p.provider if p is not None else None) or m
 
+    def _is_workspace_proxy() -> bool:
+        p = _route()
+        return p is not None and not p.via_gateway and p.provider == "litellm"
+
+    def _explicit(m: str) -> str:
+        # An explicitly named model on a workspace-proxy profile is the
+        # PROXY's alias, whatever its shape ("gpt-4o", "openai/gpt-4o"). Off
+        # the proxy it is left exactly as the caller wrote it.
+        p = _route()
+        if p is not None and not p.via_gateway and p.provider == "litellm":
+            return resolve_litellm_model(m, "litellm") or m
+        return m
+
     def _key(provider: str) -> str:
         if provider == "litellm_proxy":
             p = _route()
@@ -1079,6 +1118,8 @@ def build_llm_client(
         resolve_model=_model if resolve_model else None,
         resolve_api_base=_base,
         resolve_billing_model=_billing_model,
+        map_explicit_model=_explicit,
+        estimate_proxy_cost=_is_workspace_proxy,
         user_id=user_id,
         workspace_id=workspace_id,
         # Defaults to the profile surface, which is right for review and for

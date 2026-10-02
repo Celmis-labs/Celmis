@@ -2283,5 +2283,9 @@
   "llm.litellm.saved": "Проксі LiteLLM збережено",
   "llm.litellm.modelsAvailable": "Доступно моделей: {count}",
   "llm.litellm.reenterKey": "Введіть ключ ще раз, щоб використати новий URL.",
-  "llm.litellm.notConfigured": "Спершу збережіть проксі LiteLLM (URL і ключ) у картці ключів провайдерів."
+  "llm.litellm.notConfigured": "Спершу збережіть проксі LiteLLM (URL і ключ) у картці ключів провайдерів.",
+  "llm.litellm.remove": "Видалити",
+  "llm.litellm.removed": "LiteLLM-проксі видалено",
+  "llm.litellm.removeConfirm": "Видалити збережені URL і ключ LiteLLM-проксі? Функції, налаштовані на проксі, перестануть працювати, доки проксі не збережуть знову.",
+  "llm.litellm.envManaged": "Задано на сервері (LITELLM_API_BASE)"
 }

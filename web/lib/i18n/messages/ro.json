@@ -2283,5 +2283,9 @@
   "llm.litellm.saved": "Proxy LiteLLM salvat",
   "llm.litellm.modelsAvailable": "{count} modele disponibile",
   "llm.litellm.reenterKey": "Reintrodu cheia pentru a folosi un URL nou.",
-  "llm.litellm.notConfigured": "Salvează mai întâi proxy-ul LiteLLM (URL și cheie) în cardul cheilor de furnizor."
+  "llm.litellm.notConfigured": "Salvează mai întâi proxy-ul LiteLLM (URL și cheie) în cardul cheilor de furnizor.",
+  "llm.litellm.remove": "Elimină",
+  "llm.litellm.removed": "Proxy LiteLLM eliminat",
+  "llm.litellm.removeConfirm": "Elimini URL-ul și cheia salvate ale proxy-ului LiteLLM? Funcțiile care îl folosesc nu vor mai merge până când se salvează din nou un proxy.",
+  "llm.litellm.envManaged": "Setat de server (LITELLM_API_BASE)"
 }

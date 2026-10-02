@@ -2283,5 +2283,9 @@
   "llm.litellm.saved": "Zapisano proxy LiteLLM",
   "llm.litellm.modelsAvailable": "Dostępne modele: {count}",
   "llm.litellm.reenterKey": "Wpisz klucz ponownie, aby użyć nowego URL.",
-  "llm.litellm.notConfigured": "Najpierw zapisz proxy LiteLLM (URL i klucz) na karcie kluczy dostawców."
+  "llm.litellm.notConfigured": "Najpierw zapisz proxy LiteLLM (URL i klucz) na karcie kluczy dostawców.",
+  "llm.litellm.remove": "Usuń",
+  "llm.litellm.removed": "Usunięto proxy LiteLLM",
+  "llm.litellm.removeConfirm": "Usunąć zapisany URL i klucz proxy LiteLLM? Funkcje korzystające z proxy przestaną działać, dopóki proxy nie zostanie zapisane ponownie.",
+  "llm.litellm.envManaged": "Ustawione na serwerze (LITELLM_API_BASE)"
 }

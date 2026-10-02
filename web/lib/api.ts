@@ -965,6 +965,9 @@ export const llmApi = {
        *  an embeddings test reports the vector width, which is what
        *  actually matters there. The backend accepts only these two. */
       surface?: "chat" | "embeddings";
+      /** LiteLLM proxy embeddings test only — the width the profile asks
+       *  for, sent as `dimensions` exactly as indexing will. */
+      dimensions?: number;
     },
   ) =>
     api<TestConnectionResult>("/api/llm/test-connection", {
@@ -972,6 +975,9 @@ export const llmApi = {
       method: "POST",
       json: body,
     }),
+  /** Remove this workspace's LiteLLM proxy row (URL + virtual key). */
+  deleteLiteLLM: (token: string) =>
+    api<LLMConfig>("/api/llm/litellm", { token, method: "DELETE" }),
   localSetupGuide: (token: string) =>
     api<LocalSetupGuide>("/api/llm/local-setup-guide", { token }),
   providerModels: (token: string, provider: string) =>
