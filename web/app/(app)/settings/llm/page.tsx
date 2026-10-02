@@ -92,6 +92,10 @@ const SELF_HOSTED = "openai_compatible";
 // the embedder, so where it runs is decided by whoever controls the server.
 const SELF_HOSTED_INFO = "__self_hosted_info__";
 
+// A LiteLLM proxy the workspace brings (URL + virtual key, set on the keys
+// card). Not in PROVIDERS: its row needs a URL next to the key.
+const LITELLM = "litellm";
+
 // Review output languages — native names, no i18n needed.
 const REVIEW_LANGS = [
   { value: "en", label: "English" }, { value: "uk", label: "Українська" },
@@ -208,9 +212,7 @@ export default function LLMConfigPage() {
  */
 function GatewayModeBanner({ config }: { config: LLMConfig }) {
   const t = useT();
-  const viaGateway = Boolean(
-    (config as LLMConfig & { gateway_enabled?: boolean }).gateway_enabled,
-  );
+  const viaGateway = Boolean(config.gateway_enabled);
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-muted)]/40 px-4 py-3 text-xs text-[var(--color-muted-foreground)]">
       <ServerIcon className="h-4 w-4 shrink-0" />
@@ -377,6 +379,7 @@ function ProviderKeysCard({ config, isAdmin, onSaved }: { config: LLMConfig; isA
             </div>
           );
         })}
+        <LiteLLMProxyRow config={config} isAdmin={isAdmin} onSaved={onSaved} />
         <p className="text-[11px] text-[var(--color-muted-foreground)]">
           {t("settings.llm.getKey")}{" "}{PROVIDERS.map((p) => (
             <a key={p.id} className="underline mr-2" href={p.tokenUrl} target="_blank" rel="noreferrer">{p.id} ↗</a>
@@ -384,6 +387,113 @@ function ProviderKeysCard({ config, isAdmin, onSaved }: { config: LLMConfig; isA
         </p>
       </CardContent>
     </Card>
+  );
+}
+
+// ─── Workspace LiteLLM proxy ─────────────────────────────────────────
+
+/**
+ * A LiteLLM proxy the customer already runs: URL + virtual key, one
+ * credential. Its own row because a virtual key pasted into the OpenAI field
+ * is sent to api.openai.com, which answers 401 for a key it never issued.
+ *
+ * Changing the URL needs the key typed again — the backend refuses to send a
+ * saved key to a new address, on save and on Test alike.
+ */
+function LiteLLMProxyRow({ config, isAdmin, onSaved }: { config: LLMConfig; isAdmin: boolean; onSaved: () => void }) {
+  const token = useToken();
+  const t = useT();
+  const st = config.litellm;
+  const [baseUrl, setBaseUrl] = useState(st?.base_url ?? "");
+  const [key, setKey] = useState("");
+  const [show, setShow] = useState(false);
+  const [outcome, setOutcome] = useState<TestOutcome | null>(null);
+  // Resync the URL when the saved one changes (a save, another tab) — during
+  // render, like ReviewAgentsCard, not in an effect.
+  const [syncedUrl, setSyncedUrl] = useState(st?.base_url ?? "");
+  if (syncedUrl !== (st?.base_url ?? "")) {
+    setSyncedUrl(st?.base_url ?? "");
+    setBaseUrl(st?.base_url ?? "");
+  }
+
+  const trimmedUrl = baseUrl.trim().replace(/\/+$/, "");
+  const urlChanged = Boolean(st?.base_url) && trimmedUrl !== (st?.base_url ?? "");
+  // A saved key may be reused only against the URL it was saved with.
+  const needsKey = !key.trim() && (!st?.connected || urlChanged);
+
+  const save = useMutation({
+    mutationFn: () => llmApi.saveConfig(token!, {
+      litellm: { base_url: trimmedUrl, ...(key.trim() ? { api_key: key.trim() } : {}) },
+    }),
+    onSuccess: () => {
+      toast.success(t("llm.litellm.saved"));
+      setKey("");
+      onSaved();
+    },
+    onError: (e) => toast.error(t("settings.llm.error", { message: (e as Error).message })),
+  });
+  const test = useMutation({
+    mutationFn: () => llmApi.testConnection(token!, {
+      provider: "litellm",
+      api_key: key.trim() || "use-saved",
+      ...(trimmedUrl ? { base_url: trimmedUrl } : {}),
+    }),
+    onSuccess: (r) => setOutcome({ result: r }),
+    onError: (e) => setOutcome({ error: (e as Error).message }),
+  });
+  const models = outcome?.result?.ok ? outcome.result.models ?? [] : [];
+
+  return (
+    <div className="space-y-2 border-t border-[var(--color-border)] pt-3">
+      <div className="grid grid-cols-[140px_1fr_1fr_auto_auto] gap-2 items-center">
+        <div className="text-sm flex items-center gap-1.5">
+          {t("llm.litellm.rowName")}
+          {st?.connected && <Badge variant="outline" className="text-[9px]">{st.source}</Badge>}
+        </div>
+        <Input
+          aria-label={t("llm.litellm.baseUrlLabel")}
+          placeholder="https://litellm.example.com"
+          value={baseUrl} disabled={!isAdmin}
+          onChange={(e) => setBaseUrl(e.target.value)}
+        />
+        <div className="relative">
+          <Input
+            type={show ? "text" : "password"}
+            value={key}
+            placeholder={st?.connected && !urlChanged
+              ? t("settings.llm.savedMasked", { masked: st.masked })
+              : t("llm.litellm.keyPlaceholder")}
+            disabled={!isAdmin}
+            onChange={(e) => setKey(e.target.value)}
+          />
+          <button type="button" onClick={() => setShow((s) => !s)}
+            className="absolute right-2 top-1/2 -translate-y-1/2 opacity-60">
+            {show ? <EyeOffIcon className="h-3.5 w-3.5" /> : <EyeIcon className="h-3.5 w-3.5" />}
+          </button>
+        </div>
+        <Button size="sm" variant="outline"
+          disabled={!isAdmin || !trimmedUrl || needsKey || save.isPending
+            || (!key.trim() && !urlChanged)}
+          onClick={() => save.mutate()}>
+          {t("settings.llm.saveButton")}
+        </Button>
+        <Button size="sm" variant="ghost"
+          disabled={!isAdmin || test.isPending || !trimmedUrl || needsKey}
+          onClick={() => test.mutate()}>
+          {t("settings.llm.testButton")}
+        </Button>
+      </div>
+      <p className="text-[11px] text-[var(--color-muted-foreground)]">
+        {urlChanged && !key.trim() ? t("llm.litellm.reenterKey") : t("llm.litellm.hint")}
+      </p>
+      <TestResultPanel outcome={outcome} />
+      {models.length > 0 && (
+        <div className="text-[11px] text-[var(--color-muted-foreground)]">
+          {t("llm.litellm.modelsAvailable", { count: models.length })}:{" "}
+          {models.map((m) => <code key={m} className="mr-1.5">{m}</code>)}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -427,12 +537,21 @@ function ProfileCard({
   // a model served from a machine you run. Only what picking it leads to
   // differs — a form on three cards, instructions on the fourth.
   const selfHostedLabel = t("settings.llm.selfHostedOption");
+  // The workspace LiteLLM proxy. Offered on embeddings only where that
+  // profile is the shared one that runs (the backend refuses it elsewhere);
+  // kept in the list whenever a surface already uses it.
+  const litellmOption = { value: LITELLM, label: t("llm.litellm.option") };
+  const litellmOffered = embeddings
+    ? Boolean(config.litellm_embeddings_allowed) || prof.provider === LITELLM
+    : true;
+  const isLitellm = provider === LITELLM;
   const providerOptions = embeddings
     ? [...EMBEDDING_PROVIDER_OPTIONS,
+       ...(litellmOffered ? [litellmOption] : []),
        { value: SELF_HOSTED_INFO, label: selfHostedLabel }]
     : selfHostedAllowed
-      ? [...PROVIDER_OPTIONS, { value: SELF_HOSTED, label: selfHostedLabel }]
-      : PROVIDER_OPTIONS;
+      ? [...PROVIDER_OPTIONS, litellmOption, { value: SELF_HOSTED, label: selfHostedLabel }]
+      : [...PROVIDER_OPTIONS, litellmOption];
   // When the operator pinned embeddings in the server environment, the
   // editable profile below is not what runs — show the pinned one read-only
   // instead of a dropdown whose choice would silently be ignored.
@@ -653,7 +772,7 @@ function ProfileCard({
           </div>
           {isEmbeddingsInfo ? <div /> : (
           <div>
-            <Label>{t("settings.llm.modelLabel")} {!isLocal && !keyConnected && <span className="text-amber-600">{t("settings.llm.addKeyHint")}</span>}</Label>
+            <Label>{t("settings.llm.modelLabel")} {!isLocal && !keyConnected && <span className="text-amber-600">{isLitellm ? t("llm.litellm.notConfigured") : t("settings.llm.addKeyHint")}</span>}</Label>
             {isLocal ? (
               // Free text, not the catalog dropdown: the names a local server
               // serves exist nowhere but on that server, and an empty vendor

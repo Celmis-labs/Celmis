@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "Nessuna modifica.",
   "freshness.toastBehind": "Il branch si è mosso — reindicizzazione in coda.",
   "freshness.toastUnreachable": "Remote irraggiungibile.",
-  "freshness.toastNeverIndexed": "Niente di indicizzato con cui confrontare."
+  "freshness.toastNeverIndexed": "Niente di indicizzato con cui confrontare.",
+  "llm.litellm.rowName": "Proxy LiteLLM",
+  "llm.litellm.option": "Proxy LiteLLM",
+  "llm.litellm.baseUrlLabel": "URL del proxy",
+  "llm.litellm.keyPlaceholder": "Chiave virtuale (sk-…)",
+  "llm.litellm.hint": "Un proxy LiteLLM gestito dalla tua azienda: il suo URL più una chiave virtuale. Dopo il salvataggio, ogni superficie qui sotto può usare i modelli del proxy. Per cambiare l'URL bisogna reinserire la chiave.",
+  "llm.litellm.saved": "Proxy LiteLLM salvato",
+  "llm.litellm.modelsAvailable": "{count} modelli disponibili",
+  "llm.litellm.reenterKey": "Reinserisci la chiave per usare un nuovo URL.",
+  "llm.litellm.notConfigured": "Salva prima il proxy LiteLLM (URL e chiave) nella scheda delle chiavi dei provider."
 }

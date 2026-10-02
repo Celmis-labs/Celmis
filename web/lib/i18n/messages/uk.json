@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "Нових змін немає.",
   "freshness.toastBehind": "Гілка зрушила — переіндексацію поставлено в чергу.",
   "freshness.toastUnreachable": "Не вдалося звʼязатися з віддаленим репозиторієм.",
-  "freshness.toastNeverIndexed": "Ще нічого не проіндексовано для порівняння."
+  "freshness.toastNeverIndexed": "Ще нічого не проіндексовано для порівняння.",
+  "llm.litellm.rowName": "Проксі LiteLLM",
+  "llm.litellm.option": "Проксі LiteLLM",
+  "llm.litellm.baseUrlLabel": "URL проксі",
+  "llm.litellm.keyPlaceholder": "Віртуальний ключ (sk-…)",
+  "llm.litellm.hint": "Проксі LiteLLM, який розгорнула ваша компанія: його URL і віртуальний ключ. Після збереження всі поверхні нижче можуть використовувати моделі проксі. Щоб змінити URL, ключ треба ввести ще раз.",
+  "llm.litellm.saved": "Проксі LiteLLM збережено",
+  "llm.litellm.modelsAvailable": "Доступно моделей: {count}",
+  "llm.litellm.reenterKey": "Введіть ключ ще раз, щоб використати новий URL.",
+  "llm.litellm.notConfigured": "Спершу збережіть проксі LiteLLM (URL і ключ) у картці ключів провайдерів."
 }

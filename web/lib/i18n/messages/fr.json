@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "Aucun changement.",
   "freshness.toastBehind": "La branche a bougé — réindexation en file.",
   "freshness.toastUnreachable": "Dépôt distant injoignable.",
-  "freshness.toastNeverIndexed": "Rien d’indexé pour comparer."
+  "freshness.toastNeverIndexed": "Rien d’indexé pour comparer.",
+  "llm.litellm.rowName": "Proxy LiteLLM",
+  "llm.litellm.option": "Proxy LiteLLM",
+  "llm.litellm.baseUrlLabel": "URL du proxy",
+  "llm.litellm.keyPlaceholder": "Clé virtuelle (sk-…)",
+  "llm.litellm.hint": "Un proxy LiteLLM géré par votre entreprise : son URL et une clé virtuelle. Une fois enregistré, chaque surface ci-dessous peut utiliser les modèles du proxy. Changer l'URL exige de saisir à nouveau la clé.",
+  "llm.litellm.saved": "Proxy LiteLLM enregistré",
+  "llm.litellm.modelsAvailable": "{count} modèles disponibles",
+  "llm.litellm.reenterKey": "Saisissez à nouveau la clé pour utiliser une nouvelle URL.",
+  "llm.litellm.notConfigured": "Enregistrez d'abord le proxy LiteLLM (URL et clé) dans la carte des clés des fournisseurs."
 }

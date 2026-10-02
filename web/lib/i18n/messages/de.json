@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "Keine neuen Änderungen.",
   "freshness.toastBehind": "Der Branch hat sich bewegt — Neuindexierung eingereiht.",
   "freshness.toastUnreachable": "Remote nicht erreichbar.",
-  "freshness.toastNeverIndexed": "Noch nichts indexiert, womit sich vergleichen ließe."
+  "freshness.toastNeverIndexed": "Noch nichts indexiert, womit sich vergleichen ließe.",
+  "llm.litellm.rowName": "LiteLLM-Proxy",
+  "llm.litellm.option": "LiteLLM-Proxy",
+  "llm.litellm.baseUrlLabel": "Proxy-URL",
+  "llm.litellm.keyPlaceholder": "Virtueller Schlüssel (sk-…)",
+  "llm.litellm.hint": "Ein LiteLLM-Proxy, den Ihr Unternehmen betreibt: seine URL plus ein virtueller Schlüssel. Nach dem Speichern können alle Bereiche unten die Modelle des Proxys nutzen. Wer die URL ändert, muss den Schlüssel erneut eingeben.",
+  "llm.litellm.saved": "LiteLLM-Proxy gespeichert",
+  "llm.litellm.modelsAvailable": "{count} Modelle verfügbar",
+  "llm.litellm.reenterKey": "Geben Sie den Schlüssel erneut ein, um eine neue URL zu verwenden.",
+  "llm.litellm.notConfigured": "Speichern Sie zuerst den LiteLLM-Proxy (URL und Schlüssel) in der Karte der Anbieterschlüssel."
 }

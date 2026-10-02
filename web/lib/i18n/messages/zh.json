@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "没有新变更。",
   "freshness.toastBehind": "分支已移动 — 重新索引已排队。",
   "freshness.toastUnreachable": "无法连接远端。",
-  "freshness.toastNeverIndexed": "尚无索引可供比较。"
+  "freshness.toastNeverIndexed": "尚无索引可供比较。",
+  "llm.litellm.rowName": "LiteLLM 代理",
+  "llm.litellm.option": "LiteLLM 代理",
+  "llm.litellm.baseUrlLabel": "代理 URL",
+  "llm.litellm.keyPlaceholder": "虚拟密钥 (sk-…)",
+  "llm.litellm.hint": "贵公司运行的 LiteLLM 代理：其 URL 和一个虚拟密钥。保存后，下方每个功能都可以使用该代理的模型。更改 URL 需要重新输入密钥。",
+  "llm.litellm.saved": "LiteLLM 代理已保存",
+  "llm.litellm.modelsAvailable": "{count} 个模型可用",
+  "llm.litellm.reenterKey": "请重新输入密钥以使用新的 URL。",
+  "llm.litellm.notConfigured": "请先在提供商密钥卡片中保存 LiteLLM 代理（URL 和密钥）。"
 }

@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "Sem alterações novas.",
   "freshness.toastBehind": "O ramo mudou — reindexação em fila.",
   "freshness.toastUnreachable": "Não foi possível contactar o remoto.",
-  "freshness.toastNeverIndexed": "Nada indexado para comparar."
+  "freshness.toastNeverIndexed": "Nada indexado para comparar.",
+  "llm.litellm.rowName": "Proxy LiteLLM",
+  "llm.litellm.option": "Proxy LiteLLM",
+  "llm.litellm.baseUrlLabel": "URL do proxy",
+  "llm.litellm.keyPlaceholder": "Chave virtual (sk-…)",
+  "llm.litellm.hint": "Um proxy LiteLLM mantido pela sua empresa: o URL dele e uma chave virtual. Depois de salvo, todas as superfícies abaixo podem usar os modelos do proxy. Alterar o URL exige digitar a chave novamente.",
+  "llm.litellm.saved": "Proxy LiteLLM salvo",
+  "llm.litellm.modelsAvailable": "{count} modelos disponíveis",
+  "llm.litellm.reenterKey": "Digite a chave novamente para usar um novo URL.",
+  "llm.litellm.notConfigured": "Salve primeiro o proxy LiteLLM (URL e chave) no cartão de chaves dos provedores."
 }

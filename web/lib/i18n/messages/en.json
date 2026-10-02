@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "No new changes.",
   "freshness.toastBehind": "The branch moved — re-indexing queued.",
   "freshness.toastUnreachable": "Could not reach the remote.",
-  "freshness.toastNeverIndexed": "Nothing indexed yet to compare against."
+  "freshness.toastNeverIndexed": "Nothing indexed yet to compare against.",
+  "llm.litellm.rowName": "LiteLLM proxy",
+  "llm.litellm.option": "LiteLLM proxy",
+  "llm.litellm.baseUrlLabel": "Proxy URL",
+  "llm.litellm.keyPlaceholder": "Virtual key (sk-…)",
+  "llm.litellm.hint": "A LiteLLM proxy your company runs: its URL plus a virtual key. Once saved, every surface below can use the proxy's models. Changing the URL requires entering the key again.",
+  "llm.litellm.saved": "LiteLLM proxy saved",
+  "llm.litellm.modelsAvailable": "{count} models available",
+  "llm.litellm.reenterKey": "Enter the key again to use a new URL.",
+  "llm.litellm.notConfigured": "Save the LiteLLM proxy (URL and key) in the provider keys card first."
 }

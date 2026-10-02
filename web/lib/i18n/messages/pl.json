@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "Brak nowych zmian.",
   "freshness.toastBehind": "Gałąź się przesunęła — reindeksacja w kolejce.",
   "freshness.toastUnreachable": "Nie udało się połączyć ze zdalnym repozytorium.",
-  "freshness.toastNeverIndexed": "Nie ma nic zaindeksowanego do porównania."
+  "freshness.toastNeverIndexed": "Nie ma nic zaindeksowanego do porównania.",
+  "llm.litellm.rowName": "Proxy LiteLLM",
+  "llm.litellm.option": "Proxy LiteLLM",
+  "llm.litellm.baseUrlLabel": "URL proxy",
+  "llm.litellm.keyPlaceholder": "Klucz wirtualny (sk-…)",
+  "llm.litellm.hint": "Proxy LiteLLM utrzymywane przez Twoją firmę: jego URL i klucz wirtualny. Po zapisaniu każda sekcja poniżej może korzystać z modeli proxy. Zmiana URL wymaga ponownego wpisania klucza.",
+  "llm.litellm.saved": "Zapisano proxy LiteLLM",
+  "llm.litellm.modelsAvailable": "Dostępne modele: {count}",
+  "llm.litellm.reenterKey": "Wpisz klucz ponownie, aby użyć nowego URL.",
+  "llm.litellm.notConfigured": "Najpierw zapisz proxy LiteLLM (URL i klucz) na karcie kluczy dostawców."
 }

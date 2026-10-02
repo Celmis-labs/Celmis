@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "新しい変更はありません。",
   "freshness.toastBehind": "ブランチが動きました — 再インデックスをキューに入れました。",
   "freshness.toastUnreachable": "リモートに到達できませんでした。",
-  "freshness.toastNeverIndexed": "比較できるインデックスがまだありません。"
+  "freshness.toastNeverIndexed": "比較できるインデックスがまだありません。",
+  "llm.litellm.rowName": "LiteLLM プロキシ",
+  "llm.litellm.option": "LiteLLM プロキシ",
+  "llm.litellm.baseUrlLabel": "プロキシ URL",
+  "llm.litellm.keyPlaceholder": "仮想キー (sk-…)",
+  "llm.litellm.hint": "社内で運用している LiteLLM プロキシ: その URL と仮想キーです。保存すると、下のすべての項目でプロキシのモデルを使えます。URL を変更するにはキーを再入力する必要があります。",
+  "llm.litellm.saved": "LiteLLM プロキシを保存しました",
+  "llm.litellm.modelsAvailable": "{count} 個のモデルが利用可能",
+  "llm.litellm.reenterKey": "新しい URL を使うにはキーを再入力してください。",
+  "llm.litellm.notConfigured": "先にプロバイダーキーのカードで LiteLLM プロキシ (URL とキー) を保存してください。"
 }

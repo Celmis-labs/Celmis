@@ -861,6 +861,21 @@ export type LLMConfig = {
    *  cosmetic — the page shows this block read-only instead, so nobody
    *  edits a dropdown that does not run. */
   effective_embeddings?: EffectiveEmbeddings | null;
+  /** True when traffic leaves through the installation's LiteLLM gateway. */
+  gateway_enabled?: boolean;
+  /** The workspace's own LiteLLM proxy (provider "litellm"). Optional only
+   *  for an API that predates it. */
+  litellm?: LiteLLMProxyStatus;
+  /** Whether the embeddings card may offer the LiteLLM proxy — only in the
+   *  workspace whose embeddings profile is the shared one that runs. */
+  litellm_embeddings_allowed?: boolean;
+};
+
+export type LiteLLMProxyStatus = {
+  connected: boolean;
+  base_url: string | null;
+  masked: string;
+  source: "ui" | "env" | "none" | string;
 };
 
 export type EffectiveEmbeddings = {
@@ -889,6 +904,9 @@ export type LLMConfigUpdate = {
    *  way to say "clear this override", since absent already means inherit. */
   agents?: Partial<Record<ReviewAgent, AgentLLMOverride>>;
   provider_keys?: Record<string, string>;
+  /** The workspace LiteLLM proxy. `api_key` may be omitted only when the
+   *  URL is unchanged — a saved key is never re-pointed at a new address. */
+  litellm?: { base_url: string; api_key?: string };
 };
 
 export type ProviderModels = {
@@ -908,6 +926,8 @@ export type TestConnectionResult = {
   /** Server-side caution that is not a failure — e.g. the returned vector
    *  width differs from the configured dimensions. */
   warning?: string | null;
+  /** LiteLLM proxy only: the model ids the virtual key may call. */
+  models?: string[] | null;
 };
 
 /** GET /api/llm/local-setup-guide — how to stand up a self-hosted
@@ -938,7 +958,8 @@ export const llmApi = {
        *  hosted providers still refuse without one (readable detail, not 422). */
       api_key?: string;
       model?: string | null;
-      /** Self-hosted (OpenAI-compatible) only — which server to ping. */
+      /** Self-hosted (OpenAI-compatible) and LiteLLM proxy only — which
+       *  server to ping. */
       base_url?: string;
       /** "chat" (generation surfaces, review included) or "embeddings" —
        *  an embeddings test reports the vector width, which is what

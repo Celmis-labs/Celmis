@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "새로운 변경 없음.",
   "freshness.toastBehind": "브랜치가 움직였습니다 — 재인덱싱을 대기열에 넣었습니다.",
   "freshness.toastUnreachable": "원격에 연결할 수 없습니다.",
-  "freshness.toastNeverIndexed": "비교할 인덱스가 아직 없습니다."
+  "freshness.toastNeverIndexed": "비교할 인덱스가 아직 없습니다.",
+  "llm.litellm.rowName": "LiteLLM 프록시",
+  "llm.litellm.option": "LiteLLM 프록시",
+  "llm.litellm.baseUrlLabel": "프록시 URL",
+  "llm.litellm.keyPlaceholder": "가상 키 (sk-…)",
+  "llm.litellm.hint": "회사에서 운영하는 LiteLLM 프록시: URL과 가상 키입니다. 저장하면 아래의 모든 영역에서 프록시의 모델을 사용할 수 있습니다. URL을 바꾸려면 키를 다시 입력해야 합니다.",
+  "llm.litellm.saved": "LiteLLM 프록시를 저장했습니다",
+  "llm.litellm.modelsAvailable": "사용 가능한 모델 {count}개",
+  "llm.litellm.reenterKey": "새 URL을 사용하려면 키를 다시 입력하세요.",
+  "llm.litellm.notConfigured": "먼저 공급자 키 카드에서 LiteLLM 프록시(URL과 키)를 저장하세요."
 }

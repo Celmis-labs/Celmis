@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "Geen nieuwe wijzigingen.",
   "freshness.toastBehind": "De branch is verschoven — herindexering in de wachtrij.",
   "freshness.toastUnreachable": "Remote niet bereikbaar.",
-  "freshness.toastNeverIndexed": "Nog niets geïndexeerd om mee te vergelijken."
+  "freshness.toastNeverIndexed": "Nog niets geïndexeerd om mee te vergelijken.",
+  "llm.litellm.rowName": "LiteLLM-proxy",
+  "llm.litellm.option": "LiteLLM-proxy",
+  "llm.litellm.baseUrlLabel": "Proxy-URL",
+  "llm.litellm.keyPlaceholder": "Virtuele sleutel (sk-…)",
+  "llm.litellm.hint": "Een LiteLLM-proxy die je bedrijf draait: de URL plus een virtuele sleutel. Na opslaan kan elk onderdeel hieronder de modellen van de proxy gebruiken. Wie de URL wijzigt, moet de sleutel opnieuw invoeren.",
+  "llm.litellm.saved": "LiteLLM-proxy opgeslagen",
+  "llm.litellm.modelsAvailable": "{count} modellen beschikbaar",
+  "llm.litellm.reenterKey": "Voer de sleutel opnieuw in om een nieuwe URL te gebruiken.",
+  "llm.litellm.notConfigured": "Sla eerst de LiteLLM-proxy (URL en sleutel) op in de kaart met providersleutels."
 }

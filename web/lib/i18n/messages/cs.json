@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "Žádné nové změny.",
   "freshness.toastBehind": "Větev se pohnula — reindexace zařazena.",
   "freshness.toastUnreachable": "Vzdálený repozitář je nedostupný.",
-  "freshness.toastNeverIndexed": "Není co porovnávat — nic zatím nebylo zaindexováno."
+  "freshness.toastNeverIndexed": "Není co porovnávat — nic zatím nebylo zaindexováno.",
+  "llm.litellm.rowName": "Proxy LiteLLM",
+  "llm.litellm.option": "Proxy LiteLLM",
+  "llm.litellm.baseUrlLabel": "URL proxy",
+  "llm.litellm.keyPlaceholder": "Virtuální klíč (sk-…)",
+  "llm.litellm.hint": "Proxy LiteLLM, které provozuje vaše firma: jeho URL a virtuální klíč. Po uložení mohou všechny oblasti níže používat modely proxy. Změna URL vyžaduje znovu zadat klíč.",
+  "llm.litellm.saved": "Proxy LiteLLM uloženo",
+  "llm.litellm.modelsAvailable": "Dostupné modely: {count}",
+  "llm.litellm.reenterKey": "Zadejte klíč znovu, chcete-li použít nové URL.",
+  "llm.litellm.notConfigured": "Nejprve uložte proxy LiteLLM (URL a klíč) na kartě klíčů poskytovatelů."
 }

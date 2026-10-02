@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "Yeni değişiklik yok.",
   "freshness.toastBehind": "Dal değişti — yeniden dizinleme kuyruğa alındı.",
   "freshness.toastUnreachable": "Uzak depoya ulaşılamadı.",
-  "freshness.toastNeverIndexed": "Karşılaştırılacak dizinlenmiş bir şey yok."
+  "freshness.toastNeverIndexed": "Karşılaştırılacak dizinlenmiş bir şey yok.",
+  "llm.litellm.rowName": "LiteLLM proxy",
+  "llm.litellm.option": "LiteLLM proxy",
+  "llm.litellm.baseUrlLabel": "Proxy URL'si",
+  "llm.litellm.keyPlaceholder": "Sanal anahtar (sk-…)",
+  "llm.litellm.hint": "Şirketinizin çalıştırdığı bir LiteLLM proxy: URL'si ve bir sanal anahtar. Kaydedildikten sonra aşağıdaki her alan proxy'nin modellerini kullanabilir. URL'yi değiştirmek için anahtarı yeniden girmeniz gerekir.",
+  "llm.litellm.saved": "LiteLLM proxy kaydedildi",
+  "llm.litellm.modelsAvailable": "{count} model kullanılabilir",
+  "llm.litellm.reenterKey": "Yeni bir URL kullanmak için anahtarı yeniden girin.",
+  "llm.litellm.notConfigured": "Önce LiteLLM proxy'yi (URL ve anahtar) sağlayıcı anahtarları kartında kaydedin."
 }

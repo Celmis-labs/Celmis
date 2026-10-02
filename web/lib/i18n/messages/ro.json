@@ -2274,5 +2274,14 @@
   "freshness.toastUpToDate": "Nicio modificare nouă.",
   "freshness.toastBehind": "Ramura s-a mutat — reindexare în coadă.",
   "freshness.toastUnreachable": "Nu s-a putut contacta depozitul la distanță.",
-  "freshness.toastNeverIndexed": "Nimic indexat cu care să comparăm."
+  "freshness.toastNeverIndexed": "Nimic indexat cu care să comparăm.",
+  "llm.litellm.rowName": "Proxy LiteLLM",
+  "llm.litellm.option": "Proxy LiteLLM",
+  "llm.litellm.baseUrlLabel": "URL proxy",
+  "llm.litellm.keyPlaceholder": "Cheie virtuală (sk-…)",
+  "llm.litellm.hint": "Un proxy LiteLLM administrat de compania ta: URL-ul lui plus o cheie virtuală. După salvare, fiecare secțiune de mai jos poate folosi modelele proxy-ului. Schimbarea URL-ului cere reintroducerea cheii.",
+  "llm.litellm.saved": "Proxy LiteLLM salvat",
+  "llm.litellm.modelsAvailable": "{count} modele disponibile",
+  "llm.litellm.reenterKey": "Reintrodu cheia pentru a folosi un URL nou.",
+  "llm.litellm.notConfigured": "Salvează mai întâi proxy-ul LiteLLM (URL și cheie) în cardul cheilor de furnizor."
 }
