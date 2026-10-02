@@ -82,14 +82,16 @@ _ENV_FALLBACK: Final[dict[str, str]] = {
     # servers started WITH auth (vLLM --api-key); a keyless server resolves to
     # the LOCAL_NO_KEY sentinel below instead of failing.
     "openai_compatible": "OPENAI_COMPATIBLE_API_KEY",
-    # A workspace's own LiteLLM proxy (virtual key "sk-…"). The key is only
-    # half of it — the proxy address travels with it, so this provider is
-    # resolved as a PAIR in src/llm/litellm_proxy.py and the env key is only
-    # ever paired with LITELLM_API_BASE. See resolve_api_key below.
-    "litellm": "LITELLM_API_KEY",
 }
 
-_KNOWN_PROVIDERS: Final[frozenset[str]] = frozenset(_ENV_FALLBACK.keys())
+#: Providers with NO env fallback: configured only through the UI.
+#: "litellm" = a workspace's own LiteLLM proxy; its key and URL are one
+#: credential, resolved as a pair in src/llm/litellm_proxy.py.
+_UI_ONLY_PROVIDERS: Final[frozenset[str]] = frozenset({"litellm"})
+
+_KNOWN_PROVIDERS: Final[frozenset[str]] = (
+    frozenset(_ENV_FALLBACK.keys()) | _UI_ONLY_PROVIDERS
+)
 
 #: What "openai_compatible" resolves to when nobody stored a key. Local
 #: servers usually run without auth, but every layer between here and litellm
@@ -144,15 +146,14 @@ def resolve_api_key(
     if provider == "litellm":
         # Resolved as (base URL, key) together: a key without its address is
         # not a usable credential, and must not make has_key() say otherwise.
-        from src.llm.litellm_proxy import ENV_BASE, resolve_endpoint
+        from src.llm.litellm_proxy import resolve_endpoint
 
         ep = resolve_endpoint(workspace_id, user_id)
         if ep is not None:
             return ep.api_key
         raise LLMCredentialError(
-            f"no LiteLLM proxy (base URL + key) for workspace {workspace_id!r}. "
-            f"Add it on the LLM Setup page, or set LITELLM_API_KEY and "
-            f"{ENV_BASE} in your .env."
+            f"no LiteLLM proxy (URL + key) for workspace {workspace_id!r}. "
+            "A workspace admin sets it in Settings → LLM."
         )
 
     # ── Tier 1 + 2: credentials store (user-scoped, then default user) ──

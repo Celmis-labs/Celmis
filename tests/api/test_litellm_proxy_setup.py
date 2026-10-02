@@ -1,109 +1,138 @@
-"""A workspace's own LiteLLM proxy on /api/llm — save, test, list models.
+"""A workspace's own LiteLLM proxy on /api/llm — validate-then-save, models, safety.
 
 What must hold:
 
-    1. The proxy is ONE credential (base URL + virtual key) in slot ws:{id}.
-       A changed URL needs the key typed again, on save and on Test — a saved
-       key is never sent to a new address.
-    2. Test pings {base}/v1/models with the virtual key and reports the model
-       ids; a 401 says the PROXY rejected the key.
-    3. /models?provider=litellm lists the proxy's aliases, split by mode.
-    4. Another workspace sees neither the key nor the URL.
-    5. A "litellm" profile is refused while no proxy resolves; embeddings may
-       use it only in the default workspace (the shared embeddings profile).
-    6. The OpenAI 401 points at the proxy row; LLMConfigOut reports
-       gateway_enabled.
+    1. URL rules: https only; no userinfo/query/fragment; "/" and "/v1"
+       normalised; every resolved address public (private, loopback,
+       link-local, CGNAT, ULA, mapped, … refused); operator allowlist only via
+       LITELLM_PROXY_ALLOWED_HOSTS.
+    2. Transport: pinned to the validated IP (SNI/Host = hostname), no
+       redirects, 2 MB cap.
+    3. Validate-then-save: 401 / redirect / oversize / bad URL → 422 and
+       NOTHING written; success → one encrypted row (key AND URL encrypted,
+       fingerprint in metadata); audit with fingerprint + host, never the key.
+    4. GET /config never carries the key or URL; host only for admins.
+    5. Only workspace admins may save / test / delete (403 otherwise).
+    6. A "litellm" profile/agent/fallback model must be in the proxy's list.
+    7. Workspace isolation; no secret in the logs.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
-BASE = "https://litellm.example.com"
-KEY = "sk-virtual-key-1234567890"
+from src.llm import litellm_proxy
+
+HOST = "litellm.example.com"
+BASE = f"https://{HOST}"
+PUBLIC_IP = "93.184.216.34"
+KEY = "sk-virtual-Qx7v9KpL2mZ8wR4tY6uB"
+OTHER_KEY = "sk-other-virtual-key-55555"
 _ADMIN = SimpleNamespace(id="u-ops", email="ops@test", is_admin=True)
+_MEMBER = SimpleNamespace(id="u-m", email="member@test", is_admin=False)
+
+DNS: dict[str, list[str]] = {}
 
 
-class _FakeStore:
-    def __init__(self):
-        self.rows: dict[tuple[str, str, str], SimpleNamespace] = {}
+def _fake_resolve(host: str, port: int) -> list[str]:
+    if host in DNS:
+        return list(DNS[host])
+    import ipaddress
+    try:
+        ipaddress.ip_address(host)
+        return [host]
+    except ValueError:
+        raise OSError("NXDOMAIN") from None
 
-    def save(self, *, provider, secret, metadata=None, user_id="", account_label="default"):
-        self.rows[(provider, user_id, account_label)] = SimpleNamespace(
-            secret=secret, metadata=metadata or {},
-        )
 
-    def load(self, *, provider, user_id="", account_label="default"):
-        return self.rows.get((provider, user_id, account_label))
-
-    def delete(self, provider, *, user_id="", account_label="default"):
-        return self.rows.pop((provider, user_id, account_label), None) is not None
+@pytest.fixture(autouse=True)
+def hermetic(monkeypatch, tmp_path):
+    for var in ("LITELLM_PROXY_URL", "LITELLM_MASTER_KEY", "LITELLM_PROXY_API_BASE",
+                "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_COMPATIBLE_API_KEY",
+                "GEMINI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    DNS.clear()
+    DNS.update({HOST: [PUBLIC_IP], "other.example.com": ["93.184.216.99"],
+                "localhost": ["127.0.0.1", "::1"]})
+    monkeypatch.setattr(litellm_proxy, "_resolve", _fake_resolve)
+    litellm_proxy.reset_cache()
+    yield
+    litellm_proxy.reset_cache()
 
 
 @pytest.fixture
-def store(monkeypatch):
-    for var in ("LITELLM_PROXY_URL", "LITELLM_MASTER_KEY", "LITELLM_PROXY_API_BASE",
-                "LITELLM_API_KEY", "LITELLM_API_BASE", "OPENAI_API_KEY",
-                "ANTHROPIC_API_KEY", "OPENAI_COMPATIBLE_API_KEY", "GEMINI_API_KEY"):
-        monkeypatch.delenv(var, raising=False)
-    from src.llm import litellm_proxy
-    litellm_proxy.reset_cache()
-    fake = _FakeStore()
-    # Hermetic DNS: *.example.com counts as public, everything else goes
-    # through the real (literal-IP) classification.
-    real_public = litellm_proxy._is_public_host
-    with patch("src.credentials.get_credential_store", return_value=fake), \
-         patch("src.llm.litellm_proxy._is_public_host",
-               side_effect=lambda h: h.endswith("example.com") or real_public(h)):
-        yield fake
+def store(tmp_path):
+    from cryptography.fernet import Fernet
+
+    from src.credentials.store import CredentialStore
+
+    real = CredentialStore(tmp_path / "creds.db", Fernet.generate_key())
+    real.db_file = tmp_path / "creds.db"
+    with patch("src.credentials.get_credential_store", return_value=real):
+        yield real
+
+
+def _row(store, ws: str):
+    return store.load(provider="litellm", user_id=f"ws:{ws}", account_label="default")
 
 
 class _Proxy:
-    """A fake proxy behind httpx.MockTransport; records every request."""
+    """Stands in for the network UNDER the guarded transport: the allowlist
+    and the IP pinning run for real; only the socket is fake."""
 
-    def __init__(self, *, status: int = 200, models=("chat-a", "embedding-2-test"),
-                 info: dict | None = None):
-        self.status = status
-        self.models = list(models)
-        self.info = info
+    def __init__(self):
+        self.status = 200
+        self.models = ["chat-a", "embedding-2-test"]
+        self.body: bytes | None = None          # raw override for /v1/models
+        self.chunked: list[bytes] | None = None
+        self.redirect: str | None = None
+        self.info: dict | None = None
         self.embed_status = 200
-        self.embed_width: int | None = None   # None → honour `dimensions`
+        self.embed_width: int | None = None
         self.requests: list[httpx.Request] = []
 
-    def handler(self, request: httpx.Request) -> httpx.Response:
+    def handle(self, _transport, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        if request.url.path == "/v1/embeddings":
-            import json as _json
+        path = request.url.path
+        if self.redirect:
+            return httpx.Response(302, headers={"location": self.redirect})
+        if path == "/v1/embeddings":
             if self.embed_status != 200:
-                return httpx.Response(self.embed_status, json={"error": "dimensions"})
-            body = _json.loads(request.content)
+                return httpx.Response(self.embed_status, json={"error": "x"})
+            body = json.loads(request.content)
             width = self.embed_width or body.get("dimensions") or 3072
             return httpx.Response(200, json={"data": [{"embedding": [0.0] * width}]})
-        if request.url.path == "/model/info":
+        if path == "/model/info":
             if self.info is None:
                 return httpx.Response(403, json={})
             return httpx.Response(200, json={"data": [
                 {"model_name": k, "litellm_params": {"model": v[0]},
-                 "model_info": {"mode": v[1]}}
-                for k, v in self.info.items()
-            ]})
+                 "model_info": {"mode": v[1]}} for k, v in self.info.items()]})
         if self.status != 200:
             return httpx.Response(self.status, json={"error": "nope"})
+        if self.chunked is not None:
+            return httpx.Response(200, content=iter(self.chunked))
+        if self.body is not None:
+            return httpx.Response(200, content=self.body)
         return httpx.Response(200, json={"data": [{"id": m} for m in self.models]})
-
-    def client(self, base_url, *, timeout):
-        return httpx.Client(transport=httpx.MockTransport(self.handler))
 
 
 @pytest.fixture
 def proxy():
     p = _Proxy()
-    with patch("src.llm.litellm_proxy.ping_client", side_effect=p.client):
+
+    def handle(transport, request):
+        return p.handle(transport, request)
+
+    with patch.object(httpx.HTTPTransport, "handle_request", handle):
         yield p
 
 
@@ -111,9 +140,16 @@ def _request():
     from starlette.requests import Request
 
     return Request({
-        "type": "http", "method": "PUT", "path": "/api/llm/config",
+        "type": "http", "method": "PUT", "path": "/api/llm/litellm",
         "headers": [], "client": ("203.0.113.9", 51234), "query_string": b"",
     })
+
+
+def _save(ws: str = "ws-a", base: str = BASE, key: str = KEY, user=_ADMIN):
+    from src.api.routers.llm import LiteLLMProxyIn, put_litellm_proxy
+
+    return put_litellm_proxy(LiteLLMProxyIn(base_url=base, api_key=key), _request(),
+                             user=user, workspace_id=ws)
 
 
 def _put(ws: str = "default", **body):
@@ -129,300 +165,387 @@ def _test(ws: str = "default", **body):
                            user=_ADMIN, workspace_id=ws)
 
 
-# ─── 1. One credential ────────────────────────────────────────────────
-
-
-def test_the_pair_is_saved_in_the_workspace_slot(store):
-    out = _put("ws-a", litellm={"base_url": BASE + "/", "api_key": KEY})
-    row = store.rows[("litellm", "ws:ws-a", "default")]
-    assert row.secret == KEY
-    assert row.metadata["base_url"] == BASE          # trailing slash stripped
-    assert out.litellm.connected is True
-    assert out.litellm.base_url == BASE
-    assert KEY not in out.litellm.masked
-    assert out.litellm.source == "ui"
-
-
-def test_a_new_url_without_the_key_is_refused(store):
-    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
+def _refused(ws: str = "ws-a", base: str = BASE, key: str = KEY) -> str:
     with pytest.raises(HTTPException) as exc:
-        _put("ws-a", litellm={"base_url": "https://evil.example.com"})
+        _save(ws, base, key)
     assert exc.value.status_code == 422
-    assert store.rows[("litellm", "ws:ws-a", "default")].metadata["base_url"] == BASE
+    return str(exc.value.detail)
 
 
-def test_a_key_only_update_keeps_the_url(store):
-    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
-    _put("ws-a", provider_keys={"litellm": "sk-rotated-key-0987654321"})
-    row = store.rows[("litellm", "ws:ws-a", "default")]
-    assert row.secret == "sk-rotated-key-0987654321"
-    assert row.metadata["base_url"] == BASE
+# ─── 1. URL rules ─────────────────────────────────────────────────────
 
 
-def test_a_key_with_no_url_anywhere_is_refused(store):
-    with pytest.raises(HTTPException) as exc:
-        _put("ws-a", provider_keys={"litellm": KEY})
-    assert exc.value.status_code == 422
+@pytest.mark.parametrize("url", [
+    f"http://{HOST}",
+    f"ftp://{HOST}",
+    HOST,
+    f"https://user:pass@{HOST}",
+    f"https://user@{HOST}",
+    f"{BASE}/?x=1",
+    f"{BASE}/v1?key=1",
+    f"{BASE}/#frag",
+    "https://",
+])
+def test_a_malformed_or_non_https_url_is_refused_before_any_request(store, proxy, url):
+    _refused(base=url)
+    assert proxy.requests == []
+    assert _row(store, "ws-a") is None
 
 
-def test_a_non_http_url_is_refused(store):
-    with pytest.raises(HTTPException) as exc:
-        _put("ws-a", litellm={"base_url": "litellm:4000", "api_key": KEY})
-    assert exc.value.status_code == 422
+@pytest.mark.parametrize("url", [
+    "https://localhost",
+    "https://127.0.0.1",
+    "https://10.1.2.3",
+    "https://172.16.0.1",
+    "https://192.168.1.10:4000",
+    "https://169.254.169.254",
+    "https://[::1]",
+    "https://[fc00::1]",
+    "https://[fd12:3456::1]",
+    "https://[fe80::1]",
+    "https://100.64.1.1",
+    "https://0.0.0.0",
+    "https://224.0.0.1",
+    "https://[::ffff:127.0.0.1]",
+    "https://[::ffff:169.254.169.254]",
+    "https://[64:ff9b::a00:1]",
+    "https://[2002:a00:1::1]",
+])
+def test_a_non_public_address_is_refused(store, proxy, url):
+    detail = _refused(base=url)
+    assert "non-public" in detail
+    assert proxy.requests == []
+    assert _row(store, "ws-a") is None
 
 
-# ─── 2. Test connection ───────────────────────────────────────────────
-
-
-def test_test_lists_the_proxys_models_with_the_bearer_key(store, proxy):
-    r = _test(api_key=KEY, base_url=BASE)
-    assert r.ok is True
-    assert r.models == ["chat-a", "embedding-2-test"]
-    assert r.models_available == 2
-    req = proxy.requests[0]
-    assert str(req.url) == f"{BASE}/v1/models"
-    assert req.headers["authorization"] == f"Bearer {KEY}"
-
-
-def test_a_v1_suffix_is_not_doubled(store, proxy):
-    _test(api_key=KEY, base_url=BASE + "/v1")
-    assert str(proxy.requests[0].url) == f"{BASE}/v1/models"
-
-
-def test_test_uses_the_saved_pair(store, proxy):
-    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
-    r = _test("ws-a", api_key="use-saved")
-    assert r.ok is True
-    assert proxy.requests[0].headers["authorization"] == f"Bearer {KEY}"
-
-
-def test_the_saved_key_is_never_sent_to_a_new_url(store, proxy):
-    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
-    r = _test("ws-a", api_key="use-saved", base_url="https://evil.example.com")
-    assert r.ok is False
+def test_a_hostname_resolving_to_a_private_ip_is_refused(store, proxy):
+    DNS["sneaky.example.com"] = ["10.0.0.5"]
+    assert "non-public" in _refused(base="https://sneaky.example.com")
+    # ONE private record among public ones is enough.
+    DNS["mixed.example.com"] = [PUBLIC_IP, "169.254.169.254"]
+    assert "non-public" in _refused(base="https://mixed.example.com")
     assert proxy.requests == []
 
 
-def test_a_rejected_key_says_the_proxy_rejected_it(store, proxy):
+def test_an_unresolvable_host_is_refused(store, proxy):
+    assert "does not resolve" in _refused(base="https://nowhere.example.com")
+
+
+@pytest.mark.parametrize("raw, want", [
+    (BASE + "/", BASE),
+    (BASE + "/v1", BASE),
+    (BASE + "/v1/", BASE),
+    ("HTTPS://LiteLLM.Example.com:443/", BASE),
+    (BASE + ":8443/gw/v1", BASE + ":8443/gw"),
+])
+def test_the_url_is_normalised(raw, want):
+    assert litellm_proxy.normalise_base_url(raw) == want
+
+
+def test_the_operator_allowlist_admits_a_lan_proxy_but_never_link_local(store, proxy):
+    from src.config import get_settings
+
+    DNS["litellm.corp.internal"] = ["10.20.0.5"]
+    DNS["meta.corp.internal"] = ["169.254.169.254"]
+    assert "LITELLM_PROXY_ALLOWED_HOSTS" in _refused(base="https://litellm.corp.internal")
+
+    s = get_settings().model_copy(update={"litellm_proxy_allowed_hosts": ["corp.internal"]})
+    with patch("src.config.get_settings", return_value=s):
+        _save("ws-a", "https://litellm.corp.internal")
+        assert _row(store, "ws-a") is not None
+        _refused("ws-b", "https://meta.corp.internal")
+    assert _row(store, "ws-b") is None
+
+
+def test_the_private_network_flag_does_not_open_this_path(store, proxy):
+    from src.config import get_settings
+
+    s = get_settings().model_copy(update={"egress_allow_private_network": True})
+    with patch("src.config.get_settings", return_value=s):
+        _refused(base="https://10.0.0.5")
+
+
+# ─── 2. Transport ─────────────────────────────────────────────────────
+
+
+def test_the_request_is_pinned_to_the_validated_ip(store, proxy):
+    _save()
+    req = proxy.requests[0]
+    assert req.url.host == PUBLIC_IP                     # connected to the IP
+    assert req.url.path == "/v1/models"
+    assert req.headers["host"] == HOST                   # Host header kept
+    assert req.extensions["sni_hostname"] == HOST        # TLS name kept
+    assert req.headers["authorization"] == f"Bearer {KEY}"
+
+
+def test_a_redirect_is_not_followed(store, proxy):
+    proxy.redirect = "https://169.254.169.254/latest/meta-data/"
+    assert "redirect" in _refused()
+    assert len(proxy.requests) == 1
+    assert _row(store, "ws-a") is None
+
+
+def test_an_oversized_model_list_is_refused(store, proxy):
+    proxy.body = b'{"data": [' + b" " * (litellm_proxy.MAX_RESPONSE_BYTES + 10) + b"]}"
+    assert "too large" in _refused()
+    assert _row(store, "ws-a") is None
+
+
+def test_an_oversized_chunked_model_list_is_refused(store, proxy):
+    chunk = b" " * (512 * 1024)
+    proxy.chunked = [b'{"data": ['] + [chunk] * 5 + [b"]}"]
+    assert "too large" in _refused()
+    assert _row(store, "ws-a") is None
+
+
+# ─── 3. Validate-then-save ────────────────────────────────────────────
+
+
+def test_a_rejected_key_saves_nothing(store, proxy):
     proxy.status = 401
-    r = _test(api_key=KEY, base_url=BASE)
-    assert r.ok is False
-    assert "proxy rejected" in r.detail
+    assert "rejected the virtual key" in _refused()
+    assert _row(store, "ws-a") is None
 
 
-# ─── 3. Model listing ─────────────────────────────────────────────────
+def test_a_rejected_key_keeps_the_previous_row(store, proxy):
+    _save()
+    proxy.status = 401
+    _refused(key=OTHER_KEY)
+    assert json.loads(_row(store, "ws-a").secret)["key"] == KEY
 
 
-def test_models_split_by_name_when_model_info_is_refused(store, proxy):
-    from src.api.routers.llm import provider_models
-
-    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
-    out = provider_models("litellm", user=_ADMIN, workspace_id="ws-a")
-    assert out.generation == ["chat-a"]
-    assert out.embedding == ["embedding-2-test"]
+@pytest.mark.parametrize("body", [b"not json", b'{"object": "list"}', b'{"data": []}'])
+def test_a_proxy_without_a_model_list_saves_nothing(store, proxy, body):
+    proxy.body = body
+    _refused()
+    assert _row(store, "ws-a") is None
 
 
-def test_models_split_by_mode_when_model_info_answers(store, proxy):
-    from src.api.routers.llm import provider_models
+def test_success_is_encrypted_at_rest(store, proxy):
+    out = _save(base=BASE + "/v1/")
+    assert out.models == ["chat-a", "embedding-2-test"]
+    row = _row(store, "ws-a")
+    assert json.loads(row.secret) == {"url": BASE, "key": KEY}
+    assert row.metadata["fingerprint"] == litellm_proxy.fingerprint(KEY)
+    assert len(row.metadata["fingerprint"]) == 12
+    assert "base_url" not in row.metadata
+    raw = b"".join(p.read_bytes() for p in store.db_file.parent.glob("creds.db*"))
+    assert KEY.encode() not in raw
+    assert HOST.encode() not in raw
+    assert BASE.encode() not in raw
 
-    proxy.models = ["vectors", "chat-a"]
-    proxy.info = {"vectors": ("gemini/gemini-embedding-001", "embedding"),
-                  "chat-a": ("gemini/gemini-3-flash", "chat")}
-    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
-    out = provider_models("litellm", user=_ADMIN, workspace_id="ws-a")
-    assert out.embedding == ["vectors"]
-    assert out.generation == ["chat-a"]
+
+def test_the_save_is_audited_without_the_key(store, proxy):
+    with patch("src.api.routers.llm.record_action") as audit:
+        _save()
+    kw = audit.call_args.kwargs
+    assert kw["action"] == "llm_key.saved" and kw["workspace_id"] == "ws-a"
+    assert kw["actor"] == _ADMIN.email
+    assert kw["detail"]["fingerprint"] == litellm_proxy.fingerprint(KEY)
+    assert kw["detail"]["host"] == HOST
+    assert KEY not in json.dumps(kw, default=str)
 
 
-# ─── 4. Workspace isolation ───────────────────────────────────────────
+def test_the_delete_is_audited_and_scoped(store, proxy):
+    from src.api.routers.llm import delete_litellm_proxy
+
+    _save("ws-a")
+    _save("ws-b", key=OTHER_KEY)
+    with patch("src.api.routers.llm.record_action") as audit:
+        out = delete_litellm_proxy(_request(), user=_ADMIN, workspace_id="ws-a")
+    assert out.litellm.connected is False
+    assert _row(store, "ws-a") is None and _row(store, "ws-b") is not None
+    kw = audit.call_args.kwargs
+    assert kw["action"] == "llm_key.deleted"
+    assert kw["detail"]["fingerprint"] == litellm_proxy.fingerprint(KEY)
+    assert kw["detail"]["host"] == HOST
+    assert KEY not in json.dumps(kw, default=str)
 
 
-def test_another_workspace_sees_neither_key_nor_url(store, proxy):
-    from src.api.routers.llm import get_config, provider_models
-    from src.llm.profiles import resolve_profile
-
-    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
-    _put("ws-a", profiles={"chat": {"provider": "litellm", "model": "chat-a"}})
-
-    cfg_b = get_config(user=_ADMIN, workspace_id="ws-b")
-    assert cfg_b.litellm.connected is False
-    assert cfg_b.litellm.base_url is None
-    assert provider_models("litellm", user=_ADMIN, workspace_id="ws-b").generation == []
-    assert _test("ws-b", api_key="use-saved").ok is False
-    # The profile resolution side: ws-a carries the pair, ws-b nothing.
-    a = resolve_profile("chat", "ws-a")
-    assert (a.api_base, a.api_key) == (BASE, KEY)
+def test_a_bare_key_through_put_config_is_refused(store):
+    with pytest.raises(HTTPException) as exc:
+        _put("ws-a", provider_keys={"litellm": KEY})
+    assert exc.value.status_code == 422
     with pytest.raises(HTTPException):
-        _put("ws-b", profiles={"chat": {"provider": "litellm", "model": "chat-a"}})
+        _put("ws-a", provider="litellm", api_key=KEY)
+    assert _row(store, "ws-a") is None
 
 
-# ─── 5. Profiles ──────────────────────────────────────────────────────
+# ─── 4. What GET /config shows ────────────────────────────────────────
 
 
-def test_a_litellm_profile_needs_a_proxy(store):
+def test_get_config_never_carries_the_key_or_url(store, proxy):
+    from src.api.routers.llm import get_config
+
+    _save()
+    with patch("src.api.deps.is_workspace_admin", return_value=False):
+        member = get_config(user=_MEMBER, workspace_id="ws-a")
+    admin = get_config(user=_ADMIN, workspace_id="ws-a")
+    for cfg in (member, admin):
+        dumped = cfg.model_dump_json()
+        assert KEY not in dumped and BASE not in dumped
+        assert cfg.litellm.connected is True
+        assert cfg.litellm.masked == "…" + KEY[-4:]
+        assert cfg.litellm.fingerprint == litellm_proxy.fingerprint(KEY)
+    assert member.litellm.host is None
+    assert admin.litellm.host == HOST
+
+
+# ─── 5. Only workspace admins ─────────────────────────────────────────
+
+
+def test_a_non_admin_gets_403_and_nothing_changes(store, proxy):
+    from src.api.deps import current_workspace_id, get_current_user
+    from src.api.routers import llm as llm_router
+
+    _save()
+    app = FastAPI()
+    app.include_router(llm_router.router)
+    app.dependency_overrides[get_current_user] = lambda: _MEMBER
+    app.dependency_overrides[current_workspace_id] = lambda: "ws-a"
+    client = TestClient(app)
+    with patch("src.api.deps.is_workspace_admin", return_value=False):
+        r1 = client.put("/api/llm/litellm",
+                        json={"base_url": "https://other.example.com", "api_key": OTHER_KEY})
+        r2 = client.post("/api/llm/test-connection",
+                         json={"provider": "litellm", "api_key": "use-saved"})
+        r3 = client.delete("/api/llm/litellm")
+    assert (r1.status_code, r2.status_code, r3.status_code) == (403, 403, 403)
+    assert json.loads(_row(store, "ws-a").secret) == {"url": BASE, "key": KEY}
+    assert len(proxy.requests) == 1          # only the admin's original save
+    with patch("src.api.deps.is_workspace_admin", return_value=True):
+        ok = client.put("/api/llm/litellm",
+                        json={"base_url": "https://other.example.com", "api_key": OTHER_KEY})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["litellm"]["host"] == "other.example.com"
+    assert KEY not in ok.text and OTHER_KEY not in ok.text
+
+
+# ─── 6. Models come from the proxy's list ────────────────────────────
+
+
+def test_a_profile_model_must_be_in_the_proxy_list(store, proxy):
+    _save()
+    with pytest.raises(HTTPException) as exc:
+        _put("ws-a", profiles={"chat": {"provider": "litellm", "model": "gpt-made-up"}})
+    assert exc.value.status_code == 422 and "not offered" in exc.value.detail
+    out = _put("ws-a", profiles={"chat": {"provider": "litellm", "model": "chat-a"}})
+    assert out.profiles["chat"].provider == "litellm"
+    assert out.profiles["chat"].model == "chat-a"
+
+
+def test_a_profile_needs_a_saved_proxy(store, proxy):
     with pytest.raises(HTTPException) as exc:
         _put("ws-a", profiles={"review": {"provider": "litellm", "model": "chat-a"}})
     assert exc.value.status_code == 422
 
 
-def test_proxy_and_profile_in_one_request(store):
-    out = _put("ws-a", litellm={"base_url": BASE, "api_key": KEY},
-               profiles={"review": {"provider": "litellm", "model": "chat-a"}})
-    assert out.profiles["review"].provider == "litellm"
-    assert out.profiles["review"].base_url == BASE
+def test_agent_and_fallback_models_must_be_in_the_list(store, proxy):
+    _save()
+    _put("ws-a", profiles={"review": {"provider": "litellm", "model": "chat-a"}})
+    with pytest.raises(HTTPException) as exc:
+        _put("ws-a", review_fallback_model="free-text-model")
+    assert "not offered" in exc.value.detail
+    with pytest.raises(HTTPException) as exc:
+        _put("ws-a", agents={"architect": {"model": "free-text-model"}})
+    assert "not offered" in exc.value.detail
 
 
-def test_a_litellm_profile_takes_no_per_surface_base_url(store):
-    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
-    with pytest.raises(HTTPException):
-        _put("ws-a", profiles={"chat": {"provider": "litellm", "model": "x",
-                                        "base_url": "https://other.example.com"}})
+def test_an_unreachable_proxy_refuses_the_profile(store, proxy):
+    _save()
+    proxy.status = 503
+    with pytest.raises(HTTPException) as exc:
+        _put("ws-a", profiles={"chat": {"provider": "litellm", "model": "chat-a"}})
+    assert "cannot verify" in exc.value.detail
 
 
-def test_embeddings_via_the_proxy_in_the_default_workspace(store):
-    out = _put("default", litellm={"base_url": BASE, "api_key": KEY},
-               profiles={"embeddings": {"provider": "litellm",
-                                        "model": "embedding-2-test",
-                                        "dimensions": 768}})
-    assert out.litellm_embeddings_allowed is True
+def test_embeddings_via_the_proxy_only_in_the_default_workspace(store, proxy):
+    _save("default")
+    out = _put("default", profiles={"embeddings": {"provider": "litellm",
+                                                   "model": "embedding-2-test",
+                                                   "dimensions": 768}})
     assert out.profiles["embeddings"].provider == "litellm"
-
-
-def test_embeddings_via_the_proxy_are_refused_elsewhere(store):
-    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
+    _save("ws-a")
     with pytest.raises(HTTPException) as exc:
         _put("ws-a", profiles={"embeddings": {"provider": "litellm",
                                               "model": "embedding-2-test"}})
     assert "default workspace" in exc.value.detail
 
 
-# ─── 6. Neighbouring fixes ────────────────────────────────────────────
+def test_models_split_by_mode_or_name(store, proxy):
+    from src.api.routers.llm import provider_models
+
+    _save()
+    out = provider_models("litellm", user=_ADMIN, workspace_id="ws-a")
+    assert (out.generation, out.embedding) == (["chat-a"], ["embedding-2-test"])
+    litellm_proxy.reset_cache()
+    proxy.models = ["vectors", "chat-a"]
+    proxy.info = {"vectors": ("gemini/gemini-embedding-001", "embedding"),
+                  "chat-a": ("gemini/gemini-3-flash", "chat")}
+    out = provider_models("litellm", user=_ADMIN, workspace_id="ws-a")
+    assert (out.generation, out.embedding) == (["chat-a"], ["vectors"])
 
 
-def test_the_openai_401_points_at_the_proxy_row(store):
-    from src.api.routers.llm import TestConnectionIn, test_connection
-
-    def client(endpoint, *, timeout):
-        return httpx.Client(transport=httpx.MockTransport(
-            lambda req: httpx.Response(401, json={})))
-
-    with patch("src.api.routers.llm._provider_ping_client", side_effect=client), \
-         patch("src.api.routers.llm._record_verified"):
-        r = test_connection(TestConnectionIn(provider="openai", api_key=KEY),
-                            user=_ADMIN, workspace_id="default")
-    assert r.ok is False
-    assert "invalid API key (401)" in r.detail
-    assert "LiteLLM proxy row" in r.detail
+# ─── 7. Isolation, Test, logs ─────────────────────────────────────────
 
 
-def test_the_config_reports_gateway_mode(store):
-    from src.api.routers.llm import get_config
+def test_workspace_b_sees_nothing_of_workspace_a(store, proxy):
+    from src.api.routers.llm import get_config, provider_models
+    from src.llm.profiles import resolve_profile
 
-    with patch("src.llm.gateway.is_enabled", return_value=True):
-        assert get_config(user=_ADMIN, workspace_id="default").gateway_enabled is True
-    with patch("src.llm.gateway.is_enabled", return_value=False):
-        assert get_config(user=_ADMIN, workspace_id="default").gateway_enabled is False
-
-
-# ─── 7. Review fixes: egress at save, env URL, delete, embeddings Test ──
-
-
-def _settings(*, private: bool = False, hosts=()):
-    """The real Settings with only the two egress fields replaced."""
-    from src.config import get_settings
-
-    return get_settings().model_copy(update={
-        "egress_allowed_hosts": list(hosts),
-        "egress_allow_private_network": private,
-    })
+    _save("ws-a")
+    _put("ws-a", profiles={"chat": {"provider": "litellm", "model": "chat-a"}})
+    cfg_b = get_config(user=_ADMIN, workspace_id="ws-b")
+    assert cfg_b.litellm.connected is False and cfg_b.litellm.host is None
+    assert KEY[-4:] not in cfg_b.model_dump_json()
+    assert provider_models("litellm", user=_ADMIN, workspace_id="ws-b").generation == []
+    assert _test("ws-b", api_key="use-saved").ok is False
+    a = resolve_profile("chat", "ws-a")
+    assert (a.api_base, a.api_key) == (BASE, KEY)
+    with pytest.raises(HTTPException):
+        _put("ws-b", profiles={"chat": {"provider": "litellm", "model": "chat-a"}})
 
 
-@pytest.mark.parametrize("url", ["http://10.0.0.5:4000", "http://127.0.0.1:4000",
-                                 "http://169.254.169.254"])
-def test_a_private_proxy_host_is_refused_at_save(store, url):
-    with patch("src.config.get_settings", return_value=_settings()), \
-            pytest.raises(HTTPException) as exc:
-        _put("ws-a", litellm={"base_url": url, "api_key": KEY})
-    assert exc.value.status_code == 422
-    assert "EGRESS_ALLOW_PRIVATE_NETWORK" in exc.value.detail
-    assert ("litellm", "ws:ws-a", "default") not in store.rows
-
-
-def test_a_private_proxy_host_is_saved_when_the_operator_allows_it(store):
-    with patch("src.config.get_settings", return_value=_settings(private=True)):
-        _put("ws-a", litellm={"base_url": "http://10.0.0.5:4000", "api_key": KEY})
-    assert ("litellm", "ws:ws-a", "default") in store.rows
-    # Link-local stays refused even with the private network allowed.
-    with patch("src.config.get_settings", return_value=_settings(private=True)), \
-            pytest.raises(HTTPException):
-        _put("ws-b", litellm={"base_url": "http://169.254.169.254", "api_key": KEY})
-    # An explicitly allowlisted host is fine without the private flag.
-    with patch("src.config.get_settings",
-               return_value=_settings(hosts=["litellm.internal"])):
-        _put("ws-c", litellm={"base_url": "http://litellm.internal:4000", "api_key": KEY})
-    assert ("litellm", "ws:ws-c", "default") in store.rows
-
-
-def test_the_env_proxy_url_is_shown_only_to_a_global_admin_in_default(store, monkeypatch):
-    from src.api.routers.llm import get_config
-
-    monkeypatch.setenv("LITELLM_API_KEY", KEY)
-    monkeypatch.setenv("LITELLM_API_BASE", "http://litellm.corp.internal:4000")
-    member = SimpleNamespace(id="u-m", email="m@test", is_admin=False)
-
-    other = get_config(user=_ADMIN, workspace_id="ws-b").litellm
-    assert other.connected is True and other.source == "env"
-    assert other.base_url is None
-    assert get_config(user=member, workspace_id="default").litellm.base_url is None
-    assert (get_config(user=_ADMIN, workspace_id="default").litellm.base_url
-            == "http://litellm.corp.internal:4000")
-    # A workspace's OWN saved URL is its own data and stays visible.
-    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
-    assert get_config(user=member, workspace_id="ws-a").litellm.base_url == BASE
-
-
-def test_the_proxy_row_can_be_deleted(store):
-    from src.api.routers.llm import delete_litellm_proxy
-
-    _put("ws-a", litellm={"base_url": BASE, "api_key": KEY})
-    _put("ws-b", litellm={"base_url": BASE, "api_key": KEY})
-    out = delete_litellm_proxy(_request(), user=_ADMIN, workspace_id="ws-a")
-    assert ("litellm", "ws:ws-a", "default") not in store.rows
-    assert ("litellm", "ws:ws-b", "default") in store.rows
-    assert out.litellm.connected is False
-    # Idempotent.
-    delete_litellm_proxy(_request(), user=_ADMIN, workspace_id="ws-a")
+def test_test_connection_saves_nothing_and_never_resends_a_saved_key(store, proxy):
+    r = _test("ws-a", api_key=KEY, base_url=BASE)
+    assert r.ok is True and r.models == ["chat-a", "embedding-2-test"]
+    assert _row(store, "ws-a") is None
+    _save("ws-a")
+    n = len(proxy.requests)
+    r = _test("ws-a", api_key="use-saved", base_url="https://other.example.com")
+    assert r.ok is False and len(proxy.requests) == n
+    assert _test("ws-a", api_key="use-saved").ok is True
 
 
 def test_an_embeddings_test_reports_the_width(store, proxy):
-    r = _test(api_key=KEY, base_url=BASE, surface="embeddings",
+    _save("default")
+    r = _test(api_key="use-saved", surface="embeddings",
               model="embedding-2-test", dimensions=768)
-    assert r.ok is True
-    assert r.vector_width == 768
+    assert r.ok is True and r.vector_width == 768
     emb = [q for q in proxy.requests if q.url.path == "/v1/embeddings"]
-    assert len(emb) == 1
-    import json as _json
-    body = _json.loads(emb[0].content)
-    assert body["model"] == "embedding-2-test" and body["dimensions"] == 768
-    assert emb[0].headers["authorization"] == f"Bearer {KEY}"
-
-
-def test_an_embeddings_test_warns_when_dimensions_are_ignored(store, proxy):
+    assert len(emb) == 1 and emb[0].url.host == PUBLIC_IP
     proxy.embed_width = 3072
-    r = _test(api_key=KEY, base_url=BASE, surface="embeddings",
+    r = _test(api_key="use-saved", surface="embeddings",
               model="embedding-2-test", dimensions=768)
-    assert r.ok is True and r.vector_width == 3072
-    assert r.warning and "768" in r.warning
+    assert r.ok is True and r.warning and "768" in r.warning
 
 
-def test_an_embeddings_test_reports_a_refused_dimensions(store, proxy):
-    proxy.embed_status = 400
-    r = _test(api_key=KEY, base_url=BASE, surface="embeddings",
-              model="embedding-2-test", dimensions=768)
-    assert r.ok is False
-    assert "/v1/embeddings" in r.detail and "dimensions" in r.detail
+def test_no_key_or_url_reaches_the_log(store, proxy, caplog):
+    from src.api.routers.llm import delete_litellm_proxy, get_config, provider_models
 
-
-def test_a_chat_test_makes_no_embeddings_call(store, proxy):
-    _test(api_key=KEY, base_url=BASE, model="chat-a")
-    assert all(q.url.path != "/v1/embeddings" for q in proxy.requests)
+    caplog.set_level(logging.DEBUG)
+    _save("ws-a")
+    get_config(user=_ADMIN, workspace_id="ws-a")
+    provider_models("litellm", user=_ADMIN, workspace_id="ws-a")
+    _test("ws-a", api_key="use-saved")
+    _test("ws-a", api_key=OTHER_KEY, base_url="https://10.0.0.1")
+    proxy.status = 401
+    _refused("ws-a", key=OTHER_KEY)
+    proxy.status = 200
+    DNS["sneaky.example.com"] = ["10.0.0.5"]
+    _refused("ws-a", base="https://sneaky.example.com/v1", key=OTHER_KEY)
+    delete_litellm_proxy(_request(), user=_ADMIN, workspace_id="ws-a")
+    text = caplog.text
+    assert caplog.records, "the paths above are expected to log something"
+    for secret in (KEY, OTHER_KEY, BASE, "https://sneaky.example.com"):
+        assert secret not in text

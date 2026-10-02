@@ -2,9 +2,9 @@
 
 What must hold:
 
-    1. Resolution — the key and the base URL come from ONE row in ws:{id}, or
-       from the env pair LITELLM_API_KEY + LITELLM_API_BASE; never half from
-       each. A non-default workspace never reads another's row.
+    1. Resolution — the key and the base URL come from ONE encrypted row in
+       ws:{id}; there is no env fallback. A non-default workspace never reads
+       another's row.
     2. Routing — chat, review/agent (LLMClient) and embeddings go out as
        "litellm_proxy/<alias>" with api_base = the proxy and the virtual key.
        No address → refuse (the SDK would otherwise read
@@ -15,13 +15,13 @@ What must hold:
        unanswered /model/info leaves the cost unknown and does not fail.
     5. list_configured_providers no longer reports a self-hosted server that
        nobody configured.
-    6. The ping client allowlists a public proxy host, never a private one.
+    6. Every SDK call re-validates the proxy host first (cached briefly): a
+       name that now resolves to a private address is refused.
 """
 
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -34,35 +34,37 @@ KEY = "sk-virtual-key-1234567890"
 ALIAS = "team-flash-lite-latest"
 
 
-class _FakeStore:
-    def __init__(self):
-        self.rows: dict[tuple[str, str, str], SimpleNamespace] = {}
-
-    def save(self, *, provider, secret, metadata=None, user_id="", account_label="default"):
-        self.rows[(provider, user_id, account_label)] = SimpleNamespace(
-            secret=secret, metadata=metadata or {},
-        )
-
-    def load(self, *, provider, user_id="", account_label="default"):
-        return self.rows.get((provider, user_id, account_label))
+#: Hermetic DNS: what each test hostname "resolves" to.
+DNS = {"litellm.example.com": ["93.184.216.34"],
+       "shared.example.com": ["93.184.216.35"]}
 
 
 @pytest.fixture(autouse=True)
 def hermetic(monkeypatch):
     for var in ("LITELLM_PROXY_URL", "LITELLM_MASTER_KEY", "LITELLM_PROXY_API_BASE",
-                "LITELLM_API_KEY", "LITELLM_API_BASE", "OPENAI_COMPATIBLE_API_KEY",
+                "OPENAI_COMPATIBLE_API_KEY",
                 "OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(litellm_proxy, "_resolve",
+                        lambda host, port: list(DNS.get(host, [host])))
     litellm_proxy.reset_cache()
     yield
     litellm_proxy.reset_cache()
 
 
 @pytest.fixture
-def store():
-    fake = _FakeStore()
-    with patch("src.credentials.get_credential_store", return_value=fake):
-        yield fake
+def store(tmp_path):
+    from cryptography.fernet import Fernet
+
+    from src.credentials.store import CredentialStore
+
+    real = CredentialStore(tmp_path / "creds.db", Fernet.generate_key())
+    with patch("src.credentials.get_credential_store", return_value=real):
+        yield real
+
+
+def _save(ws: str, base: str = BASE, key: str = KEY) -> None:
+    litellm_proxy.save_endpoint(ws, litellm_proxy.Endpoint(base_url=base, api_key=key))
 
 
 def _proxy_profile(surface: str = "chat", api_base: str | None = BASE,
@@ -75,13 +77,13 @@ def _proxy_profile(surface: str = "chat", api_base: str | None = BASE,
 
 
 def test_the_pair_resolves_from_the_workspace_row(store):
-    litellm_proxy.save_endpoint("ws-a", base_url=BASE, api_key=KEY)
+    _save("ws-a")
     ep = litellm_proxy.resolve_endpoint("ws-a")
     assert (ep.base_url, ep.api_key, ep.source) == (BASE, KEY, "ui")
 
 
 def test_another_workspace_does_not_see_the_row(store):
-    litellm_proxy.save_endpoint("ws-a", base_url=BASE, api_key=KEY)
+    _save("ws-a")
     assert litellm_proxy.resolve_endpoint("ws-b") is None
     from src.llm.keys import LLMCredentialError, has_key, resolve_api_key
     assert has_key("litellm", workspace_id="ws-b") is False
@@ -89,31 +91,28 @@ def test_another_workspace_does_not_see_the_row(store):
         resolve_api_key("litellm", workspace_id="ws-b")
 
 
-def test_a_row_without_a_url_is_not_a_credential(store):
-    store.save(provider="litellm", secret=KEY, user_id="ws:ws-a")
+def test_a_bare_key_row_is_not_a_credential(store):
+    # The pre-encrypted-URL shape (key as the secret, URL in metadata) is not
+    # read: the URL must come out of the encrypted secret.
+    store.save(provider="litellm", secret=KEY, user_id="ws:ws-a",
+               metadata={"base_url": BASE})
     assert litellm_proxy.resolve_endpoint("ws-a") is None
 
 
-def test_the_env_pair_is_used_only_as_a_pair(store, monkeypatch):
+def test_there_is_no_env_fallback(store, monkeypatch):
+    from src.llm.keys import has_key
+
     monkeypatch.setenv("LITELLM_API_KEY", KEY)
+    monkeypatch.setenv("LITELLM_API_BASE", BASE)
     assert litellm_proxy.resolve_endpoint("ws-a") is None
-    monkeypatch.setenv("LITELLM_API_BASE", BASE + "/")
-    ep = litellm_proxy.resolve_endpoint("ws-a")
-    assert (ep.base_url, ep.source) == (BASE, "env")
-
-
-def test_a_stored_row_beats_the_env_pair(store, monkeypatch):
-    monkeypatch.setenv("LITELLM_API_KEY", "sk-env-house-key-000000")
-    monkeypatch.setenv("LITELLM_API_BASE", "https://house.example.com")
-    litellm_proxy.save_endpoint("ws-a", base_url=BASE, api_key=KEY)
-    ep = litellm_proxy.resolve_endpoint("ws-a")
-    assert (ep.base_url, ep.api_key) == (BASE, KEY)
+    assert litellm_proxy.resolve_endpoint("default") is None
+    assert has_key("litellm", workspace_id="ws-a") is False
 
 
 def test_the_profile_carries_the_pair(store, monkeypatch):
     from src.llm import profiles
 
-    litellm_proxy.save_endpoint("ws-a", base_url=BASE, api_key=KEY)
+    _save("ws-a")
     blob = {"profiles": {"review": {"provider": "litellm", "model": ALIAS}}}
     monkeypatch.setattr(profiles, "_blob", lambda workspace_id="default": blob)
     p = profiles.resolve_profile("review", "ws-a")
@@ -127,15 +126,14 @@ def test_shared_embeddings_never_use_the_callers_proxy(store, monkeypatch):
     own proxy must not answer for the shared collection."""
     from src.llm import profiles
 
-    litellm_proxy.save_endpoint("ws-a", base_url=BASE, api_key=KEY)
+    _save("ws-a")
     blob = {"profiles": {"embeddings": {"provider": "litellm",
                                         "model": "embedding-2-test"}}}
     monkeypatch.setattr(profiles, "_blob", lambda workspace_id="default": blob)
     p = profiles.resolve_profile("embeddings", "ws-a")
     assert p.api_base is None and p.api_key == ""
 
-    litellm_proxy.save_endpoint("default", base_url="https://shared.example.com",
-                                api_key="sk-default-key-1234567")
+    _save("default", "https://shared.example.com", "sk-default-key-1234567")
     p = profiles.resolve_profile("embeddings", "ws-a")
     assert p.api_base == "https://shared.example.com"
 
@@ -373,21 +371,15 @@ def test_an_unknown_alias_costs_nothing_and_does_not_fail():
 
 
 def test_model_info_is_parsed_and_a_refusal_is_empty():
-    import httpx
-
     body = {"data": [{"model_name": ALIAS,
                       "litellm_params": {"model": "gemini/gemini-2.5-flash-lite"},
                       "model_info": {"mode": "chat"}}]}
-
-    def client(status, payload):
-        return lambda base, *, timeout: httpx.Client(transport=httpx.MockTransport(
-            lambda req: httpx.Response(status, json=payload)))
-
     ep = litellm_proxy.Endpoint(base_url=BASE, api_key=KEY, source="ui")
-    with patch("src.llm.litellm_proxy.ping_client", side_effect=client(200, body)):
+    with patch("src.llm.litellm_proxy.request_json", return_value=(200, body)) as rq:
         info = litellm_proxy.fetch_model_info(ep)
     assert info[ALIAS]["underlying"] == "gemini/gemini-2.5-flash-lite"
-    with patch("src.llm.litellm_proxy.ping_client", side_effect=client(403, {})):
+    assert rq.call_args.args[0].addresses == ("93.184.216.34",)   # validated target
+    with patch("src.llm.litellm_proxy.request_json", return_value=(403, {})):
         assert litellm_proxy.fetch_model_info(ep) == {}
 
 
@@ -398,25 +390,48 @@ def test_an_unconfigured_self_hosted_server_is_not_listed(store):
     from src.llm.keys import list_configured_providers
 
     assert "openai_compatible" not in list_configured_providers(workspace_id="ws-a")
-    litellm_proxy.save_endpoint("ws-a", base_url=BASE, api_key=KEY)
+    _save("ws-a")
     assert "litellm" in list_configured_providers(workspace_id="ws-a")
     assert "litellm" not in list_configured_providers(workspace_id="ws-b")
 
 
-# ─── 6. Egress policy for the probe ──────────────────────────────────
+# ─── 6. Call-time re-validation ──────────────────────────────────────
 
 
-@pytest.mark.parametrize("host, allowed", [
-    ("8.8.8.8", True),
-    ("127.0.0.1", False),
-    ("169.254.169.254", False),
-    ("10.0.0.5", False),
-])
-def test_only_a_public_proxy_host_extends_the_allowlist(host, allowed):
-    with patch("src.http.build_client") as bc:
-        litellm_proxy.ping_client(f"http://{host}:4000", timeout=1.0)
-    extra = bc.call_args.kwargs["extra_allowed_hosts"]
-    assert (host in extra) is allowed
+def test_an_sdk_call_is_refused_once_the_host_turns_private(monkeypatch):
+    import litellm
+
+    from src.llm.completion import _litellm_stream
+
+    DNS["rebind.example.com"] = ["93.184.216.40"]
+    base = "https://rebind.example.com"
+    try:
+        assert litellm_proxy.require_api_base(base) == base
+        DNS["rebind.example.com"] = ["10.0.0.7"]
+        litellm_proxy.reset_cache()            # past the short TTL
+        with patch.object(litellm, "acompletion") as call, \
+                pytest.raises(litellm_proxy.UnsafeProxyURL):
+            _consume(_litellm_stream(
+                _proxy_profile(api_base=base), prompt="hi",
+                system_instruction=None, temperature=None, max_output_tokens=None,
+            ))
+        call.assert_not_called()
+    finally:
+        DNS.pop("rebind.example.com", None)
+
+
+def test_the_call_time_check_is_cached_briefly(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(litellm_proxy, "_resolve",
+                        lambda host, port: calls.append(host) or ["93.184.216.34"])
+    clock = [500.0]
+    monkeypatch.setattr(litellm_proxy.time, "monotonic", lambda: clock[0])
+    for _ in range(5):
+        litellm_proxy.require_api_base(BASE)
+    assert calls == ["litellm.example.com"]
+    clock[0] += 31
+    litellm_proxy.require_api_base(BASE)
+    assert len(calls) == 2
 
 
 def test_the_gateway_cost_is_not_estimated(monkeypatch):

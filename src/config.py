@@ -301,6 +301,13 @@ class Settings(BaseSettings):
     # `egress_allowed_hosts` and turns this ON: nothing reachable outside, the
     # local model server reachable because it is not outside.
     egress_allow_private_network: bool = False
+    # A workspace's own LiteLLM proxy (src/llm/litellm_proxy.py) must resolve
+    # to public addresses only. The operator's escape hatch for a proxy on the
+    # LAN: list its host here (same exact-or-subdomain semantics as
+    # egress_allowed_hosts). Such a host may resolve to private / loopback /
+    # CGNAT / ULA — never link-local, multicast or unspecified. Empty = strict.
+    # Deliberately NOT implied by egress_allow_private_network.
+    litellm_proxy_allowed_hosts: list[str] = Field(default_factory=list)
     audit_log_file: Path | None = None  # will be computed in a property
     audit_retention_days: int = 90
     redaction_fail_closed: bool = True

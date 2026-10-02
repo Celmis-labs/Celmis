@@ -136,6 +136,7 @@ def build_client(
     auth: Any = None,
     follow_redirects: bool = False,
     extra_allowed_hosts: Iterable[str] = (),
+    pinned_addresses: Mapping[str, str] | None = None,
 ) -> httpx.Client:
     """An ``httpx.Client`` that can only reach the hosts this install allows.
 
@@ -151,6 +152,9 @@ def build_client(
     is built from — a host taken from user input would make the allowlist
     decorative.
 
+    `pinned_addresses` ({host: ip}) connects that host to an IP the caller
+    already validated, keeping SNI/Host = host (DNS-rebinding guard).
+
     Raises :class:`src.security.egress.EgressBlockedError` at request time,
     never at construction time: the check needs the URL.
     """
@@ -161,6 +165,7 @@ def build_client(
         allowed_hosts(extra_allowed_hosts),
         timeout=timeout,
         allow_private_network=settings.egress_allow_private_network,
+        pinned_addresses=pinned_addresses,
         **_client_kwargs(headers, base_url, auth, follow_redirects),
     )
 
@@ -173,6 +178,7 @@ def build_async_client(
     auth: Any = None,
     follow_redirects: bool = False,
     extra_allowed_hosts: Iterable[str] = (),
+    pinned_addresses: Mapping[str, str] | None = None,
 ) -> httpx.AsyncClient:
     """:func:`build_client` for ``await``ing callers — same door, same policy.
 
@@ -198,5 +204,6 @@ def build_async_client(
         allowed_hosts(extra_allowed_hosts),
         timeout=timeout,
         allow_private_network=settings.egress_allow_private_network,
+        pinned_addresses=pinned_addresses,
         **_client_kwargs(headers, base_url, auth, follow_redirects),
     )
