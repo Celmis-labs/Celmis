@@ -36,7 +36,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "web"
-AUTOMATION = (WEB / "app" / "(app)" / "automation" / "page.tsx").read_text(encoding="utf-8")
+# The reply cards moved out of the page into the module the floating agent
+# panel shares with it; the answer is rendered from there now.
+AUTOMATION = "\n".join(
+    path.read_text(encoding="utf-8") for path in (
+        WEB / "app" / "(app)" / "automation" / "page.tsx",
+        WEB / "components" / "automation" / "thread.tsx",
+    ))
 LLM_SETTINGS = (WEB / "app" / "(app)" / "settings" / "llm" / "page.tsx").read_text(encoding="utf-8")
 MESSAGES = WEB / "lib" / "i18n" / "messages"
 
