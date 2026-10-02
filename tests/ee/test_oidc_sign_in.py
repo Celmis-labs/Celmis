@@ -1,3 +1,5 @@
+# Celmis Enterprise Edition tests. Licensed under LICENSE_EE, not the AGPL —
+# see LICENSING.md and ee/README.md in the repository root.
 """Company SSO (Keycloak / OIDC) sign-in: the token is checked, not trusted.
 
 `POST /api/auth/oidc` receives an id_token from the web app and hands back a
@@ -12,8 +14,13 @@ discovery fetch, so the parsing path in `_fetch_jwks` runs for real.
 
 The second half is account linking. Linking by email gives the existing
 account to whoever controls that email at the IdP, so it requires
-`email_verified` — the same check is now on the Google endpoint, which had
-none.
+`email_verified`. The same rule on the Google endpoint, the password-login
+switch and the refusal to renew an SSO-only session are AGPL and are tested in
+tests/api/test_password_login_and_google_linking.py.
+
+The endpoint is enterprise (src/ee/sso), so the app under test mounts it the
+way production does — through `mount_enterprise` with a licence signed by the
+suite's throwaway key — and one test checks that without one it is not there.
 """
 
 from __future__ import annotations
@@ -27,7 +34,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.api import oidc
+from src.ee import license as lic
+from src.ee.sso import oidc
+from tests.ee.licensing import mint_test_license, trust_test_key
 
 ISSUER = "https://sso.example.com/realms/celmis"
 CLIENT_ID = "celmis-web"
@@ -220,20 +229,39 @@ def users(tmp_path):
     return UserStore(tmp_path / "users.db")
 
 
-@pytest.fixture
-def client(users, monkeypatch):
+def _app(users, monkeypatch, *, features=("sso",)) -> FastAPI:
     from src.api.deps import get_users
     from src.api.routers import auth as auth_router
+    from src.ee import mount_enterprise
+    from src.ee.sso import router as sso_router
 
     monkeypatch.setattr(
         "src.api.workspace_provision.provision_personal_workspace",
         lambda *a, **k: None,
     )
     monkeypatch.setattr(auth_router, "record_action", lambda **k: None)
+    monkeypatch.setattr(sso_router, "record_action", lambda **k: None)
+    trust_test_key(monkeypatch)
     app = FastAPI()
     app.include_router(auth_router.router)
+    env = {lic.ENV_KEY: mint_test_license(features)} if features else {}
+    mount_enterprise(app, env=env)
     app.dependency_overrides[get_users] = lambda: users
-    return TestClient(app)
+    return app
+
+
+@pytest.fixture
+def client(users, monkeypatch):
+    return TestClient(_app(users, monkeypatch))
+
+
+@pytest.mark.parametrize("features", [(), ("analytics",)], ids=["no-licence", "analytics-only"])
+def test_without_an_sso_licence_the_endpoint_is_not_there(users, monkeypatch, features):
+    """Not a 403 from a mounted route: absent, so /api/capabilities reports
+    `sso` off from the route table and the login page hides the button."""
+    c = TestClient(_app(users, monkeypatch, features=features))
+    assert c.post("/api/auth/oidc", json={"id_token": _token()}).status_code == 404
+    assert users.get_by_oidc(ISSUER, "kc-subject-1") is None
 
 
 def _password_user(users, email="dev@example.com"):
@@ -286,34 +314,6 @@ def test_an_existing_sso_user_signs_in_by_subject_even_if_unverified_later(clien
     assert r.status_code == 200, r.text
 
 
-def test_an_sso_only_session_is_not_renewed(client, users):
-    """Deprovisioning in the IdP must take effect: /refresh would otherwise
-    roll an SSO-only session forever without asking the IdP again."""
-    from src.api.deps import get_current_user
-
-    assert client.post("/api/auth/oidc", json={"id_token": _token()}).status_code == 200
-    sso_user = users.get_by_oidc(ISSUER, "kc-subject-1")
-    client.app.dependency_overrides[get_current_user] = lambda: sso_user
-    assert client.post("/api/auth/refresh").status_code == 401
-
-    pw = _password_user(users, email="pw@example.com")
-    client.app.dependency_overrides[get_current_user] = lambda: pw
-    assert client.post("/api/auth/refresh").status_code == 200
-
-
-def test_sso_with_password_is_renewed_only_while_password_login_is_on(
-        client, users, monkeypatch):
-    from src.api.deps import get_current_user
-
-    _password_user(users)
-    assert client.post("/api/auth/oidc", json={"id_token": _token()}).status_code == 200
-    linked = users.get_by_email("dev@example.com")
-    client.app.dependency_overrides[get_current_user] = lambda: linked
-    assert client.post("/api/auth/refresh").status_code == 200
-    monkeypatch.setenv("AUTH_PASSWORD_LOGIN", "false")
-    assert client.post("/api/auth/refresh").status_code == 401
-
-
 def test_verified_email_links_the_existing_account(client, users):
     _password_user(users)
     r = client.post("/api/auth/oidc", json={"id_token": _token()})
@@ -362,89 +362,3 @@ def test_unconfigured_is_503(client, monkeypatch):
     assert r.status_code == 503
 
 
-# ─── password login switch ──────────────────────────────────────────
-
-
-def test_password_login_off_refuses_signup_login_and_reset(client, users, monkeypatch):
-    _password_user(users, email="pw@example.com")
-    monkeypatch.setenv("AUTH_PASSWORD_LOGIN", "false")
-    assert client.post("/api/auth/signup", json={
-        "email": "new@example.com", "password": "Vq7#mLz2-Rk9wTp4!"}).status_code == 403
-    assert client.post("/api/auth/login", json={
-        "email": "pw@example.com", "password": "Vq7#mLz2-Rk9wTp4!"}).status_code == 403
-    assert client.post("/api/auth/forgot-password",
-                       json={"email": "pw@example.com"}).status_code == 403
-
-
-def test_master_key_still_works_with_password_login_off(client, monkeypatch):
-    """Break-glass: the IdP being down must not lock the operator out."""
-    monkeypatch.setenv("AUTH_PASSWORD_LOGIN", "false")
-    monkeypatch.setenv("CELMIS_MASTER_EMAIL", "root@example.com")
-    monkeypatch.setenv("CELMIS_MASTER_KEY", "sk-master-correct-horse-battery")
-    r = client.post("/api/auth/login", json={
-        "email": "root@example.com", "password": "sk-master-correct-horse-battery"})
-    assert r.status_code == 200, r.text
-
-
-# ─── Google: the same linking rule ──────────────────────────────────
-
-
-def test_google_unverified_email_does_not_link(client, users, monkeypatch):
-    from src.api.routers import auth as auth_router
-
-    _password_user(users)
-    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "g-client")
-
-    class _Resp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"aud": "g-client", "iss": "https://accounts.google.com",
-                    "sub": "g-1", "email": "dev@example.com",
-                    "email_verified": "false"}
-
-    class _Client:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def get(self, *a, **k):
-            return _Resp()
-
-    monkeypatch.setattr(auth_router, "build_client", lambda **k: _Client())
-    r = client.post("/api/auth/google", json={"id_token": "x"})
-    assert r.status_code == 403
-    assert users.get_by_email("dev@example.com").google_sub is None
-
-
-def test_google_unverified_email_does_not_create_an_account(client, users, monkeypatch):
-    from src.api.routers import auth as auth_router
-
-    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "g-client")
-
-    class _Resp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"aud": "g-client", "iss": "https://accounts.google.com",
-                    "sub": "g-2", "email": "victim@corp.example",
-                    "email_verified": "false"}
-
-    class _Client:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def get(self, *a, **k):
-            return _Resp()
-
-    monkeypatch.setattr(auth_router, "build_client", lambda **k: _Client())
-    r = client.post("/api/auth/google", json={"id_token": "x"})
-    assert r.status_code == 403
-    assert users.get_by_email("victim@corp.example") is None

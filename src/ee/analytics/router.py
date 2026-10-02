@@ -1,13 +1,20 @@
+# Celmis Enterprise Edition. Licensed under LICENSE_EE, not the AGPL —
+# see LICENSING.md and ee/README.md in the repository root.
 """Review analytics for the active workspace.
 
     GET /api/analytics/summary?days=7|30|90
 
 Owner, admin or editor of the workspace (or a global admin) — see
-`require_analytics_access`. The arithmetic lives in src/review/analytics.py;
-this module only reads the two stores it needs:
+`require_analytics_access` (src/api/deps.py — RBAC, so it stays AGPL). The
+arithmetic lives in src/ee/analytics/aggregate.py; this module only reads the
+two stores it needs:
 
   - runs from the SQLite `review_runs` table (time, cost, severity counts);
   - issues from Postgres `review_issues`, each with its PR's state.
+
+An enterprise feature: mounted by ``src.ee.mount_enterprise`` only when the
+licence grants ``analytics``. It only READS; the tables and their writers
+(issues, pull requests, review runs) are AGPL and keep working without it.
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ from src.api.deps import current_workspace_id, require_analytics_access
 from src.api.review_runs import get_review_run_store
 from src.db.models import ReviewIssue, ReviewPullRequest
 from src.db.session import get_async_session
-from src.review.analytics import ALLOWED_WINDOWS, summarize
+from src.ee.analytics.aggregate import ALLOWED_WINDOWS, summarize
 from src.users import User
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])

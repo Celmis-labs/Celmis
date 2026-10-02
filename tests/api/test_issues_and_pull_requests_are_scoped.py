@@ -1,10 +1,9 @@
-"""Issues, pull requests and analytics — who may read what, and the numbers.
+"""Issues and pull requests — who may read and change what.
 
-/api/analytics/summary reports cost and how often the team merged what the
-reviewer flagged; it is for owner, admin and editor of the workspace (or a
-global admin). A member or a viewer gets 403. /api/issues and
-/api/pull-requests are readable by any member; changing an issue's status
-needs member or above, so a viewer cannot.
+/api/issues and /api/pull-requests are readable by any member; changing an
+issue's status needs member or above, so a viewer cannot. These are AGPL;
+the analytics that reads the same tables is enterprise and is tested in
+tests/ee/test_analytics_is_a_leads_view.py.
 
 The router runs over sqlite with the real models; `workspace_role` is
 replaced so no Postgres is needed, and the SQLite run store is replaced by
@@ -17,7 +16,6 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.dialects.postgresql import JSONB
@@ -27,12 +25,10 @@ from sqlalchemy.pool import StaticPool
 
 from src.api import deps as deps_module
 from src.api.deps import current_workspace_id, get_current_user
-from src.api.routers import analytics as analytics_router
 from src.api.routers import issues as issues_router
 from src.api.routers import pull_requests as prs_router
 from src.db.models import ReviewIssue, ReviewPullRequest
 from src.db.session import get_async_session
-from src.review.analytics import percentile, summarize
 
 
 @compiles(JSONB, "sqlite")
@@ -46,26 +42,6 @@ NOW = datetime.now(UTC)
 
 def _ago(days: float) -> datetime:
     return NOW - timedelta(days=days)
-
-
-RUNS = [
-    {"status": "complete", "started_at": _ago(1).isoformat(), "elapsed_seconds": 60.0,
-     "cost_usd": 0.20, "findings_count": 3, "critical": 1, "error_count": 1,
-     "warning": 1, "info": 0},
-    {"status": "complete", "started_at": _ago(2).isoformat(), "elapsed_seconds": 120.0,
-     "cost_usd": 0.40, "findings_count": 2, "critical": 0, "error_count": 0,
-     "warning": 1, "info": 1},
-    {"status": "partial", "started_at": _ago(3).isoformat(), "elapsed_seconds": 300.0,
-     "cost_usd": None, "findings_count": 1, "critical": 0, "error_count": 1,
-     "warning": 0, "info": 0},
-    {"status": "failed", "started_at": _ago(3).isoformat(), "elapsed_seconds": 2.0,
-     "cost_usd": None, "findings_count": 0, "critical": 0, "error_count": 0,
-     "warning": 0, "info": 0},
-    # Outside a 7-day window.
-    {"status": "complete", "started_at": _ago(20).isoformat(), "elapsed_seconds": 90.0,
-     "cost_usd": 1.0, "findings_count": 9, "critical": 9, "error_count": 0,
-     "warning": 0, "info": 0},
-]
 
 
 def _issue(i: int, *, status="open", source=None, category="bug", severity="error",
@@ -109,48 +85,6 @@ PRS = [
 ]
 
 
-# ─── the arithmetic ──────────────────────────────────────────────────
-
-
-def test_percentile_is_nearest_rank() -> None:
-    assert percentile([], 50) is None
-    assert percentile([60.0, 120.0, 300.0], 50) == 120.0
-    assert percentile([60.0, 120.0, 300.0], 90) == 300.0
-
-
-def test_summary_over_seeded_rows() -> None:
-    issues = [
-        {**i, "pr_state": next(p["state"] for p in PRS if p["number"] == i["pr_number"])}
-        for i in ISSUES
-    ]
-    out = summarize(RUNS, issues, days=7, now=NOW)
-
-    assert out["reviews"]["total"] == 4
-    assert out["reviews"]["by_status"] == {
-        "complete": 2, "partial": 1, "skipped": 0, "failed": 1}
-    rt = out["review_time_seconds"]
-    assert rt["avg"] == 160.0 and rt["p50"] == 120.0 and rt["p90"] == 300.0
-    assert rt["samples"] == 3, "a failed run's 2 seconds is not a review time"
-    cost = out["cost_usd"]
-    assert cost["total"] == pytest.approx(0.60)
-    assert cost["avg_per_review"] == pytest.approx(0.30)
-    assert cost["runs_with_unknown_cost"] == 1, "NULL is unknown, not $0"
-    assert out["cost_basis"] == "review_runs.cost_usd"
-    assert out["findings_by_severity"] == {
-        "critical": 1, "error": 2, "warning": 2, "info": 1}
-    assert out["issues_by_category"]["security"] == 1
-    assert out["issues_by_category"]["bug"] == 3
-    oc = out["outcomes"]
-    assert oc["found"] == 6
-    assert oc["fixed_in_next_commits"] == 2
-    assert oc["open_on_merged_prs"] == 2
-    assert oc["still_open"] == 3
-    assert oc["fix_rate_pct"] == 40.0, "2 fixed of 5 not dismissed"
-    assert out["issues"]["fixed"] == 2 and out["issues"]["dismissed"] == 1
-    assert len(out["daily"]) == 8, "every day of the window, zeros included"
-    assert sum(d["reviews"] for d in out["daily"]) == 4
-
-
 # ─── the routers ─────────────────────────────────────────────────────
 
 
@@ -174,10 +108,9 @@ async def api(*, role: str | None, is_admin: bool = False, monkeypatch):
         await s.commit()
 
     monkeypatch.setattr(deps_module, "workspace_role", lambda uid, ws: role)
-    monkeypatch.setattr(analytics_router, "_load_runs", lambda ws, since: list(RUNS))
 
     app = FastAPI()
-    for r in (analytics_router, issues_router, prs_router):
+    for r in (issues_router, prs_router):
         app.include_router(r.router)
 
     async def _session():
@@ -191,30 +124,6 @@ async def api(*, role: str | None, is_admin: bool = False, monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         yield c
     await engine.dispose()
-
-
-@pytest.mark.parametrize(("role", "admin", "code"), [
-    ("viewer", False, 403),
-    ("member", False, 403),
-    (None, False, 403),
-    ("editor", False, 200),
-    ("admin", False, 200),
-    ("owner", False, 200),
-    (None, True, 200),
-])
-async def test_analytics_access(role, admin, code, monkeypatch) -> None:
-    async with api(role=role, is_admin=admin, monkeypatch=monkeypatch) as c:
-        r = await c.get("/api/analytics/summary?days=7")
-        assert r.status_code == code, r.text
-        if code == 200:
-            body = r.json()
-            assert body["reviews"]["total"] == 4
-            assert body["outcomes"]["found"] == 6, "another workspace leaked in"
-
-
-async def test_analytics_refuses_an_unknown_window(monkeypatch) -> None:
-    async with api(role="owner", monkeypatch=monkeypatch) as c:
-        assert (await c.get("/api/analytics/summary?days=12")).status_code == 422
 
 
 async def test_issues_list_filters_and_scopes(monkeypatch) -> None:

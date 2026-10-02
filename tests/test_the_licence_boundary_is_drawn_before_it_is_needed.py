@@ -5,11 +5,12 @@ opposite of what publishing it is for. Celmis is AGPL-3.0 with one exception,
 drawn by path so that git shows it and no separate registry of covered files
 can drift.
 
-`ee/` holds no product code and is expected not to for a while. That is the
-point: adding the boundary after the first outside contribution means
-re-asking every contributor who has already sent work under an unqualified
-AGPL, because a contribution arrives under the licence it was made under. The
-line costs an hour now and a negotiation later.
+The boundary was drawn while it held no product code, which was the point:
+adding it after the first outside contribution means re-asking every
+contributor who has already sent work under an unqualified AGPL, because a
+contribution arrives under the licence it was made under. It now holds two
+features — SSO and review analytics — in `src/ee/`, `web/ee/` and
+`tests/ee/`, each a path the rule already covered before they arrived.
 
 These are cheap guards on facts that are easy to lose in a move between
 repositories — which is exactly when they will be lost.
@@ -127,15 +128,48 @@ def test_contributing_states_where_enterprise_code_goes():
     assert "AGPL" in text
 
 
-def test_no_product_code_has_crossed_the_boundary_yet():
-    """If this ever fails it is not a bug — it is a decision that has to be
-    made deliberately, with the licence consequences in view."""
-    strays = [
-        p for p in (ROOT / "ee").rglob("*")
-        if p.is_file() and p.suffix in {".py", ".ts", ".tsx"}
-    ]
+#: Where enterprise code is allowed to live. Each is under an `ee/` path, so
+#: LICENSE_EE covers it by the rule alone; the list exists so that code
+#: crossing the boundary somewhere new is a decision, not an accident.
+EE_CODE_ROOTS = ("src/ee", "web/ee", "tests/ee")
 
-    assert not strays, f"code moved behind the licence boundary: {strays}"
+
+def _code_files(base: pathlib.Path):
+    return [p for p in base.rglob("*")
+            if p.is_file() and p.suffix in {".py", ".ts", ".tsx"}
+            and "node_modules" not in p.parts]
+
+
+def test_enterprise_code_lives_only_where_it_was_decided_to():
+    """If this fails it is not a bug — it is a decision that has to be made
+    deliberately, with the licence consequences in view. The top-level `ee/`
+    directory stays documentation: the API image copies only `src/`, so code
+    there would be licensed and never shipped."""
+    assert not _code_files(ROOT / "ee"), "code in the top-level ee/ directory"
+
+    ee_files = [
+        p.relative_to(ROOT).as_posix()
+        for top in ("src", "web", "tests", "scripts")
+        for p in _code_files(ROOT / top)
+        if "ee" in p.relative_to(ROOT).parts[:-1] or ".ee." in p.name
+    ]
+    strays = [f for f in ee_files if not f.startswith(tuple(r + "/" for r in EE_CODE_ROOTS))]
+    assert not strays, f"enterprise-licensed code outside {EE_CODE_ROOTS}: {strays}"
+    assert ee_files, "nothing found behind the boundary — the walk broke"
+
+
+@pytest.mark.parametrize("root", EE_CODE_ROOTS)
+def test_every_enterprise_file_says_which_licence_it_is_under(root):
+    """The path already decides it; the header is for the reader who opened
+    one file from a search result and never saw the directory."""
+    missing = []
+    for path in _code_files(ROOT / root):
+        if path.stat().st_size == 0:
+            continue
+        head = "\n".join(path.read_text(encoding="utf-8").splitlines()[:5])
+        if "LICENSE_EE" not in head:
+            missing.append(path.relative_to(ROOT).as_posix())
+    assert not missing, f"no LICENSE_EE header: {missing}"
 
 
 def test_the_distribution_is_named_for_the_product():

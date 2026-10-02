@@ -1,3 +1,5 @@
+# Celmis Enterprise Edition. Licensed under LICENSE_EE, not the AGPL —
+# see LICENSING.md and ee/README.md in the repository root.
 """Review analytics — the numbers behind /analytics, as pure functions.
 
 Two sources, read by the router and handed in here as plain dicts so the

@@ -2,8 +2,7 @@
 
 WHY THIS EXISTS
 ---------------
-There is no server-side edition gate, so the frontend has nothing to ask and
-guesses instead: it renders every page in ``SECTION_TABS`` and lets the user
+Before this endpoint the frontend had nothing to ask and guessed instead: it renders every page in ``SECTION_TABS`` and lets the user
 discover by 403 which of them this installation actually has. Worse,
 ``web/components/app-shell.tsx`` fetches on first paint and a missing module
 takes down the whole shell rather than the one page that needed it. This
@@ -102,7 +101,32 @@ Deliberately excluded, and each for a reason rather than a hunch:
 
 Auth-method discovery is not here on purpose: the login page already reads
 NextAuth's own ``/api/auth/providers``, and a second source for the same fact
-is a fact that can disagree with itself.
+is a fact that can disagree with itself. The one exception is ``sso``, and it
+is the same rule rather than a break from it: NextAuth knows whether the web
+side is CONFIGURED for SSO, only this document knows whether the API MOUNTED
+the endpoint the provider's callback posts to — the login page needs both.
+
+EDITION AND LICENCE
+-------------------
+``edition`` is ``"community"`` or ``"enterprise"``: enterprise when a valid
+licence was loaded at start-up (``src/ee/license.py``), community otherwise —
+including when the ``src/ee`` package is not in the build at all. This file
+does not import ``src.ee``; it reads the licence SUMMARY that
+``src.ee.mount_enterprise`` leaves on ``app.state.celmis_license``.
+
+Enterprise features (``Feature.license_feature`` set) are reported like any
+other — from the route table — so a licence that does not grant one leaves
+it unmounted and therefore ``available: false``, with no list kept here.
+
+``license`` carries the granted feature names for everyone (they are already
+visible as ``available`` flags) and, like the deployment mode, the customer
+and expiry only for a caller presenting a valid token: a customer name is a
+fact about a business, and the anonymous first paint has no use for it. The
+token itself is never on the app at all, so it cannot be here.
+
+``complete`` is what ``edition`` used to say as ``"full"``/``"partial"``:
+every non-enterprise feature, and every enterprise feature the licence
+grants, is mounted.
 """
 
 from __future__ import annotations
@@ -120,7 +144,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["capabilities"])
 
 #: Bump when a client would have to be changed to read the payload correctly.
-SCHEMA_VERSION = 1
+#: 2: `edition` became "community"/"enterprise" (it was "full"/"partial",
+#: which is now `complete`), and `license` was added.
+SCHEMA_VERSION = 2
 
 
 # ─── The one thing that is written down ──────────────────────────────
@@ -144,6 +170,11 @@ class Feature:
     #: bought anything less. Such a feature is still reported; it just does
     #: not drag the derived edition label down to "partial".
     counts_towards_edition: bool = True
+    #: The licence feature that mounts this one (src/ee/license.py
+    #: KNOWN_FEATURES), or None for an AGPL feature. An enterprise feature
+    #: that is off in a community build is the edition working, not a
+    #: missing module, so it does not make the build incomplete.
+    license_feature: str | None = None
 
 
 FEATURES: tuple[Feature, ...] = (
@@ -185,7 +216,10 @@ FEATURES: tuple[Feature, ...] = (
     # `code_review`: a build without them still reviews.
     Feature("review_issues", ("/api/issues", "/api/pull-requests"),
             ("/issues", "/pull-requests")),
-    Feature("review_analytics", ("/api/analytics",), ("/analytics",)),
+    # Enterprise (src/ee/analytics, LICENSE_EE): mounted only when the licence
+    # grants "analytics". The tables it reads are the AGPL feature above.
+    Feature("review_analytics", ("/api/analytics",), ("/analytics",),
+            license_feature="analytics"),
     Feature("qa", ("/api/qa", "/api/projects", "/api/chats", "/api/search"),
             ("/projects", "/chats", "/search")),
     # The two `/docs` are unrelated and both correct: the PREFIX `/docs` above
@@ -221,6 +255,12 @@ FEATURES: tuple[Feature, ...] = (
     Feature("inbound_webhooks", ("/webhook", "/api/webhooks")),
     Feature("push", ("/api/push",)),
     Feature("feedback", ("/api/feedback",)),
+    # Enterprise (src/ee/sso, LICENSE_EE): the OIDC sign-in exchange. Its one
+    # route lives under /api/auth, which `core` already claims at the
+    # two-segment granularity, so this prefix is deeper and is matched
+    # against full paths — see `prefix_is_mounted`. No page: the login form
+    # reads `features.sso` to decide whether to offer the button.
+    Feature("sso", ("/api/auth/oidc",), (), license_feature="sso"),
 )
 
 
@@ -291,6 +331,24 @@ def _paths(app: Any) -> set[str]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("capabilities_openapi_read_failed err=%s", exc)
     return found
+
+
+def mounted_paths(app: Any) -> set[str]:
+    """Every registered path — public name for the coverage test."""
+    return _paths(app)
+
+
+def prefix_is_mounted(prefix: str, prefixes: set[str], paths: set[str]) -> bool:
+    """Is `prefix` backed by a registered route?
+
+    Most claims are at the granularity of `mounted_prefixes` and are a set
+    lookup. A deeper claim (``/api/auth/oidc`` — one enterprise route inside
+    the AGPL ``/api/auth`` namespace) is matched against the full paths, on a
+    segment boundary so ``/api/auth/oidcx`` would not satisfy it.
+    """
+    if prefix in prefixes:
+        return True
+    return any(p == prefix or p.startswith(prefix + "/") for p in paths)
 
 
 def mounted_prefixes(app: Any) -> set[str]:
@@ -464,12 +522,26 @@ class DeploymentOut(BaseModel):
     source: str
 
 
+class LicenseOut(BaseModel):
+    #: Licence feature names granted ("sso", "analytics"); empty in community.
+    features: list[str] = []
+    #: Who the licence was issued to — only for an authenticated caller.
+    customer: str | None = None
+    #: ISO-8601 expiry — only for an authenticated caller.
+    expires_at: str | None = None
+
+
 class CapabilitiesOut(BaseModel):
     schema_version: int
     product: str
     api_version: str
+    #: "community" | "enterprise" — or a label owned by `src.deployment`.
     edition: str
+    #: "license" (read from the licence state), "src.deployment", "degraded".
     edition_source: str
+    #: Every feature this edition should have is mounted.
+    complete: bool
+    license: LicenseOut
     deployment: DeploymentOut
     features: dict[str, FeatureOut]
     #: Flattened client route → is it backed by a mounted feature. The one-line
@@ -485,8 +557,36 @@ def _empty(reason: str) -> CapabilitiesOut:
     return CapabilitiesOut(
         schema_version=SCHEMA_VERSION, product="celmis", api_version="unknown",
         edition="unknown", edition_source="degraded",
+        complete=False, license=LicenseOut(),
         deployment=DeploymentOut(mode="unknown", source="unavailable"),
         features={}, pages={}, degraded=True,
+    )
+
+
+def _license_state(app: Any) -> dict[str, Any] | None:
+    """The licence summary `src.ee.mount_enterprise` left on the app, if any."""
+    state = getattr(getattr(app, "state", None), "celmis_license", None)
+    return state if isinstance(state, dict) else None
+
+
+def _license_out(state: dict[str, Any] | None, *, authenticated: bool) -> LicenseOut:
+    """The summary comes from a signed licence, but this endpoint is anonymous:
+    a feature name that is not a short label is dropped rather than forwarded,
+    and the customer and expiry are withheld from anonymous callers."""
+    if not state:
+        return LicenseOut()
+    features = sorted(
+        label for label in (_coerce_label(f) for f in state.get("features") or ())
+        if label
+    )
+    if not authenticated:
+        return LicenseOut(features=features)
+    customer = state.get("customer")
+    expires = state.get("expires_at")
+    return LicenseOut(
+        features=features,
+        customer=customer[:200] if isinstance(customer, str) else None,
+        expires_at=expires if isinstance(expires, str) else None,
     )
 
 
@@ -503,9 +603,12 @@ def build_capabilities(app: Any, *, authenticated: bool = False) -> Capabilities
         if not prefixes:
             return _empty("no routes discovered")
 
+        # Full paths only when some claim is deeper than `prefixes` can answer.
+        paths = (_paths(app) if any(p not in prefixes for f in FEATURES
+                                    for p in f.prefixes) else set())
         features = {
             f.key: FeatureOut(
-                available=all(p in prefixes for p in f.prefixes),
+                available=all(prefix_is_mounted(p, prefixes, paths) for p in f.prefixes),
                 pages=list(f.pages),
             )
             for f in FEATURES
@@ -527,19 +630,26 @@ def build_capabilities(app: Any, *, authenticated: bool = False) -> Capabilities
             _deployment_mode() if authenticated else ("unknown", "requires_auth")
         )
         module_edition = _module_edition()
+        license_state = _license_state(app)
+        granted = set((license_state or {}).get("features") or ())
 
         # Derived, so it cannot claim a completeness the build does not have:
-        # "full" only when every OPTIONAL feature is mounted. A name from
-        # `src.deployment` wins — it knows what was actually sold.
+        # complete only when every optional feature this edition should have
+        # is mounted — an enterprise feature counts only if it is licensed.
+        missing = [
+            f.key for f in FEATURES
+            if f.counts_towards_edition and not features[f.key].available
+            and (f.license_feature is None or f.license_feature in granted)
+        ]
+        if missing:
+            logger.info("capabilities_incomplete missing=%s", missing)
+
+        # A name from `src.deployment` wins — it knows what was actually sold.
         if module_edition:
             edition, edition_source = module_edition, "src.deployment"
         else:
-            missing = [f.key for f in FEATURES
-                       if f.counts_towards_edition and not features[f.key].available]
-            edition = "full" if not missing else "partial"
-            edition_source = "derived"
-            if missing:
-                logger.info("capabilities_edition_partial missing=%s", missing)
+            edition = "enterprise" if license_state else "community"
+            edition_source = "license"
 
         return CapabilitiesOut(
             schema_version=SCHEMA_VERSION,
@@ -547,6 +657,8 @@ def build_capabilities(app: Any, *, authenticated: bool = False) -> Capabilities
             api_version=str(getattr(app, "version", "") or "unknown"),
             edition=edition,
             edition_source=edition_source,
+            complete=not missing,
+            license=_license_out(license_state, authenticated=authenticated),
             deployment=DeploymentOut(mode=mode, source=mode_source),
             features=features,
             pages=pages,
@@ -588,7 +700,10 @@ __all__ = [
     "SCHEMA_VERSION",
     "CapabilitiesOut",
     "Feature",
+    "LicenseOut",
     "build_capabilities",
+    "mounted_paths",
     "mounted_prefixes",
+    "prefix_is_mounted",
     "router",
 ]

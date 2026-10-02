@@ -1,7 +1,9 @@
+# Celmis Enterprise Edition. Licensed under LICENSE_EE, not the AGPL —
+# see LICENSING.md and ee/README.md in the repository root.
 """Generic OIDC (Keycloak et al.) id_token verification.
 
 The web app (next-auth) runs the OIDC dance and forwards the id_token to
-``POST /api/auth/oidc``. Here the token is checked against the issuer's own
+``POST /api/auth/oidc`` (src/ee/sso/router.py). Here the token is checked against the issuer's own
 signing keys — not against a tokeninfo endpoint, which a self-hosted IdP may
 not have — and the claims are handed back only if all of these hold:
 

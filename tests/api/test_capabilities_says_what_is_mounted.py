@@ -14,6 +14,12 @@ Three properties, in the order they would hurt if they broke:
    the endpoint never 401s whatever it is handed, and the payload has no key
    outside the published contract.
 
+Every test that takes the `app` (or `client`) fixture runs TWICE: once as the
+community edition (no licence) and once as the enterprise edition (a licence
+signed by the suite's throwaway key, tests/ee/licensing.py). The anti-drift
+guarantees have to hold in both, because the route table differs between them
+and a client trusts this document in both.
+
 These build the app rather than reading its source, because the thing being
 pinned is what the endpoint *answers*. A test that grepped
 `src/api/routers/capabilities.py` for "workspace" would pass on a file whose
@@ -35,18 +41,47 @@ from src.api.routers import capabilities as caps
 SECRET = "test-capabilities-secret-0123456789abcdef"
 
 
-@pytest.fixture(scope="module")
-def app():
-    """The real application, plus the one line main.py is asked to add."""
+EDITIONS = ("community", "enterprise")
+LICENSED = {"sso", "analytics"}
+
+
+@pytest.fixture(scope="module", params=EDITIONS)
+def app(request):
+    """The real application, built as each edition in turn.
+
+    The licence is read once, inside `build_app`; the key patch and the
+    variable are undone straight after, so nothing else in the module runs
+    with them.
+    """
     import os
 
     os.environ.setdefault("CELMIS_JWT_SECRET", SECRET)
     os.environ.setdefault("GEMINI_API_KEY", "test-key-12345678")
     from src.api.main import build_app
+    from src.ee import license as lic
+    from tests.ee.licensing import mint_test_license, trust_test_key
 
-    application = build_app()
+    mp = pytest.MonkeyPatch()
+    mp.delenv(lic.ENV_KEY, raising=False)
+    mp.delenv(lic.ENV_FILE, raising=False)
+    if request.param == "enterprise":
+        trust_test_key(mp)
+        mp.setenv(lic.ENV_KEY, mint_test_license(sorted(LICENSED)))
+    try:
+        application = build_app()
+    finally:
+        mp.undo()
     application.include_router(caps.router)
+    application.state.test_edition = request.param
     return application
+
+
+def _enterprise(app) -> bool:
+    return app.state.test_edition == "enterprise"
+
+
+def _granted(app) -> set[str]:
+    return LICENSED if _enterprise(app) else set()
 
 
 @pytest.fixture(scope="module")
@@ -86,13 +121,28 @@ def test_every_mounted_prefix_is_claimed_by_a_feature(app):
 def test_no_feature_claims_a_prefix_that_is_not_mounted(app):
     """The dangerous direction. A misspelt prefix can never be satisfied, so
     its feature reports `available: false` for ever and a client that trusts
-    this document hides a page that works perfectly well."""
-    mounted = caps.mounted_prefixes(app)
-    phantom = sorted({p for f in caps.FEATURES for p in f.prefixes} - mounted)
+    this document hides a page that works perfectly well.
+
+    An enterprise feature the licence does not grant is SUPPOSED to be
+    unmounted — that is the gate — so it is held to the opposite claim: it
+    must not be mounted. Both halves read `prefix_is_mounted`, the same
+    function the endpoint uses, so a deeper claim like /api/auth/oidc is
+    judged the way it is served."""
+    prefixes, paths = caps.mounted_prefixes(app), caps.mounted_paths(app)
+    phantom, leaked = [], []
+    for f in caps.FEATURES:
+        for p in f.prefixes:
+            on = caps.prefix_is_mounted(p, prefixes, paths)
+            expected = f.license_feature is None or f.license_feature in _granted(app)
+            if expected and not on:
+                phantom.append(p)
+            if not expected and on:
+                leaked.append(p)
     assert not phantom, (
         f"claimed by a feature but not mounted: {phantom}. Every one of these "
         f"permanently hides the pages of its feature."
     )
+    assert not leaked, f"enterprise routes mounted without a licence: {leaked}"
 
 
 def test_the_real_installation_reports_every_feature_available(app):
@@ -104,10 +154,36 @@ def test_the_real_installation_reports_every_feature_available(app):
     """
     doc = caps.build_capabilities(app)
     off = sorted(k for k, v in doc.features.items() if not v.available)
-    assert not off, f"reported off on a complete build: {off}"
-    assert doc.edition == "full"
+    expected_off = sorted(
+        f.key for f in caps.FEATURES
+        if f.license_feature is not None and f.license_feature not in _granted(app)
+    )
+    assert off == expected_off, f"reported off on a complete build: {off}"
+    assert doc.edition == ("enterprise" if _enterprise(app) else "community")
+    assert doc.edition_source == "license"
+    assert doc.complete is True
     assert doc.degraded is False
-    assert not [p for p, ok in doc.pages.items() if not ok]
+    # The only pages a client may hide are the unlicensed enterprise ones.
+    hidden = sorted(p for p, ok in doc.pages.items() if not ok)
+    assert hidden == sorted(
+        p for f in caps.FEATURES if f.key in expected_off for p in f.pages
+    )
+
+
+def test_the_enterprise_features_follow_the_licence(app):
+    """The community build reports both off and still calls itself complete;
+    the licensed one reports both on. Nothing here is a list of what was
+    sold — it is the route table, which is what `mount_enterprise` changed."""
+    doc = caps.build_capabilities(app)
+    on = _enterprise(app)
+
+    assert doc.features["sso"].available is on
+    assert doc.features["review_analytics"].available is on
+    assert doc.pages["/analytics"] is on
+    assert sorted(doc.license.features) == sorted(_granted(app))
+    # The AGPL half of the same product area never moves with the licence.
+    assert doc.features["review_issues"].available is True
+    assert doc.features["core"].available is True
 
 
 # ─── 2. derivation: the answer follows the routes ────────────────────
@@ -140,7 +216,8 @@ def test_a_missing_module_reports_its_feature_off_and_hides_its_pages():
     assert doc.pages["/chats"] is False
     assert doc.pages["/reviews"] is False
 
-    assert doc.edition == "partial"
+    assert doc.complete is False
+    assert doc.edition == "community", "no licence state on this app"
     assert doc.api_version == "9.9.9"
 
 
@@ -251,9 +328,31 @@ def test_only_the_mode_depends_on_who_is_asking(client, token):
         "/api/capabilities", headers={"Authorization": f"Bearer {token}"},
     ).json()
 
-    assert {k: v for k, v in anon.items() if k != "deployment"} == \
-           {k: v for k, v in authed.items() if k != "deployment"}
+    def public(body: dict) -> dict:
+        out = {k: v for k, v in body.items() if k not in ("deployment", "license")}
+        out["license_features"] = body["license"]["features"]
+        return out
+
+    assert public(anon) == public(authed)
     assert anon["deployment"] != authed["deployment"]
+
+
+def test_the_licence_customer_is_told_only_to_a_signed_in_caller(client, token, app):
+    """A customer name is a fact about a business — gated like the mode. The
+    features it grants are not: they are already public as `available`."""
+    anon = client.get("/api/capabilities").json()["license"]
+    authed = client.get(
+        "/api/capabilities", headers={"Authorization": f"Bearer {token}"},
+    ).json()["license"]
+    from tests.ee.licensing import CUSTOMER
+
+    assert anon["customer"] is None and anon["expires_at"] is None
+    assert CUSTOMER not in client.get("/api/capabilities").text
+    if _enterprise(app):
+        assert authed["customer"] == CUSTOMER
+        assert authed["expires_at"]
+    else:
+        assert authed == {"features": [], "customer": None, "expires_at": None}
 
 
 def test_the_payload_carries_nothing_outside_its_contract(client):
@@ -264,9 +363,10 @@ def test_the_payload_carries_nothing_outside_its_contract(client):
 
     assert set(body) == {
         "schema_version", "product", "api_version", "edition", "edition_source",
-        "deployment", "features", "pages", "degraded",
+        "complete", "license", "deployment", "features", "pages", "degraded",
     }
     assert set(body["deployment"]) == {"mode", "source"}
+    assert set(body["license"]) == {"features", "customer", "expires_at"}
     for name, feature in body["features"].items():
         assert set(feature) == {"available", "pages"}, name
 
@@ -291,14 +391,21 @@ def test_every_string_on_the_wire_comes_from_a_fixed_vocabulary(client, token, a
 
     allowed = (
         {"schema_version", "product", "api_version", "edition", "edition_source",
+         "complete", "license", "customer", "expires_at",
          "deployment", "features", "pages", "degraded", "mode", "source",
          "available"}
         | {f.key for f in caps.FEATURES}
+        | {f.license_feature for f in caps.FEATURES if f.license_feature}
         | {p for f in caps.FEATURES for p in f.pages}
-        | {"celmis", str(app.version), "full", "partial", "unknown"}
-        | {"derived", "src.deployment", "requires_auth", "unavailable", "degraded"}
+        | {"celmis", str(app.version), "community", "enterprise", "unknown"}
+        | {"license", "src.deployment", "requires_auth", "unavailable", "degraded"}
         | {m.value for m in DeploymentMode}
     )
+    # The two runtime values the contract does admit — the licence's customer
+    # and expiry — and only for a signed-in caller of a licensed build. They
+    # come from the signed licence, not from anything a tenant controls.
+    summary = getattr(app.state, "celmis_license", None) or {}
+    licence_values = {summary.get("customer"), summary.get("expires_at")} - {None}
 
     def strings(node) -> set[str]:
         if isinstance(node, str):
@@ -311,7 +418,8 @@ def test_every_string_on_the_wire_comes_from_a_fixed_vocabulary(client, token, a
 
     for headers in ({}, {"Authorization": f"Bearer {token}"}):
         body = client.get("/api/capabilities", headers=headers).json()
-        unexpected = strings(body) - allowed
+        admitted = allowed | (licence_values if headers else set())
+        unexpected = strings(body) - admitted
         assert not unexpected, (sorted(unexpected), headers)
 
 

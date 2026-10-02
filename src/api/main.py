@@ -27,7 +27,6 @@ from fastapi.responses import JSONResponse
 from src.api.routers import access as access_router
 from src.api.routers import agents as agents_router
 from src.api.routers import alerts as alerts_router
-from src.api.routers import analytics as analytics_router
 from src.api.routers import apply_fix as apply_fix_router
 
 # Stage 21
@@ -478,10 +477,10 @@ def build_app() -> FastAPI:
     app.include_router(reviews_router.router)
     app.include_router(webhooks_router.router)
     app.include_router(review_policies_router.router)
-    # Review issues, reviewed pull requests and review analytics.
+    # Review issues and reviewed pull requests. Review analytics, which reads
+    # them, is an enterprise feature and is mounted below with the rest.
     app.include_router(issues_router.router)
     app.include_router(pull_requests_router.router)
-    app.include_router(analytics_router.router)
     app.include_router(models_router.router)
     app.include_router(agents_router.router)
     app.include_router(llm_router.router)
@@ -537,6 +536,20 @@ def build_app() -> FastAPI:
     app.include_router(mcp_access_router.router)
     from src.api.routers import automation as automation_router
     app.include_router(automation_router.router)
+
+    # The one place the AGPL application touches src/ee (LICENSE_EE). A build
+    # without that package — or one whose licence is absent, invalid or
+    # expired — is the community edition: nothing enterprise is mounted, and
+    # /api/capabilities reports those features off because it reads this
+    # route table. A licence problem never stops the process; the reason is
+    # logged by src/ee/license.py.
+    try:
+        from src.ee import mount_enterprise
+    except ImportError:
+        app.state.celmis_license = None
+        logger.info("enterprise_package_absent — community edition")
+    else:
+        mount_enterprise(app)
 
     # Mount webhook endpoints (already a FastAPI sub-app in webhook.py).
     # We import the existing routes directly so they live on the same host.
