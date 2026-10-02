@@ -1,9 +1,12 @@
 /**
  * NextAuth (Auth.js v5) configuration.
  *
- * Two providers:
+ * Providers:
  *   - Credentials (email + password) → calls FastAPI /api/auth/login
  *   - Google     → calls FastAPI /api/auth/google with the Google id_token
+ *   - OIDC (Keycloak or any OpenID provider, id "oidc") → calls FastAPI
+ *     /api/auth/oidc with the provider's id_token. Registered only when
+ *     AUTH_OIDC_ISSUER + AUTH_OIDC_CLIENT_ID + AUTH_OIDC_CLIENT_SECRET are set.
  *
  * The FastAPI backend is the source of truth for the user record. NextAuth
  * stores the backend-issued JWT inside the session so frontend pages can
@@ -12,8 +15,23 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import Google from "next-auth/providers/google";
+import Keycloak from "next-auth/providers/keycloak";
 
 import { api, type TokenResponse, type UserOut } from "@/lib/api";
+import { oidcConfigured, oidcProviderName, passwordLoginEnabled } from "@/lib/auth-options";
+
+/** How often the jwt callback re-reads /api/auth/me (is_admin). */
+const ME_RECHECK_MS = 5 * 60 * 1000;
+
+/** Exchange a provider id_token at a backend endpoint and load the user. */
+async function exchangeIdToken(path: string, idToken: string) {
+  const tok = await api<TokenResponse>(path, {
+    method: "POST",
+    json: { id_token: idToken },
+  });
+  const me = await api<UserOut>("/api/auth/me", { token: tok.access_token });
+  return { tok, me };
+}
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   trustHost: true,
@@ -33,6 +51,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const mode = String(raw?.mode ?? "login");
         const name = String(raw?.name ?? "");
         if (!email || !password) return null;
+        // AUTH_PASSWORD_LOGIN=false: no self-service signup. Login stays
+        // routed to the backend, which refuses everything but the master key
+        // (the break-glass account for when the IdP is down).
+        if (mode === "signup" && !passwordLoginEnabled()) return null;
 
         const path = mode === "signup" ? "/api/auth/signup" : "/api/auth/login";
         const body =
@@ -68,6 +90,22 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           }),
         ]
       : []),
+    // Company SSO (Keycloak realm or any OIDC issuer). Same rule as Google:
+    // registered only when fully configured. The Keycloak provider is a plain
+    // OIDC provider with discovery from `issuer`, so it serves both cases;
+    // the id is "oidc", making the redirect URI /api/auth/callback/oidc.
+    ...(oidcConfigured()
+      ? [
+          Keycloak({
+            id: "oidc",
+            name: oidcProviderName(),
+            issuer: process.env.AUTH_OIDC_ISSUER,
+            clientId: process.env.AUTH_OIDC_CLIENT_ID,
+            clientSecret: process.env.AUTH_OIDC_CLIENT_SECRET,
+            authorization: { params: { scope: "openid email profile" } },
+          }),
+        ]
+      : []),
   ],
   callbacks: {
     jwt: async ({ token, user, account }) => {
@@ -78,21 +116,25 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         token.celmisExpiresAt = u.celmisExpiresAt;
         token.isAdmin = u.isAdmin;
         token.userId = u.id;
+        token.meCheckedAt = Date.now();
         return token;
       }
 
-      // Initial sign-in via Google — exchange id_token for our JWT
-      if (account?.provider === "google" && account.id_token) {
+      // Initial sign-in via Google or OIDC — exchange id_token for our JWT
+      const exchangePath =
+        account?.provider === "google"
+          ? "/api/auth/google"
+          : account?.provider === "oidc"
+            ? "/api/auth/oidc"
+            : null;
+      if (exchangePath && account?.id_token) {
         try {
-          const tok = await api<TokenResponse>("/api/auth/google", {
-            method: "POST",
-            json: { id_token: account.id_token },
-          });
-          const me = await api<UserOut>("/api/auth/me", { token: tok.access_token });
+          const { tok, me } = await exchangeIdToken(exchangePath, account.id_token);
           token.celmisToken = tok.access_token;
           token.celmisExpiresAt = tok.expires_at;
           token.userId = me.id;
           token.isAdmin = me.is_admin;
+          token.meCheckedAt = Date.now();
           token.email = me.email;
           token.name = me.name || me.email;
         } catch {
@@ -118,9 +160,24 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             });
             token.celmisToken = fresh.access_token;
             token.celmisExpiresAt = fresh.expires_at;
+            token.meCheckedAt = 0; // re-read the user below with the new token
           } catch {
             // keep the old token — natural expiry will log the user out
           }
+        }
+      }
+
+      // is_admin used to be copied once at sign-in, so a promotion or a
+      // demotion (CLI, admin page, IdP role on the next SSO login) did not
+      // reach the UI for up to 30 days. The backend re-reads it per request
+      // anyway; this keeps the session's copy at most ME_RECHECK_MS stale.
+      if (token.celmisToken && Date.now() - (token.meCheckedAt ?? 0) > ME_RECHECK_MS) {
+        try {
+          const me = await api<UserOut>("/api/auth/me", { token: token.celmisToken as string });
+          token.isAdmin = me.is_admin;
+          token.meCheckedAt = Date.now();
+        } catch {
+          // backend unreachable or token refused — keep the last known value
         }
       }
       return token;

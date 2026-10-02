@@ -13,6 +13,7 @@ class UserAuthMethod(StrEnum):
     PASSWORD = "password"          # email + scrypt hash
     GOOGLE_OAUTH = "google_oauth"  # Google subject (no password stored)
     BOTH = "both"                  # password set + Google linked
+    OIDC = "oidc"                  # generic OIDC / Keycloak subject
 
 
 @dataclass
@@ -23,6 +24,8 @@ class User:
         email + password (Argon2/scrypt hash)
         Google OAuth (sub claim — stable Google user ID)
         Or both (linked account)
+        OIDC / Keycloak (iss + sub — stable per issuer); may be linked to
+        any of the above, `auth_method` keeps describing the first one
 
     Permissions:
         is_admin — can manage other users + system-wide settings
@@ -41,6 +44,8 @@ class User:
     created_at: str = ""  # ISO timestamp
     last_login_at: str | None = None
     name: str = ""  # display name
+    oidc_iss: str | None = None  # OIDC issuer URL
+    oidc_sub: str | None = None  # OIDC subject — stable per issuer
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -53,3 +58,7 @@ class User:
     @property
     def has_google(self) -> bool:
         return bool(self.google_sub)
+
+    @property
+    def has_oidc(self) -> bool:
+        return bool(self.oidc_sub)

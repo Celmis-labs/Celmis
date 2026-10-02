@@ -1,4 +1,4 @@
-"""Auth routes — login, signup, Google OAuth callback, /me."""
+"""Auth routes — login, signup, Google OAuth and OIDC callbacks, /me."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from src.api.schemas import (
     ForgotPasswordRequest,
     GoogleCallbackRequest,
     LoginRequest,
+    OidcCallbackRequest,
     ResetPasswordRequest,
     SignupRequest,
     TokenResponse,
@@ -36,6 +37,23 @@ from src.users.scopes import STANDARD_SCOPES, held_scopes
 logger = logging.getLogger(__name__)
 
 
+def password_login_enabled() -> bool:
+    """AUTH_PASSWORD_LOGIN=false turns off email+password sign-in and signup.
+
+    For installs where the company IdP (Keycloak/OIDC) is the only way in.
+    The master-key login (`_master_login`) is NOT affected: it is the
+    break-glass path for when the IdP itself is down or misconfigured, and
+    an install that disabled it here would have no way back in.
+    """
+    raw = os.environ.get("AUTH_PASSWORD_LOGIN", "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _password_login_disabled() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Password sign-in is disabled on this server — use single sign-on",
+    )
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -50,6 +68,7 @@ def _user_to_out(user: User) -> UserOut:
         auth_method=user.auth_method.value,
         has_password=user.has_password,
         has_google=user.has_google,
+        has_oidc=user.has_oidc,
         created_at=user.created_at,
         last_login_at=user.last_login_at,
     )
@@ -62,6 +81,12 @@ def _master_email() -> str:
     """No in-code default: the master identity exists ONLY when the operator
     explicitly sets CELMIS_MASTER_EMAIL in the env (alongside the key)."""
     return os.environ.get("CELMIS_MASTER_EMAIL", "").strip().lower()
+
+
+def _is_master_account(user: User) -> bool:
+    """The break-glass identity: never linkable to an external sign-in."""
+    master = _master_email()
+    return user.id == _MASTER_ADMIN_ID or bool(master and user.email == master)
 
 
 def _master_login(req, users: UserStore,
@@ -204,6 +229,8 @@ def _record_login_failure(email: str, request: Request | None, reason: str,
 @router.post("/signup", response_model=TokenResponse)
 def signup(req: SignupRequest, request: Request,
            users: UserStore = Depends(get_users)) -> TokenResponse:
+    if not password_login_enabled():
+        raise _password_login_disabled()
     existing = users.get_by_email(req.email)
     if existing is not None:
         raise HTTPException(
@@ -243,6 +270,9 @@ def login(req: LoginRequest, request: Request,
     master = _master_login(req, users, request)
     if master is not None:
         return master
+    if not password_login_enabled():
+        _record_login_failure(req.email, request, "password-login-disabled")
+        raise _password_login_disabled()
     user = users.get_by_email(req.email)
     if user is None or not user.is_active:
         # Recorded, and the two cases kept apart. The RESPONSE stays a single
@@ -262,7 +292,8 @@ def login(req: LoginRequest, request: Request,
                               actor_id=user.id)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Account uses Google sign-in only",
+            detail=("Account uses Google sign-in only" if user.has_google
+                    else "Account uses single sign-on only"),
         )
     if not verify_password(req.password, user.password_hash):
         _record_login_failure(req.email, request, "wrong-password",
@@ -337,7 +368,23 @@ def google_callback(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Token missing required claims",
         )
 
-    user = users.get_by_google_sub(sub) or users.get_by_email(email)
+    user = users.get_by_google_sub(sub)
+    if user is None:
+        # Linking by email hands the existing account to whoever controls this
+        # Google identity, so the address must be one Google has verified.
+        # tokeninfo sends the flag as the string "true".
+        existing = users.get_by_email(email)
+        if existing is not None and _is_master_account(existing):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This account cannot use Google sign-in",
+            )
+        if existing is not None and str(claims.get("email_verified", "")).lower() != "true":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Google has not verified this email address",
+            )
+        user = existing
     if user is None:
         user = User(
             id=str(uuid.uuid4()),
@@ -365,6 +412,137 @@ def google_callback(
     record_action(
         action="auth.login", actor=user.email, actor_id=user.id,
         target="google", ip=client_ip(request),
+    )
+    from src.api.workspace_provision import provision_personal_workspace
+    provision_personal_workspace(user.id, user.email, user.name)
+    return TokenResponse(access_token=token, expires_at=exp)
+
+
+@router.post("/oidc", response_model=TokenResponse)
+def oidc_callback(
+    req: OidcCallbackRequest, request: Request,
+    users: UserStore = Depends(get_users),
+) -> TokenResponse:
+    """Verify an OIDC (Keycloak) id_token, create or link the user, return JWT.
+
+    Same shape as `/google`, with two differences that matter:
+
+      * the token is verified locally against the issuer's JWKS
+        (src/api/oidc.py) — iss, aud/azp, exp and the signature;
+      * an existing account is linked by email ONLY when the IdP says the
+        address is verified. Otherwise anyone who can register an
+        unverified address at the IdP could sign in as that account.
+
+    The user is found by (iss, sub) first; the email is only used to link
+    an account that has no OIDC subject yet.
+    """
+    from src.api import oidc
+
+    config = oidc.oidc_config()
+    if config is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OIDC sign-in is not configured on server",
+        )
+    try:
+        claims = oidc.verify_id_token(req.id_token, config)
+    except oidc.OidcError as exc:
+        logger.warning("oidc_token_rejected err=%s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid OIDC ID token",
+        ) from exc
+
+    sub = str(claims.get("sub") or "")
+    email = str(claims.get("email") or "").strip()
+    name = str(claims.get("name") or claims.get("preferred_username") or "")
+    if not sub or not email:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token missing required claims",
+        )
+    verified = oidc.email_is_verified(claims)
+
+    user = users.get_by_oidc(config.issuer, sub)
+    if user is None:
+        existing = users.get_by_email(email)
+        if existing is not None and _is_master_account(existing):
+            # The master account signs in ONLY with CELMIS_MASTER_KEY. An IdP
+            # user that happens to carry the master email must not inherit it.
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This account cannot use single sign-on",
+            )
+        if existing is not None and not existing.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled",
+            )
+        if existing is not None:
+            if not verified:
+                record_action(
+                    action="auth.login_failed", actor=email[:200],
+                    actor_id=existing.id, target="oidc",
+                    ip=client_ip(request), error="unverified-email-link",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="The identity provider has not verified this email address",
+                )
+            if existing.has_oidc:
+                # Already bound to a different subject (or issuer). Rebinding
+                # silently would let a second IdP account take this one over.
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Account is linked to a different single sign-on identity",
+                )
+            existing.oidc_iss = config.issuer
+            existing.oidc_sub = sub
+            users.update(existing)
+            user = existing
+        else:
+            user = User(
+                id=str(uuid.uuid4()),
+                email=email,
+                name=name or email.split("@", 1)[0],
+                auth_method=UserAuthMethod.OIDC,
+                oidc_iss=config.issuer,
+                oidc_sub=sub,
+                is_admin=False,
+                scopes=list(STANDARD_SCOPES),
+            )
+            try:
+                users.create(user)
+            except UserExistsError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT, detail=str(exc),
+                ) from exc
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled",
+        )
+
+    # Optional IdP-managed admin flag. Granting is re-applied on every login;
+    # revoking only with OIDC_ADMIN_ROLE_SYNC=true, so an admin promoted by
+    # hand (CLI) is not demoted the first time they use SSO.
+    if config.admin_role:
+        has_role = config.admin_role in oidc.token_roles(claims)
+        if has_role and not user.is_admin:
+            user.is_admin = True
+            users.update(user)
+            logger.info("oidc_admin_granted id=%s email=%s", user.id, user.email)
+        elif (not has_role and user.is_admin and config.admin_role_sync
+              and user.id != _MASTER_ADMIN_ID):
+            # Never the master account: it is the break-glass identity, and
+            # an IdP that dropped a role must not be able to lock it out.
+            user.is_admin = False
+            users.update(user)
+            logger.info("oidc_admin_revoked id=%s email=%s", user.id, user.email)
+
+    users.update_last_login(user.id)
+    token, exp = issue_token(user_id=user.id, email=user.email, scopes=held_scopes(user))
+    logger.info("user_oidc_login id=%s email=%s", user.id, user.email)
+    record_action(
+        action="auth.login", actor=user.email, actor_id=user.id,
+        target="oidc", ip=client_ip(request),
     )
     from src.api.workspace_provision import provision_personal_workspace
     provision_personal_workspace(user.id, user.email, user.name)
@@ -500,6 +678,8 @@ async def forgot_password(
     req: ForgotPasswordRequest,
     users: UserStore = Depends(get_users),
 ) -> dict:
+    if not password_login_enabled():
+        raise _password_login_disabled()
     user = users.get_by_email(str(req.email))
     out: dict = {"ok": True, "detail": "If that address exists, a reset link was created."}
     if user is None or not user.is_active:
