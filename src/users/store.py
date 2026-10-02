@@ -15,7 +15,9 @@ Schema:
         scopes TEXT NOT NULL,  -- JSON array
         created_at TEXT NOT NULL,
         last_login_at TEXT,
-        name TEXT NOT NULL DEFAULT ''
+        name TEXT NOT NULL DEFAULT '',
+        oidc_iss TEXT,          -- added later: ALTER on open, see _migrate
+        oidc_sub TEXT           -- UNIQUE together with oidc_iss
     )
 
 NOTE: the schema is the same for SQLite and Postgres (minimal type
@@ -60,7 +62,9 @@ CREATE TABLE IF NOT EXISTS users (
     scopes        TEXT NOT NULL,
     created_at    TEXT NOT NULL,
     last_login_at TEXT,
-    name          TEXT NOT NULL DEFAULT ''
+    name          TEXT NOT NULL DEFAULT '',
+    oidc_iss      TEXT,
+    oidc_sub      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
@@ -79,8 +83,34 @@ class UserStore:
     def _init_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            self._migrate(conn)
             conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA foreign_keys = ON")
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Bring a users.db created by an older build up to the current schema.
+
+        `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so a column
+        added to `_SCHEMA` never reaches a database that predates it. Each step
+        here is idempotent: it asks what the table has before changing it.
+        """
+        have = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+        for column in ("oidc_iss", "oidc_sub"):
+            if column not in have:
+                try:
+                    conn.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT")
+                except sqlite3.OperationalError as exc:
+                    # Check-then-act: another thread or process opening the
+                    # same users.db may have added it since PRAGMA ran.
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+        # SQLite cannot add a UNIQUE column with ALTER; a partial unique index
+        # gives the same guarantee and leaves every non-OIDC row out of it.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oidc "
+            "ON users(oidc_iss, oidc_sub) WHERE oidc_sub IS NOT NULL"
+        )
 
     @contextmanager
     def _connect(self):
@@ -104,8 +134,9 @@ class UserStore:
                     """
                     INSERT INTO users
                     (id, email, auth_method, password_hash, google_sub,
-                     is_admin, is_active, scopes, created_at, last_login_at, name)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     is_admin, is_active, scopes, created_at, last_login_at, name,
+                     oidc_iss, oidc_sub)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         user.id,
@@ -119,6 +150,8 @@ class UserStore:
                         user.created_at,
                         user.last_login_at,
                         user.name,
+                        user.oidc_iss,
+                        user.oidc_sub,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -128,6 +161,10 @@ class UserStore:
                 if "users.google_sub" in msg:
                     raise UserExistsError(
                         f"google_sub {user.google_sub!r} already linked"
+                    ) from exc
+                if "users.oidc" in msg:
+                    raise UserExistsError(
+                        f"oidc subject {user.oidc_sub!r} already linked"
                     ) from exc
                 if "users.id" in msg or "primary key" in msg:
                     raise UserExistsError(f"id {user.id!r} already exists") from exc
@@ -159,6 +196,14 @@ class UserStore:
             ).fetchone()
         return self._row_to_user(row) if row else None
 
+    def get_by_oidc(self, issuer: str, subject: str) -> User | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE oidc_iss = ? AND oidc_sub = ?",
+                (issuer, subject),
+            ).fetchone()
+        return self._row_to_user(row) if row else None
+
     def list(self, *, active_only: bool = True) -> list[User]:
         sql = "SELECT * FROM users"
         params: tuple = ()
@@ -177,7 +222,8 @@ class UserStore:
                 UPDATE users SET
                     email = ?, auth_method = ?, password_hash = ?,
                     google_sub = ?, is_admin = ?, is_active = ?,
-                    scopes = ?, last_login_at = ?, name = ?
+                    scopes = ?, last_login_at = ?, name = ?,
+                    oidc_iss = ?, oidc_sub = ?
                 WHERE id = ?
                 """,
                 (
@@ -190,6 +236,8 @@ class UserStore:
                     json.dumps(user.scopes),
                     user.last_login_at,
                     user.name,
+                    user.oidc_iss,
+                    user.oidc_sub,
                     user.id,
                 ),
             )
@@ -256,6 +304,8 @@ class UserStore:
             created_at=str(row["created_at"]),
             last_login_at=row["last_login_at"],
             name=str(row["name"] or ""),
+            oidc_iss=row["oidc_iss"],
+            oidc_sub=row["oidc_sub"],
         )
 
 

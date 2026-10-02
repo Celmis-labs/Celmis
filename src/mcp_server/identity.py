@@ -34,6 +34,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from src.users.roles import WORKSPACE_ROLE_RANK
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,7 +53,7 @@ class McpCaller:
     workspace_resolved: bool = True
 
 
-_WS_RANK = {"viewer": 1, "member": 2, "admin": 3, "owner": 4}
+_WS_RANK = WORKSPACE_ROLE_RANK
 
 
 def _decode_subject(raw_token: str) -> tuple[str | None, list[str]]:

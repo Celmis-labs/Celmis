@@ -1,0 +1,43 @@
+# Local Keycloak for testing Celmis SSO. DEV ONLY: start-dev, HTTP, fixed
+# client secret and passwords committed below. Never point production at it.
+#
+#     docker compose -f deploy/keycloak/docker-compose.yml up -d
+#
+# Admin console: http://localhost:8089 (admin / admin). The realm "celmis" is
+# imported from celmis-realm.json on first start:
+#
+#   client  celmis-web / celmis-dev-secret  (redirects localhost:3000, :8081)
+#   users   admin@celmis.test / admin-dev-pass       (realm role celmis-admin)
+#           dev@celmis.test / dev-dev-pass           (verified email)
+#           unverified@celmis.test / unverified-dev-pass (email NOT verified)
+#
+# Then, in .env (web + api read the same names):
+#
+#   AUTH_OIDC_ISSUER=http://localhost:8089/realms/celmis
+#   AUTH_OIDC_CLIENT_ID=celmis-web
+#   AUTH_OIDC_CLIENT_SECRET=celmis-dev-secret
+#   AUTH_OIDC_NAME=Keycloak
+#   OIDC_ADMIN_ROLE=celmis-admin
+#
+# The issuer must be ONE address that both the browser and the Celmis
+# containers can reach, because the `iss` claim is compared exactly.
+# `localhost` works for `pnpm dev` + uvicorn on the host. With the whole stack
+# in Docker use http://host.docker.internal:8089/realms/celmis instead (on
+# Linux add `127.0.0.1 host.docker.internal` to /etc/hosts so the browser can
+# resolve it too). start-dev derives the issuer from the request host, so no
+# KC_HOSTNAME is needed.
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./celmis-realm.json:/opt/keycloak/data/import/celmis-realm.json:ro
+    ports:
+      - "127.0.0.1:8089:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

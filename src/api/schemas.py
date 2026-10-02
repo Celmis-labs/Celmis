@@ -60,6 +60,12 @@ class GoogleCallbackRequest(BaseModel):
     id_token: str
 
 
+class OidcCallbackRequest(BaseModel):
+    """ID token from a generic OIDC / Keycloak sign-in (frontend-driven flow)."""
+
+    id_token: str
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -74,6 +80,7 @@ class UserOut(BaseModel):
     auth_method: str
     has_password: bool
     has_google: bool
+    has_oidc: bool = False
     created_at: str
     last_login_at: str | None
 

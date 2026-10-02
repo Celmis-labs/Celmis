@@ -24,6 +24,7 @@ import {
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
+import { roleLabel, roleOptions } from "@/lib/roles";
 import { copyText } from "@/lib/copy";
 import { PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
@@ -37,8 +38,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 
-const WS_ROLES = ["owner", "admin", "member", "viewer"];
-const WS_ROLE_OPTIONS = WS_ROLES.map((r) => ({ value: r, label: r }));
 
 /**
  * Copies a short-lived password-reset link to the clipboard.
@@ -210,7 +209,7 @@ function WorkspaceCard({ ws, activeId }: { ws: WorkspaceSummary; activeId: strin
               {ws.id === activeId && <Badge variant="outline">{t("admin.workspaces.activeBadge")}</Badge>}
             </CardTitle>
             <CardDescription className="mt-1">
-              <code>{ws.slug}</code>{ws.role ? t("admin.workspaces.yourRole", { role: ws.role }) : ""}
+              <code>{ws.slug}</code>{ws.role ? t("admin.workspaces.yourRole", { role: roleLabel(t, ws.role) }) : ""}
             </CardDescription>
           </div>
           {ws.slug !== "default" && (
@@ -246,7 +245,7 @@ function WorkspaceCard({ ws, activeId }: { ws: WorkspaceSummary; activeId: strin
                     {m.name ? (
                       <span className="ml-1 text-xs text-[var(--color-muted-foreground)]">{m.name}</span>
                     ) : null}
-                    {" · "}<Badge variant="outline">{m.role}</Badge>
+                    {" · "}<Badge variant="outline">{roleLabel(t, m.role)}</Badge>
                   </span>
                   <div className="flex items-center">
                     <ResetLinkButton wsId={ws.id} userId={m.user_id} email={m.email || emailById(m.user_id)} />
@@ -283,7 +282,7 @@ function WorkspaceCard({ ws, activeId }: { ws: WorkspaceSummary; activeId: strin
               />
               <Select
                 value={pickRole} onChange={(v) => setPickRole(v)}
-                options={WS_ROLE_OPTIONS}
+                options={roleOptions(t)}
               />
               <Button onClick={() => addMember.mutate()} disabled={!pickUser || addMember.isPending}>
                 {t("admin.workspaces.addButton")}
@@ -378,7 +377,7 @@ function InviteSection({ wsId }: { wsId: string }) {
                onChange={(e) => setEmail(e.target.value)} />
         <Select
           value={role} onChange={(v) => setRole(v)}
-          options={WS_ROLE_OPTIONS}
+          options={roleOptions(t)}
         />
         <Button size="sm" disabled={!email.trim() || create.isPending}
                 onClick={() => create.mutate("email")}>
@@ -428,7 +427,7 @@ function InviteSection({ wsId }: { wsId: string }) {
           {active.map((i) => (
             <div key={i.id} className="flex items-center justify-between text-xs">
               <span>
-                {i.email ?? t("invite.openLink")} · <Badge variant="outline">{i.role}</Badge>
+                {i.email ?? t("invite.openLink")} · <Badge variant="outline">{roleLabel(t, i.role)}</Badge>
                 <span className="ml-1 text-[10px] text-[var(--color-muted-foreground)]">
                   {i.used_count}/{i.max_uses}
                 </span>

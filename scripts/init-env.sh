@@ -93,6 +93,8 @@ NOT_OURS = {
     "GOOGLE_CLIENT_ID": "from Google Cloud Console — optional, for Google sign-in",
     "GOOGLE_CLIENT_SECRET": "from Google Cloud Console — optional",
     "GOOGLE_OAUTH_CLIENT_ID": "from Google Cloud Console — optional",
+    "AUTH_OIDC_CLIENT_SECRET": "from your Keycloak / OIDC provider's client — "
+                               "optional, for single sign-on",
     "VAPID_PUBLIC_KEY": "an EC P-256 keypair, not a random string — "
                         "`npx web-push generate-vapid-keys`; optional",
     "VAPID_PRIVATE_KEY": "the private half of the pair above; optional",

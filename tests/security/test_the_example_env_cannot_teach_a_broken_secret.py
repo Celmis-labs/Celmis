@@ -44,6 +44,8 @@ _THIRD_PARTY = frozenset({
 NOT_SECRETS = frozenset({
     "CELMIS_CORS_ORIGINS", "CELMIS_MASTER_EMAIL", "COMPOSE_PROFILES",
     "EMBEDDING_DOCUMENT_PREFIX", "EMBEDDING_QUERY_PREFIX",
+    # An on/off switch for password sign-in, not a password.
+    "AUTH_PASSWORD_LOGIN",
 })
 
 

@@ -21,5 +21,7 @@ declare module "next-auth/jwt" {
     celmisExpiresAt?: string;
     isAdmin?: boolean;
     userId?: string;
+    /** ms epoch of the last /api/auth/me read (keeps isAdmin fresh). */
+    meCheckedAt?: number;
   }
 }

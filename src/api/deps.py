@@ -335,8 +335,8 @@ async def current_workspace_id(
                 _select(WorkspaceMember).where(WorkspaceMember.user_id == user.id)
             ).scalars().all()
             if memberships:
-                _RANK = {"viewer": 1, "member": 2, "admin": 3, "owner": 4}
-                memberships.sort(key=lambda m: -_RANK.get(m.role, 0))
+                from src.users.roles import role_rank
+                memberships.sort(key=lambda m: -role_rank(m.role))
                 return memberships[0].workspace_id
             # No membership yet — provision this user's personal workspace so
             # their keys/repos land in an isolated tenant (safety net for users

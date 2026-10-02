@@ -33,13 +33,14 @@ from src.api.deps import get_current_user
 from src.db.models import Workspace, WorkspaceMember
 from src.db.session import get_async_session
 from src.users import User
+from src.users.roles import VALID_WORKSPACE_ROLES, WORKSPACE_ROLE_RANK
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 
-_VALID_ROLES = {"owner", "admin", "member", "viewer"}
-_ROLE_RANK = {"viewer": 1, "member": 2, "admin": 3, "owner": 4}
+_VALID_ROLES = VALID_WORKSPACE_ROLES
+_ROLE_RANK = WORKSPACE_ROLE_RANK
 _SLUG_PAT = re.compile(r"^[a-z0-9][a-z0-9-]{1,60}$")
 
 
@@ -270,7 +271,7 @@ async def upsert_member(
     await _require_ws_admin(session, admin, ws_id)
     if payload.role not in _VALID_ROLES:
         raise HTTPException(status_code=400,
-                            detail=f"role must be one of {_VALID_ROLES}")
+                            detail=f"role must be one of {sorted(_VALID_ROLES)}")
     if await session.get(Workspace, ws_id) is None:
         raise HTTPException(status_code=404, detail="workspace not found")
 

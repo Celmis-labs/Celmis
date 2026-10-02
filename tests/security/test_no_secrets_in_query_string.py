@@ -39,7 +39,9 @@ FORM_OPEN = re.compile(r"<form\b[^>]*>", re.S)
 
 
 def _pages() -> list[Path]:
-    return sorted(WEB.rglob("page.tsx"))
+    # A page that reads server env renders its form from a sibling client
+    # component (`login/login-form.tsx`); those carry the <form> now.
+    return sorted([*WEB.rglob("page.tsx"), *WEB.rglob("*-form.tsx")])
 
 
 def test_there_are_pages_to_scan() -> None:
@@ -65,7 +67,7 @@ def test_a_form_holding_a_secret_posts(page: Path) -> None:
 
 def test_the_login_form_specifically() -> None:
     """The page this was found on, pinned by name so it cannot regress quietly."""
-    login = (WEB / "login" / "page.tsx").read_text()
+    login = (WEB / "login" / "login-form.tsx").read_text()
     forms = FORM_OPEN.findall(login)
     assert len(forms) >= 2, "expected a sign-in and a sign-up form"
     for form in forms:

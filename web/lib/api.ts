@@ -109,6 +109,8 @@ export interface UserOut {
   auth_method: string;
   has_password: boolean;
   has_google: boolean;
+  /** Linked to a Keycloak / OIDC identity. */
+  has_oidc?: boolean;
   created_at: string;
   last_login_at: string | null;
 }

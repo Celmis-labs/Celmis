@@ -18,6 +18,7 @@ import { BuildingIcon, CheckIcon, XCircleIcon } from "lucide-react";
 import { invitesApi } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
+import { roleLabel } from "@/lib/roles";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,7 +43,7 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
       const r = await invitesApi.accept(jwt, inviteToken);
       // Switch the active workspace to the one we just joined.
       document.cookie = `x-workspace=${r.workspace_slug}; path=/; max-age=31536000; SameSite=Lax`;
-      toast.success(t("invite.joined", { workspace: r.workspace_slug, role: r.role }));
+      toast.success(t("invite.joined", { workspace: r.workspace_slug, role: roleLabel(t, r.role) }));
       router.push("/dashboard");
     } catch (err) {
       toast.error((err as Error).message);
@@ -62,7 +63,7 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
           </CardTitle>
           <CardDescription>
             {preview.isLoading ? t("common.loading") : p?.valid
-              ? t("invite.grants", { workspace: p.workspace_name, role: p.role })
+              ? t("invite.grants", { workspace: p.workspace_name, role: roleLabel(t, p.role) })
               : t("invite.invalid")}
           </CardDescription>
         </CardHeader>
@@ -77,7 +78,7 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
           {p?.valid && (
             <>
               <div className="flex items-center gap-2 text-sm">
-                <Badge variant="outline">{p.role}</Badge>
+                <Badge variant="outline">{roleLabel(t, p.role)}</Badge>
                 {p.email_bound && (
                   <span className="text-[11px] text-[var(--color-muted-foreground)]">
                     {t("invite.emailBound")}

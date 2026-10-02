@@ -1,0 +1,93 @@
+{
+  "realm": "celmis",
+  "enabled": true,
+  "displayName": "Celmis (dev)",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "roles": {
+    "realm": [
+      {
+        "name": "celmis-admin",
+        "description": "Grants Celmis global admin when OIDC_ADMIN_ROLE=celmis-admin"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "celmis-web",
+      "name": "Celmis web",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "celmis-dev-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:3000/*",
+        "http://localhost:8081/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3000",
+        "http://localhost:8081"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:3000/*##http://localhost:8081/*",
+        "pkce.code.challenge.method": "S256"
+      },
+      "defaultClientScopes": ["web-origins", "profile", "roles", "email", "basic", "acr"],
+      "protocolMappers": [
+        {
+          "name": "realm roles in id_token",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "email": "admin@celmis.test",
+      "firstName": "Celmis",
+      "lastName": "Admin",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "admin-dev-pass", "temporary": false }],
+      "realmRoles": ["default-roles-celmis", "celmis-admin"]
+    },
+    {
+      "username": "dev",
+      "email": "dev@celmis.test",
+      "firstName": "Dev",
+      "lastName": "User",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "dev-dev-pass", "temporary": false }],
+      "realmRoles": ["default-roles-celmis"]
+    },
+    {
+      "username": "unverified",
+      "email": "unverified@celmis.test",
+      "firstName": "Not",
+      "lastName": "Verified",
+      "enabled": true,
+      "emailVerified": false,
+      "credentials": [{ "type": "password", "value": "unverified-dev-pass", "temporary": false }],
+      "realmRoles": ["default-roles-celmis"]
+    }
+  ]
+}
