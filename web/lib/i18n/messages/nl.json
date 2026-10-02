@@ -2355,7 +2355,7 @@
   "prs.col.repo": "Repository",
   "prs.col.branch": "Branch",
   "prs.col.author": "Auteur",
-  "prs.col.opened": "Geopend",
+  "prs.col.opened": "Eerst gezien",
   "prs.col.reviews": "Reviews",
   "prs.col.suggestions": "Suggesties",
   "prs.col.status": "Laatste review",

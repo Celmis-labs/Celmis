@@ -2355,7 +2355,7 @@
   "prs.col.repo": "仓库",
   "prs.col.branch": "分支",
   "prs.col.author": "作者",
-  "prs.col.opened": "创建时间",
+  "prs.col.opened": "首次记录",
   "prs.col.reviews": "审查",
   "prs.col.suggestions": "建议",
   "prs.col.status": "最近审查",

@@ -56,3 +56,6 @@ async def test_bad_values_are_refused():
         assert r.status_code == 422 and "ignore_globs" in r.text
         r = await _put(client, ignore_globs=["**"])
         assert r.status_code == 422
+        # A malformed class raised re.error out of the validator: a 500.
+        r = await _put(client, ignore_globs=["[z-a].py"])
+        assert r.status_code == 422 and "ignore_globs" in r.text

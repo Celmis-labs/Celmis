@@ -2355,7 +2355,7 @@
   "prs.col.repo": "Репозиторій",
   "prs.col.branch": "Гілка",
   "prs.col.author": "Автор",
-  "prs.col.opened": "Відкрито",
+  "prs.col.opened": "Вперше побачено",
   "prs.col.reviews": "Рев'ю",
   "prs.col.suggestions": "Пропозиції",
   "prs.col.status": "Останнє рев'ю",

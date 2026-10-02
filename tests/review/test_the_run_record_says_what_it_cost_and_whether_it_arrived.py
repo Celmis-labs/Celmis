@@ -560,15 +560,13 @@ def test_both_completion_writers_record_the_same_row(review, store, monkeypatch)
     assert (queue["tokens_input"], queue["tokens_output"]) == (1000, 400)
 
 
-def test_the_ui_writer_does_not_yet_record_a_failed_delivery(review, store, monkeypatch):
-    """The outstanding half, pinned so it cannot be forgotten.
+def test_the_ui_writer_records_a_failed_delivery_too(review, store, monkeypatch):
+    """Both writers now go through `completion_status` and `post_failure`.
 
-    `completion_status` and `post_failure` live in src/api/review_runs.py and
-    only `record_completed_review` calls them; the UI trigger's writer in
-    src/api/routers/reviews.py still passes `batch.run_status.value` straight
-    through, so a review triggered from the UI that GitHub refuses still says
-    `complete`. This test asserts the gap rather than hiding it, and will fail
-    the moment somebody closes it — which is when it should be deleted.
+    The UI trigger's writer in src/api/routers/reviews.py used to pass
+    `batch.run_status.value` straight through, so a review triggered from the
+    UI that GitHub refused still said `complete` — and the PR record took the
+    same word, disagreeing with the queue writer's row for the same outcome.
     """
     import src.api.routers.reviews as reviews_mod
     import src.review.orchestrator as orch_mod
@@ -595,10 +593,8 @@ def test_the_ui_writer_does_not_yet_record_a_failed_delivery(review, store, monk
     )
 
     row = store.get("r-ui")
-    assert row.post_error is None
-    assert row.status == ReviewRunStatus.COMPLETE.value, (
-        "if this now says 'partial', the UI writer was fixed — delete this test"
-    )
+    assert row.post_error
+    assert row.status == ReviewRunStatus.PARTIAL.value
 
 
 # ─── the migration ───────────────────────────────────────────────────

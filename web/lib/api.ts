@@ -1699,8 +1699,20 @@ export const feedbackApi = {
   }) => api<FindingFeedback>(`/api/feedback/run/${runId}`, {
     token, method: "PUT", json: body,
   }),
-  clear: (token: string, runId: string, key: string) =>
-    api<void>(`/api/feedback/run/${runId}/${key}`, { token, method: "DELETE" }),
+  /** `finding` lets the server reopen the tracked issue the dismissal closed. */
+  clear: (token: string, runId: string, key: string, finding?: {
+    file_path?: string | null; title?: string | null; rule_id?: string | null;
+  }) => {
+    const q = new URLSearchParams();
+    if (finding?.file_path) q.set("file_path", finding.file_path);
+    if (finding?.title != null) q.set("title", finding.title);
+    if (finding?.rule_id) q.set("rule_id", finding.rule_id);
+    const qs = q.toString();
+    return api<void>(
+      `/api/feedback/run/${runId}/${encodeURIComponent(key)}${qs ? `?${qs}` : ""}`,
+      { token, method: "DELETE" },
+    );
+  },
   stats: (token: string) => api<AgentFeedbackStat[]>("/api/feedback/stats", { token }),
 };
 

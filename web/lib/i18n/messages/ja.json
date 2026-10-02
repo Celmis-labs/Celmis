@@ -2355,7 +2355,7 @@
   "prs.col.repo": "リポジトリ",
   "prs.col.branch": "ブランチ",
   "prs.col.author": "作成者",
-  "prs.col.opened": "作成日",
+  "prs.col.opened": "初回記録",
   "prs.col.reviews": "レビュー",
   "prs.col.suggestions": "提案",
   "prs.col.status": "直近のレビュー",

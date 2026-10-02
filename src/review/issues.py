@@ -26,7 +26,11 @@ Fixed in a subsequent commit — `plan_sync()`:
       - the same head reviewed again — a model not repeating itself is not a
         fix;
       - a partial run, or the agent that raised it failed / was skipped — the
-        finder that would have repeated it did not look.
+        finder that would have repeated it did not look;
+      - the file's hunks did not reach the agents (skipped for size, a skip
+        list, an ignore glob, or the file left the diff) — nobody looked;
+      - the issue's rule was hidden by the deny-list this run — it may have
+        been found and dropped.
     A section hash also moves when the base branch moves under a rebase; that
     can call an untouched file changed. It cannot call a changed file
     untouched, which is the error that would hide a live defect.
@@ -208,6 +212,7 @@ class ExistingIssue:
     agent: str | None
     status: str
     resolution_source: str | None
+    rule_id: str | None = None
 
 
 @dataclass
@@ -260,10 +265,20 @@ def plan_sync(
     prev_file_hashes: dict[str, str] | None,
     new_file_hashes: dict[str, str] | None,
     agents_not_run: Iterable[str] = (),
+    reviewed_files: Iterable[str] | None = None,
+    hidden_rules: Iterable[str] = (),
 ) -> SyncPlan:
     """What to do with this PR's issue rows after one run. No I/O.
 
     See the module docstring for when an unrepeated issue counts as fixed.
+
+    `reviewed_files` is the set of paths whose hunks the run's agents were
+    actually given. `raw_diff` (and so `new_file_hashes`) still carries a file
+    that was skipped for size, a lock/binary/generated list or an ignore glob,
+    so a changed hash there says nothing about whether anyone looked. None —
+    not known — judges nothing. `hidden_rules` are rule ids whose findings the
+    prefilter's deny-list dropped this run: such a finding WAS found again and
+    then hidden, which is not a fix.
     """
     plan = SyncPlan()
     by_fp = {e.fingerprint: e for e in existing}
@@ -286,14 +301,23 @@ def plan_sync(
         and head_sha != prev_head_sha
         and prev_file_hashes is not None
         and bool(new_file_hashes)
+        and reviewed_files is not None
     )
     if not can_judge:
         return plan
     skipped_agents = {a.strip().lower() for a in agents_not_run if a}
+    looked_at = {p for p in (reviewed_files or ()) if p}
+    hidden = {r.strip() for r in hidden_rules if r and r.strip()}
     for e in existing:
         if e.status != "open" or e.fingerprint in found_fps:
             continue
         if (e.agent or "").strip().lower() in skipped_agents:
+            continue
+        if e.file_path not in looked_at:
+            # Skipped for size, by a glob or a skip list, or gone from the
+            # diff altogether: nobody read the file, so nothing was fixed.
+            continue
+        if e.rule_id and e.rule_id.strip() in hidden:
             continue
         before = (prev_file_hashes or {}).get(e.file_path)
         after = (new_file_hashes or {}).get(e.file_path)
@@ -337,16 +361,59 @@ def _now() -> datetime:
 
 
 def _pr_row(s, workspace_id: str, provider: str, repo: str, number: int):
+    """The PR's row, created if missing, and LOCKED for this transaction.
+
+    Two writers can finish on one PR at once (a UI-triggered run next to a
+    webhook one; the queue's dedup key has no head sha). Read-then-insert let
+    the second commit hit the unique key and lose its whole sync — no issues,
+    no new baseline — silently. So the row is first inserted with ON CONFLICT
+    DO NOTHING and then read FOR UPDATE: the second writer waits for the first
+    to commit and then sees its baseline and its issues. SQLite (tests) has no
+    row locks and serialises writers anyway; FOR UPDATE is dropped there.
+    """
     from sqlalchemy import select
 
     from src.db.models import ReviewPullRequest
 
-    return s.execute(select(ReviewPullRequest).where(
+    dialect = s.get_bind().dialect.name
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as _insert
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert as _insert
+    else:  # pragma: no cover - no third backend is deployed
+        _insert = None
+    now = _now()
+    if _insert is not None:
+        s.execute(_insert(ReviewPullRequest).values(
+            id=_new_id(), workspace_id=workspace_id, provider=provider,
+            repo=repo, number=number, state="open", reviews_count=0,
+            title="", opened_at=now, updated_at=now,
+        ).on_conflict_do_nothing(index_elements=[
+            "workspace_id", "provider", "repo", "number",
+        ]))
+    q = select(ReviewPullRequest).where(
         ReviewPullRequest.workspace_id == workspace_id,
         ReviewPullRequest.provider == provider,
         ReviewPullRequest.repo == repo,
         ReviewPullRequest.number == number,
-    )).scalar_one_or_none()
+    )
+    if dialect == "postgresql":
+        q = q.with_for_update()
+    row = s.execute(q).scalar_one_or_none()
+    if row is None:
+        row = ReviewPullRequest(
+            workspace_id=workspace_id, provider=provider, repo=repo,
+            number=number, state="open", reviews_count=0, opened_at=now,
+        )
+        s.add(row)
+        s.flush()
+    return row
+
+
+def _new_id() -> str:
+    import uuid
+
+    return str(uuid.uuid4())
 
 
 def record_review_run(
@@ -373,6 +440,21 @@ def record_review_run(
         logger.warning("review_issues_sync_failed run=%s err=%s", run_id, exc)
 
 
+def _reviewed_files(pr) -> set[str]:
+    """Paths whose hunks reached the review: both sides of a rename.
+
+    `pr.hunks` is what is left after the provider's skip lists, the size
+    limit per file and the repo's ignore globs, so a file in `skipped_files`
+    is not in it.
+    """
+    out: set[str] = set()
+    for h in getattr(pr, "hunks", None) or []:
+        for p in (getattr(h, "file_path", None), getattr(h, "old_file_path", None)):
+            if p:
+                out.add(str(p))
+    return out
+
+
 def _stage_status(batch, fallback: str) -> str:
     try:
         return str(batch.run_status.value)
@@ -384,7 +466,7 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
     from sqlalchemy import select
     from sqlalchemy.orm import Session
 
-    from src.db.models import ReviewIssue, ReviewPullRequest
+    from src.db.models import ReviewIssue
 
     now = _now()
     provider = str(pr.provider or "")
@@ -398,12 +480,6 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
 
     with Session(engine) as s:
         row = _pr_row(s, workspace_id, provider, repo, number)
-        if row is None:
-            row = ReviewPullRequest(
-                workspace_id=workspace_id, provider=provider, repo=repo,
-                number=number, state="open", reviews_count=0, opened_at=now,
-            )
-            s.add(row)
         prev_head = row.head_sha
         prev_hashes = row.file_hashes if isinstance(row.file_hashes, dict) else None
 
@@ -441,7 +517,7 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
             [ExistingIssue(
                 id=r.id, fingerprint=r.fingerprint, file_path=r.file_path,
                 agent=r.agent, status=r.status,
-                resolution_source=r.resolution_source,
+                resolution_source=r.resolution_source, rule_id=r.rule_id,
             ) for r in existing_rows],
             found_issues(batch.findings),
             # The stages, not the delivery: a review whose every agent
@@ -453,6 +529,8 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
                 *(getattr(batch, "agents_failed", None) or []),
                 *(getattr(batch, "agents_skipped", None) or []),
             ],
+            reviewed_files=_reviewed_files(pr),
+            hidden_rules=list((getattr(batch, "dropped_by_rule", None) or {}).keys()),
         )
 
         for f in plan.create:
@@ -511,18 +589,10 @@ def record_failed_review(
     try:
         from sqlalchemy.orm import Session
 
-        from src.db.models import ReviewPullRequest
 
         now = _now()
         with Session(engine or _engine()) as s:
             row = _pr_row(s, workspace_id, provider, repo, int(number))
-            if row is None:
-                row = ReviewPullRequest(
-                    workspace_id=workspace_id, provider=provider, repo=repo,
-                    number=int(number), state="open", reviews_count=0,
-                    opened_at=now,
-                )
-                s.add(row)
             row.reviews_count = int(row.reviews_count or 0) + 1
             row.last_review_status = "failed"
             row.last_run_id = run_id
@@ -550,17 +620,11 @@ def record_pr_state(
         from sqlalchemy import select
         from sqlalchemy.orm import Session
 
-        from src.db.models import ReviewIssue, ReviewPullRequest
+        from src.db.models import ReviewIssue
 
         now = _now()
         with Session(engine or _engine()) as s:
             row = _pr_row(s, workspace_id, provider, repo, int(number))
-            if row is None:
-                row = ReviewPullRequest(
-                    workspace_id=workspace_id, provider=provider, repo=repo,
-                    number=int(number), reviews_count=0, opened_at=now,
-                )
-                s.add(row)
             row.state = state
             row.closed_at = now if state != "open" else None
             if title:
@@ -597,8 +661,10 @@ def apply_feedback(
     """Map a finding's accept/dismiss onto its issue. Returns rows changed.
 
     dismissed → the issue is dismissed (resolution_source=feedback);
-    None (the feedback was cleared) → an issue dismissed BY feedback reopens;
-    accepted → nothing: "this is real" is what open already says.
+    None (the feedback was cleared) or accepted (the verdict was flipped —
+    the review page's only way to undo a dismissal) → an issue dismissed BY
+    feedback reopens; on an open issue accepted changes nothing, because
+    "this is real" is what open already says.
     Never raises.
     """
     if not file_path or title is None:
@@ -624,7 +690,7 @@ def apply_feedback(
                     r.resolution_source = "feedback"
                     r.closed_at = _now()
                     changed += 1
-                elif state is None and r.status == "dismissed" \
+                elif state in (None, "accepted") and r.status == "dismissed" \
                         and r.resolution_source == "feedback":
                     r.status = "open"
                     r.resolution_source = None

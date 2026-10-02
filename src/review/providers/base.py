@@ -259,7 +259,10 @@ def _posting_line(batch: ReviewBatch) -> str:
     over_cap = postable - shown
     if not below and not over_cap:
         return ""
-    parts = [f"**{shown}** shown inline"]
+    # "up to": this text is composed before the comments are sent, and a
+    # provider can still refuse some of them one by one (GitLab, Bitbucket
+    # post per finding). The number is what was SELECTED, said as such.
+    parts = [f"up to **{shown}** shown inline"]
     if below:
         label = _THRESHOLD_LABEL.get(
             str(batch.comment_min_severity or "").lower(), "the threshold")
@@ -335,7 +338,17 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
             f"(blast radius via materialized edges)"
         )
     if batch.skipped_files:
-        lines.append(f"- Skipped: {len(batch.skipped_files)} files (lock/binary/generated)")
+        # Two causes with two owners: the install's skip lists and size limit,
+        # and this repository's own ignore globs (tagged by the orchestrator).
+        by_glob = sum(1 for p in batch.skipped_files
+                      if str(p).endswith(" (ignore glob)"))
+        other = len(batch.skipped_files) - by_glob
+        if other:
+            lines.append(
+                f"- Skipped: {other} files (lock/binary/generated/too large)")
+        if by_glob:
+            lines.append(
+                f"- Ignored by this repository's ignore globs: {by_glob} files")
     lines.append("")
 
     # Telemetry

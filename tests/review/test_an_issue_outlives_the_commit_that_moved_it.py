@@ -38,6 +38,7 @@ from src.review.issues import (
 from src.review.models import (
     Finding,
     FindingSeverity,
+    Hunk,
     PullRequest,
     ReviewBatch,
     ReviewVerdict,
@@ -114,7 +115,8 @@ def _existing(fp: str, path: str = "src/a.py", agent: str = "defect",
 def _plan(existing, found=(), **kw):
     args = dict(run_complete=True, head_sha="h2", prev_head_sha="h1",
                 prev_file_hashes={"src/a.py": "old"},
-                new_file_hashes={"src/a.py": "new"})
+                new_file_hashes={"src/a.py": "new"},
+                reviewed_files={"src/a.py"})
     args.update(kw)
     return plan_sync(list(existing), list(found), **args)
 
@@ -134,9 +136,21 @@ def test_an_unrepeated_issue_in_an_untouched_file_stays_open() -> None:
     {"prev_file_hashes": None},          # nothing to compare against
     {"new_file_hashes": {}},             # no diff on the new run
     {"agents_not_run": ["defect"]},      # its finder did not look
+    {"reviewed_files": None},            # not known what was looked at
+    {"reviewed_files": set()},           # the file was skipped / ignored
+    # The file left the diff altogether: before set, after missing.
+    {"new_file_hashes": {"src/b.py": "x"}, "reviewed_files": {"src/b.py"}},
 ])
 def test_uncertainty_leaves_the_issue_open(kw) -> None:
     assert _plan([_existing("x")], **kw).fixed == []
+
+
+def test_a_rule_the_deny_list_hid_this_run_is_not_a_fix() -> None:
+    e = ExistingIssue(id="x", fingerprint="x", file_path="src/a.py",
+                      agent="defect", status="open", resolution_source=None,
+                      rule_id="defect.ret")
+    assert _plan([e], hidden_rules=["defect.ret"]).fixed == []
+    assert _plan([e], hidden_rules=["other.rule"]).fixed == ["x"]
 
 
 def test_a_refound_auto_fix_is_a_regression_but_a_human_decision_stands() -> None:
@@ -169,15 +183,22 @@ def _diff(body: str) -> str:
     )
 
 
-def _result(head: str, raw: str, findings: list[Finding], failed=()) -> SimpleNamespace:
+def _result(head: str, raw: str, findings: list[Finding], failed=(),
+            reviewed=("src/a.py",), suppressed: dict | None = None) -> SimpleNamespace:
     pr = PullRequest(
         provider="github", repo="acme/api", number=7, title="Add cache",
         description="", author="dana", base_ref="main", base_sha="b",
         head_ref="feat/cache", head_sha=head, state="open",
         url="https://github.com/acme/api/pull/7", raw_diff=raw,
+        # What reached the agents. A file the run skipped is in `raw_diff`
+        # but not here.
+        hunks=[Hunk(file_path=p, old_file_path=p, old_start=1, old_count=1,
+                    new_start=1, new_count=1, content="@@ -1 +1 @@\n")
+               for p in reviewed],
     )
     batch = ReviewBatch(pull_request=pr, findings=findings,
                         verdict=ReviewVerdict.COMMENT)
+    batch.dropped_by_rule = dict(suppressed or {})
     batch.agents_run = ["defect", "security"]
     batch.agents_failed = list(failed)
     return SimpleNamespace(batch=batch, posted=True, provider_response={})
@@ -279,6 +300,106 @@ def test_dismissing_the_finding_dismisses_the_issue_and_undo_reopens(engine) -> 
                    file_path="src/a.py", title="Unchecked return",
                    rule_id="defect.ret", engine=engine)
     assert _issues(engine)[0].status == "open"
+
+
+def test_a_file_the_run_skipped_is_not_fixed_by_its_changed_hash(engine) -> None:
+    """The file grew past the size limit (or matched a new ignore glob): its
+    section is still in raw_diff, so its hash moved, but no agent read it."""
+    record_review_run(_result("h1", _diff("-a\n+b\n"), [_f(10)]),
+                      run_id="r1", workspace_id="ws", status="complete",
+                      engine=engine)
+    record_review_run(_result("h2", _diff("-a\n+c\n"), [], reviewed=()),
+                      run_id="r2", workspace_id="ws", status="complete",
+                      engine=engine)
+    assert _issues(engine)[0].status == "open"
+
+
+def test_a_finding_the_deny_list_hid_is_not_a_fix(engine) -> None:
+    record_review_run(_result("h1", _diff("-a\n+b\n"), [_f(10)]),
+                      run_id="r1", workspace_id="ws", status="complete",
+                      engine=engine)
+    record_review_run(_result("h2", _diff("-a\n+c\n"), [],
+                              suppressed={"defect.ret": 1}),
+                      run_id="r2", workspace_id="ws", status="complete",
+                      engine=engine)
+    assert _issues(engine)[0].status == "open"
+
+
+def test_flipping_a_dismissal_to_accepted_reopens(engine) -> None:
+    """The review page has no "clear" — it flips the verdict. That flip
+    must undo a dismissal the same way clearing does."""
+    record_review_run(_result("h1", _diff("-a\n+b\n"), [_f(10)]),
+                      run_id="r1", workspace_id="ws", status="complete",
+                      engine=engine)
+    kw = dict(workspace_id="ws", run_id="r1", file_path="src/a.py",
+              title="Unchecked return", rule_id="defect.ret", engine=engine)
+    apply_feedback(state="dismissed", **kw)
+    assert _issues(engine)[0].status == "dismissed"
+    assert apply_feedback(state="accepted", **kw) == 1
+    assert _issues(engine)[0].status == "open"
+
+
+def test_a_pr_row_written_first_by_the_webhook_is_reused(engine) -> None:
+    """The row is inserted ON CONFLICT DO NOTHING and then read, so a second
+    writer finds the first one's row instead of colliding on the unique key."""
+    assert record_pr_state(workspace_id="ws", provider="github", repo="acme/api",
+                           number=7, state="open", engine=engine)
+    record_review_run(_result("h1", _diff("-a\n+b\n"), [_f(10)]),
+                      run_id="r1", workspace_id="ws", status="complete",
+                      engine=engine)
+    record_review_run(_result("h2", _diff("-a\n+c\n"), [_f(10)]),
+                      run_id="r2", workspace_id="ws", status="complete",
+                      engine=engine)
+    pr = _pr_row(engine)
+    assert (pr.reviews_count, pr.head_sha) == (2, "h2")
+
+
+def test_a_review_that_posted_is_not_failed_by_its_own_bookkeeping(monkeypatch) -> None:
+    """Recording raised after a posted review: the queue writer used to mark
+    the run failed, count the PR's review twice and re-raise into the queue."""
+    import asyncio
+
+    import src.api.review_runs as runs_mod
+    import src.review.issues as issues_mod
+    import src.review.orchestrator as orch_mod
+    import src.review.providers as providers_mod
+    from src.sync.handlers import handle_review
+
+    result = _result("h1", _diff("-a\n+b\n"), [_f(10)])
+    updates: list[dict] = []
+    failed_calls: list[dict] = []
+
+    class _Store:
+        def insert(self, row):
+            pass
+
+        def update(self, run_id, **kw):
+            updates.append(kw)
+
+    class _Orch:
+        _last_drift_facts = None
+
+        def review(self, *a, **kw):
+            return result
+
+    def _boom(*a, **kw):
+        raise RuntimeError("sqlite is locked")
+
+    monkeypatch.setattr(orch_mod, "ReviewOrchestrator", _Orch)
+    monkeypatch.setattr(providers_mod, "get_provider_for",
+                        lambda *a, **kw: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(runs_mod, "get_review_run_store", lambda: _Store())
+    monkeypatch.setattr(runs_mod, "record_completed_review", _boom)
+    monkeypatch.setattr(issues_mod, "record_failed_review",
+                        lambda **kw: failed_calls.append(kw))
+
+    asyncio.run(handle_review({"payload": {
+        "provider": "github", "repo": "acme/api", "pr_number": 7,
+        "user_id": "u", "workspace_id": "ws",
+    }}))
+    assert failed_calls == []
+    assert updates and all(u.get("status") != "failed" for u in updates)
+    assert updates[-1]["finished"] is True
 
 
 def test_the_ledger_never_breaks_the_review(caplog) -> None:

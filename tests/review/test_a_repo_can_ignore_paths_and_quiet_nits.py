@@ -216,7 +216,7 @@ def test_only_findings_over_the_threshold_become_comments(cfg) -> None:
     assert all("finding 1" in d or "finding 2" in d for d in discussions)
     # The counts stay honest: all five are counted, and the gap is explained.
     assert "**Warning:** 2" in summary and "**Info:** 1" in summary
-    assert "**2** shown inline" in summary
+    assert "up to **2** shown inline" in summary
     assert "3 below the comment threshold (critical + error)" in summary
 
 
@@ -231,7 +231,7 @@ def test_the_inline_cap_is_said_too(cfg) -> None:
     b = _batch("warning")
     assert len(b.inline_findings(cfg.max_inline_comments)) == 1
     summary = _format_summary(b, marker="<!-- m -->")
-    assert "**1** shown inline" in summary
+    assert "up to **1** shown inline" in summary
     assert "1 below the comment threshold (warning and above)" in summary
     assert "3 over the 1-comment limit" in summary
 
@@ -245,3 +245,41 @@ def test_a_late_critical_is_sorted_ahead_of_the_cap() -> None:
     ordered = _sort_by_severity([*warnings, late])
     assert ordered[0] is late
     assert ordered[1:] == warnings, "the sort is stable within a severity"
+
+
+# ─── a hostile pattern cannot stall the worker ───────────────────────
+
+
+def test_a_backtracking_bomb_matches_in_linear_time() -> None:
+    """`**a**a…b` took 0.7 s at 21 characters on the old regex translation
+    and ~9x more per extra `a**`; the worker reviewing every tenant ran it
+    once per hunk. The matcher walks the path once, whatever the pattern."""
+    import time
+
+    from src.review.ignore_globs import _compile
+
+    bomb = "**a" * 40 + "**b"          # 123 characters, far past the old cliff
+    path = "a" * 300
+    t0 = time.perf_counter()
+    for _ in range(20):
+        assert _compile(bomb).match(path) is False
+        assert _compile(bomb).match(path + "b") is True
+    assert time.perf_counter() - t0 < 2.0
+    # And the saved form is refused before it is ever stored.
+    with pytest.raises(ValueError, match="at most"):
+        validate_ignore_globs(["**a**a**a**a**a**b"])
+
+
+def test_a_malformed_class_is_a_value_error_not_a_500() -> None:
+    with pytest.raises(ValueError, match="character class"):
+        validate_ignore_globs(["[z-a].py"])
+    # A stored one (saved before validation knew) matches nothing, quietly.
+    assert path_ignored("src/z.py", ["[z-a].py", "*.snap"]) is False
+
+
+def test_the_scope_line_names_ignore_globs_apart_from_the_skip_list() -> None:
+    b = _batch(None)
+    b.skipped_files = ["yarn.lock", "docs/a.md (ignore glob)", "docs/b.md (ignore glob)"]
+    summary = _format_summary(b, marker="<!-- m -->")
+    assert "Skipped: 1 files (lock/binary/generated/too large)" in summary
+    assert "ignore globs: 2 files" in summary

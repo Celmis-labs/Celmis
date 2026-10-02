@@ -389,12 +389,10 @@ def post_failure(result) -> str | None:
 
     A shared helper, next to `adjustments_payload` and for the reason that one
     gives — two hand-written copies of the same rule are how `cost_usd` came
-    to be written by one writer and not the other. Only
-    `record_completed_review` calls it today: the UI trigger's writer in
-    src/api/routers/reviews.py still passes `batch.run_status.value` straight
-    through, so a review triggered from the UI that GitHub refuses still says
-    `complete`. That outstanding half is pinned by
-    tests/review/test_the_run_record_says_what_it_cost_and_whether_it_arrived.py.
+    to be written by one writer and not the other. Both writers call it:
+    `record_completed_review` and the UI trigger's writer in
+    src/api/routers/reviews.py, so a review triggered from the UI that GitHub
+    refuses is PARTIAL with the refusal recorded, like a queued one.
     """
     response = getattr(result, "provider_response", None)
     if not isinstance(response, dict) or response.get("dry_run"):

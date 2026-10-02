@@ -21,6 +21,7 @@ import {
   type ReviewIssueList,
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
+import { useCanEditIssues } from "@/lib/use-analytics-access";
 import { useT } from "@/lib/i18n";
 import { formatDateTime } from "@/lib/format";
 import { PageHeader, PageShell } from "@/components/page-shell";
@@ -69,6 +70,7 @@ function age(iso: string): string {
 export default function IssuesPage() {
   const t = useT();
   const token = useToken();
+  const canEdit = useCanEditIssues();
   const qc = useQueryClient();
 
   const [status, setStatus] = useState<string>("open");
@@ -212,6 +214,7 @@ export default function IssuesPage() {
                           key={i.id}
                           issue={i}
                           busy={setIssueStatus.isPending}
+                          readOnly={canEdit === false}
                           onStatus={(next) => setIssueStatus.mutate({ id: i.id, next })}
                         />
                       ))}
@@ -253,10 +256,11 @@ export default function IssuesPage() {
 }
 
 function IssueRow({
-  issue: i, busy, onStatus,
+  issue: i, busy, readOnly, onStatus,
 }: {
   issue: ReviewIssue;
   busy: boolean;
+  readOnly: boolean;
   onStatus: (s: IssueStatus) => void;
 }) {
   const t = useT();
@@ -271,7 +275,7 @@ function IssueRow({
           <div className="flex flex-col gap-1">
             <Select
               className="h-7 w-32 text-xs"
-              disabled={busy}
+              disabled={busy || readOnly}
               value={i.status}
               onChange={(v) => onStatus(v as IssueStatus)}
               options={STATUSES.map((s) => ({ value: s, label: t(`issues.status.${s}`) }))}

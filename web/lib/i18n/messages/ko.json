@@ -2355,7 +2355,7 @@
   "prs.col.repo": "저장소",
   "prs.col.branch": "브랜치",
   "prs.col.author": "작성자",
-  "prs.col.opened": "생성일",
+  "prs.col.opened": "최초 기록",
   "prs.col.reviews": "리뷰",
   "prs.col.suggestions": "제안",
   "prs.col.status": "마지막 리뷰",

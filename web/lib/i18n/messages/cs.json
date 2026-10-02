@@ -2355,7 +2355,7 @@
   "prs.col.repo": "Repozitář",
   "prs.col.branch": "Větev",
   "prs.col.author": "Autor",
-  "prs.col.opened": "Otevřeno",
+  "prs.col.opened": "Poprvé zaznamenáno",
   "prs.col.reviews": "Revize",
   "prs.col.suggestions": "Návrhy",
   "prs.col.status": "Poslední revize",

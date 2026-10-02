@@ -30,51 +30,137 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Sequence
 from functools import lru_cache
+from typing import Any
 
 #: Limits checked on save. A glob list is configuration, not data.
 MAX_GLOBS = 200
 MAX_GLOB_LENGTH = 300
+#: Wildcards per pattern. Matching is linear whatever the pattern (see
+#: `_Glob`), so this is about readable configuration, not safety.
+MAX_STARS = 8
 
 
-def _translate(pattern: str) -> str:
-    """One glob → one regex body (no anchors)."""
-    out: list[str] = []
+# ─── Matching ───────────────────────────────────────────────────────
+#
+# Not a regex. The first version translated `**` to an unanchored `.*`, and a
+# pattern such as `**a**a**a**a**a**a**b` made Python's backtracking engine
+# take seconds per path, growing about ninefold with every extra `a**` — on a
+# worker shared by every tenant, from a setting any repo reviewer can save.
+# Possessive/atomic tricks do not save it here: `*` and `**` match different
+# alphabets (`*` never crosses `/`), so "take the first occurrence" is not
+# always right. The pattern is compiled into a small NFA instead and the path
+# is walked once, carrying the set of live states, so the cost is bounded by
+# len(path) × len(pattern) whatever the pattern looks like.
+
+_LIT, _ONE, _CLASS, _STAR, _DSTAR, _DSTAR_SLASH = range(6)
+
+
+class _Glob:
+    """One compiled pattern: tokens plus the epsilon closure of each state."""
+
+    __slots__ = ("tokens", "_closure")
+
+    def __init__(self, tokens: list[tuple[int, Any]]):
+        self.tokens = tokens
+        n = len(tokens)
+        closure: list[frozenset[int]] = [frozenset()] * (n + 1)
+        closure[n] = frozenset((n,))
+        for i in range(n - 1, -1, -1):
+            kind = tokens[i][0]
+            if kind in (_STAR, _DSTAR, _DSTAR_SLASH):
+                # Each of these may match nothing.
+                closure[i] = frozenset((i,)) | closure[i + 1]
+            else:
+                closure[i] = frozenset((i,))
+        self._closure = closure
+
+    def match(self, path: str) -> bool:
+        tokens = self.tokens
+        n = len(tokens)
+        states = self._closure[0]
+        for ch in path:
+            nxt: set[int] = set()
+            for i in states:
+                if i == n:
+                    continue
+                kind, arg = tokens[i]
+                if kind == _LIT:
+                    if ch == arg:
+                        nxt |= self._closure[i + 1]
+                elif kind == _ONE:
+                    if ch != "/":
+                        nxt |= self._closure[i + 1]
+                elif kind == _CLASS:
+                    if ch != "/" and arg.fullmatch(ch):
+                        nxt |= self._closure[i + 1]
+                elif kind == _STAR:
+                    if ch != "/":
+                        nxt |= self._closure[i]
+                elif kind == _DSTAR:
+                    nxt |= self._closure[i]
+                else:  # _DSTAR_SLASH: `(?:.*/)?` — any run ending in a `/`
+                    nxt |= self._closure[i]
+                    if ch == "/":
+                        nxt |= self._closure[i + 1]
+            if not nxt:
+                return False
+            states = frozenset(nxt)
+        return n in states
+
+
+def _tokens(pattern: str) -> list[tuple[int, Any]]:
+    """One glob → NFA tokens (no anchors). Raises ValueError on a bad class."""
+    out: list[tuple[int, Any]] = []
     i = 0
     n = len(pattern)
     while i < n:
         ch = pattern[i]
         if ch == "*":
-            if i + 1 < n and pattern[i + 1] == "*":
+            j = i
+            while j < n and pattern[j] == "*":
+                j += 1
+            if j - i >= 2:
                 # `**/` — zero or more whole segments; a bare `**` — anything.
-                if i + 2 < n and pattern[i + 2] == "/":
-                    out.append("(?:.*/)?")
-                    i += 3
+                if j < n and pattern[j] == "/":
+                    out.append((_DSTAR_SLASH, None))
+                    i = j + 1
                     continue
-                out.append(".*")
-                i += 2
-                continue
-            out.append("[^/]*")
-        elif ch == "?":
-            out.append("[^/]")
+                out.append((_DSTAR, None))
+            else:
+                out.append((_STAR, None))
+            i = j
+            continue
+        if ch == "?":
+            out.append((_ONE, None))
         elif ch == "[":
-            end = pattern.find("]", i + 1)
+            end = pattern.find("]", i + 2)
             if end == -1:
-                out.append(re.escape(ch))
+                out.append((_LIT, ch))
             else:
                 body = pattern[i + 1:end].replace("\\", "\\\\")
                 if body.startswith("!"):
                     body = "^" + body[1:]
-                out.append(f"[{body}]")
+                try:
+                    # One character against one class: no repetition, so no
+                    # backtracking whatever the class says.
+                    rx = re.compile(f"[{body}]")
+                except re.error as exc:
+                    raise ValueError(
+                        f"{pattern!r}: bad character class [{pattern[i + 1:end]}] "
+                        f"({exc})") from None
+                out.append((_CLASS, rx))
                 i = end + 1
                 continue
         else:
-            out.append(re.escape(ch))
+            out.append((_LIT, ch))
         i += 1
-    return "".join(out)
+    return out
 
 
 @lru_cache(maxsize=512)
-def _compile(pattern: str) -> re.Pattern[str] | None:
+def _compile(pattern: str) -> _Glob | None:
+    """None for a pattern that matches nothing on purpose (blank, comment,
+    negation). Raises ValueError for one that cannot be compiled."""
     p = pattern.strip()
     if not p or p.startswith("#") or p.startswith("!"):
         return None
@@ -82,14 +168,14 @@ def _compile(pattern: str) -> re.Pattern[str] | None:
     p = p.strip("/")
     if not p:
         return None
+    body = _tokens(p)
     if "/" in p or directory:
         # Anchored at the root. A directory pattern covers its whole subtree.
-        body = _translate(p)
         if directory:
-            return re.compile(f"^{body}/.*$")
-        return re.compile(f"^{body}$")
+            return _Glob([*body, (_LIT, "/"), (_DSTAR, None)])
+        return _Glob(body)
     # Name-only: the last segment, at any depth.
-    return re.compile(f"^(?:.*/)?{_translate(p)}$")
+    return _Glob([(_DSTAR_SLASH, None), *body])
 
 
 def path_ignored(path: str, globs: Iterable[str] | None) -> bool:
@@ -98,7 +184,11 @@ def path_ignored(path: str, globs: Iterable[str] | None) -> bool:
         return False
     norm = path.replace("\\", "/").lstrip("/")
     for g in globs:
-        rx = _compile(str(g))
+        try:
+            rx = _compile(str(g))
+        except ValueError:
+            # Stored before validation refused it; it matches nothing.
+            continue
         if rx is not None and rx.match(norm):
             return True
     return False
@@ -135,7 +225,11 @@ def validate_ignore_globs(globs: Sequence[str] | None) -> list[str]:
             raise ValueError(
                 f"{g!r} matches every file — switch the review off for this "
                 f"repository instead")
-        if _compile(g) is None:
+        if g.count("*") > MAX_STARS:
+            raise ValueError(
+                f"{g!r}: at most {MAX_STARS} `*` per pattern — split it into "
+                f"several simpler patterns")
+        if _compile(g) is None:  # raises ValueError for a bad class
             raise ValueError(f"{g!r} is not a usable pattern")
         cleaned.append(g)
     return list(dict.fromkeys(cleaned))

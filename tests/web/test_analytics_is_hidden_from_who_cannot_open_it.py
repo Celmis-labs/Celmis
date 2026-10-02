@@ -36,3 +36,21 @@ def test_the_page_refuses_before_it_asks() -> None:
     page = (WEB / "app" / "(app)" / "analytics" / "page.tsx").read_text(encoding="utf-8")
     assert "enabled: !!token && allowed === true" in page
     assert "allowed === false" in page
+
+
+def test_the_issue_status_control_follows_the_api_write_roles() -> None:
+    """A viewer saw an enabled status select that always answered 403."""
+    from src.api.deps import ISSUE_WRITE_ROLES
+
+    hook = (WEB / "lib" / "use-analytics-access.ts").read_text(encoding="utf-8")
+    m = re.search(r"ISSUE_WRITE_ROLES = new Set\(\[([^\]]*)\]\)", hook)
+    assert m, "the hook no longer declares the issue write roles"
+    assert set(re.findall(r'"(\w+)"', m.group(1))) == set(ISSUE_WRITE_ROLES)
+    page = (WEB / "app" / "(app)" / "issues" / "page.tsx").read_text(encoding="utf-8")
+    assert "useCanEditIssues()" in page
+    assert "disabled={busy || readOnly}" in page
+
+
+def test_a_failed_membership_fetch_is_a_refusal_not_a_wait() -> None:
+    hook = (WEB / "lib" / "use-analytics-access.ts").read_text(encoding="utf-8")
+    assert re.search(r"if \(me\.isError\) return false;", hook)

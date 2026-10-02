@@ -2355,7 +2355,7 @@
   "prs.col.repo": "Repository",
   "prs.col.branch": "Ramură",
   "prs.col.author": "Autor",
-  "prs.col.opened": "Deschis",
+  "prs.col.opened": "Prima înregistrare",
   "prs.col.reviews": "Review-uri",
   "prs.col.suggestions": "Sugestii",
   "prs.col.status": "Ultimul review",

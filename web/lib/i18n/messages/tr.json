@@ -2355,7 +2355,7 @@
   "prs.col.repo": "Depo",
   "prs.col.branch": "Dal",
   "prs.col.author": "Yazar",
-  "prs.col.opened": "Açıldı",
+  "prs.col.opened": "İlk görülme",
   "prs.col.reviews": "İncelemeler",
   "prs.col.suggestions": "Öneriler",
   "prs.col.status": "Son inceleme",
