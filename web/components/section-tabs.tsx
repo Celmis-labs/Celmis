@@ -18,6 +18,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useT } from "@/lib/i18n";
+import { useCanViewAnalytics } from "@/lib/use-analytics-access";
 import { cn } from "@/lib/utils";
 
 export type TabDef = {
@@ -30,6 +31,9 @@ export type TabDef = {
    * holds every workspace's lines, so it is a platform view living inside a
    * section that is otherwise workspace-scoped. */
   adminOnly?: boolean;
+  /** Hidden unless the person may read review analytics — global admin, or
+   * owner / admin / editor of the active workspace (useCanViewAnalytics). */
+  analyticsOnly?: boolean;
 };
 
 export const SECTION_TABS = {
@@ -50,6 +54,11 @@ export const SECTION_TABS = {
   ],
   review: [
     { href: "/reviews", labelKey: "nav.reviews" },
+    // Findings followed across a PR's pushes, the reviewed PRs themselves,
+    // and the lead's view over both.
+    { href: "/issues", labelKey: "issues.navLabel" },
+    { href: "/pull-requests", labelKey: "prs.navLabel" },
+    { href: "/analytics", labelKey: "analytics.navLabel", analyticsOnly: true },
     { href: "/admin/review-policies", labelKey: "nav.reviewPolicies" },
     { href: "/admin/agents", labelKey: "nav.agents" },
     { href: "/admin/compliance", labelKey: "nav.compliance" },
@@ -175,6 +184,9 @@ export function SectionTabs({
   // disagree about who may see it.
   const { data: session } = useSession();
   const isAdmin = Boolean(session?.isAdmin);
+  // `undefined` while loading counts as no: a tab that appears late is
+  // better than one that appears and is then taken away.
+  const canAnalytics = useCanViewAnalytics() === true;
   // The section this route belongs to wins over the one the page asked for;
   // see sectionOwning(). Explicit `items` are never second-guessed.
   const key = items ? undefined : sectionOwning(pathname) ?? set;
@@ -183,6 +195,7 @@ export function SectionTabs({
     (key
       ? TAB_SETS[key]
           .filter((d: TabDef) => !d.adminOnly || isAdmin)
+          .filter((d: TabDef) => !d.analyticsOnly || canAnalytics)
           .map((d: TabDef) => ({
             href: d.href,
             label: t(d.labelKey),

@@ -762,6 +762,8 @@ function FindingRow({
         finding_key: fkey, state,
         reason: state === "dismissed" ? "false_positive" : "",
         agent: f.agent, severity: f.severity, repo_slug: pr.repo ?? null,
+        // Lets the server carry a dismissal onto the PR's tracked issue.
+        file_path: f.file_path, title: f.title, rule_id: f.rule_id ?? null,
       }),
     onSuccess: (_d, state) => {
       qc.invalidateQueries({ queryKey: ["feedback", runId] });

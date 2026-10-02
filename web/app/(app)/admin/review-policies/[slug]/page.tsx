@@ -144,6 +144,30 @@ function policyAgentLLMOverrides(
   return out;
 }
 
+/** The comment thresholds, most permissive first, as the select lists them.
+ *  "" is "inherit", which posts every finding. Mirrors
+ *  `COMMENT_SEVERITY_LEVELS` in src/api/routers/review_policies.py. */
+const COMMENT_THRESHOLDS = ["", "warning", "error", "critical"] as const;
+
+/** One pattern per line → the list the API stores, blank lines dropped. */
+function globLines(text: string): string[] {
+  return text.split("\n").map((l) => l.trim()).filter(Boolean);
+}
+
+/** The first problem with a glob list, as an i18n key + the offending line,
+ *  or null. The same refusals `validate_ignore_globs` makes on the server, so
+ *  a bad pattern is caught at the keyboard rather than as a 422 on Save. */
+function globError(lines: string[]): { key: string; line: string } | null {
+  for (const line of lines) {
+    if (line.startsWith("!")) return { key: "review.settings.globNegation", line };
+    if (line.startsWith("#")) return { key: "review.settings.globComment", line };
+    if (line.replace(/[/*]/g, "") === "") return { key: "review.settings.globEverything", line };
+    if (line.length > 300) return { key: "review.settings.globTooLong", line: line.slice(0, 40) };
+  }
+  if (lines.length > 200) return { key: "review.settings.globTooMany", line: String(lines.length) };
+  return null;
+}
+
 export default function ReviewPolicyEditPage() {
   const params = useParams<{ slug: string }>();
   const router = useRouter();
@@ -188,6 +212,8 @@ export default function ReviewPolicyEditPage() {
   // squeezing a stage into that list is what made the default
   // un-invertible on the server.
   const [verifierEnabled, setVerifierEnabled] = useState(false);
+  const [ignoreGlobsText, setIgnoreGlobsText] = useState("");
+  const [commentMinSeverity, setCommentMinSeverity] = useState<string>("");
   const [mcpSources, setMcpSources] = useState<Array<{
     name: string; url: string; auth_type: string;
     api_key_ref: string | null;
@@ -234,6 +260,8 @@ export default function ReviewPolicyEditPage() {
     setVerifierEnabled(
       policy.data.verifier_enabled ?? policy.data.verifier_enabled_effective ?? false,
     );
+    setIgnoreGlobsText((policy.data.ignore_globs ?? []).join("\n"));
+    setCommentMinSeverity(policy.data.comment_min_severity ?? "");
     setDirty(false);
   }, [policy.data]);
 
@@ -271,6 +299,9 @@ export default function ReviewPolicyEditPage() {
     (agent, i) => agentMaxOutError(agentDrafts[agent].maxOut, agentCaps[i].caps),
   );
   const agentLLMBlocked = maxOutErrors.some((e) => e !== null);
+  const ignoreGlobs = globLines(ignoreGlobsText);
+  const ignoreGlobsError = globError(ignoreGlobs);
+  const saveBlocked = agentLLMBlocked || ignoreGlobsError !== null;
 
   /** Rows about to save a reasoning value the operator can neither see nor
    *  edit, because their capabilities lookup gave no answer and will not.
@@ -325,6 +356,16 @@ export default function ReviewPolicyEditPage() {
           ? disabledAgents.filter((a) => a !== "verifier")
           : disabledAgents,
         verifier_enabled: verifierEnabled,
+        // Only once the policy has loaded, for the reason the overrides above
+        // wait: an unloaded form would send "no globs" and "inherit" over
+        // whatever is stored. Omitted keys keep the stored values.
+        ...(policy.data
+          ? {
+              ignore_globs: ignoreGlobs,
+              comment_min_severity:
+                (commentMinSeverity || null) as ReviewPolicy["comment_min_severity"],
+            }
+          : {}),
       }),
     onSuccess: () => {
       toast.success(t("admin.reviewPolicies.detail.saveSuccess"));
@@ -621,6 +662,63 @@ export default function ReviewPolicyEditPage() {
                 {t("admin.reviewPolicies.detail.branchesAddButton")}
               </Button>
             </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t("review.settings.outputTitle")}</CardTitle>
+          <CardDescription>{t("review.settings.outputDesc")}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="space-y-1">
+            <Label htmlFor="comment-min-severity">
+              {t("review.settings.thresholdLabel")}
+            </Label>
+            <Select
+              id="comment-min-severity"
+              className="w-full sm:w-80"
+              value={commentMinSeverity}
+              onChange={(v) => {
+                setCommentMinSeverity(v);
+                setDirty(true);
+              }}
+              options={COMMENT_THRESHOLDS.map((level) => ({
+                value: level,
+                label: t(`review.settings.threshold.${level || "all"}`),
+              }))}
+            />
+            <p className="text-xs text-[var(--color-muted-foreground)]">
+              {t("review.settings.thresholdHint")}
+            </p>
+          </div>
+
+          <div className="space-y-1">
+            <Label htmlFor="ignore-globs">{t("review.settings.globsLabel")}</Label>
+            <Textarea
+              id="ignore-globs"
+              rows={5}
+              spellCheck={false}
+              className="font-mono text-xs"
+              placeholder={"docs/**\n*.snap\nmigrations/*.py"}
+              value={ignoreGlobsText}
+              aria-invalid={ignoreGlobsError ? true : undefined}
+              aria-describedby="ignore-globs-hint"
+              onChange={(e) => {
+                setIgnoreGlobsText(e.target.value);
+                setDirty(true);
+              }}
+            />
+            {ignoreGlobsError ? (
+              <p id="ignore-globs-hint" role="alert" className="text-xs text-red-600 dark:text-red-400">
+                {t(ignoreGlobsError.key, { line: ignoreGlobsError.line })}
+              </p>
+            ) : (
+              <p id="ignore-globs-hint" className="text-xs text-[var(--color-muted-foreground)]">
+                {t("review.settings.globsHint")}
+              </p>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -1083,7 +1181,7 @@ export default function ReviewPolicyEditPage() {
           <RotateCcwIcon className="h-4 w-4 mr-1" /> {t("admin.reviewPolicies.detail.resetButton")}
         </Button>
         <div className="flex items-center gap-2">
-          {dirty && !agentLLMBlocked && (
+          {dirty && !saveBlocked && (
             <span className="text-xs text-[var(--color-muted-foreground)]">
               {t("admin.reviewPolicies.detail.unsavedChanges")}
             </span>
@@ -1098,9 +1196,14 @@ export default function ReviewPolicyEditPage() {
               {t("settings.llm.agents.saveBlocked")}
             </span>
           )}
+          {!agentLLMBlocked && ignoreGlobsError && (
+            <span className="text-xs text-red-600 dark:text-red-400">
+              {t("review.settings.saveBlockedGlobs")}
+            </span>
+          )}
           <Button
             onClick={() => save.mutate()}
-            disabled={save.isPending || !dirty || agentLLMBlocked}
+            disabled={save.isPending || !dirty || saveBlocked}
           >
             <SaveIcon className="h-4 w-4 mr-1" />
             {save.isPending
