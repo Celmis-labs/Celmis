@@ -102,6 +102,28 @@ CATALOGUE: dict[str, dict[str, Any]] = {
                      "network and you never send it to an outside provider",
         },
     },
+    # The one read whose answer the model writes. Everything it may say is in
+    # `src.automation.guide`, which travels in the system prompt — so "where
+    # do I paste a GitLab token" is answered from a page somebody checked,
+    # with links to the pages it names, rather than from what a model
+    # remembers about products in general.
+    #
+    # The wording avoids the words the `explain` topics are chosen on —
+    # this product's name, "agent", "model" — on purpose: those questions
+    # already have written-down answers, and a clause that shares their
+    # vocabulary would draw "what is this?" into a generated paragraph.
+    # tests/automation/test_it_explains_running_your_own_model.py is the
+    # tie-breaker that notices.
+    "help": {
+        "summary": "Answer a how-do-I or where-is question about using the "
+                   "app: adding GitHub, GitLab or Bitbucket tokens and which "
+                   "scopes they need, editing review prompts, review "
+                   "policies and reviewers, provider API keys, a LiteLLM "
+                   "proxy, members, roles and invitations, or which page "
+                   "holds a setting. Answered from the guide.",
+        "reads": True,
+        "arguments": {},
+    },
     "audit_status": {
         "summary": "Answer how the most recent dependency audit went — what "
                    "it covered, and what it found by severity.",
@@ -204,6 +226,28 @@ Write the fields of your answer in this order and no other: `language`, then
 `note`, then `steps`. Your answer is read as it arrives and the person sees
 `note` the moment it is written — before the steps exist — so a note written
 last is a person watching nothing happen for several seconds.
+"""
+
+#: Appended to the system prompt rather than written into it: the field-order
+#: paragraph above is pinned by position, and the guide is long enough that a
+#: provider which caches a stable prefix should get to cache all of it.
+_HELP = """
+HOW-TO AND WHERE-IS QUESTIONS — the help action.
+
+For help, the plan's note is not one sentence: it IS the whole answer, and the
+person reads it while you write it. Write it from the product guide below and
+from nothing else. If the guide does not cover the question, say so plainly
+and point to the page closest to it. Keep it short — two to six sentences, or
+a short list.
+
+Link every page you mention as a markdown link to its path exactly as the
+guide writes it, for example [Repositories](/repositories). Translate the
+label into the language of the request and keep the path as it is. Never
+link anywhere else and never make a path up. Then return exactly one step:
+{"action": "help", "arguments": {}}.
+
+Product guide:
+
 """
 
 
@@ -333,6 +377,7 @@ def interpret(
     pressing Stop interrupts the model instead of waiting for it to finish.
     Pass neither and this is the single blocking call it has always been.
     """
+    from src.automation.guide import GUIDE
     from src.llm.client import build_llm_client
 
     # ══ FIELD ORDER IS THE FEATURE. DO NOT "TIDY" IT. ══════════════════
@@ -404,9 +449,13 @@ def interpret(
         return True
 
     response = client.generate(
-        prompt=prompt, agent="automation", system_instruction=_SYSTEM,
+        prompt=prompt, agent="automation",
+        system_instruction=_SYSTEM + _HELP + GUIDE,
         mode="qa", operation="automation_interpret", temperature=0.0,
-        max_output_tokens=800,
+        # A help answer is a paragraph with links rather than a sentence,
+        # and in Cyrillic a paragraph is twice the tokens it is in English.
+        # 800 cut those answers off mid-word.
+        max_output_tokens=1500,
         # Only when somebody is listening. A caller that wants neither the
         # sentence nor the ability to stop takes the plain call — one path
         # fewer to be wrong in the CLI and in tests.
@@ -504,6 +553,8 @@ def _parse(text: str) -> Plan:
     """
     import re
 
+    from src.automation.guide import keep_known_links
+
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
         return Plan(note="I could not read that as an action.")
@@ -538,7 +589,10 @@ def _parse(text: str) -> Plan:
             note=str(raw.get("note") or ""),
         ))
 
-    note = str(data.get("note") or "")
+    # Notes are rendered as markdown, so a link in one is a link somebody can
+    # press. Only the pages the guide names survive as links; anything else —
+    # a made-up path, another site — is reduced to its words.
+    note = keep_known_links(str(data.get("note") or ""))
     if not steps and not note:
         note = "I could not read that as an action."
     return Plan(steps=steps, note=note, language=_language(data))
@@ -664,6 +718,7 @@ async def execute(plan: Plan, actor, session) -> dict[str, Any]:
         set_auto_review,
         start_dep_audit,
     )
+    from src.automation.guide import guide_links
 
     if not plan.steps:
         raise ActionError("There is nothing to run.")
@@ -697,6 +752,12 @@ async def execute(plan: Plan, actor, session) -> dict[str, Any]:
                 # say — which of these surfaces the person reading the answer
                 # can actually change, and which one is not theirs to change.
                 outcome.update(_self_hosted_surfaces())
+        elif step.action == "help":
+            # The answer is the plan's note, already written and already
+            # stripped of links the guide does not name. What travels here is
+            # the pages it pointed at, so a client can offer them as buttons
+            # without parsing markdown of its own.
+            outcome = {"links": guide_links(plan.note)}
         elif step.action == "list_repos":
             outcome = list_repos(actor)
         elif step.action == "audit_status":
