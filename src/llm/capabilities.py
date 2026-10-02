@@ -348,6 +348,12 @@ def resolve_litellm_model(model: str, provider: str | None = None) -> str:
         return name
     if (provider or "").strip() == _SELF_HOSTED_PROVIDER:
         return f"openai/{name}"
+    if (provider or "").strip() == "litellm":
+        # A workspace LiteLLM proxy: the name is the PROXY's alias, routed by
+        # the SDK's litellm_proxy/ prefix (src/llm/litellm_proxy.py). Like the
+        # self-hosted case, the profile's vendor outranks the name's shape —
+        # "gpt-4o" behind the proxy is not a call to OpenAI.
+        return f"litellm_proxy/{name}"
     if provider_of(name) == "gemini":
         # The one rewrite LiteLLM needs from us: bare "gemini-*" is vertex_ai to
         # it and Gemini to us, and the key we hold is the Gemini one.

@@ -90,6 +90,12 @@ def _record_litellm_spend(
             cost_usd = cost_for(p.litellm_model, tokens_in, tokens_out)
             if cost_usd is None:
                 cost_usd = cost_for(p.model, tokens_in, tokens_out)
+            if cost_usd is None and p.provider == "litellm":
+                # A proxy alias is in no price table; what it runs on usually
+                # is. Best effort (cached /model/info) — None stays None.
+                underlying = _litellm_underlying(p)
+                if underlying:
+                    cost_usd = cost_for(underlying, tokens_in, tokens_out)
             cost_source = "litellm_estimate" if cost_usd is not None else "unknown"
         record_spend(
             workspace_id=workspace_id,
@@ -105,6 +111,24 @@ def _record_litellm_spend(
         )
     except Exception as exc:  # noqa: BLE001 — ledger must never break a call
         logger.warning("litellm_spend_record_failed op=%s err=%s", operation, exc)
+
+
+def _litellm_underlying(p: Profile, alias: str | None = None) -> str | None:
+    """The model a workspace-proxy alias runs on, or None. Never raises.
+
+    `alias` defaults to the profile's own model; a per-agent override names a
+    different alias on the same proxy.
+    """
+    try:
+        from src.llm.litellm_proxy import Endpoint, underlying_model
+
+        if not (p.api_base and p.api_key):
+            return None
+        ep = Endpoint(base_url=p.api_base, api_key=p.api_key, source="profile")
+        return underlying_model(ep, alias or p.model)
+    except Exception as exc:  # noqa: BLE001 — pricing must never break a call
+        logger.debug("litellm_underlying_failed err=%s", exc)
+        return None
 
 
 def record_completion_spend(
@@ -243,6 +267,11 @@ async def _litellm_stream(
                 "/settings/llm; refusing to default to api.openai.com"
             )
         kwargs["api_base"] = p.api_base
+    elif p.provider == "litellm":
+        # Workspace LiteLLM proxy: "litellm_proxy/<alias>" without api_base
+        # would go to LITELLM_PROXY_API_BASE — the installation's gateway.
+        from src.llm.litellm_proxy import require_api_base
+        kwargs["api_base"] = require_api_base(p.api_base)
     from src.ops.telemetry import record_llm_call
     record_llm_call()
     # Audit: the native Gemini stream writes one record per call, so the gateway
@@ -483,6 +512,10 @@ def _embedding_kwargs(p: Profile, inputs: list[str], task_type: str) -> dict:
         # Required: LiteLLM's embedding path does NOT read LITELLM_PROXY_API_BASE,
         # it falls back to OPENAI_API_BASE — i.e. straight to api.openai.com.
         kwargs["api_base"] = p.gateway_url
+    elif p.provider == "litellm":
+        # Same fail-closed rule as the chat path: no address, no call.
+        from src.llm.litellm_proxy import require_api_base
+        kwargs["api_base"] = require_api_base(p.api_base)
     expressible = _expressible_task_type(p, task_type)
     if expressible:
         kwargs["task_type"] = expressible
@@ -686,3 +719,7 @@ def reset_caches() -> None:
         gateway.reset_cache()
     except Exception as exc:  # noqa: BLE001
         logger.debug("gateway_cache_reset_failed err=%s", exc)
+    # The workspace-proxy alias → underlying-model cache is keyed on the
+    # (URL, key) pair, but a re-save may change what an alias runs on.
+    from src.llm import litellm_proxy
+    litellm_proxy.reset_cache()

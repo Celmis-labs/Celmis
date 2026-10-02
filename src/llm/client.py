@@ -624,8 +624,20 @@ class LLMClient:
                 getattr(response, "usage", None)
             )
 
-            from src.llm.pricing import extract_actual_cost_usd
+            from src.llm.pricing import cost_for, extract_actual_cost_usd
             cost_usd, cost_source = extract_actual_cost_usd(response)
+            if cost_usd is None and provider == "litellm_proxy" and self._resolve_billing_model:
+                # A proxy alias / deployment name is in no price table; the
+                # model behind it usually is. Estimate off that — still None
+                # when nobody knows, never a made-up number.
+                try:
+                    billing = self._resolve_billing_model(resolved_model)
+                    if billing and billing != resolved_model:
+                        est = cost_for(billing, input_tokens, output_tokens)
+                        if est is not None:
+                            cost_usd, cost_source = est, "litellm_estimate"
+                except Exception:  # noqa: BLE001 — pricing never fails a call
+                    pass
 
             record.input_tokens_estimated = input_tokens
             record.output_tokens_estimated = output_tokens
@@ -1016,7 +1028,17 @@ def build_llm_client(
     def _base(provider: str) -> str | None:
         if provider == "litellm_proxy":
             p = _route()
-            return p.gateway_url if p is not None else None
+            if p is None:
+                return None
+            if p.via_gateway:
+                return p.gateway_url
+            if p.provider == "litellm":
+                # The workspace's own proxy. Fail closed: with no address the
+                # SDK would read LITELLM_PROXY_API_BASE — the installation's
+                # gateway — and hand it this tenant's virtual key.
+                from src.llm.litellm_proxy import require_api_base
+                return require_api_base(p.api_base)
+            return p.gateway_url
         if provider in ("openai", "openai_compatible"):
             p = _route()
             if p is not None and p.provider == "openai_compatible":
@@ -1044,6 +1066,12 @@ def build_llm_client(
         p = _route()
         if p is None:
             return resolved
+        if not p.via_gateway and p.provider == "litellm":
+            # A workspace-proxy alias: ask the proxy what it runs on (cached
+            # /model/info), so Usage and the price table see a real model.
+            from src.llm.completion import _litellm_underlying
+            alias = resolved.split("/", 1)[1]
+            return _litellm_underlying(p, alias) or alias
         return p.gateway_underlying or p.model or resolved
 
     return LLMClient(

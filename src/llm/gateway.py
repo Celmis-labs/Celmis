@@ -628,6 +628,13 @@ def ensure_workspace_keys(
     """
     if not is_enabled():
         return None
+    if (provider or "").lower() == "litellm":
+        # Same refusal as `_plan`: a virtual key is not a vendor key.
+        logger.warning(
+            "litellm_provision_refused workspace=%s reason=workspace_litellm_proxy",
+            workspace_id,
+        )
+        return None
     if (provider or "").lower() == "openai_compatible":
         # Same refusal as `_plan`: a proxy deployment for this provider would
         # carry "openai/<model>" without an api_base — i.e. api.openai.com.
@@ -673,6 +680,16 @@ def _plan(workspace_id: str) -> list[_Entry]:
             p = resolve_profile(surface, workspace_id)
         except Exception as exc:  # noqa: BLE001
             logger.debug("litellm_plan_profile_failed surface=%s err=%s", surface, exc)
+            continue
+        if p.provider == "litellm":
+            # The workspace's OWN LiteLLM proxy: its key is a virtual key, not
+            # a vendor key. A deployment built from it would nest one proxy
+            # inside another (and hand the tenant's key to this one). Second
+            # layer of the refusal in profiles._attach_gateway.
+            logger.debug(
+                "litellm_plan_skipped surface=%s workspace=%s "
+                "reason=workspace_litellm_proxy", surface, workspace_id,
+            )
             continue
         if p.provider == "openai_compatible":
             # A self-hosted surface is never provisioned. The deployment we
