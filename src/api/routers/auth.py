@@ -379,7 +379,10 @@ def google_callback(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="This account cannot use Google sign-in",
             )
-        if existing is not None and str(claims.get("email_verified", "")).lower() != "true":
+        # A NEW account needs a verified address just as much: Celmis treats
+        # the stored email as identity (an email invite adds an existing
+        # account directly, a later Google/SSO sign-in links to it by email).
+        if str(claims.get("email_verified", "")).lower() != "true":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Google has not verified this email address",
@@ -428,10 +431,12 @@ def oidc_callback(
     Same shape as `/google`, with two differences that matter:
 
       * the token is verified locally against the issuer's JWKS
-        (src/api/oidc.py) — iss, aud/azp, exp and the signature;
-      * an existing account is linked by email ONLY when the IdP says the
-        address is verified. Otherwise anyone who can register an
-        unverified address at the IdP could sign in as that account.
+        (src/api/oidc.py) — iss, aud (+azp), typ, exp and the signature;
+      * an unknown (iss, sub) is accepted ONLY when the IdP says the email
+        is verified, both for linking an existing account and for creating
+        a new one. Otherwise anyone who can register an unverified address
+        at the IdP could sign in as that account, or claim the address
+        before its owner does (invites resolve accounts by email).
 
     The user is found by (iss, sub) first; the email is only used to link
     an account that has no OIDC subject yet.
@@ -475,17 +480,24 @@ def oidc_callback(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled",
             )
+        if not verified:
+            # Refused for a new account too, not only for linking. Celmis
+            # treats a stored email as identity: an email invite adds an
+            # existing account straight to the workspace, and a later Google
+            # sign-in links to it by email. An unverified IdP address would
+            # get both under someone else's name.
+            record_action(
+                action="auth.login_failed", actor=email[:200],
+                actor_id=existing.id if existing is not None else None,
+                target="oidc", ip=client_ip(request),
+                error="unverified-email-link" if existing is not None
+                else "unverified-email-signup",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="The identity provider has not verified this email address",
+            )
         if existing is not None:
-            if not verified:
-                record_action(
-                    action="auth.login_failed", actor=email[:200],
-                    actor_id=existing.id, target="oidc",
-                    ip=client_ip(request), error="unverified-email-link",
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="The identity provider has not verified this email address",
-                )
             if existing.has_oidc:
                 # Already bound to a different subject (or issuer). Rebinding
                 # silently would let a second IdP account take this one over.
@@ -619,6 +631,17 @@ def delete_account(
     logger.info("account_deleted id=%s email=%s", user.id, user.email)
 
 
+def _sso_only(user: User) -> bool:
+    """True when single sign-on is this user's only way in.
+
+    Google is a separate identity the IdP does not control, and a password
+    counts only while password login is on.
+    """
+    if not user.has_oidc or user.has_google:
+        return False
+    return not (user.has_password and password_login_enabled())
+
+
 @router.post("/refresh", response_model=TokenResponse)
 def refresh(user: User = Depends(get_current_user)) -> TokenResponse:
     """Re-issue a session token for a still-valid session (Stage 21).
@@ -628,6 +651,15 @@ def refresh(user: User = Depends(get_current_user)) -> TokenResponse:
     re-login. Requires the CURRENT token to still be valid — an expired
     token cannot self-refresh (that's what the login flow is for).
     """
+    if _sso_only(user):
+        # The IdP is the only way in for this user, so it must be asked again:
+        # a refresh would otherwise keep a user disabled (or stripped of the
+        # admin role) in Keycloak signed in for good. The session ends at its
+        # token's expiry and the next SSO sign-in re-checks the IdP.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Single sign-on session expired, sign in again",
+        )
     token, exp = issue_token(user_id=user.id, email=user.email, scopes=held_scopes(user))
     logger.info("session_token_refreshed id=%s email=%s", user.id, user.email)
     return TokenResponse(access_token=token, expires_at=exp)

@@ -6,9 +6,13 @@ signing keys — not against a tokeninfo endpoint, which a self-hosted IdP may
 not have — and the claims are handed back only if all of these hold:
 
   * the signature verifies with a key from the issuer's JWKS,
-  * ``iss`` equals the configured issuer exactly,
-  * ``aud`` contains the client id, or ``azp`` equals it (Keycloak puts the
-    client in ``azp`` and may add other audiences),
+  * ``iss`` equals the configured issuer (a trailing slash on either side is
+    ignored: Auth0 and Azure AD v1 put one in ``iss``, Keycloak does not),
+  * ``aud`` contains the client id, as OIDC Core requires of an id_token; when
+    ``aud`` names several audiences, ``azp`` must also be the client id,
+  * a Keycloak ``typ`` claim, when present, is ``ID``: a Keycloak access token
+    for the same client carries the user's email too and must not pass as an
+    id_token,
   * ``exp`` is in the future (PyJWT, with a small leeway).
 
 Configuration is env-only and the feature is off unless both the issuer and
@@ -79,6 +83,8 @@ def _env(*names: str) -> str:
 
 def oidc_config() -> OidcConfig | None:
     """The configured provider, or None when OIDC sign-in is off."""
+    # Stripped once here: it is the identity key stored in users.oidc_iss and
+    # the base of the discovery URL. The `iss` comparison ignores the slash.
     issuer = _env("OIDC_ISSUER", "AUTH_OIDC_ISSUER").rstrip("/")
     client_id = _env("OIDC_CLIENT_ID", "AUTH_OIDC_CLIENT_ID")
     if not issuer or not client_id:
@@ -196,23 +202,31 @@ def verify_id_token(token: str, config: OidcConfig) -> dict[str, Any]:
             token,
             key=key.key,
             algorithms=[alg],
-            issuer=config.issuer,
             leeway=LEEWAY_SECONDS,
-            # Audience is checked by hand below: Keycloak names the client in
-            # `azp` and may put only "account" in `aud`.
-            options={"verify_aud": False, "require": ["exp", "iat", "iss", "sub"]},
+            # iss and aud are checked by hand below: PyJWT compares iss
+            # byte-for-byte, and the configured issuer has its trailing slash
+            # stripped.
+            options={"verify_aud": False, "verify_iss": False,
+                     "require": ["exp", "iat", "iss", "sub"]},
         )
     except jwt.ExpiredSignatureError as exc:
         raise OidcError("token expired") from exc
-    except jwt.InvalidIssuerError as exc:
-        raise OidcError("issuer mismatch") from exc
     except jwt.PyJWTError as exc:
         raise OidcError(f"invalid token: {exc}") from exc
 
+    iss = claims.get("iss")
+    if not isinstance(iss, str) or iss.removesuffix("/") != config.issuer:
+        raise OidcError("issuer mismatch")
+
     aud = claims.get("aud")
     audiences = [aud] if isinstance(aud, str) else list(aud or [])
-    if config.client_id not in audiences and claims.get("azp") != config.client_id:
+    if config.client_id not in audiences:
         raise OidcError("audience mismatch")
+    if len(audiences) > 1 and claims.get("azp") != config.client_id:
+        raise OidcError("azp mismatch for a multi-audience token")
+    typ = claims.get("typ")
+    if typ is not None and typ != "ID":
+        raise OidcError(f"token typ {typ!r} is not an id_token")
     return claims
 
 

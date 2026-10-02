@@ -51,3 +51,22 @@ def test_one_subject_cannot_be_linked_twice(tmp_path):
     with pytest.raises(UserExistsError):
         store.create(User(id="b", email="b@example.com", auth_method=UserAuthMethod.OIDC,
                           oidc_iss="https://idp", oidc_sub="s"))
+
+
+def test_losing_the_migration_race_is_not_a_crash(tmp_path):
+    """Two openers both read PRAGMA before either ALTERs: the second ALTER
+    hits 'duplicate column'. Simulated by a PRAGMA that answers stale."""
+    db = tmp_path / "users.db"
+    UserStore(db)  # the winner: columns exist now
+
+    conn = sqlite3.connect(db, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+
+    class _StalePragma:
+        def execute(self, sql, *args):
+            if sql.startswith("PRAGMA table_info"):
+                return iter([{"name": "id"}])
+            return conn.execute(sql, *args)
+
+    UserStore._migrate(_StalePragma())  # must not raise
+    conn.close()

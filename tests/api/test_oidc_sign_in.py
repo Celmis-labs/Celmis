@@ -52,8 +52,10 @@ def _token(*, key=SIGNING_KEY, kid=KID, alg="RS256", **overrides) -> str:
     now = int(time.time())
     claims = {
         "iss": ISSUER,
-        "aud": "account",
+        # The shape of a real Keycloak id_token: client in aud and azp, typ ID.
+        "aud": CLIENT_ID,
         "azp": CLIENT_ID,
+        "typ": "ID",
         "sub": "kc-subject-1",
         "email": "dev@example.com",
         "email_verified": True,
@@ -104,9 +106,52 @@ def test_a_valid_token_is_accepted():
     assert claims["sub"] == "kc-subject-1"
 
 
-def test_the_client_may_be_named_in_aud_instead_of_azp():
-    claims = oidc.verify_id_token(_token(aud=CLIENT_ID, azp=None), _config())
+def test_the_client_in_aud_without_azp_or_typ_is_enough():
+    """A generic IdP: no azp, no Keycloak typ claim."""
+    claims = oidc.verify_id_token(_token(azp=None, typ=None), _config())
     assert claims["email"] == "dev@example.com"
+
+
+def test_a_keycloak_access_token_does_not_pass_as_an_id_token():
+    """aud=account, azp=celmis-web: what any resource server receiving the
+    user's access token holds. It carries email + email_verified too."""
+    access = _token(aud="account", typ="Bearer")
+    with pytest.raises(oidc.OidcError):
+        oidc.verify_id_token(access, _config())
+    # Even with typ stripped, azp alone does not name the audience.
+    with pytest.raises(oidc.OidcError):
+        oidc.verify_id_token(_token(aud="account", typ=None), _config())
+
+
+def test_a_multi_audience_token_needs_azp_to_be_the_client():
+    with pytest.raises(oidc.OidcError):
+        oidc.verify_id_token(_token(aud=[CLIENT_ID, "other"], azp="other"), _config())
+    assert oidc.verify_id_token(_token(aud=[CLIENT_ID, "other"]), _config())
+
+
+@pytest.mark.parametrize("configured, iss", [
+    pytest.param("https://tenant.auth0.com/", "https://tenant.auth0.com/", id="both-slash"),
+    pytest.param("https://tenant.auth0.com", "https://tenant.auth0.com/", id="iss-slash"),
+    pytest.param("https://tenant.auth0.com/", "https://tenant.auth0.com", id="config-slash"),
+])
+def test_a_trailing_slash_issuer_is_accepted(monkeypatch, configured, iss):
+    """Auth0 and Azure AD v1 end `iss` with a slash; Keycloak does not."""
+    base = "https://tenant.auth0.com"
+
+    def fake_get_json(url: str, _issuer: str) -> dict:
+        if url == f"{base}/.well-known/openid-configuration":
+            return {"issuer": f"{base}/", "jwks_uri": f"{base}/.well-known/jwks.json"}
+        if url == f"{base}/.well-known/jwks.json":
+            return {"keys": [_jwk(SIGNING_KEY, KID)]}
+        raise AssertionError(f"unexpected fetch {url}")
+
+    monkeypatch.setattr(oidc, "_get_json", fake_get_json)
+    monkeypatch.setenv("OIDC_ISSUER", configured)
+    oidc.reset_cache()
+    claims = oidc.verify_id_token(_token(iss=iss), _config())
+    assert claims["sub"] == "kc-subject-1"
+    with pytest.raises(oidc.OidcError):
+        oidc.verify_id_token(_token(iss=f"{base}.evil.com/"), _config())
 
 
 def test_jwks_is_fetched_once_and_cached(issuer):
@@ -221,6 +266,54 @@ def test_unverified_email_does_not_take_over_a_password_account(client, users):
     assert users.get_by_email("dev@example.com").oidc_sub is None
 
 
+def test_unverified_email_does_not_create_an_account(client, users):
+    """A new account under an unverified address would be resolved by email
+    later: an email invite adds it to the workspace, a Google sign-in of the
+    real owner links to it."""
+    r = client.post("/api/auth/oidc",
+                    json={"id_token": _token(email="victim@corp.example",
+                                             email_verified=False)})
+    assert r.status_code == 403
+    assert users.get_by_oidc(ISSUER, "kc-subject-1") is None
+    assert users.get_by_email("victim@corp.example") is None
+
+
+def test_an_existing_sso_user_signs_in_by_subject_even_if_unverified_later(client, users):
+    """The (iss, sub) match is the identity; email_verified gates only the
+    email-based steps."""
+    assert client.post("/api/auth/oidc", json={"id_token": _token()}).status_code == 200
+    r = client.post("/api/auth/oidc", json={"id_token": _token(email_verified=False)})
+    assert r.status_code == 200, r.text
+
+
+def test_an_sso_only_session_is_not_renewed(client, users):
+    """Deprovisioning in the IdP must take effect: /refresh would otherwise
+    roll an SSO-only session forever without asking the IdP again."""
+    from src.api.deps import get_current_user
+
+    assert client.post("/api/auth/oidc", json={"id_token": _token()}).status_code == 200
+    sso_user = users.get_by_oidc(ISSUER, "kc-subject-1")
+    client.app.dependency_overrides[get_current_user] = lambda: sso_user
+    assert client.post("/api/auth/refresh").status_code == 401
+
+    pw = _password_user(users, email="pw@example.com")
+    client.app.dependency_overrides[get_current_user] = lambda: pw
+    assert client.post("/api/auth/refresh").status_code == 200
+
+
+def test_sso_with_password_is_renewed_only_while_password_login_is_on(
+        client, users, monkeypatch):
+    from src.api.deps import get_current_user
+
+    _password_user(users)
+    assert client.post("/api/auth/oidc", json={"id_token": _token()}).status_code == 200
+    linked = users.get_by_email("dev@example.com")
+    client.app.dependency_overrides[get_current_user] = lambda: linked
+    assert client.post("/api/auth/refresh").status_code == 200
+    monkeypatch.setenv("AUTH_PASSWORD_LOGIN", "false")
+    assert client.post("/api/auth/refresh").status_code == 401
+
+
 def test_verified_email_links_the_existing_account(client, users):
     _password_user(users)
     r = client.post("/api/auth/oidc", json={"id_token": _token()})
@@ -325,3 +418,33 @@ def test_google_unverified_email_does_not_link(client, users, monkeypatch):
     r = client.post("/api/auth/google", json={"id_token": "x"})
     assert r.status_code == 403
     assert users.get_by_email("dev@example.com").google_sub is None
+
+
+def test_google_unverified_email_does_not_create_an_account(client, users, monkeypatch):
+    from src.api.routers import auth as auth_router
+
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "g-client")
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"aud": "g-client", "iss": "https://accounts.google.com",
+                    "sub": "g-2", "email": "victim@corp.example",
+                    "email_verified": "false"}
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(auth_router, "build_client", lambda **k: _Client())
+    r = client.post("/api/auth/google", json={"id_token": "x"})
+    assert r.status_code == 403
+    assert users.get_by_email("victim@corp.example") is None

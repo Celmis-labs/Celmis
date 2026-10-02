@@ -13,7 +13,13 @@ class UserAuthMethod(StrEnum):
     PASSWORD = "password"          # email + scrypt hash
     GOOGLE_OAUTH = "google_oauth"  # Google subject (no password stored)
     BOTH = "both"                  # password set + Google linked
-    OIDC = "oidc"                  # generic OIDC / Keycloak subject
+    # Generic OIDC / Keycloak subject. ONE-WAY: a build older than this value
+    # raises ValueError on UserAuthMethod("oidc"), so once an SSO-only user
+    # exists, rolling back breaks every listing that reads that row (admin
+    # users page, UserStore.list). Before a rollback, rewrite such rows, e.g.
+    # UPDATE users SET auth_method='google_oauth' WHERE auth_method='oidc'
+    # (with no google_sub the row has no usable sign-in on the old build).
+    OIDC = "oidc"
 
 
 @dataclass

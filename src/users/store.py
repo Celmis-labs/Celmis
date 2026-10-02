@@ -98,7 +98,13 @@ class UserStore:
         have = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
         for column in ("oidc_iss", "oidc_sub"):
             if column not in have:
-                conn.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT")
+                try:
+                    conn.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT")
+                except sqlite3.OperationalError as exc:
+                    # Check-then-act: another thread or process opening the
+                    # same users.db may have added it since PRAGMA ran.
+                    if "duplicate column" not in str(exc).lower():
+                        raise
         # SQLite cannot add a UNIQUE column with ALTER; a partial unique index
         # gives the same guarantee and leaves every non-OIDC row out of it.
         conn.execute(
