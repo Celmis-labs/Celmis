@@ -1002,11 +1002,13 @@ whose name contains `.ee.`, is covered by [LICENSE_EE](LICENSE_EE) instead.
 [LICENSING.md](LICENSING.md) states the boundary in full — `LICENSE` itself is
 the unmodified AGPL text, because a licence file with a preamble in front of
 it is not recognised as that licence.
-`ee/` holds no product code today — the boundary was drawn before the first
-tag because adding it afterwards means re-asking every contributor who has
-already sent work under an unqualified AGPL.
+Two enterprise features live behind it today — single sign-on (OIDC /
+Keycloak) and review analytics, in `src/ee/` and `web/ee/`, switched on by an
+offline licence key (see [ee/README.md](ee/README.md)). The boundary was drawn
+before the first tag because adding it afterwards means re-asking every
+contributor who has already sent work under an unqualified AGPL.
 
-Everything shipped here is AGPL, including the parts that look commercial: the
+Everything else shipped here is AGPL, including the parts that look commercial: the
 audit console, usage and spend, compliance checks, installation metrics.
 Security controls are never enterprise-only — the audit *log* is written under
 AGPL and always will be. See [CONTRIBUTING.md](CONTRIBUTING.md) for where new

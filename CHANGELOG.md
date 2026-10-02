@@ -20,7 +20,75 @@ derives it from there.
 
 ## [Unreleased]
 
-Nothing since `v0.1.31`.
+### Added
+
+- **Celmis Enterprise Edition, and the licence that switches it on.** Two new
+  features ship under [`LICENSE_EE`](LICENSE_EE) rather than the AGPL, in
+  `src/ee/`, `web/ee/` and `tests/ee/` (see [`ee/README.md`](ee/README.md)).
+  They are enabled by an offline signed licence — an Ed25519 (`EdDSA`) JWT
+  verified at API start-up against a public key in `src/ee/license.py`, set
+  through `CELMIS_LICENSE_KEY` or `CELMIS_LICENSE_FILE`. It never calls home.
+  No licence, or an invalid or expired one, is the **community edition**: the
+  enterprise routers are not mounted, the reason is logged as a warning
+  (never the token), and everything else works as before. Each feature is
+  mounted only if the licence lists it; a licence that lapses while the
+  process runs stops serving them with a 403. `scripts/ee_mint_license.py`
+  mints a licence from a private key kept outside the repository.
+- **[EE] Single sign-on with Keycloak or any OIDC provider.** `POST
+  /api/auth/oidc` verifies the id_token against the issuer's JWKS (issuer,
+  audience/azp, Keycloak `typ`, expiry; RSA/PSS/EC algorithms only), links an
+  existing account only for a verified email, never the master account, and
+  can grant — or with `OIDC_ADMIN_ROLE_SYNC=true` revoke — global admin from
+  an IdP role. The "Sign in with …" button appears only when the web side is
+  configured (`AUTH_OIDC_*`) **and** the API reports the `sso` capability.
+  A local Keycloak to try it with is in `deploy/keycloak/`.
+- **[EE] Review analytics** at `/analytics`: reviews run, review time
+  (average, p50, p90), cost per review from `review_runs.cost_usd`, findings by
+  severity and category, and what came of them — fixed in the next commits,
+  left open on merged PRs, fix rate — over 7, 30 or 90 days. For a global
+  admin or the owner, admin or editor of the workspace. Without a licence the
+  tab is hidden and the page says it is part of Celmis Enterprise.
+- **`/api/capabilities` reports the edition.** `edition` is now `community`
+  or `enterprise` (it used to be `full`/`partial`, which moved to
+  `complete`), and `license` carries the granted features — plus, for a
+  signed-in caller only, the customer and expiry. `/admin/health` shows them
+  as an Edition card. `schema_version` is 2.
+- **LiteLLM proxy as an LLM provider**: point Celmis at an existing LiteLLM
+  gateway and use the models it routes, with the gateway's own keys, budgets
+  and logging.
+- **Issues**: findings followed across a PR's pushes by a line-free
+  fingerprint, marked fixed when a later commit removes them, with status
+  tabs, filters and per-row status changes (`/issues`, `GET/PATCH
+  /api/issues`).
+- **Pull requests**: every reviewed PR with its state from close/merge
+  webhooks, review count and open suggestions (`/pull-requests`).
+- **Ignore globs** per repository review policy: matching paths are skipped
+  and cut from the diff the agents read. Matched without backtracking; at most
+  eight `*` per pattern.
+- **Comment threshold** per policy: findings below the chosen severity are not
+  posted inline, and the summary says how many were held back.
+- **Editor workspace role** between member and admin: may read analytics, has
+  no workspace-admin powers. One role table (`src/users/roles.py`) now serves
+  workspaces, invites and the MCP identity resolver.
+- **`AUTH_PASSWORD_LOGIN=false`** turns off email+password sign-in and signup
+  for SSO-only installs; the master-key login keeps working as break-glass.
+- **The Celmis agent as a floating panel on every page**, sharing one
+  conversation with `/automation`, and able to answer "how do I…" and "where
+  is…" from a curated product guide with links to the right pages.
+- **Sidebar**: no width flash on first paint (state in a cookie), Cmd/Ctrl+B
+  to toggle, tooltips on the collapsed rail, theme and account menu in its
+  footer.
+
+### Fixed
+
+- **Google sign-in** no longer links or creates an account for an email
+  Google has not verified.
+- **An SSO-only session is not renewed** by `/api/auth/refresh`, so disabling
+  a user in the IdP takes effect when their session expires.
+- **Dark mode followed the operating system instead of the theme toggle** for
+  every `dark:` utility; it now follows the toggle.
+- `isAdmin` in the web session is re-read every five minutes instead of once
+  at sign-in.
 
 ## [0.1.31] — 2026-09-14
 

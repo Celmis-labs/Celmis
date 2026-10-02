@@ -17,9 +17,12 @@ There is exactly one exception, and it is drawn by path:
 [`LICENSING.md`](LICENSING.md) states that boundary and why it is where it is.
 [`LICENSE`](LICENSE) is the unmodified AGPL text and nothing else.
 
-**New enterprise capabilities go in `ee/` from their first commit.** SSO/SAML,
-an organisation-wide role directory, extended reporting — anything a company
-buys because it is a company.
+**New enterprise capabilities go in an `ee/` path from their first commit** —
+`src/ee/` for the API (the image copies only `src/`), `web/ee/` for the web
+app, `tests/ee/` for their tests. SSO/SAML, an organisation-wide role
+directory, extended reporting — anything a company buys because it is a
+company. AGPL code must not import `src.ee`; the one guarded mount point is in
+`src/api/main.py`. See [`ee/README.md`](ee/README.md).
 
 **Everything else goes in `src/` under AGPL**, including things that look
 commercial: the audit console, usage and spend, compliance checks, installation
@@ -31,7 +34,8 @@ The test: if switching a feature off would make the free build **less safe** or
 enterprise-only — the audit *log* is always written, whatever a licence says
 about the console for reading it.
 
-`ee/` is empty today. The boundary exists early because adding it later means
+Today the boundary holds single sign-on and review analytics. It was drawn
+before them because adding it later means
 re-asking every contributor who has already sent work under an unqualified
 AGPL, and a contribution arrives under the licence it was made under.
 

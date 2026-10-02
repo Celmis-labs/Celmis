@@ -25,10 +25,11 @@ exception.
     LICENSE_EE in the root of this repository.
 
     The boundary is visible to git, so no separate registry of covered files
-    is kept and none can drift out of date. At the time of writing `ee/` holds
-    no product code: the line exists before it is needed because adding it
-    later would mean re-asking every contributor who had already sent work
-    under an unqualified AGPL.
+    is kept and none can drift out of date. The line was drawn before any
+    product code lived behind it, because adding it later would mean
+    re-asking every contributor who had already sent work under an
+    unqualified AGPL. It now covers single sign-on and review analytics, in
+    `src/ee/`, `web/ee/` and `tests/ee/`.
 
     Everything else in this repository — the whole of `src/`, `web/`,
     `tests/`, `scripts/` and the deployment files — is AGPL-3.0, including the

@@ -104,6 +104,8 @@ NOT_OURS = {
     "GITLAB_TOKEN": "as above",
     "BITBUCKET_TOKEN": "as above",
     "SMTP_PASSWORD": "your mail server's — optional, only for digests/invites",
+    "CELMIS_LICENSE_KEY": "a Celmis Enterprise licence — optional; without it "
+                          "the community edition runs (no SSO, no analytics)",
 }
 
 ASSIGN = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")

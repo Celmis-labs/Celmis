@@ -464,8 +464,13 @@ services:
       # Server-side Google ID-token verification (audience check). Same value as
       # the web GOOGLE_CLIENT_ID. Empty -> Google sign-in returns 503.
       GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:-}"
-      # Keycloak / OIDC sign-in: the API verifies the id_token the web app
-      # forwards. Same names as the web service; empty -> 503 (SSO off).
+      # Celmis Enterprise licence (ee/README.md). Empty -> community edition:
+      # SSO and analytics are not mounted. Read once at start-up.
+      CELMIS_LICENSE_KEY: "${CELMIS_LICENSE_KEY:-}"
+      CELMIS_LICENSE_FILE: "${CELMIS_LICENSE_FILE:-}"
+      # Keycloak / OIDC sign-in (enterprise: needs a licence granting "sso").
+      # The API verifies the id_token the web app forwards. Same names as the
+      # web service; empty -> 503 (SSO off).
       AUTH_OIDC_ISSUER: "${AUTH_OIDC_ISSUER:-}"
       AUTH_OIDC_CLIENT_ID: "${AUTH_OIDC_CLIENT_ID:-}"
       OIDC_ADMIN_ROLE: "${OIDC_ADMIN_ROLE:-}"
