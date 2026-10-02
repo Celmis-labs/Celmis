@@ -1,5 +1,9 @@
 "use client";
 
+import { useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import * as m from "motion/react-m";
+
 import { cn } from "@/lib/utils";
 
 /**
@@ -45,6 +49,91 @@ export function Tooltip({
       >
         {label}
       </span>
+    </span>
+  );
+}
+
+/**
+ * A tooltip that escapes its container — for the sidebar rail.
+ *
+ * The CSS one above is an absolutely-positioned child, and the rail is a
+ * 48px column with `overflow: hidden` (it has to clip the labels while its
+ * width animates), so a bubble meant to hang to the right of an icon was cut
+ * off at the column's edge. This one is measured from the trigger and painted
+ * into <body>, like the workspace menu, so no ancestor can clip it.
+ *
+ * Shown on hover and on keyboard focus, never on a touch press: a tap is a
+ * navigation, and a bubble that appears under the finger as the page changes
+ * is noise. The trigger already carries the same words as its accessible
+ * name, so the bubble is decoration for sighted pointer users.
+ */
+export function FloatingTooltip({
+  label,
+  shortcut,
+  side = "right",
+  disabled = false,
+  children,
+}: {
+  label: string;
+  /** Rendered as a <kbd> beside the label, e.g. "⌘B". */
+  shortcut?: string;
+  side?: "right" | "bottom";
+  /** Render the child alone — e.g. while the label is visible anyway. */
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLSpanElement | null>(null);
+  const [at, setAt] = useState<{ top: number; left: number } | null>(null);
+  const show = (e: React.PointerEvent | React.FocusEvent) => {
+    if ("pointerType" in e && e.pointerType === "touch") return;
+    const r = ref.current?.getBoundingClientRect();
+    if (!r) return;
+    setAt(side === "right"
+      ? { top: r.top + r.height / 2, left: r.right + 8 }
+      : { top: r.bottom + 6, left: r.left + r.width / 2 });
+  };
+  const hide = () => setAt(null);
+
+  if (disabled) return <>{children}</>;
+  return (
+    <span
+      ref={ref}
+      className="inline-flex"
+      onPointerEnter={show}
+      onPointerLeave={hide}
+      onFocus={show}
+      onBlur={hide}
+      onClick={hide}
+    >
+      {children}
+      {at && createPortal(
+        // Two boxes: the outer one is placed and centred by CSS, the inner
+        // one is animated. One box doing both would have Motion's `x`/`y`
+        // overwrite the centring translate on the first frame.
+        <span
+          style={{ position: "fixed", top: at.top, left: at.left }}
+          className={cn(
+            "pointer-events-none z-50",
+            side === "right" ? "-translate-y-1/2" : "-translate-x-1/2",
+          )}
+        >
+          <m.span
+            role="tooltip"
+            initial={{ opacity: 0, x: side === "right" ? -4 : 0, y: side === "bottom" ? -2 : 0 }}
+            animate={{ opacity: 1, x: 0, y: 0 }}
+            transition={{ duration: 0.14, ease: [0.2, 0, 0, 1] }}
+            className="flex items-center gap-2 whitespace-nowrap rounded-md border border-[var(--color-border)] bg-[var(--color-popover)] px-2 py-1 text-xs font-medium text-[var(--color-popover-foreground)] shadow-[var(--shadow-md)]"
+          >
+            {label}
+            {shortcut && (
+              <kbd className="rounded border border-[var(--color-border)] bg-[var(--color-muted)] px-1 font-sans text-[10px] text-[var(--color-muted-foreground)]">
+                {shortcut}
+              </kbd>
+            )}
+          </m.span>
+        </span>,
+        document.body,
+      )}
     </span>
   );
 }

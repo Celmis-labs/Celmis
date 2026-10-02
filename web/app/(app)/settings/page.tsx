@@ -10,6 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { authApi, spendApi } from "@/lib/api";
+import { forgetAgentSession } from "@/lib/agent-session";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { PageHeader, PageShell } from "@/components/page-shell";
@@ -268,6 +269,7 @@ function DeleteAccountCard() {
     mutationFn: () => authApi.deleteAccount(token!),
     onSuccess: () => {
       toast.success(t("settings.deleteAccountDone"));
+      forgetAgentSession();
       void signOut({ callbackUrl: "/login" });
     },
     onError: (e) => toast.error((e as Error).message),

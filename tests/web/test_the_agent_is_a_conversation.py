@@ -66,6 +66,12 @@ from tests.web.test_rules_of_hooks import FATAL_RULES, WEB, _eslint_available
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 PAGE = WEB / "app" / "(app)" / "automation" / "page.tsx"
+#: The conversation as parts — the thread hook and the reply cards. They moved
+#: out of the page when the same conversation became a panel floating over
+#: every page, so that the panel and the page are one implementation. Every
+#: claim below is about the conversation, not about which file it is in, so
+#: the two are read as one source.
+THREAD = WEB / "components" / "automation" / "thread.tsx"
 MESSAGES = WEB / "lib" / "i18n" / "messages"
 
 EN = json.loads((MESSAGES / "en.json").read_text(encoding="utf-8"))
@@ -218,8 +224,13 @@ def _hooks_after_first_return(body: str) -> list[str]:
     return late
 
 
-CODE = _code(PAGE.read_text(encoding="utf-8"))
-PAGE_BODY = _squash(_body(CODE, "AutomationPage"))
+CODE = (_code(PAGE.read_text(encoding="utf-8")) + "\n"
+        + _code(THREAD.read_text(encoding="utf-8")))
+#: The page component and the hook it calls for the thread, in that order:
+#: what the page does when a person presses something, wherever the code for
+#: it now lives.
+PAGE_BODY = (_squash(_body(CODE, "AutomationPage")) + " "
+             + _squash(_body(CODE, "useAutomationThread")))
 REPLY_BODY = _squash(_body(CODE, "Reply"))
 CAPABILITIES_BODY = _squash(_body(CODE, "Capabilities"))
 
@@ -702,7 +713,8 @@ def test_no_hook_on_this_page_is_called_conditionally():
     took the site down the last time."""
     proc = subprocess.run(
         [str(WEB / "node_modules" / ".bin" / "eslint"),
-         str(PAGE.relative_to(WEB)), "--format", "json"],
+         str(PAGE.relative_to(WEB)), str(THREAD.relative_to(WEB)),
+         "--format", "json"],
         cwd=WEB, capture_output=True, text=True, timeout=300,
     )
     try:

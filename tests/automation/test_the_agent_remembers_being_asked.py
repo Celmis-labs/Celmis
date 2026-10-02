@@ -26,7 +26,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 ROUTER = (ROOT / "src" / "api" / "routers" / "automation.py").read_text(encoding="utf-8")
 CHAT = (ROOT / "src" / "automation" / "chat.py").read_text(encoding="utf-8")
-PAGE = (ROOT / "web" / "app" / "(app)" / "automation" / "page.tsx").read_text(encoding="utf-8")
+# The page and the conversation parts it shares with the floating panel.
+PAGE = "\n".join(
+    path.read_text(encoding="utf-8") for path in (
+        ROOT / "web" / "app" / "(app)" / "automation" / "page.tsx",
+        ROOT / "web" / "components" / "automation" / "thread.tsx",
+    ))
 MESSAGES = ROOT / "web" / "lib" / "i18n" / "messages"
 EN = json.loads((MESSAGES / "en.json").read_text(encoding="utf-8"))
 LOCALES = sorted(p.stem for p in MESSAGES.glob("*.json"))

@@ -1,6 +1,28 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* `dark:` follows the theme toggle, not the operating system.
+ *
+ * Tailwind 4's default `dark` variant is `prefers-color-scheme: dark`, while
+ * the toggle (and THEME_INIT_SCRIPT) switch a `.dark` class on <html> — so
+ * every `dark:text-amber-400` in the app answered the OS and ignored the
+ * toggle. Someone with a light OS who picked dark got dark tokens with
+ * light-mode amber and red on top, which is where the low-contrast warnings
+ * came from; the reverse case got pale text on a white card. `:where()` keeps
+ * the variant's specificity at zero, as the default one has. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* A sticky bottom bar on a page where the agent launcher shows keeps its
+ * right-hand control out from under the round button (fixed, 16px in from
+ * the bottom-right corner, 48px wide — so it covers 16-64px from the edge).
+ * Without this, "Save" on a policy or agent page sits under the launcher on
+ * a phone and next to it on a desktop: a mis-tap that opens the agent instead
+ * of saving. 4.5rem clears the button plus a gap. Pages that hide the
+ * launcher (agent-widget.tsx HIDDEN_ON) do not need it. */
+@utility clear-agent-launcher {
+  padding-right: 4.5rem;
+}
+
 @theme {
   /* Neutrals carry a faint green undertone so they sit with the brand. */
   --color-background: hsl(160 20% 98%);
@@ -22,7 +44,10 @@
   --color-success: hsl(150 62% 34%);
   --color-warning: hsl(35 92% 46%);
   --color-border: hsl(160 12% 89%);
-  --color-input: hsl(160 12% 89%);
+  /* A field's edge is one step darker than a card's: the two were the same
+   * colour, so an empty input on a white card read as a gap in the layout
+   * rather than as somewhere to type (the provider-key rows on LLM settings). */
+  --color-input: hsl(160 10% 82%);
   --color-ring: hsl(168 44% 32%);
 
   /* Brand — deep forest green. */
@@ -60,7 +85,7 @@
   --color-success: hsl(150 55% 48%);
   --color-warning: hsl(35 85% 55%);
   --color-border: hsl(172 8% 17%);
-  --color-input: hsl(172 8% 19%);
+  --color-input: hsl(172 8% 24%);
   --color-ring: hsl(160 45% 52%);
 
   /* Brand lifts in dark mode so it stays legible on the near-black canvas. */
@@ -216,4 +241,27 @@
   main, body { background: #fff !important; color: #000 !important; }
   a[href]::after { content: ""; }
   pre, code { white-space: pre-wrap !important; word-break: break-word; }
+}
+
+/* ── The agent's sentence while it is being written ──────────────────────
+ * A caret after the last line of a note that is still arriving (NoteText's
+ * `streaming`). On the last block rather than as a sibling element, because
+ * the note is markdown now: a sibling would sit on a line of its own under
+ * the paragraph instead of after its last word. */
+.celmis-streaming > :last-child::after {
+  content: "";
+  display: inline-block;
+  width: 2px;
+  height: 0.8em;
+  margin-left: 2px;
+  vertical-align: -0.05em;
+  border-radius: 1px;
+  background-color: var(--color-brand);
+  animation: celmis-caret 1s steps(2, start) infinite;
+}
+@keyframes celmis-caret {
+  to { visibility: hidden; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .celmis-streaming > :last-child::after { animation: none; }
 }

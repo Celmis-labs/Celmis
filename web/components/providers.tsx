@@ -1,5 +1,6 @@
 "use client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { domAnimation, LazyMotion, MotionConfig } from "motion/react";
 import { SessionProvider } from "next-auth/react";
 import { useState } from "react";
 import { Toaster } from "sonner";
@@ -32,7 +33,18 @@ export function Providers({
     <SessionProvider>
       <I18nProvider initialLocale={initialLocale}>
         <QueryClientProvider client={queryClient}>
-          {children}
+          {/* Motion, loaded lean. Components use the `m.*` elements from
+              "motion/react-m", which carry no animation code of their own;
+              `domAnimation` supplies it once (animate, exit, hover, focus —
+              no layout or drag, which nothing here uses), so the bundle pays
+              for the features rather than for every component that animates.
+              `reducedMotion="user"` drops transforms and layout motion for
+              anyone whose system asks for less; opacity still fades. */}
+          <LazyMotion features={domAnimation}>
+            <MotionConfig reducedMotion="user">
+              {children}
+            </MotionConfig>
+          </LazyMotion>
           <Toaster position="top-right" richColors closeButton />
         </QueryClientProvider>
       </I18nProvider>
