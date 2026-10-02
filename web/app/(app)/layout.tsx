@@ -7,5 +7,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   // Read here, on the server, so the sidebar's first paint is already the
   // width the person left it at — see SIDEBAR_COOKIE.
   const sidebar = (await cookies()).get(SIDEBAR_COOKIE)?.value;
-  return <AppShell initialSidebarOpen={sidebar !== "closed"}>{children}</AppShell>;
+  return (
+    <AppShell initialSidebarOpen={sidebar !== "closed"} sidebarRemembered={sidebar !== undefined}>
+      {children}
+    </AppShell>
+  );
 }

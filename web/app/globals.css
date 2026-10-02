@@ -12,6 +12,17 @@
  * the variant's specificity at zero, as the default one has. */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* A sticky bottom bar on a page where the agent launcher shows keeps its
+ * right-hand control out from under the round button (fixed, 16px in from
+ * the bottom-right corner, 48px wide — so it covers 16-64px from the edge).
+ * Without this, "Save" on a policy or agent page sits under the launcher on
+ * a phone and next to it on a desktop: a mis-tap that opens the agent instead
+ * of saving. 4.5rem clears the button plus a gap. Pages that hide the
+ * launcher (agent-widget.tsx HIDDEN_ON) do not need it. */
+@utility clear-agent-launcher {
+  padding-right: 4.5rem;
+}
+
 @theme {
   /* Neutrals carry a faint green undertone so they sit with the brand. */
   --color-background: hsl(160 20% 98%);

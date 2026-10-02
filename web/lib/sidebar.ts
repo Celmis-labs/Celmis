@@ -9,3 +9,13 @@
  *  client module, and a constant imported from one into a server component
  *  arrives as a client reference, not as the string. */
 export const SIDEBAR_COOKIE = "celmis-sidebar";
+
+/** Where the state lived before the cookie. Read once, by a browser that has
+ *  no cookie yet, so somebody who collapsed the sidebar before this shipped
+ *  does not find it expanded again; then removed — the cookie is the only
+ *  record from there on. */
+export const LEGACY_SIDEBAR_KEY = "celmis:sidebar";
+
+export function writeSidebarCookie(value: "open" | "closed"): void {
+  document.cookie = `${SIDEBAR_COOKIE}=${value}; path=/; max-age=31536000; SameSite=Lax`;
+}

@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 
 import { api, llmApi } from "@/lib/api";
+import { AGENT_SESSION_KEY } from "@/lib/agent-session";
 import { cn } from "@/lib/utils";
 import { useToken } from "@/lib/use-token";
 import { useDictFor, useT } from "@/lib/i18n";
@@ -98,7 +99,7 @@ export type SessionRow = {
  *  the same value until the store actually changes — generating a fresh uuid
  *  per call would re-render forever.
  */
-const SESSION_KEY = "automation_session_id";
+const SESSION_KEY = AGENT_SESSION_KEY;
 
 let cachedSessionId: string | null = null;
 const sessionListeners = new Set<() => void>();
@@ -406,37 +407,60 @@ export function sendsOnEnter(e: React.KeyboardEvent): boolean {
 /** The model's own prose — a note, or the whole answer to a how-to question —
  *  as markdown, with links into the app as router links.
  *
- *  Only in-app paths become links. The server already reduced every link the
- *  guide does not name to its words; this is the second gate, for the
- *  sentence while it is still being WRITTEN, which reaches the screen before
- *  the server has had the finished note to clean. Anything that is not a path
- *  on this origin renders as its label and nothing else.
+ *  Only in-app paths become links, and only in the FINISHED note: the server
+ *  reduced every link the guide does not name to its words before storing
+ *  it. The sentence while it is still being written reaches the screen
+ *  before the server has had it to clean, so there a link is its label in
+ *  link colour and nothing to press — an invented `/settings/github` must not
+ *  be a live button for the seconds until the real note replaces it.
+ *  Anything that is not a path on this origin renders as its label only.
+ *
+ *  Markdown only where the model wrote markdown: a `help` answer, or a note
+ *  carrying an in-app link (`isMarkdownNote`). Every other note — a plan's
+ *  one-liner that echoes `services/*` or `api-*-service` back — is shown
+ *  verbatim, as it was before notes could be markdown; parsed, those globs
+ *  turn into italics and stored rows would change how they read.
  *
  *  A router link rather than an anchor so pressing one keeps the floating
  *  panel open: it lives in the shell, and a client-side navigation does not
  *  unmount the shell. */
+export function isMarkdownNote(text: string, steps?: { action: string | null }[]): boolean {
+  return (steps ?? []).some((s) => s.action === "help") || text.includes("](/");
+}
+
 export function NoteText({
-  text, className, streaming,
+  text, className, streaming, markdown,
 }: {
   text: string;
   className?: string;
-  /** Still being written: a caret follows the last line (globals.css). */
+  /** Still being written: a caret follows the last line (globals.css), and
+   *  links are not pressable yet. */
   streaming?: boolean;
+  /** Parse as markdown (see `isMarkdownNote`); otherwise shown verbatim. */
+  markdown: boolean;
 }) {
+  const box = cn(
+    streaming && "celmis-streaming",
+    "space-y-1.5 wrap-anywhere text-[13px] leading-relaxed text-[var(--color-foreground)]/90",
+    "[&_ol]:list-decimal [&_ol]:space-y-1 [&_ol]:pl-5 [&_ul]:list-disc [&_ul]:space-y-1 [&_ul]:pl-5",
+    className,
+  );
+  if (!markdown) {
+    return (
+      <div className={box}>
+        <p className="whitespace-pre-wrap">{text}</p>
+      </div>
+    );
+  }
   return (
-    <div
-      className={cn(
-        streaming && "celmis-streaming",
-        "space-y-1.5 wrap-anywhere text-[13px] leading-relaxed text-[var(--color-foreground)]/90",
-        "[&_ol]:list-decimal [&_ol]:space-y-1 [&_ol]:pl-5 [&_ul]:list-disc [&_ul]:space-y-1 [&_ul]:pl-5",
-        className,
-      )}
-    >
+    <div className={box}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ href, children }) =>
-            href && href.startsWith("/") && !href.startsWith("//") ? (
+            streaming ? (
+              <span className="font-medium text-[var(--color-brand)]">{children}</span>
+            ) : href && href.startsWith("/") && !href.startsWith("//") ? (
               <Link
                 href={href}
                 className="font-medium text-[var(--color-brand)] underline decoration-[var(--color-brand)]/40 underline-offset-2 transition-colors hover:decoration-[var(--color-brand)]"
@@ -558,7 +582,7 @@ export function Reply({
           // the sentence is not finished, which the spinner says about the
           // reply and not about this line. Decoration only — a screen reader
           // has `aria-busy` for the same fact.
-          <NoteText text={partial} streaming />
+          <NoteText text={partial} streaming markdown={isMarkdownNote(partial, run.steps)} />
         )}
       </div>
     );
@@ -598,7 +622,7 @@ export function Reply({
 
       {/* The same paragraph the partial sentence was rendered into, in the
           same slot: this is the element it turns into. */}
-      {run.note && <NoteText text={run.note} />}
+      {run.note && <NoteText text={run.note} markdown={isMarkdownNote(run.note, run.steps)} />}
 
       {(run.blocked || run.error) && (
         <p className="wrap-anywhere text-sm text-[var(--color-destructive)]">

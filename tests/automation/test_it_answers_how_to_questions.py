@@ -137,3 +137,47 @@ def test_help_has_no_scope_to_resolve():
     plan = resolve_scope(Plan(steps=[Step(action="help")]), workspace_id="ws")
     assert plan.steps[0].resolved_repos == []
     assert plan.blocked is None
+
+
+_REPO = __import__("pathlib").Path(__file__).resolve().parents[2]
+
+
+def test_every_route_the_guide_links_is_a_page():
+    """The allow-list is only worth something if each entry lands on a page.
+
+    A route the guide names but no `page.tsx` serves is whitelisted into a
+    button that lands on a 404 — the failure the allow-list exists to stop.
+    A page that is renamed or not merged yet fails here, not in front of a
+    user.
+    """
+    from src.automation.guide import GUIDE_ROUTES
+
+    app = _REPO / "web" / "app" / "(app)"
+    missing = sorted(r for r in GUIDE_ROUTES
+                     if not (app / r.lstrip("/") / "page.tsx").is_file())
+    assert not missing, f"guide links routes with no page: {missing}"
+
+
+def test_every_label_the_guide_quotes_is_on_screen():
+    """Somebody told to press "Re-index all" looks for that text and finds
+    "Reindex everything". Every quoted label must be an English UI string."""
+    import re
+
+    from src.automation.guide import GUIDE
+
+    en = json.loads((_REPO / "web" / "lib" / "i18n" / "messages" / "en.json")
+                    .read_text(encoding="utf-8"))
+    strings: set[str] = set()
+
+    def _walk(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, str):
+            strings.add(node)
+
+    _walk(en)
+    quoted = re.findall(r'"([^"\n]+)"', GUIDE)
+    assert quoted, "the guide quotes no labels; the check would pass vacuously"
+    stale = [q for q in quoted if q not in strings]
+    assert not stale, f"guide quotes labels that are not in en.json: {stale}"

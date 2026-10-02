@@ -21,7 +21,8 @@ import { FloatingTooltip } from "@/components/ui/tooltip";
 import { LanguageSwitcher } from "@/components/language-switcher";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { API_BASE } from "@/lib/api";
-import { SIDEBAR_COOKIE } from "@/lib/sidebar";
+import { forgetAgentSession } from "@/lib/agent-session";
+import { LEGACY_SIDEBAR_KEY, writeSidebarCookie } from "@/lib/sidebar";
 import { useT } from "@/lib/i18n";
 import { startMainTour, TOUR_DONE_KEY } from "@/lib/tour";
 import { cn } from "@/lib/utils";
@@ -178,6 +179,8 @@ function WorkspaceSwitcher() {
 
   const switchWs = (slug: string, wsName: string) => {
     document.cookie = `x-workspace=${slug}; path=/; max-age=31536000; SameSite=Lax`;
+    // The agent's sitting belongs to the workspace it was started in.
+    forgetAgentSession();
     // Picked up by AppShell after the reload — confirms the switch worked.
     try { sessionStorage.setItem("ws-switched", wsName); } catch {}
     location.reload();
@@ -481,7 +484,7 @@ function RailAccount() {
           <button
             type="button"
             role="menuitem"
-            onClick={() => signOut({ callbackUrl: "/login" })}
+            onClick={() => { forgetAgentSession(); void signOut({ callbackUrl: "/login" }); }}
             className="mt-1 flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-[var(--color-accent)]"
           >
             <LogOutIcon className="h-3.5 w-3.5" />
@@ -537,10 +540,14 @@ function breadcrumbFor(pathname: string) {
 export function AppShell({
   children,
   initialSidebarOpen = true,
+  sidebarRemembered = true,
 }: {
   children: React.ReactNode;
   /** From the sidebar cookie, read by the server — see SIDEBAR_COOKIE. */
   initialSidebarOpen?: boolean;
+  /** Whether that cookie exists at all. When it does not, the pre-cookie
+   *  localStorage value is migrated once — see LEGACY_SIDEBAR_KEY. */
+  sidebarRemembered?: boolean;
 }) {
   const pathname = usePathname();
   const { data } = useSession();
@@ -559,6 +566,23 @@ export function AppShell({
   // Sidebar collapse — persisted so it survives navigation and reloads, and
   // known to the server so the first paint is already the right width.
   const [sidebarOpen, setSidebarOpen] = useState(initialSidebarOpen);
+
+  // One-time migration from the localStorage-only days. Without it, everyone
+  // who had collapsed the sidebar gets it expanded after the deploy. In an
+  // effect because localStorage does not exist on the server; it runs only
+  // for a browser with no cookie, so at most once per browser.
+  useEffect(() => {
+    if (sidebarRemembered) return;
+    let legacy: string | null = null;
+    try {
+      legacy = localStorage.getItem(LEGACY_SIDEBAR_KEY);
+      localStorage.removeItem(LEGACY_SIDEBAR_KEY);
+    } catch { /* private mode */ }
+    if (legacy !== "open" && legacy !== "closed") return;
+    writeSidebarCookie(legacy);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- a one-shot migration of a value only the browser has
+    if (legacy === "closed") setSidebarOpen(false);
+  }, [sidebarRemembered]);
 
   // Below md the sidebar is an off-canvas drawer instead of a column: 240px of
   // a 390px screen left every page with a ~70px content well. Not persisted —
@@ -593,8 +617,7 @@ export function AppShell({
     setSidebarOpen((v) => {
       const next = !v;
       const value = next ? "open" : "closed";
-      document.cookie = `${SIDEBAR_COOKIE}=${value}; path=/; max-age=31536000; SameSite=Lax`;
-      try { localStorage.setItem("celmis:sidebar", value); } catch { /* ignore */ }
+      writeSidebarCookie(value);
       return next;
     });
   }, []);
@@ -772,7 +795,7 @@ export function AppShell({
                   variant="ghost"
                   size="sm"
                   className="min-h-11 w-full justify-start sm:min-h-0"
-                  onClick={() => signOut({ callbackUrl: "/login" })}
+                  onClick={() => { forgetAgentSession(); void signOut({ callbackUrl: "/login" }); }}
                 >
                   <LogOutIcon className="h-4 w-4" />
                   {t("shell.signOut")}

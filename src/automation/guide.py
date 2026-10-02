@@ -28,7 +28,7 @@ GUIDE = """\
 
 - [Dashboard](/dashboard): overview; [Setup wizard](/onboarding) walks through the first repository; [What you can do](/capabilities).
 - [Repositories](/repositories): add a repository (paste a URL or pick one from a connected provider), start indexing, see index state. Also [Dependencies](/dependencies) (audits), [Docs](/docs) (generated documentation), [Repo intelligence](/admin/intel).
-- [Code review](/reviews): past and running PR reviews; trigger a review by PR URL. [Pull requests](/pull-requests) and [Issues](/issues) across connected providers; [Analytics](/analytics) (editors, admins and owners only). [Review policies](/admin/review-policies), [Review agents](/admin/agents), [Compliance](/admin/compliance), [Deprecations](/admin/deprecations).
+- [Code review](/reviews): past and running PR reviews; trigger a review by PR URL. [Review policies](/admin/review-policies), [Review agents](/admin/agents), [Compliance](/admin/compliance), [Deprecations](/admin/deprecations).
 - [Ask the code](/projects): a project groups indexed repositories so one question searches all of them. [All chats](/chats), [Code search](/search).
 - [Claude agent](/claude): connect a Claude subscription token, then run coding sessions against a repository.
 - [Celmis agent](/automation): this conversation as a full page, with the list of past chats. Also opened from the round button at the bottom right of every page.
@@ -74,13 +74,15 @@ automatic review per repository there, or ask this agent to do it for a set.
 ## LLM keys and models
 
 - [LLM keys & models](/settings/llm): provider keys (Google Gemini, Anthropic,
-  OpenAI, OpenRouter, Groq, Mistral) — paste, Save, then Test. The Google key
-  is also used for embeddings. The same page holds a LiteLLM proxy (an
-  OpenAI-compatible gateway: its URL and key) and the model profile for each
+  OpenAI, OpenRouter, Groq, Mistral) — paste, Save, then Test. Embeddings use
+  the key of the embeddings provider chosen there (Google, OpenAI or
+  Mistral). The same page holds a LiteLLM proxy (an OpenAI-compatible
+  gateway: its URL and key) and the model profile for each
   surface: chat, review, agent and embeddings. A self-hosted server (Ollama,
-  vLLM, LM Studio) is picked there as the "self-hosted" provider.
-- Changing the embeddings model or dimension needs a re-index ("Re-index all"
-  on the same page).
+  vLLM, LM Studio) is picked there as the "Self-hosted (OpenAI-compatible)"
+  provider.
+- Changing the embeddings model or dimension needs a re-index:
+  "Reindex everything" on the same page.
 - Which models exist and what they cost: [Model catalog](/settings/models).
 
 ## Roles

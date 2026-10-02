@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 
 import { useT } from "@/lib/i18n";
+import { AGENT_WIDGET_OPEN_KEY } from "@/lib/agent-session";
 import { useToken } from "@/lib/use-token";
 import {
   Reply, newSessionId, sendsOnEnter, useAutomationThread,
@@ -44,7 +45,7 @@ import { Button } from "@/components/ui/button";
  *  out of an answer, or reloading the page it led to, comes back to the
  *  panel they had open. A tiny external store rather than state in the shell
  *  because both the button and the panel's own close control write it. */
-const OPEN_KEY = "celmis:agent-widget";
+const OPEN_KEY = AGENT_WIDGET_OPEN_KEY;
 const openListeners = new Set<() => void>();
 
 function subscribeOpen(onChange: () => void): () => void {
@@ -75,7 +76,12 @@ function setOpen(open: boolean): void {
  *  a Claude session both put their own composer, with its send button, in
  *  exactly the bottom-right corner this button occupies — a round button over
  *  a send button is a mis-tap waiting to happen, and on those screens there
- *  is already a conversation in front of the reader. */
+ *  is already a conversation in front of the reader.
+ *
+ *  Any other page with a sticky bottom bar (policy and agent detail pages,
+ *  whose Save is the bar's right-hand control) keeps the button and gives the
+ *  bar the `clear-agent-launcher` utility from globals.css instead — those
+ *  are the pages the guide sends people to, so hiding help there is wrong. */
 const HIDDEN_ON = [
   /^\/automation(\/|$)/,
   /^\/projects\/[^/]+\/chats\/[^/]+/,

@@ -1068,7 +1068,7 @@ export default function ReviewPolicyEditPage() {
         </DialogContent>
       </Dialog>
 
-      <div className="flex items-center justify-between sticky bottom-0 bg-[var(--color-background)] border-t border-[var(--color-border)] py-3">
+      <div className="clear-agent-launcher flex items-center justify-between sticky bottom-0 bg-[var(--color-background)] border-t border-[var(--color-border)] py-3">
         <Button
           variant="ghost"
           onClick={async () => {
