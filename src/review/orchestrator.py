@@ -63,6 +63,30 @@ class _BudgetExhausted(Exception):
     """
 
 
+def _sort_by_severity(findings: list[Finding]) -> list[Finding]:
+    """Critical first, info last; stable, so equal severities keep their order."""
+    from src.review.models import SEVERITY_RANK, severity_value
+
+    return sorted(
+        findings,
+        key=lambda f: -SEVERITY_RANK.get(severity_value(f.severity), -1),
+    )
+
+
+def _drop_ignored(findings: list[Finding], globs: list[str]) -> list[Finding]:
+    """Findings on a path the repo's ignore globs exclude, removed.
+
+    The agents never see those files' hunks, but `changed_files_of` still
+    accepts skipped paths as anchors, so a model that names one is not refused
+    at parse time. An ignored path is ignored all the way through.
+    """
+    if not globs:
+        return findings
+    from src.review.ignore_globs import path_ignored
+
+    return [f for f in findings if not path_ignored(f.file_path, globs)]
+
+
 class ReviewOrchestrator:
     """End-to-end PR review."""
 
@@ -163,6 +187,22 @@ class ReviewOrchestrator:
         policy = self._load_policy(pr.local_slug)
 
         batch = ReviewBatch(pull_request=pr)
+        batch.comment_min_severity = (policy or {}).get("comment_min_severity")
+
+        # ── Per-repo ignore globs. The diff was parsed inside the provider,
+        # before any policy existed, so the repository's own exclusions can
+        # only be applied here. What they drop joins `skipped_files`, which
+        # keeps the "all changed files were filtered out" skip below true when
+        # the globs cover the whole change. `review_diff` is the text the
+        # claude_code engine and the size cap read; `pr.raw_diff` itself is
+        # left whole because the run row stores it for the diff view.
+        ignore_globs = list((policy or {}).get("ignore_globs") or [])
+        review_diff = pr.raw_diff or ""
+        if ignore_globs:
+            review_diff = self._apply_ignore_globs(pr, ignore_globs)
+        # Copied for every run, not only a filtered one: the summary's
+        # "Skipped: N files" line reads the batch, and nothing filled it.
+        batch.skipped_files = list(pr.skipped_files)
 
         # Hard skip — policy disabled for this repo
         if policy is not None and not policy["enabled"]:
@@ -228,7 +268,7 @@ class ReviewOrchestrator:
         # strings, an emoji in a test fixture — would measure up to four times
         # under its real size and slip past a cap set for the transport that
         # actually carries it.
-        raw_len = len((pr.raw_diff or "").encode("utf-8"))
+        raw_len = len(review_diff.encode("utf-8"))
         if cap and raw_len > cap:
             reason = (
                 f"Diff is {raw_len:,} bytes, over the {cap:,}-byte limit for a "
@@ -254,7 +294,8 @@ class ReviewOrchestrator:
                 )
                 reason = (
                     f"All {len(pr.skipped_files)} changed files were filtered "
-                    f"out by skip patterns (lockfiles, binaries, build dirs, etc.):"
+                    f"out by skip patterns (lockfiles, binaries, build dirs, "
+                    f"this repository's ignore globs, etc.):"
                     f"\n{preview}{more}"
                 )
             else:
@@ -295,8 +336,15 @@ class ReviewOrchestrator:
             # Worse than not running it: the run record says a drift check
             # happened, because one did.
             from src.review.claude_engine import run_claude_review
+
+            # This engine reads the raw text, not the hunks, so the ignore
+            # globs reach it as a diff with those files' sections cut out.
+            engine_pr = pr
+            if ignore_globs:
+                import dataclasses
+                engine_pr = dataclasses.replace(pr, raw_diff=review_diff)
             cr = run_claude_review(
-                pr, user_id=user_id, workspace_id=workspace_id,
+                engine_pr, user_id=user_id, workspace_id=workspace_id,
                 custom_rules=context.custom_rules,
                 graph_summary=context.graph_summary,
                 cross_repo_drift=context.cross_repo_drift,
@@ -314,7 +362,10 @@ class ReviewOrchestrator:
                 batch.agents_failed.append("claude_code")
                 batch.summary = f"⚠ Claude Code review failed: {cr.error}"
             else:
-                batch.findings = cr.findings
+                # Sorted worst-first like the agent path's prefilter output,
+                # so the providers' inline cap never cuts a critical for a nit.
+                batch.findings = _drop_ignored(
+                    _sort_by_severity(list(cr.findings)), ignore_globs)
                 batch.summary = cr.summary
                 batch.agents_run.append("claude_code")
             # Outside the branch on purpose: `run_claude_review` reports the
@@ -599,6 +650,15 @@ class ReviewOrchestrator:
             logger.warning("compliance_agent_failed err=%s", exc)
             batch.agents_failed.append("compliance")
 
+        # ── Worst first, again. Breaking-change and compliance findings were
+        # appended AFTER the prefilter's severity sort, so on a review with
+        # more findings than `max_inline_comments` a critical breaking change
+        # sat at the tail of the list and the providers' cap cut it while
+        # twenty warnings posted. A stable sort keeps the prefilter's
+        # confidence order inside each severity.
+        batch.findings = _drop_ignored(
+            _sort_by_severity(batch.findings), ignore_globs)
+
         # Finalise Stage 11 cost. None when any agent had an unknown model.
         batch.cost_usd = None if any_unknown_cost else round(cost_sum, 6)
         batch.cost_source = (
@@ -812,6 +872,36 @@ class ReviewOrchestrator:
             return None, {}
         return client, by_agent
 
+    # ─── Per-repo ignore globs ──────────────────────────────────
+
+    @staticmethod
+    def _apply_ignore_globs(pr: PullRequest, globs: list[str]) -> str:
+        """Drop the hunks of ignored files from `pr`, in place, and return the
+        raw diff without their sections.
+
+        Each ignored file is added once to `pr.skipped_files`, tagged so the
+        skip message can tell a repo's own exclusion from a lockfile.
+        """
+        from src.review.ignore_globs import filter_raw_diff, path_ignored
+
+        kept = []
+        ignored: list[str] = []
+        for h in pr.hunks:
+            if (path_ignored(h.file_path, globs)
+                    or path_ignored(h.old_file_path or "", globs)):
+                if h.file_path not in ignored:
+                    ignored.append(h.file_path)
+                continue
+            kept.append(h)
+        if ignored:
+            pr.hunks = kept
+            pr.skipped_files = list(pr.skipped_files) + [
+                f"{p} (ignore glob)" for p in ignored
+            ]
+            logger.info("ignore_globs_applied pr=%d files=%d globs=%d",
+                        pr.number, len(ignored), len(globs))
+        return filter_raw_diff(pr.raw_diff or "", globs)
+
     # ─── Stage 10: per-repo policy loading + rules formatting ──
 
     def _load_policy(self, repo_slug: str) -> dict | None:
@@ -888,6 +978,13 @@ class ReviewOrchestrator:
                         # boolean the operator never chose. See
                         # `_verifier_enabled`.
                         "verifier_enabled": row.verifier_enabled,
+                        # Paths this repository's review never reads, and the
+                        # lowest severity posted as a PR comment (None = all).
+                        # getattr: a row loaded by code older than the
+                        # migration simply has neither.
+                        "ignore_globs": list(getattr(row, "ignore_globs", None) or []),
+                        "comment_min_severity": getattr(
+                            row, "comment_min_severity", None),
                     }
             finally:
                 engine.dispose()

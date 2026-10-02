@@ -466,17 +466,11 @@ def test_the_status_helper_leaves_a_skipped_run_alone():
 
 
 #: Columns the UI trigger's writer fills and `record_completed_review` does
-#: not. This is OUTSTANDING drift, not blessed drift: the PR coordinates and
-#: the diff snapshot are what the apply-fix and side-by-side views read, so a
-#: webhook-triggered run cannot be apply-fixed today. They are pinned by an
-#: EXACT comparison below, which means this test fails both when new drift
-#: appears and when this drift is closed — at which point the entry comes out
-#: of this set. `raw_diff` is a storage decision (capped at 800 KB per row)
-#: that belongs with whoever owns src/api/routers/reviews.py.
-KNOWN_OUTSTANDING = {
-    "pr_head_sha", "pr_head_ref", "pr_provider", "pr_repo", "pr_number",
-    "raw_diff",
-}
+#: not. Pinned by an EXACT comparison below, so this test fails both when new
+#: drift appears and when drift is closed. It held the PR coordinates and the
+#: diff snapshot until `pr_snapshot` gave both writers one source for them —
+#: a webhook-triggered run can now be apply-fixed and followed across pushes.
+KNOWN_OUTSTANDING: set[str] = set()
 
 #: Genuinely per-row, not drift.
 _PER_ROW = {"id", "started_at", "finished_at"}
@@ -566,15 +560,13 @@ def test_both_completion_writers_record_the_same_row(review, store, monkeypatch)
     assert (queue["tokens_input"], queue["tokens_output"]) == (1000, 400)
 
 
-def test_the_ui_writer_does_not_yet_record_a_failed_delivery(review, store, monkeypatch):
-    """The outstanding half, pinned so it cannot be forgotten.
+def test_the_ui_writer_records_a_failed_delivery_too(review, store, monkeypatch):
+    """Both writers now go through `completion_status` and `post_failure`.
 
-    `completion_status` and `post_failure` live in src/api/review_runs.py and
-    only `record_completed_review` calls them; the UI trigger's writer in
-    src/api/routers/reviews.py still passes `batch.run_status.value` straight
-    through, so a review triggered from the UI that GitHub refuses still says
-    `complete`. This test asserts the gap rather than hiding it, and will fail
-    the moment somebody closes it — which is when it should be deleted.
+    The UI trigger's writer in src/api/routers/reviews.py used to pass
+    `batch.run_status.value` straight through, so a review triggered from the
+    UI that GitHub refused still said `complete` — and the PR record took the
+    same word, disagreeing with the queue writer's row for the same outcome.
     """
     import src.api.routers.reviews as reviews_mod
     import src.review.orchestrator as orch_mod
@@ -601,10 +593,8 @@ def test_the_ui_writer_does_not_yet_record_a_failed_delivery(review, store, monk
     )
 
     row = store.get("r-ui")
-    assert row.post_error is None
-    assert row.status == ReviewRunStatus.COMPLETE.value, (
-        "if this now says 'partial', the UI writer was fixed — delete this test"
-    )
+    assert row.post_error
+    assert row.status == ReviewRunStatus.PARTIAL.value
 
 
 # ─── the migration ───────────────────────────────────────────────────

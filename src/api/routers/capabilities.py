@@ -180,6 +180,12 @@ FEATURES: tuple[Feature, ...] = (
             ("/api/reviews", "/api/review-policies", "/api/agents", "/api/compliance"),
             ("/reviews", "/admin/review-policies", "/admin/agents",
              "/admin/compliance", "/admin/deprecations")),
+    # Findings followed across a PR's runs, the PRs themselves, and the
+    # lead's view over both. Their own features rather than more prefixes on
+    # `code_review`: a build without them still reviews.
+    Feature("review_issues", ("/api/issues", "/api/pull-requests"),
+            ("/issues", "/pull-requests")),
+    Feature("review_analytics", ("/api/analytics",), ("/analytics",)),
     Feature("qa", ("/api/qa", "/api/projects", "/api/chats", "/api/search"),
             ("/projects", "/chats", "/search")),
     # The two `/docs` are unrelated and both correct: the PREFIX `/docs` above

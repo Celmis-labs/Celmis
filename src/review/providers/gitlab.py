@@ -268,7 +268,7 @@ class GitLabPRProvider(PullRequestProvider):
         posted = 0
         failed = 0
         snapped = 0
-        for finding in batch.findings[: settings.max_inline_comments]:
+        for finding in batch.inline_findings(settings.max_inline_comments):
             side = "RIGHT" if finding.side == HunkSide.RIGHT else "LEFT"
             line = _snap_to_span(
                 finding.line, ranges.get((finding.file_path, side), []))

@@ -21,8 +21,11 @@ from src.api.deps import (
 from src.api.review_runs import (
     ReviewRun,
     adjustments_payload,
+    completion_status,
     get_review_run_store,
     hidden_payload,
+    post_failure,
+    pr_snapshot,
 )
 from src.api.schemas import ReviewRunOut, ReviewTriggerRequest
 from src.users import User
@@ -303,7 +306,6 @@ def _run_review_task(
             }
             for f in batch.findings
         ]
-        pr = batch.pull_request
         # The providers count what their cleanup actually did ({deleted,
         # failed, kept_threaded, complete}) — and the count used to die right
         # here, in a provider_response nothing persisted, so the UI could not
@@ -317,11 +319,17 @@ def _run_review_task(
         # not fail the whole run into 'failed'.
         cleanup = getattr(result, "provider_response", None)
         cleanup = cleanup.get("cleanup") if isinstance(cleanup, dict) else None
+        # Same two helpers as record_completed_review: a review the provider
+        # refused to receive is PARTIAL with the refusal recorded, not
+        # COMPLETE — and the PR record below gets the same word as this row.
+        post_error = post_failure(result)
+        final_status = completion_status(batch, post_error)
         store.update(
             run_id,
             # See record_completed_review: "complete" is a claim, and a run
             # that lost its security agent is not entitled to make it.
-            status=batch.run_status.value,
+            status=final_status,
+            post_error=post_error,
             agents_run=list(batch.agents_run),
             agents_failed=list(batch.agents_failed),
             agents_skipped=list(getattr(batch, "agents_skipped", []) or []),
@@ -349,14 +357,9 @@ def _run_review_task(
             drift_json=(_json.dumps(orch._last_drift_facts)
                         if getattr(orch, "_last_drift_facts", None)
                         else None),
-            pr_head_sha=pr.head_sha or None,
-            pr_head_ref=pr.head_ref or None,
-            pr_provider=pr.provider or None,
-            pr_repo=pr.repo or None,
-            pr_number=pr.number or None,
-            # Stage 21 — diff snapshot for the side-by-side UI. Capped so a
-            # multi-MB monorepo diff can't bloat the sqlite row.
-            raw_diff=(pr.raw_diff or "")[:800_000] or None,
+            # PR coordinates and the diff snapshot — one helper for both
+            # writers (see `pr_snapshot`).
+            **pr_snapshot(batch),
             cleanup_json=(_json.dumps(cleanup)
                           if isinstance(cleanup, dict) else None),
             # Same helper as record_completed_review — the two writers have
@@ -364,6 +367,11 @@ def _run_review_task(
             parameter_adjustments=adjustments_payload(batch),
             hidden=hidden_payload(batch),
         )
+        # The issue ledger and the PR record — the same call the queue writer
+        # makes. Best-effort: never fails the run it describes.
+        from src.review.issues import record_review_run
+        record_review_run(result, run_id=run_id, workspace_id=workspace_id,
+                          status=final_status)
         logger.info(
             "review_run_complete id=%s user=%s pr_ref=%s verdict=%s findings=%d",
             run_id, user_id, pr_ref, batch.verdict.value, len(batch.findings),
@@ -377,3 +385,13 @@ def _run_review_task(
             finished=True,
         )
         logger.exception("review_run_failed id=%s err=%s", run_id, exc)
+        try:
+            from src.cli import _parse_pr_ref
+            from src.review.issues import record_failed_review
+            f_provider, f_repo, f_number = _parse_pr_ref(pr_ref)
+            record_failed_review(
+                workspace_id=workspace_id, provider=f_provider, repo=f_repo,
+                number=int(f_number), run_id=run_id,
+            )
+        except Exception:  # noqa: BLE001
+            pass  # an unparseable pr_ref is what failed the run in the first place

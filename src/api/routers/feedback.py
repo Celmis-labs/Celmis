@@ -53,6 +53,12 @@ class FeedbackIn(BaseModel):
     agent: str | None = None
     severity: str | None = None
     repo_slug: str | None = None
+    # What identifies the finding across runs. Optional, and only used to
+    # carry a dismissal onto the PR's issue (src/review/issues.py): the
+    # `finding_key` is line-sensitive and client-minted, so it cannot.
+    file_path: str | None = Field(default=None, max_length=1000)
+    title: str | None = Field(default=None, max_length=2000)
+    rule_id: str | None = Field(default=None, max_length=300)
 
 
 class FeedbackOut(BaseModel):
@@ -128,6 +134,15 @@ async def upsert_feedback(
         "finding_feedback run=%s key=%s state=%s agent=%s by=%s",
         run_id, payload.finding_key, payload.state, payload.agent, user.email,
     )
+    if payload.file_path and payload.title is not None:
+        import asyncio
+
+        from src.review.issues import apply_feedback
+        await asyncio.to_thread(
+            apply_feedback, workspace_id=ws, run_id=run_id, state=payload.state,
+            file_path=payload.file_path, title=payload.title,
+            rule_id=payload.rule_id,
+        )
     return FeedbackOut(
         finding_key=row.finding_key, state=row.state, reason=row.reason,
         agent=row.agent, severity=row.severity, user_id=row.user_id,
@@ -139,6 +154,10 @@ async def clear_feedback(
     run_id: str, fkey: str,
     session: AsyncSession = Depends(get_async_session),
     _user: User = Depends(get_current_user),
+    ws: str = Depends(current_workspace_id),
+    file_path: str | None = None,
+    title: str | None = None,
+    rule_id: str | None = None,
 ) -> None:
     row = (await session.scalars(
         select(FindingFeedback).where(
@@ -149,6 +168,16 @@ async def clear_feedback(
     if row is not None:
         await session.delete(row)
         await session.commit()
+    if file_path and title is not None:
+        # Undoing a dismissal reopens the issue it dismissed — and only that:
+        # `apply_feedback` leaves a status somebody set elsewhere alone.
+        import asyncio
+
+        from src.review.issues import apply_feedback
+        await asyncio.to_thread(
+            apply_feedback, workspace_id=ws, run_id=run_id, state=None,
+            file_path=file_path, title=title, rule_id=rule_id,
+        )
 
 
 @router.get("/stats", response_model=list[AgentStat])

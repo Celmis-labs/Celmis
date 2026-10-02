@@ -389,12 +389,10 @@ def post_failure(result) -> str | None:
 
     A shared helper, next to `adjustments_payload` and for the reason that one
     gives — two hand-written copies of the same rule are how `cost_usd` came
-    to be written by one writer and not the other. Only
-    `record_completed_review` calls it today: the UI trigger's writer in
-    src/api/routers/reviews.py still passes `batch.run_status.value` straight
-    through, so a review triggered from the UI that GitHub refuses still says
-    `complete`. That outstanding half is pinned by
-    tests/review/test_the_run_record_says_what_it_cost_and_whether_it_arrived.py.
+    to be written by one writer and not the other. Both writers call it:
+    `record_completed_review` and the UI trigger's writer in
+    src/api/routers/reviews.py, so a review triggered from the UI that GitHub
+    refuses is PARTIAL with the refusal recorded, like a queued one.
     """
     response = getattr(result, "provider_response", None)
     if not isinstance(response, dict) or response.get("dry_run"):
@@ -754,7 +752,33 @@ def get_review_run_store() -> ReviewRunStore:
     return _default_store
 
 
-def record_completed_review(result, *, run_id: str, store=None) -> None:
+def pr_snapshot(batch) -> dict:
+    """The PR coordinates and diff a run row carries, for both writers.
+
+    The queue writer never passed these, so every webhook- and poller-run row
+    had NULL head sha, provider, repo and number: apply-fix, the diff view and
+    anything that follows a PR across runs were dead for automatic reviews.
+    One helper so the two writers cannot drift on it again.
+    """
+    pr = getattr(batch, "pull_request", None)
+    if pr is None:
+        return {}
+    return {
+        "pr_head_sha": getattr(pr, "head_sha", None) or None,
+        "pr_head_ref": getattr(pr, "head_ref", None) or None,
+        "pr_provider": getattr(pr, "provider", None) or None,
+        "pr_repo": getattr(pr, "repo", None) or None,
+        "pr_number": getattr(pr, "number", None) or None,
+        # Stage 21 — diff snapshot for the side-by-side UI. Capped so a
+        # multi-MB monorepo diff can't bloat the sqlite row.
+        "raw_diff": (getattr(pr, "raw_diff", "") or "")[:800_000] or None,
+    }
+
+
+def record_completed_review(
+    result, *, run_id: str, store=None, drift_facts: dict | None = None,
+    workspace_id: str | None = None,
+) -> None:
     """Write a finished review into the run store.
 
     There were two paths into a review and only one of them recorded anything.
@@ -817,6 +841,7 @@ def record_completed_review(result, *, run_id: str, store=None) -> None:
     # Same dict, the other key. The post error sat next to the cleanup report
     # the whole time and only the cleanup report was ever read out of it.
     post_error = post_failure(result)
+    final_status = completion_status(batch, post_error)
     store.update(
         run_id,
         # Not the literal "complete". A run whose security agent never
@@ -825,7 +850,11 @@ def record_completed_review(result, *, run_id: str, store=None) -> None:
         # read. `run_status` is the same property the summary banner is built
         # from, so the two cannot disagree — and `completion_status` adds the
         # half `run_status` cannot see, which is whether anything arrived.
-        status=completion_status(batch, post_error),
+        status=final_status,
+        # The PR coordinates, the diff and the drift facts — written by the UI
+        # writer all along and by this one never (see `pr_snapshot`).
+        **pr_snapshot(batch),
+        drift_json=(_json.dumps(drift_facts) if drift_facts else None),
         post_error=post_error,
         agents_run=list(batch.agents_run),
         agents_failed=list(batch.agents_failed),
@@ -876,3 +905,11 @@ def record_completed_review(result, *, run_id: str, store=None) -> None:
         tokens_input=int(getattr(batch, "tokens_in", 0) or 0),
         tokens_output=int(getattr(batch, "tokens_out", 0) or 0),
     )
+    # The issue ledger and the PR record, in Postgres. Best-effort inside —
+    # the run row above is already written whatever happens here.
+    if workspace_id is None:
+        existing = store.get(run_id) if hasattr(store, "get") else None
+        workspace_id = getattr(existing, "workspace_id", None) or "default"
+    from src.review.issues import record_review_run
+    record_review_run(result, run_id=run_id, workspace_id=workspace_id,
+                      status=final_status)

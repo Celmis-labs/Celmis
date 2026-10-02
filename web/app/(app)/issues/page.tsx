@@ -1,0 +1,357 @@
+"use client";
+
+/**
+ * /issues — review findings followed across a pull request's pushes.
+ *
+ * One row per finding per PR, keyed by a line-free fingerprint, so the same
+ * defect on push 1 and push 3 is one row seen twice. A finding the next
+ * commit no longer produces, in a file that commit changed, is marked fixed
+ * by the pipeline itself (src/review/issues.py); the rest is closed here.
+ */
+
+import { useState } from "react";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { ExternalLinkIcon, ListChecksIcon } from "lucide-react";
+
+import {
+  issuesApi,
+  type IssueStatus,
+  type ReviewIssue,
+  type ReviewIssueList,
+} from "@/lib/api";
+import { useToken } from "@/lib/use-token";
+import { useCanEditIssues } from "@/lib/use-analytics-access";
+import { useT } from "@/lib/i18n";
+import { formatDateTime } from "@/lib/format";
+import { PageHeader, PageShell } from "@/components/page-shell";
+import { SectionTabs } from "@/components/section-tabs";
+import { WorkspaceBadge } from "@/components/workspace-badge";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { QueryState } from "@/components/ui/query-state";
+import { Select } from "@/components/ui/select";
+import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
+
+const STATUSES: IssueStatus[] = ["open", "fixed", "dismissed", "resolved"];
+const SEVERITIES = ["critical", "error", "warning", "info"] as const;
+const CATEGORIES = [
+  "bug", "security", "performance", "maintainability", "style", "other",
+] as const;
+const PAGE = 50;
+
+const SEVERITY_CLASS: Record<string, string> = {
+  critical: "text-red-700 dark:text-red-400 font-semibold",
+  error: "text-orange-600 dark:text-orange-400 font-semibold",
+  warning: "text-amber-600 dark:text-amber-400",
+  info: "text-[var(--color-muted-foreground)]",
+};
+
+const STATUS_VARIANT: Record<IssueStatus, "default" | "success" | "warning" | "outline"> = {
+  open: "warning",
+  fixed: "success",
+  dismissed: "outline",
+  resolved: "default",
+};
+
+/** "3d", "5h", "12m" — the age column, short on purpose. */
+function age(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const m = Math.floor(ms / 60_000);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+export default function IssuesPage() {
+  const t = useT();
+  const token = useToken();
+  const canEdit = useCanEditIssues();
+  const qc = useQueryClient();
+
+  const [status, setStatus] = useState<string>("open");
+  const [severity, setSeverity] = useState("");
+  const [category, setCategory] = useState("");
+  const [repo, setRepo] = useState("");
+  const [q, setQ] = useState("");
+  const [sort, setSort] = useState<"newest" | "oldest" | "severity" | "last_seen">("newest");
+  const [offset, setOffset] = useState(0);
+
+  const filters = { status, severity, category, repo, q, sort, limit: PAGE, offset };
+  const list = useQuery({
+    queryKey: ["issues", filters],
+    queryFn: () => issuesApi.list(token!, filters),
+    enabled: !!token,
+    placeholderData: keepPreviousData,
+  });
+
+  const setIssueStatus = useMutation({
+    mutationFn: ({ id, next }: { id: string; next: IssueStatus }) =>
+      issuesApi.setStatus(token!, id, next),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["issues"] });
+      toast.success(t("issues.statusSaved"));
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
+
+  const resetPage = <T,>(set: (v: T) => void) => (v: T) => {
+    set(v);
+    setOffset(0);
+  };
+
+  const counts = list.data?.status_counts;
+  const any = (label: string) => ({ value: "", label });
+
+  return (
+    <PageShell width="wide">
+      <PageHeader
+        icon={<ListChecksIcon className="h-6 w-6" />}
+        title={t("issues.title")}
+        badge={<WorkspaceBadge />}
+        description={t("issues.subtitle")}
+        tabs={<SectionTabs set="review" />}
+      />
+
+      {/* Status tabs with counts under the other filters, like a mailbox. */}
+      <div role="tablist" aria-label={t("issues.col.status")} className="flex flex-wrap gap-1">
+        {["", ...STATUSES].map((s) => {
+          const active = status === s;
+          const n = s ? counts?.[s as IssueStatus] : counts
+            ? Object.values(counts).reduce((a, b) => a + b, 0)
+            : undefined;
+          return (
+            <button
+              key={s || "all"}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => resetPage(setStatus)(s)}
+              className={`rounded-md px-3 py-1.5 text-xs transition-colors ${
+                active
+                  ? "bg-[var(--color-brand-muted)] font-medium text-[var(--color-brand)]"
+                  : "text-[var(--color-muted-foreground)] hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)]"
+              }`}
+            >
+              {s ? t(`issues.status.${s}`) : t("issues.all")}
+              {n !== undefined && <span className="ml-1.5 tabular-nums opacity-70">{n}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+        <Input
+          aria-label={t("issues.search")}
+          placeholder={t("issues.search")}
+          value={q}
+          onChange={(e) => resetPage(setQ)(e.target.value)}
+        />
+        <Select
+          value={severity}
+          onChange={resetPage(setSeverity)}
+          options={[any(t("issues.anySeverity")),
+            ...SEVERITIES.map((s) => ({ value: s, label: t(`issues.severity.${s}`) }))]}
+        />
+        <Select
+          value={category}
+          onChange={resetPage(setCategory)}
+          options={[any(t("issues.anyCategory")),
+            ...CATEGORIES.map((c) => ({ value: c, label: t(`issues.category.${c}`) }))]}
+        />
+        <Select
+          value={repo}
+          onChange={resetPage(setRepo)}
+          options={[any(t("issues.anyRepo")),
+            ...(list.data?.repos ?? []).map((r) => ({ value: r, label: r }))]}
+        />
+        <Select
+          value={sort}
+          onChange={(v) => resetPage(setSort)(v as typeof sort)}
+          options={(["newest", "oldest", "severity", "last_seen"] as const).map((s) => ({
+            value: s, label: t(`issues.sort.${s}`),
+          }))}
+        />
+      </div>
+
+      <Card>
+        <CardContent className="pt-4">
+          <QueryState
+            query={list}
+            skeleton={6}
+          >
+            {(data: ReviewIssueList) =>
+              data.items.length === 0 ? (
+                <div className="py-10 text-center">
+                  <ListChecksIcon className="mx-auto h-8 w-8 text-[var(--color-muted-foreground)]" />
+                  <div className="mt-2 text-sm font-medium">{t("issues.emptyTitle")}</div>
+                  <p className="mx-auto mt-1 max-w-md text-xs text-[var(--color-muted-foreground)]">
+                    {t("issues.emptyDesc")}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <Table>
+                    <THead>
+                      <TR>
+                        <TH>{t("issues.col.status")}</TH>
+                        <TH>{t("issues.col.severity")}</TH>
+                        <TH>{t("issues.col.category")}</TH>
+                        <TH>{t("issues.col.title")}</TH>
+                        <TH>{t("issues.col.repo")}</TH>
+                        <TH>{t("issues.col.file")}</TH>
+                        <TH>{t("issues.col.age")}</TH>
+                        <TH>{t("issues.col.pr")}</TH>
+                      </TR>
+                    </THead>
+                    <TBody>
+                      {data.items.map((i) => (
+                        <IssueRow
+                          key={i.id}
+                          issue={i}
+                          busy={setIssueStatus.isPending}
+                          readOnly={canEdit === false}
+                          onStatus={(next) => setIssueStatus.mutate({ id: i.id, next })}
+                        />
+                      ))}
+                    </TBody>
+                  </Table>
+                  <div className="mt-3 flex items-center justify-between text-xs text-[var(--color-muted-foreground)]">
+                    <span>
+                      {t("issues.range", {
+                        from: data.total ? data.offset + 1 : 0,
+                        to: data.offset + data.items.length,
+                        total: data.total,
+                      })}
+                    </span>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm" variant="outline"
+                        disabled={offset === 0}
+                        onClick={() => setOffset(Math.max(0, offset - PAGE))}
+                      >
+                        {t("issues.prev")}
+                      </Button>
+                      <Button
+                        size="sm" variant="outline"
+                        disabled={data.offset + data.items.length >= data.total}
+                        onClick={() => setOffset(offset + PAGE)}
+                      >
+                        {t("issues.next")}
+                      </Button>
+                    </div>
+                  </div>
+                </>
+              )
+            }
+          </QueryState>
+        </CardContent>
+      </Card>
+    </PageShell>
+  );
+}
+
+function IssueRow({
+  issue: i, busy, readOnly, onStatus,
+}: {
+  issue: ReviewIssue;
+  busy: boolean;
+  readOnly: boolean;
+  onStatus: (s: IssueStatus) => void;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const fixedNote = i.status === "fixed" && i.resolution_source === "auto_next_commit"
+    ? t("issues.fixedInCommit", { sha: (i.fixed_in_sha ?? "").slice(0, 7) })
+    : null;
+  return (
+    <>
+      <TR>
+        <TD className="whitespace-nowrap">
+          <div className="flex flex-col gap-1">
+            <Select
+              className="h-7 w-32 text-xs"
+              disabled={busy || readOnly}
+              value={i.status}
+              onChange={(v) => onStatus(v as IssueStatus)}
+              options={STATUSES.map((s) => ({ value: s, label: t(`issues.status.${s}`) }))}
+            />
+            {fixedNote && (
+              <Badge variant={STATUS_VARIANT.fixed} className="w-fit text-[10px]">{fixedNote}</Badge>
+            )}
+          </div>
+        </TD>
+        <TD className={`whitespace-nowrap ${SEVERITY_CLASS[i.severity] ?? ""}`}>
+          {t(`issues.severity.${i.severity}`)}
+        </TD>
+        <TD className="whitespace-nowrap">{t(`issues.category.${i.category}`)}</TD>
+        <TD className="min-w-[16rem]">
+          <button
+            type="button"
+            className="text-left font-medium hover:underline"
+            aria-expanded={open}
+            onClick={() => setOpen(!open)}
+          >
+            {i.title}
+          </button>
+          {i.occurrences > 1 && (
+            <span className="ml-2 text-[10px] text-[var(--color-muted-foreground)]">
+              {t("issues.seenTimes", { n: i.occurrences })}
+            </span>
+          )}
+        </TD>
+        <TD className="whitespace-nowrap">{i.pr_repo || i.repo_slug}</TD>
+        <TD className="max-w-[18rem] truncate font-mono" title={i.file_path}>
+          {i.file_path}{i.line ? `:${i.line}` : ""}
+        </TD>
+        <TD className="whitespace-nowrap tabular-nums" title={formatDateTime(i.first_seen_at)}>
+          {age(i.first_seen_at)}
+        </TD>
+        <TD className="whitespace-nowrap">
+          {i.pr_url ? (
+            <a
+              href={i.pr_url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 hover:underline"
+            >
+              #{i.pr_number} <ExternalLinkIcon className="h-3 w-3" />
+            </a>
+          ) : (
+            <>#{i.pr_number}</>
+          )}
+          {i.pr_state && i.pr_state !== "open" && (
+            <span className="ml-1 text-[10px] text-[var(--color-muted-foreground)]">
+              {t(`prs.state.${i.pr_state}`)}
+            </span>
+          )}
+        </TD>
+      </TR>
+      {open && (
+        <TR>
+          <TD colSpan={8} className="bg-[var(--color-muted)]/30">
+            <div className="space-y-2 py-1 text-xs">
+              {i.body && <p className="whitespace-pre-wrap">{i.body}</p>}
+              {i.suggestion && (
+                <pre className="overflow-x-auto rounded bg-[var(--color-muted)] p-2 font-mono">
+                  {i.suggestion}
+                </pre>
+              )}
+              <p className="text-[var(--color-muted-foreground)]">
+                {t("issues.meta", {
+                  agent: i.agent ?? "—",
+                  first: formatDateTime(i.first_seen_at),
+                  last: formatDateTime(i.last_seen_at),
+                })}
+              </p>
+            </div>
+          </TD>
+        </TR>
+      )}
+    </>
+  );
+}

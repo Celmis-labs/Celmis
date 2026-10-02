@@ -572,6 +572,12 @@ export type ReviewPolicy = {
   // What a review starting now would actually do — the answer above, or the
   // install default it inherits. Read-only; the PUT body drops it.
   verifier_enabled_effective?: boolean;
+  // Gitignore-ish globs for paths this repo's review never reads.
+  ignore_globs?: string[];
+  // Lowest severity posted as an inline comment; null inherits (= all).
+  comment_min_severity?: "critical" | "error" | "warning" | "info" | null;
+  // What a review would apply — read-only, the PUT body drops it.
+  comment_min_severity_effective?: string;
 };
 
 /** The PUT body. Not `Omit<ReviewPolicy, …>` alone, for two reasons that both
@@ -587,7 +593,7 @@ export type ReviewPolicyUpdate = Omit<
   ReviewPolicy,
   "repo_slug" | "created_at" | "updated_at" | "updated_by"
   | "agent_llm_overrides" | "agents_effective"
-  | "verifier_enabled_effective"
+  | "verifier_enabled_effective" | "comment_min_severity_effective"
 > & {
   agent_llm_overrides?: Record<string, AgentLLMOverride | null> | null;
 };
@@ -1691,12 +1697,171 @@ export const feedbackApi = {
   set: (token: string, runId: string, body: {
     finding_key: string; state: "accepted" | "dismissed"; reason?: string;
     agent?: string | null; severity?: string | null; repo_slug?: string | null;
+    file_path?: string | null; title?: string | null; rule_id?: string | null;
   }) => api<FindingFeedback>(`/api/feedback/run/${runId}`, {
     token, method: "PUT", json: body,
   }),
-  clear: (token: string, runId: string, key: string) =>
-    api<void>(`/api/feedback/run/${runId}/${key}`, { token, method: "DELETE" }),
+  /** `finding` lets the server reopen the tracked issue the dismissal closed. */
+  clear: (token: string, runId: string, key: string, finding?: {
+    file_path?: string | null; title?: string | null; rule_id?: string | null;
+  }) => {
+    const q = new URLSearchParams();
+    if (finding?.file_path) q.set("file_path", finding.file_path);
+    if (finding?.title != null) q.set("title", finding.title);
+    if (finding?.rule_id) q.set("rule_id", finding.rule_id);
+    const qs = q.toString();
+    return api<void>(
+      `/api/feedback/run/${runId}/${encodeURIComponent(key)}${qs ? `?${qs}` : ""}`,
+      { token, method: "DELETE" },
+    );
+  },
   stats: (token: string) => api<AgentFeedbackStat[]>("/api/feedback/stats", { token }),
+};
+
+// ─── Review issues, reviewed PRs, review analytics ──────────────────
+
+export type IssueStatus = "open" | "fixed" | "dismissed" | "resolved";
+export type IssueCategory =
+  | "bug" | "security" | "performance" | "maintainability" | "style" | "other";
+
+/** One finding followed across a pull request's runs (src/review/issues.py). */
+export type ReviewIssue = {
+  id: string;
+  status: IssueStatus;
+  severity: "critical" | "error" | "warning" | "info";
+  category: IssueCategory;
+  title: string;
+  body: string;
+  suggestion: string | null;
+  repo_slug: string;
+  file_path: string;
+  line: number | null;
+  agent: string | null;
+  rule_id: string | null;
+  /** auto_next_commit | manual | feedback | pr_closed */
+  resolution_source: string | null;
+  pr_provider: string;
+  pr_repo: string;
+  pr_number: number;
+  pr_url: string | null;
+  pr_title: string | null;
+  pr_state: "open" | "merged" | "closed" | null;
+  occurrences: number;
+  first_seen_sha: string | null;
+  last_seen_sha: string | null;
+  fixed_in_sha: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  closed_at: string | null;
+};
+
+export type ReviewIssueList = {
+  items: ReviewIssue[];
+  total: number;
+  limit: number;
+  offset: number;
+  status_counts: Record<IssueStatus, number>;
+  repos: string[];
+};
+
+export type IssueFilters = {
+  status?: string; severity?: string; category?: string; repo?: string;
+  pr?: number; q?: string;
+  sort?: "newest" | "oldest" | "severity" | "last_seen";
+  limit?: number; offset?: number;
+};
+
+function queryString(params: Record<string, string | number | undefined | null>): string {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+  }
+  const s = qs.toString();
+  return s ? `?${s}` : "";
+}
+
+export const issuesApi = {
+  list: (token: string, f: IssueFilters = {}) =>
+    api<ReviewIssueList>(`/api/issues${queryString(f)}`, { token }),
+  setStatus: (token: string, id: string, status: IssueStatus) =>
+    api<ReviewIssue>(`/api/issues/${encodeURIComponent(id)}`, {
+      token, method: "PATCH", json: { status },
+    }),
+};
+
+export type ReviewedPullRequest = {
+  id: string;
+  provider: string;
+  repo: string;
+  repo_slug: string | null;
+  number: number;
+  title: string;
+  author: string | null;
+  url: string | null;
+  head_ref: string | null;
+  base_ref: string | null;
+  state: "open" | "merged" | "closed";
+  head_sha: string | null;
+  /** complete | partial | skipped | failed — the last review's outcome */
+  last_review_status: string | null;
+  last_run_id: string | null;
+  reviews_count: number;
+  issues_total: number;
+  issues_open: number;
+  by_severity: Record<string, number>;
+  opened_at: string;
+  updated_at: string;
+  closed_at: string | null;
+};
+
+export type ReviewedPullRequestList = {
+  items: ReviewedPullRequest[];
+  total: number;
+  limit: number;
+  offset: number;
+  repos: string[];
+};
+
+export const pullRequestsApi = {
+  list: (token: string, f: {
+    q?: string; repo?: string; state?: string; review_status?: string;
+    limit?: number; offset?: number;
+  } = {}) =>
+    api<ReviewedPullRequestList>(`/api/pull-requests${queryString(f)}`, { token }),
+};
+
+export type AnalyticsSummary = {
+  days: number;
+  since: string;
+  /** Where the money figures come from — `review_runs.cost_usd`. */
+  cost_basis: string;
+  reviews: { total: number; by_status: Record<string, number> };
+  review_time_seconds: {
+    avg: number | null; p50: number | null; p90: number | null; samples: number;
+  };
+  cost_usd: {
+    total: number; avg_per_review: number | null;
+    runs_with_cost: number; runs_with_unknown_cost: number;
+  };
+  findings_by_severity: Record<"critical" | "error" | "warning" | "info", number>;
+  issues_by_category: Record<IssueCategory, number>;
+  issues: {
+    opened: number; closed: number; fixed: number; fixed_auto: number; dismissed: number;
+  };
+  outcomes: {
+    found: number; fixed_in_next_commits: number; fixed_any: number;
+    open_on_merged_prs: number; still_open: number; dismissed: number;
+    fix_rate_pct: number | null;
+  };
+  daily: Array<{
+    date: string; reviews: number; findings: number;
+    issues_opened: number; issues_fixed: number;
+  }>;
+};
+
+export const analyticsApi = {
+  summary: (token: string, days: 7 | 30 | 90) =>
+    api<AnalyticsSummary>(`/api/analytics/summary?days=${days}`, { token }),
 };
 
 export type Invite = {

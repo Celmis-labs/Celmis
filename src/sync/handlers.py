@@ -67,17 +67,50 @@ async def handle_review(job: dict[str, Any]) -> None:
             user_id=user_id,
             workspace_id=workspace_id,
         )
-        await asyncio.to_thread(record_completed_review, result, run_id=run_id,
-                                store=store)
     except Exception as exc:
         # Recorded as failed rather than left "running" forever — a row stuck
         # in that state is indistinguishable from a worker that died.
+        # "failed", the `ReviewRunStatus` word: this wrote "error", which no
+        # status bucket, badge or metric knows, so these runs vanished from
+        # every count of failures.
         await asyncio.to_thread(
-            store.update, run_id, status="error", finished=True,
+            store.update, run_id, status="failed", finished=True,
             summary=str(exc)[:500])
+        from src.review.issues import record_failed_review
+        await asyncio.to_thread(
+            record_failed_review, workspace_id=workspace_id,
+            provider=p["provider"], repo=p["repo"],
+            number=int(p["pr_number"]), run_id=run_id,
+        )
         raise
     finally:
         await asyncio.to_thread(provider.close)
+
+    # Outside the try above on purpose: the review ran and (maybe) posted, so
+    # a failure to WRITE it down must not turn the run into a failed review —
+    # that overwrote the row to "failed", counted the PR's review twice and
+    # re-raised into a queue that may retry, i.e. post the comments again.
+    try:
+        await asyncio.to_thread(
+            record_completed_review, result, run_id=run_id, store=store,
+            # The deterministic drift facts, which only the UI writer stored.
+            drift_facts=getattr(orch, "_last_drift_facts", None),
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("review_run_record_failed run=%s", run_id)
+        try:
+            from src.api.review_runs import completion_status, post_failure
+
+            batch = getattr(result, "batch", None)
+            status = (completion_status(batch, post_failure(result))
+                      if batch is not None else "partial")
+            await asyncio.to_thread(
+                store.update, run_id, status=status, finished=True,
+                summary=f"Review finished; its record could not be written: {exc}"[:500],
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("review_run_record_fallback_failed run=%s", run_id)
 
 
 # ─── index_repo (incremental) ────────────────────────────────────────

@@ -349,6 +349,17 @@ class RepoReviewPolicy(Base, TimestampMixin):
         Boolean, nullable=True,
     )
 
+    # Gitignore-ish globs for paths this repository's review never reads,
+    # e.g. ["docs/**", "*.snap", "migrations/*.py"]. Applied on top of the
+    # install-wide skip lists; see src/review/ignore_globs.py for the rules.
+    # NULL and [] both mean "nothing extra".
+    ignore_globs: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+    # The lowest severity posted as an inline PR comment: critical | error |
+    # warning | info. NULL inherits the default, which posts everything.
+    # Findings under it are still counted in the summary and stored.
+    comment_min_severity: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     __table_args__ = (
         Index("ix_repo_review_policies_department", "department"),
     )
@@ -852,6 +863,138 @@ class FindingFeedback(Base):
         UniqueConstraint("run_id", "finding_key", name="uq_finding_feedback"),
         Index("ix_finding_feedback_run", "run_id"),
         Index("ix_finding_feedback_agent", "agent", "state"),
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
+# ReviewIssue — one review finding followed across the runs of one PR
+# ════════════════════════════════════════════════════════════════════
+class ReviewIssue(Base):
+    """A finding with an identity that survives a new commit.
+
+    Findings live per run (a JSON blob on the SQLite run row) and nothing tied
+    the finding of push N to the same finding on push N+1, so "was it fixed?"
+    could not be asked. An issue is keyed by a FINGERPRINT —
+    sha256(rule_id | file_path | normalised title), deliberately without the
+    line (a push above it shifts the line) and without the run id — and is
+    scoped to one pull request: the same defect on two PRs is two issues,
+    each with its own lifecycle.
+
+    status: open | fixed | dismissed | resolved
+      - fixed: a later run on the same PR no longer found it AND its file
+        changed between the two heads (resolution_source=auto_next_commit),
+        or someone said so by hand (manual);
+      - dismissed: a person said it is noise (manual, or finding feedback);
+      - resolved: closed for another reason (the PR was closed unmerged).
+
+    category is derived (bug | security | performance | maintainability |
+    style | other) — see `src.review.issues.categorize` for the mapping.
+    """
+
+    __tablename__ = "review_issues"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    repo_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    line: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rule_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str] = mapped_column(Text, nullable=False, server_default="other")
+    severity: Mapped[str] = mapped_column(Text, nullable=False, server_default="warning")
+    title: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    body: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    suggestion: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # open | fixed | dismissed | resolved
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="open")
+    # auto_next_commit | manual | feedback | pr_closed
+    resolution_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pr_provider: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    pr_repo: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    pr_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_seen_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fixed_in_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    occurrences: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "repo_slug", "pr_number", "fingerprint",
+            name="uq_review_issue_pr_fingerprint",
+        ),
+        Index("ix_review_issues_ws_status", "workspace_id", "status"),
+        Index("ix_review_issues_ws_seen", "workspace_id", "first_seen_at"),
+        Index("ix_review_issues_pr", "workspace_id", "pr_provider", "pr_repo", "pr_number"),
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
+# ReviewPullRequest — the PRs Celmis reviewed, and what became of them
+# ════════════════════════════════════════════════════════════════════
+class ReviewPullRequest(Base):
+    """One pull request as the review pipeline knows it.
+
+    Upserted after every review run (title, author, head, last review status,
+    how many reviews) and on the provider's close/merge webhook (state). The
+    run rows live in SQLite and know nothing about a PR's fate, so "issues
+    still open on merged PRs" had nowhere to be answered from.
+
+    `file_hashes` is {path: sha256 of that file's section of the last reviewed
+    diff}. Comparing it with the next run's is how "the file changed between
+    the two heads" is decided for the fixed-in-next-commit check without
+    fetching the commit range from the provider.
+    """
+
+    __tablename__ = "review_pull_requests"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    repo: Mapped[str] = mapped_column(Text, nullable=False)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    repo_slug: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    author: Mapped[str | None] = mapped_column(Text, nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    head_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    base_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # open | merged | closed
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="open")
+    head_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # success | skipped | failed — the last review's outcome, as the list shows it
+    last_review_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviews_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    file_hashes: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "provider", "repo", "number",
+            name="uq_review_pull_request",
+        ),
+        Index("ix_review_pull_requests_ws_updated", "workspace_id", "updated_at"),
     )
 
 
