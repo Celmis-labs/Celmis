@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse
 from src.api.routers import access as access_router
 from src.api.routers import agents as agents_router
 from src.api.routers import alerts as alerts_router
+from src.api.routers import analytics as analytics_router
 from src.api.routers import apply_fix as apply_fix_router
 
 # Stage 21
@@ -44,6 +45,7 @@ from src.api.routers import gdpr as gdpr_router
 from src.api.routers import groups as groups_router
 from src.api.routers import intel as intel_router_mod
 from src.api.routers import invites as invites_router
+from src.api.routers import issues as issues_router
 from src.api.routers import jobs as jobs_router
 from src.api.routers import llm as llm_router
 from src.api.routers import models as models_router
@@ -52,6 +54,7 @@ from src.api.routers import oauth_metadata as oauth_metadata_router
 from src.api.routers import ops_gateway as ops_gateway_router
 from src.api.routers import ops_metrics as ops_metrics_router
 from src.api.routers import projects as projects_router
+from src.api.routers import pull_requests as pull_requests_router
 from src.api.routers import push as push_router
 from src.api.routers import qa as qa_router
 from src.api.routers import repos as repos_router
@@ -475,6 +478,10 @@ def build_app() -> FastAPI:
     app.include_router(reviews_router.router)
     app.include_router(webhooks_router.router)
     app.include_router(review_policies_router.router)
+    # Review issues, reviewed pull requests and review analytics.
+    app.include_router(issues_router.router)
+    app.include_router(pull_requests_router.router)
+    app.include_router(analytics_router.router)
     app.include_router(models_router.router)
     app.include_router(agents_router.router)
     app.include_router(llm_router.router)

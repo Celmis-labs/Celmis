@@ -593,6 +593,13 @@ class ReviewPolicyIn(BaseModel):
     # inheriting the install default, and true/false is this repository's own
     # decision. The default is off — see `ReviewSettings.verifier_enabled`.
     verifier_enabled: bool | None = None
+    # Paths this repo's review never reads (gitignore-ish globs, see
+    # src/review/ignore_globs.py). Absent keeps what is stored; null or []
+    # clears it.
+    ignore_globs: list[str] | None = Field(default=None, max_length=200)
+    # Lowest severity posted as an inline comment: critical | error | warning
+    # | info. Absent keeps what is stored; null inherits (= post everything).
+    comment_min_severity: str | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -653,6 +660,10 @@ class ReviewPolicyOut(BaseModel):
     # reason `suppressed_rules_effective` is: the layer that wins has to show
     # what it is winning over.
     verifier_enabled_effective: bool = False
+    ignore_globs: list[str] = Field(default_factory=list)
+    # What THIS policy says (None = inherit) and what a review would apply.
+    comment_min_severity: str | None = None
+    comment_min_severity_effective: str = "info"
 
     model_config = ConfigDict(from_attributes=True)
 

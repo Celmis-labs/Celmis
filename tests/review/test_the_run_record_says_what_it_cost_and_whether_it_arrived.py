@@ -466,17 +466,11 @@ def test_the_status_helper_leaves_a_skipped_run_alone():
 
 
 #: Columns the UI trigger's writer fills and `record_completed_review` does
-#: not. This is OUTSTANDING drift, not blessed drift: the PR coordinates and
-#: the diff snapshot are what the apply-fix and side-by-side views read, so a
-#: webhook-triggered run cannot be apply-fixed today. They are pinned by an
-#: EXACT comparison below, which means this test fails both when new drift
-#: appears and when this drift is closed — at which point the entry comes out
-#: of this set. `raw_diff` is a storage decision (capped at 800 KB per row)
-#: that belongs with whoever owns src/api/routers/reviews.py.
-KNOWN_OUTSTANDING = {
-    "pr_head_sha", "pr_head_ref", "pr_provider", "pr_repo", "pr_number",
-    "raw_diff",
-}
+#: not. Pinned by an EXACT comparison below, so this test fails both when new
+#: drift appears and when drift is closed. It held the PR coordinates and the
+#: diff snapshot until `pr_snapshot` gave both writers one source for them —
+#: a webhook-triggered run can now be apply-fixed and followed across pushes.
+KNOWN_OUTSTANDING: set[str] = set()
 
 #: Genuinely per-row, not drift.
 _PER_ROW = {"id", "started_at", "finished_at"}

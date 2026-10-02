@@ -136,6 +136,38 @@ def _verifier_default() -> bool:
     return bool(get_review_settings().verifier_enabled)
 
 
+#: The comment thresholds a policy may name, most to least strict, and what an
+#: unset one means: post every finding.
+COMMENT_SEVERITY_LEVELS = ("critical", "error", "warning", "info")
+COMMENT_SEVERITY_DEFAULT = "info"
+
+
+def _comment_min_severity_from_payload(incoming: str | None) -> str | None:
+    if incoming is None:
+        return None
+    value = str(incoming).strip().lower()
+    if not value:
+        return None
+    if value not in COMMENT_SEVERITY_LEVELS:
+        raise HTTPException(status_code=422, detail=(
+            f"comment_min_severity: {incoming!r} — expected one of "
+            f"{', '.join(COMMENT_SEVERITY_LEVELS)}, or null to inherit"
+        ))
+    return value
+
+
+def _ignore_globs_from_payload(incoming: list[str] | None) -> list[str] | None:
+    """Validate and clean a PUT's `ignore_globs`; [] is stored as NULL."""
+    if incoming is None:
+        return None
+    from src.review.ignore_globs import validate_ignore_globs
+    try:
+        cleaned = validate_ignore_globs(incoming)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"ignore_globs: {exc}") from exc
+    return cleaned or None
+
+
 def _suppressed_rules_from_payload(incoming: list[str] | None) -> list[str] | None:
     """Shape a PUT's `suppressed_rules` into what the row stores.
 
@@ -414,6 +446,10 @@ def _row_to_out(
             else _verifier_default() if row.verifier_enabled is None
             else bool(row.verifier_enabled)
         ),
+        ignore_globs=list(row.ignore_globs or []),
+        comment_min_severity=row.comment_min_severity,
+        comment_min_severity_effective=(
+            row.comment_min_severity or COMMENT_SEVERITY_DEFAULT),
     )
 
 
@@ -459,6 +495,9 @@ def _default_out(
         suppressed_rules_effective=_default_suppressed_rules(),
         verifier_enabled=None,
         verifier_enabled_effective=_verifier_default(),
+        ignore_globs=[],
+        comment_min_severity=None,
+        comment_min_severity_effective=COMMENT_SEVERITY_DEFAULT,
     )
 
 
@@ -693,6 +732,9 @@ async def upsert_policy(
         payload.agent_llm_overrides,
         None if row is None else row.agent_llm_overrides,
     )
+    ignore_globs = _ignore_globs_from_payload(payload.ignore_globs)
+    comment_min_severity = _comment_min_severity_from_payload(
+        payload.comment_min_severity)
     if payload.agent_llm_overrides is not None and agent_llm_overrides:
         # Only what this request actually sent. Re-checking a map the payload
         # never mentioned would let a model change on this page lock an
@@ -764,6 +806,12 @@ async def upsert_policy(
             None if payload.verifier_enabled is None
             else bool(payload.verifier_enabled)
         )
+    # Same courtesy for the two review-output settings: a client that does
+    # not render them must not reset them.
+    if "ignore_globs" in payload.model_fields_set:
+        row.ignore_globs = ignore_globs
+    if "comment_min_severity" in payload.model_fields_set:
+        row.comment_min_severity = comment_min_severity
 
     await session.commit()
     await session.refresh(row)

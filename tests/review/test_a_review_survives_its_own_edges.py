@@ -150,9 +150,15 @@ def test_a_queued_review_is_recorded():
 
 
 def test_a_failed_queued_review_is_not_left_running():
-    """A row stuck at "running" is indistinguishable from a worker that died."""
+    """A row stuck at "running" is indistinguishable from a worker that died.
+
+    And the word it is left at is "failed", the `ReviewRunStatus` member —
+    "error" is in no status bucket, badge or metric, so those runs fell out
+    of every count of failures.
+    """
     handlers = (SRC / "sync" / "handlers.py").read_text(encoding="utf-8")
-    assert 'status="error"' in handlers
+    assert 'status="failed"' in handlers
+    assert 'status="error"' not in handlers
 
 
 def test_the_row_shape_is_written_once():

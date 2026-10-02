@@ -364,6 +364,11 @@ def _run_review_task(
             parameter_adjustments=adjustments_payload(batch),
             hidden=hidden_payload(batch),
         )
+        # The issue ledger and the PR record — the same call the queue writer
+        # makes. Best-effort: never fails the run it describes.
+        from src.review.issues import record_review_run
+        record_review_run(result, run_id=run_id, workspace_id=workspace_id,
+                          status=batch.run_status.value)
         logger.info(
             "review_run_complete id=%s user=%s pr_ref=%s verdict=%s findings=%d",
             run_id, user_id, pr_ref, batch.verdict.value, len(batch.findings),
@@ -377,3 +382,13 @@ def _run_review_task(
             finished=True,
         )
         logger.exception("review_run_failed id=%s err=%s", run_id, exc)
+        try:
+            from src.cli import _parse_pr_ref
+            from src.review.issues import record_failed_review
+            f_provider, f_repo, f_number = _parse_pr_ref(pr_ref)
+            record_failed_review(
+                workspace_id=workspace_id, provider=f_provider, repo=f_repo,
+                number=int(f_number), run_id=run_id,
+            )
+        except Exception:  # noqa: BLE001
+            pass  # an unparseable pr_ref is what failed the run in the first place

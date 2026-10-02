@@ -400,6 +400,60 @@ async def require_workspace_admin(
     )
 
 
+#: Workspace roles that may read review analytics: the people who answer for
+#: the code and its cost. "editor" is spelled out by name — the role ladder is
+#: viewer < member < editor < admin < owner.
+ANALYTICS_ROLES = frozenset({"owner", "admin", "editor"})
+
+#: Roles that may change a review issue's status (member and above).
+ISSUE_WRITE_ROLES = frozenset({"member", "editor", "admin", "owner"})
+
+
+def workspace_role(user_id: str, workspace_id: str) -> str | None:
+    """The caller's role in `workspace_id`, or None when not a member.
+
+    Blocking — call it from a thread or a sync dependency.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session as _Session
+
+    from src.db.models import WorkspaceMember
+    from src.db.session import get_database_url
+
+    sync_url = get_database_url().replace(
+        "postgresql+asyncpg://", "postgresql+psycopg://"
+    )
+    eng = create_engine(sync_url, pool_pre_ping=True)
+    try:
+        with _Session(eng) as s:
+            m = s.get(WorkspaceMember, (workspace_id, user_id))
+            return m.role if m is not None else None
+    finally:
+        eng.dispose()
+
+
+async def require_analytics_access(
+    user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> User:
+    """Global admin, or owner/admin/editor of the ACTIVE workspace.
+
+    Members and viewers get 403: the analytics page reports cost and how
+    often a team merged what the reviewer flagged, which is a lead's view.
+    """
+    if user.is_admin:
+        return user
+    import asyncio
+
+    role = await asyncio.to_thread(workspace_role, user.id, workspace_id)
+    if role in ANALYTICS_ROLES:
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Analytics requires owner, admin or editor on this workspace",
+    )
+
+
 def require_repo_permission(min_perm: str = "read"):
     """FastAPI dependency factory. Reads path parameter `repo_slug` (or
     `slug`) from the request and enforces the caller has at least

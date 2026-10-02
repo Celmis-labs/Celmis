@@ -242,6 +242,99 @@ def _extract_bitbucket_pr(payload: dict, event_key: str) -> dict | None:
     }
 
 
+# ─── PR lifecycle (merged / closed / reopened) ─────────────────
+#
+# Not review triggers: these feed `review_pull_requests.state`, which is how
+# the analytics page can say "found by Celmis, merged anyway" and how a PR
+# closed unmerged resolves its open issues. Each returns None for anything
+# that is not a lifecycle change.
+
+
+def _extract_github_pr_state(payload: dict) -> dict | None:
+    action = payload.get("action")
+    if action not in ("closed", "reopened"):
+        return None
+    pr = payload.get("pull_request") or {}
+    repo = (payload.get("repository") or {}).get("full_name")
+    if not pr or not repo:
+        return None
+    state = (
+        "open" if action == "reopened"
+        else "merged" if pr.get("merged")
+        else "closed"
+    )
+    return {
+        "provider": "github", "repo": repo, "number": int(pr.get("number") or 0),
+        "state": state, "title": pr.get("title"),
+        "author": (pr.get("user") or {}).get("login"), "url": pr.get("html_url"),
+    }
+
+
+def _extract_gitlab_mr_state(payload: dict) -> dict | None:
+    if payload.get("object_kind") != "merge_request":
+        return None
+    attrs = payload.get("object_attributes") or {}
+    state = {"merge": "merged", "close": "closed", "reopen": "open"}.get(
+        str(attrs.get("action") or ""))
+    project = (payload.get("project") or {}).get("path_with_namespace")
+    if state is None or not project:
+        return None
+    return {
+        "provider": "gitlab", "repo": project, "number": int(attrs.get("iid") or 0),
+        "state": state, "title": attrs.get("title"),
+        "author": (payload.get("user") or {}).get("username"), "url": attrs.get("url"),
+    }
+
+
+def _extract_bitbucket_pr_state(payload: dict, event_key: str) -> dict | None:
+    state = {"pullrequest:fulfilled": "merged",
+             "pullrequest:rejected": "closed"}.get(event_key)
+    pr = payload.get("pullrequest") or {}
+    repo = (payload.get("repository") or {}).get("full_name")
+    if state is None or not pr or not repo:
+        return None
+    return {
+        "provider": "bitbucket", "repo": repo, "number": int(pr.get("id") or 0),
+        "state": state, "title": pr.get("title"),
+        "author": (pr.get("author") or {}).get("nickname")
+                  or (pr.get("author") or {}).get("display_name"),
+        "url": ((pr.get("links") or {}).get("html") or {}).get("href"),
+    }
+
+
+async def _dispatch_pr_state(
+    info: dict, *, expected_workspace_id: str | None,
+) -> None:
+    """Record a PR's lifecycle change under the repo's ONE workspace.
+
+    The same tenant binding `_dispatch_review` uses, and the same fail-closed
+    rule: a repo bound to no workspace, or to several, records nothing, and a
+    delivery signed for one workspace cannot write another's PR. Never raises.
+    """
+    try:
+        from src.api.auto_review import get_auto_review_store
+        cfg = get_auto_review_store().config_for_repo(info["provider"], info["repo"])
+        if cfg is None:
+            logger.info("pr_state_no_workspace_binding provider=%s repo=%s",
+                        info["provider"], info["repo"])
+            return
+        if expected_workspace_id is not None and cfg.workspace_id != expected_workspace_id:
+            logger.warning(
+                "pr_state_workspace_mismatch url_ws=%s bound_ws=%s repo=%s",
+                expected_workspace_id, cfg.workspace_id, info["repo"])
+            return
+        from src.review.issues import record_pr_state
+        await asyncio.to_thread(
+            record_pr_state, workspace_id=cfg.workspace_id,
+            provider=info["provider"], repo=info["repo"], number=info["number"],
+            state=info["state"], title=info.get("title"),
+            author=info.get("author"), url=info.get("url"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pr_state_dispatch_failed repo=%s err=%s",
+                       info.get("repo"), exc)
+
+
 # ─── Background review dispatch ────────────────────────────────
 
 
@@ -626,8 +719,15 @@ def build_webhook_app(
             # The decoder's offset is noise to a webhook sender; 400 is the answer.
             raise HTTPException(400, "Invalid JSON") from None
 
+        state_info = _extract_github_pr_state(payload)
+        if state_info is not None:
+            asyncio.create_task(_dispatch_pr_state(
+                state_info, expected_workspace_id=workspace_id))
+
         pr_info = _extract_github_pr(payload)
         if pr_info is None:
+            if state_info is not None:
+                return JSONResponse({"status": "recorded", "state": state_info["state"]})
             return JSONResponse({"status": "ignored", "reason": "non-trigger action"})
 
         # Skip drafts if action=opened (drafts trigger ready_for_review later)
@@ -730,8 +830,15 @@ def build_webhook_app(
         iid = attrs.get("iid")
         sha = (attrs.get("last_commit") or {}).get("id", "")
 
+        state_info = _extract_gitlab_mr_state(payload)
+        if state_info is not None:
+            asyncio.create_task(_dispatch_pr_state(
+                state_info, expected_workspace_id=workspace_id))
+
         mr_info = _extract_gitlab_mr(payload)
         if mr_info is None:
+            if state_info is not None:
+                return JSONResponse({"status": "recorded", "state": state_info["state"]})
             return JSONResponse({"status": "ignored", "reason": "non-trigger"})
 
         is_draft = bool(attrs.get("work_in_progress") or attrs.get("draft"))
@@ -819,6 +926,12 @@ def build_webhook_app(
         except json.JSONDecodeError:
             # The decoder's offset is noise to a webhook sender; 400 is the answer.
             raise HTTPException(400, "Invalid JSON") from None
+
+        state_info = _extract_bitbucket_pr_state(payload, x_event_key or "")
+        if state_info is not None:
+            asyncio.create_task(_dispatch_pr_state(
+                state_info, expected_workspace_id=workspace_id))
+            return JSONResponse({"status": "recorded", "state": state_info["state"]})
 
         pr_info = _extract_bitbucket_pr(payload, x_event_key or "")
         if pr_info is None:

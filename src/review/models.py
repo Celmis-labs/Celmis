@@ -38,6 +38,20 @@ class FindingSeverity(StrEnum):
     CRITICAL = "critical"  # security / data-loss risk
 
 
+#: Severity as a number, higher = worse. The per-repo comment threshold
+#: (`RepoReviewPolicy.comment_min_severity`) compares against this; the
+#: prefilter's sort keeps its own order in agents/verifier.py.
+SEVERITY_RANK: dict[str, int] = {
+    "info": 0, "warning": 1, "error": 2, "critical": 3,
+}
+
+
+def severity_value(severity: object) -> str:
+    """'warning' for FindingSeverity.WARNING and for 'WARNING' alike — the
+    plain lowercase word, whatever shape the finding carried it in."""
+    return str(getattr(severity, "value", severity) or "").strip().lower()
+
+
 class ReviewVerdict(StrEnum):
     """Overall PR verdict — analog GitHub review event."""
 
@@ -320,6 +334,12 @@ class ReviewBatch:
     #: the API says nothing about — the same rule `partial_banner` already
     #: keeps with `agents_failed`.
     parameter_adjustments: list[ParameterAdjustment] = field(default_factory=list)
+    #: The lowest severity that is posted as an inline comment, from the repo
+    #: policy: "critical" | "error" | "warning" | "info". None posts every
+    #: finding, the same as "info". Findings below it stay in `findings` —
+    #: they are counted in the summary, stored on the run row and tracked as
+    #: issues — they just do not become a comment on the pull request.
+    comment_min_severity: str | None = None
 
     def __post_init__(self) -> None:
         if not self.started_at:
@@ -340,6 +360,36 @@ class ReviewBatch:
     @property
     def info_count(self) -> int:
         return sum(1 for f in self.findings if f.severity == FindingSeverity.INFO)
+
+    def meets_comment_threshold(self, finding: Finding) -> bool:
+        """Whether `finding` is severe enough to be posted as a comment.
+
+        An unknown threshold word posts everything rather than nothing: a
+        typo in a policy row must not silence a review.
+        """
+        floor = SEVERITY_RANK.get(severity_value(self.comment_min_severity))
+        if floor is None:
+            return True
+        return SEVERITY_RANK.get(severity_value(finding.severity), 0) >= floor
+
+    @property
+    def postable_findings(self) -> list[Finding]:
+        """The findings at or above the comment threshold, in batch order."""
+        return [f for f in self.findings if self.meets_comment_threshold(f)]
+
+    @property
+    def below_threshold_count(self) -> int:
+        """Findings kept out of the PR comments by the severity threshold."""
+        return len(self.findings) - len(self.postable_findings)
+
+    def inline_findings(self, cap: int) -> list[Finding]:
+        """What a provider posts inline: over the threshold, then capped.
+
+        One method so the three providers cannot apply the two filters in a
+        different order — threshold first, so a nit never takes the place of
+        an error under the cap.
+        """
+        return self.postable_findings[: max(0, int(cap))]
 
     # Agents whose failure invalidates an APPROVE verdict. If one of the LLM
     # finders never ran, we do not know whether the change is safe — the right

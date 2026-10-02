@@ -231,6 +231,47 @@ def _format_review_pointer(batch: ReviewBatch, summary_url: str | None = None) -
     )
 
 
+_THRESHOLD_LABEL = {
+    "critical": "critical only",
+    "error": "critical + error",
+    "warning": "warning and above",
+}
+
+
+def _posting_line(batch: ReviewBatch) -> str:
+    """How many of the counted findings became inline comments, and why not
+    the rest.
+
+    The severity counts above are ALL findings. Once a repo raises its comment
+    threshold, or a review crosses the inline cap, fewer comments arrive than
+    the counts promise — and a reader who counts the threads and gets a
+    different number concludes the tool lost some. So the gap is said, with
+    its cause: "3 shown inline · 7 below the warning threshold (kept in
+    Celmis)". Empty when every finding was posted.
+    """
+    from src.review.settings import get_review_settings
+
+    total = len(batch.findings)
+    below = batch.below_threshold_count
+    postable = total - below
+    cap = int(get_review_settings().max_inline_comments)
+    shown = min(postable, max(0, cap))
+    over_cap = postable - shown
+    if not below and not over_cap:
+        return ""
+    parts = [f"**{shown}** shown inline"]
+    if below:
+        label = _THRESHOLD_LABEL.get(
+            str(batch.comment_min_severity or "").lower(), "the threshold")
+        parts.append(
+            f"{below} below the comment threshold ({label}) — recorded in "
+            f"Celmis, not posted"
+        )
+    if over_cap:
+        parts.append(f"{over_cap} over the {cap}-comment limit")
+    return "_" + " · ".join(parts) + "_"
+
+
 def _format_summary(batch: ReviewBatch, marker: str) -> str:
     """Top-level summary comment markdown — universal for all 3 providers."""
     pr = batch.pull_request
@@ -270,6 +311,10 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
         if batch.info_count:
             lines.append(f"- 💡 **Info:** {batch.info_count}")
         lines.append("")
+        posting = _posting_line(batch)
+        if posting:
+            lines.append(posting)
+            lines.append("")
     elif batch.agents_run:
         # "_No issues detected._" is a claim that something looked and found
         # the code clean. It used to print unconditionally on zero findings,
