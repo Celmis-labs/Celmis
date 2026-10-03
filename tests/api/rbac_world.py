@@ -110,6 +110,7 @@ class World:
 
 def _routers():
     from src.api.routers import (
+        access_requests,
         admin_users,
         agents,
         alerts,
@@ -130,11 +131,11 @@ def _routers():
     return [workspaces.router, invites.router, teams.router, admin_users.router,
             agents.router, review_policies.router, repos.router, reviews.router,
             issues.router, pull_requests.router, alerts.router, automation.router,
-            llm.router, connections.router, analytics.router]
+            llm.router, connections.router, analytics.router, access_requests.router]
 
 
 @contextlib.asynccontextmanager
-async def world(tmp_path: Path, monkeypatch):
+async def world(tmp_path: Path, monkeypatch, extra_routers: tuple = ()):
     # ── environment: tenancy mode, master identity, data dir ──────────
     monkeypatch.setenv("CELMIS_DEPLOYMENT_MODE", "multi_tenant")
     monkeypatch.setenv("CELMIS_MASTER_EMAIL", MASTER_EMAIL)
@@ -201,7 +202,7 @@ async def world(tmp_path: Path, monkeypatch):
     ids = await _seed(factory, users, ws_ids)
 
     app = FastAPI()
-    for r in _routers():
+    for r in (*_routers(), *extra_routers):
         app.include_router(r)
 
     from src.api.deps import get_current_user

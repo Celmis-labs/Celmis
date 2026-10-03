@@ -303,6 +303,11 @@ def signup(req: SignupRequest, request: Request,
     )
     from src.api.workspace_provision import provision_personal_workspace
     provision_personal_workspace(user.id, user.email, user.name)
+    # Deliberately NO invite redemption here (nor at /login): nobody verified
+    # that this person owns the address they typed, so the invites addressed
+    # to it stay theirs to accept through the link that reached the mailbox.
+    # Google and SSO sign-ins, whose IdP vouches for the address, redeem them
+    # automatically — see src/api/routers/invites.py.
     return TokenResponse(access_token=token, expires_at=exp)
 
 
@@ -469,6 +474,16 @@ def google_callback(
     )
     from src.api.workspace_provision import provision_personal_workspace
     provision_personal_workspace(user.id, user.email, user.name)
+    # Google vouched for this address, so the invites addressed to it are this
+    # person's: redeem them now (src/api/routers/invites.py). Only on Google's
+    # own `email_verified`, and only for the account's own address — the
+    # password routes above never do this.
+    from src.api.routers.invites import redeem_after_verified_sign_in
+    redeem_after_verified_sign_in(
+        user, users, email=str(email),
+        email_verified=str(claims.get("email_verified", "")).lower() == "true",
+        ip=client_ip(request),
+    )
     return TokenResponse(access_token=token, expires_at=exp)
 
 

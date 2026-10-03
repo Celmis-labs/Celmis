@@ -23,6 +23,11 @@ minted by an admin who has since been removed grants nothing.
     DELETE /api/invites/{invite_id}     — revoke (admin)
     GET    /api/invites/preview/{token} — what does this link grant?
     POST   /api/invites/accept          — redeem as the logged-in user
+
+Plus one redemption that needs no click: at a Google / company-SSO sign-in
+whose identity provider has VERIFIED the email, that address's pending
+email-bound invites are redeemed (`redeem_invites_for_verified_email`). Never
+for a password account — see the note above that function.
 """
 
 from __future__ import annotations
@@ -35,7 +40,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import (
@@ -46,7 +51,7 @@ from src.api.deps import (
     require_workspace_admin,
 )
 from src.api.memberships import actor_role, change_membership, refuse_unless_can_change
-from src.db.models import Workspace, WorkspaceInvite
+from src.db.models import Workspace, WorkspaceInvite, WorkspaceMember
 from src.db.session import get_async_session
 from src.users import User, UserStore
 from src.users.roles import VALID_WORKSPACE_ROLES
@@ -115,6 +120,9 @@ class InviteCreated(InviteOut):
     token: str | None = None
     invite_url: str | None = None
     added_directly: bool = False
+    #: True when SMTP is configured and the link was handed to the mailer
+    #: (best effort, in the background). The link above is returned either way.
+    emailed: bool = False
 
 
 class InvitePreview(BaseModel):
@@ -124,6 +132,10 @@ class InvitePreview(BaseModel):
     email_bound: bool
     valid: bool
     detail: str = ""
+    #: not_found | revoked | expired | used — set when `valid` is false.
+    reason: str = ""
+    #: Display name (or email) of whoever issued the invite.
+    invited_by: str = ""
 
 
 def _to_out(row: WorkspaceInvite) -> InviteOut:
@@ -218,6 +230,7 @@ async def create_invite(
     # Email-bound invite + SMTP configured → deliver the link directly. The
     # token is still returned to the admin below, so manual sharing keeps
     # working as the fallback when there is no mailer.
+    emailed = False
     if payload.email:
         try:
             from src.notifications.mailer import (
@@ -237,11 +250,13 @@ async def create_invite(
                     "If you don't have an account yet, you can sign up on that page "
                     "with this email address.",
                 )
+                emailed = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("invite_email_failed err=%s", exc)
     out = InviteCreated(**_to_out(row).model_dump())
     out.token = raw
     out.invite_url = f"/invite/{raw}"
+    out.emailed = emailed
     return out
 
 
@@ -260,41 +275,72 @@ async def revoke_invite(
     logger.info("invite_revoked id=%s by=%s", invite_id, admin.email)
 
 
-async def _load_valid(session: AsyncSession, token: str) -> WorkspaceInvite | None:
-    row = (await session.scalars(
-        select(WorkspaceInvite).where(WorkspaceInvite.token_hash == _hash(token))
-    )).first()
-    if row is None or row.revoked:
-        return None
+#: Why a link does not work — the landing page and the accept error say which,
+#: because "invalid, expired or already used" left the invitee guessing whether
+#: to ask for a new link or just sign in.
+INVALID_DETAIL = {
+    "not_found": "This invite link is not valid. Check that it was copied in full.",
+    "revoked": "This invite was revoked by the workspace admin.",
+    "expired": "This invite has expired. Ask the workspace admin for a new one.",
+    "used": "This invite has already been used.",
+}
+
+
+def _is_expired(row: WorkspaceInvite) -> bool:
     expires_at = row.expires_at
     if expires_at.tzinfo is None:
         # Stored as UTC; a driver that drops the zone (SQLite) must not turn
         # the comparison into a TypeError — a 500 on every redemption.
         expires_at = expires_at.replace(tzinfo=UTC)
-    if expires_at <= datetime.now(UTC):
-        return None
+    return expires_at <= datetime.now(UTC)
+
+
+def _invalid_reason(row: WorkspaceInvite | None) -> str | None:
+    """None when the invite can be redeemed, else the reason it cannot."""
+    if row is None:
+        return "not_found"
+    if row.revoked:
+        return "revoked"
+    if _is_expired(row):
+        return "expired"
     if row.used_count >= row.max_uses:
-        return None
-    return row
+        return "used"
+    return None
+
+
+async def _find(session: AsyncSession, token: str) -> WorkspaceInvite | None:
+    return (await session.scalars(
+        select(WorkspaceInvite).where(WorkspaceInvite.token_hash == _hash(token))
+    )).first()
 
 
 @router.get("/preview/{token}", response_model=InvitePreview)
 async def preview(
     token: str,
     session: AsyncSession = Depends(get_async_session),
+    users: UserStore = Depends(get_users),
 ) -> InvitePreview:
-    """Unauthenticated — lets the invite landing page say what it grants."""
-    row = await _load_valid(session, token)
-    if row is None:
+    """Unauthenticated — lets the invite landing page say what it grants.
+
+    The token is the secret: whoever holds a valid one is shown the
+    workspace, the role and who sent it. An invalid one says only WHY it is
+    invalid, never what it was for.
+    """
+    row = await _find(session, token)
+    reason = _invalid_reason(row)
+    if reason is not None or row is None:
         return InvitePreview(
             workspace_id="", workspace_name="", role="", email_bound=False,
-            valid=False, detail="This invite is invalid, expired or already used.",
+            valid=False, reason=reason or "not_found",
+            detail=INVALID_DETAIL[reason or "not_found"],
         )
     ws = await session.get(Workspace, row.workspace_id)
+    issuer = _invite_authority(users, row)
     return InvitePreview(
         workspace_id=row.workspace_id,
         workspace_name=ws.name if ws else row.workspace_id,
         role=row.role, email_bound=bool(row.email), valid=True,
+        invited_by=(issuer.name or issuer.email) if issuer else (row.created_by or ""),
     )
 
 
@@ -323,23 +369,22 @@ def _invite_authority(users: UserStore, row: WorkspaceInvite) -> User | None:
     return creator
 
 
-@router.post("/accept")
-async def accept(
-    payload: AcceptIn,
-    request: Request,
-    session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(get_current_user),
-    users: UserStore = Depends(get_users),
-) -> dict:
-    row = await _load_valid(session, payload.token)
-    if row is None:
-        raise HTTPException(status_code=400, detail="Invite is invalid, expired or already used")
-    if row.email and row.email.lower() != user.email.lower():
-        raise HTTPException(
-            status_code=403,
-            detail="This invite was issued for a different email address",
-        )
+async def _redeem(
+    session: AsyncSession,
+    *,
+    row: WorkspaceInvite,
+    user: User,
+    users: UserStore,
+    via: str,
+    ip: str | None,
+) -> None:
+    """Grant `row` to `user` — the one path both redemptions take.
 
+    Accepting a link and the automatic redemption at a verified sign-in both
+    come through here: the issuer's right is re-checked NOW (`change_membership`
+    with `authority`), the grant is audited, and the use is counted so an
+    email-bound invite works once.
+    """
     # Re-checked at redemption, against the inviter as they are NOW: an invite
     # outlives the authority it was minted with (a link may be "never
     # expires"), and a role that may not be granted today is not granted by a
@@ -352,13 +397,52 @@ async def accept(
             status_code=403, detail="The person who issued this invite can no longer grant it")
     await change_membership(
         session, actor=user, authority=authority, ws_id=row.workspace_id,
-        user_id=user.id, new_role=row.role, via="invite_accept", ip=client_ip(request),
+        user_id=user.id, new_role=row.role, via=via, ip=ip,
     )
     row.used_count += 1
     await session.commit()
     logger.info(
-        "invite_accepted ws=%s user=%s role=%s", row.workspace_id, user.email, row.role,
+        "invite_redeemed ws=%s user=%s role=%s via=%s",
+        row.workspace_id, user.email, row.role, via,
     )
+
+
+@router.post("/accept")
+async def accept(
+    payload: AcceptIn,
+    request: Request,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(get_current_user),
+    users: UserStore = Depends(get_users),
+) -> dict:
+    row = await _find(session, payload.token)
+    reason = _invalid_reason(row)
+    if row is not None and row.email and row.email.lower() != user.email.lower():
+        # Checked before the validity reasons: a link addressed to somebody
+        # else says so, whatever state it is in.
+        raise HTTPException(
+            status_code=403,
+            detail="This invite was issued for a different email address",
+        )
+    if reason == "used" and row is not None and row.email:
+        # Already redeemed by this very address (checked just above) — by an
+        # earlier click, or automatically at a verified sign-in. Coming back
+        # to the link is not an error: answer with the workspace so the page
+        # can open it, as long as the membership is really there.
+        member = await session.get(WorkspaceMember, (row.workspace_id, user.id))
+        if member is not None:
+            ws = await session.get(Workspace, row.workspace_id)
+            return {
+                "ok": True, "already": True,
+                "workspace_id": row.workspace_id,
+                "workspace_slug": ws.slug if ws else row.workspace_id,
+                "role": member.role,
+            }
+    if reason is not None or row is None:
+        raise HTTPException(status_code=400, detail=INVALID_DETAIL[reason or "not_found"])
+
+    await _redeem(session, row=row, user=user, users=users,
+                  via="invite_accept", ip=client_ip(request))
     ws = await session.get(Workspace, row.workspace_id)
     return {
         "ok": True,
@@ -366,3 +450,109 @@ async def accept(
         "workspace_slug": ws.slug if ws else row.workspace_id,
         "role": row.role,
     }
+
+
+# ─── Automatic redemption at a VERIFIED sign-in ───────────────────────
+#
+# An email-bound invite is addressed to a person by their address. When an
+# identity provider vouches for that address — Google's or the company IdP's
+# `email_verified` — the person signing in IS the addressee, and making them
+# click the link again would only add a step. So their pending invites are
+# redeemed at sign-in, through `_redeem`: the same re-check of the issuer's
+# right, the same audit row, the same single use.
+#
+# A PASSWORD account is never redeemed this way. Celmis does not verify the
+# address somebody types at signup, so anyone can register another person's
+# email; matching invites by it would hand that person's invitations to
+# whoever signed up first. A password account opens the link — which travelled
+# to the real mailbox — and accepts it there.
+
+
+async def redeem_invites_for_verified_email(
+    session: AsyncSession,
+    *,
+    user: User,
+    users: UserStore,
+    verified_email: str,
+    ip: str | None = None,
+) -> list[str]:
+    """Redeem every live email-bound invite for `verified_email`. Returns the
+    ids of the workspaces joined.
+
+    `verified_email` must be an address an identity provider has just vouched
+    for, and it must be the account's own; anything else redeems nothing.
+    Each invite stands alone: one the issuer may no longer grant is skipped
+    (and stays unused), the rest still apply.
+    """
+    address = (verified_email or "").strip().lower()
+    if not address or address != (user.email or "").strip().lower() or not user.is_active:
+        return []
+    invite_ids = list((await session.scalars(
+        select(WorkspaceInvite.id).where(
+            func.lower(WorkspaceInvite.email) == address,
+            WorkspaceInvite.revoked.is_(False),
+        ).order_by(WorkspaceInvite.created_at)
+    )).all())
+    joined: list[str] = []
+    for invite_id in invite_ids:
+        # Re-read per invite: a refused one is rolled back, and a rollback
+        # expires every row the session holds.
+        row = await session.get(WorkspaceInvite, invite_id)
+        if row is None or _invalid_reason(row) is not None:
+            continue
+        ws_id = row.workspace_id
+        try:
+            await _redeem(session, row=row, user=user, users=users,
+                          via="invite_auto_redeem", ip=ip)
+        except HTTPException as exc:
+            await session.rollback()
+            logger.info(
+                "invite_auto_redeem_skipped id=%s ws=%s user=%s status=%s detail=%s",
+                invite_id, ws_id, user.email, exc.status_code, exc.detail,
+            )
+            from src.security.audit import record_action
+
+            record_action(
+                action="invite.auto_redeem_refused", actor=user.email,
+                actor_id=user.id, workspace_id=ws_id, target=invite_id,
+                ip=ip, error=str(exc.detail),
+            )
+            continue
+        joined.append(ws_id)
+    return joined
+
+
+def redeem_after_verified_sign_in(
+    user: User, users: UserStore, *, email: str | None, email_verified: bool,
+    ip: str | None = None,
+) -> list[str]:
+    """Sync entry point for the Google / SSO sign-in routes (plain `def`).
+
+    Never raises: a failure here must not turn a good sign-in into an error —
+    the invite still works through its link. `email_verified` is the IdP's
+    claim, already parsed; False redeems nothing. The password routes never
+    call this at all.
+    """
+    if not email_verified or not email:
+        return []
+
+    async def _run() -> list[str]:
+        from src.db.session import async_session
+
+        async with async_session() as session:
+            return await redeem_invites_for_verified_email(
+                session, user=user, users=users, verified_email=email, ip=ip)
+
+    try:
+        import anyio.from_thread
+
+        try:
+            return anyio.from_thread.run(_run)
+        except RuntimeError:
+            # Not inside an AnyIO worker thread (a direct call, a script).
+            import asyncio
+
+            return asyncio.run(_run())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("invite_auto_redeem_failed user=%s err=%s", user.id, exc)
+        return []

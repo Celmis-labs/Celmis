@@ -185,4 +185,13 @@ def oidc_callback(
     )
     from src.api.workspace_provision import provision_personal_workspace
     provision_personal_workspace(user.id, user.email, user.name)
+    # The IdP vouched for this address (`email_verified`), so the invites
+    # addressed to it are this person's: redeem them now, through the same
+    # path as clicking the link (src/api/routers/invites.py). An unverified
+    # claim — possible for an identity already bound by subject — redeems
+    # nothing; that person opens the link like a password account does.
+    from src.api.routers.invites import redeem_after_verified_sign_in
+    redeem_after_verified_sign_in(
+        user, users, email=email, email_verified=verified, ip=client_ip(request),
+    )
     return TokenResponse(access_token=token, expires_at=exp)

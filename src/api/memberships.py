@@ -3,7 +3,8 @@
 Members can be added, re-roled or removed from six places: PUT/DELETE
 /api/workspaces/{id}/members, an invite created for an existing account, an
 invite accepted, the superadmin's Users page, and the owner row of a newly
-created workspace. Each used to write the row
+created workspace — and an approved access request, which writes several at
+once (`change_memberships`, all or nothing). Each used to write the row
 itself, and each had its own idea of who was allowed to — so "an admin can
 demote the owner" was true on one route and would have stayed true on another
 after a fix to the first.
@@ -74,41 +75,80 @@ async def change_membership(
     Commits. Raises 404 for an unknown workspace, 403/422 per
     `refuse_unless_can_change`.
     """
-    if await session.get(Workspace, ws_id) is None:
-        raise HTTPException(status_code=404, detail="workspace not found")
-    granting = authority if authority is not None else actor
-    row = await session.get(WorkspaceMember, (ws_id, user_id))
-    old = row.role if row is not None else None
-    if old == new_role:
-        return old, new_role
-    refuse_unless_can_change(
-        granting, await actor_role(session, granting, ws_id), old, new_role)
+    [(_, old, new)] = await change_memberships(
+        session, actor=actor, user_id=user_id, changes=[(ws_id, new_role)],
+        via=via, ip=ip, authority=authority,
+    )
+    return old, new
 
-    if new_role is None:
-        if row is not None:
-            await session.delete(row)
-    elif row is None:
-        session.add(WorkspaceMember(workspace_id=ws_id, user_id=user_id, role=new_role))
-    else:
-        row.role = new_role
+
+async def change_memberships(
+    session: AsyncSession,
+    *,
+    actor: User,
+    user_id: str,
+    changes: list[tuple[str, str | None]],
+    via: str,
+    ip: str | None = None,
+    authority: User | None = None,
+    extra_detail: dict | None = None,
+) -> list[tuple[str, str | None, str | None]]:
+    """Several (workspace, role) changes for ONE person, all or nothing.
+
+    Every change is checked (workspace exists, `can_change`) BEFORE any row is
+    written, and the rows are written in one commit — so an approval that
+    names five workspaces and one it may not grant writes none of them. The
+    audit rows are recorded after the commit, one per membership that actually
+    changed, exactly as `change_membership` records a single one (it is this
+    function with one item). Anything the caller staged on `session` before
+    the call is committed in the same transaction.
+    """
+    granting = authority if authority is not None else actor
+    planned: list[tuple[str, WorkspaceMember | None, str | None, str | None]] = []
+    for ws_id, new_role in changes:
+        if await session.get(Workspace, ws_id) is None:
+            raise HTTPException(status_code=404, detail="workspace not found")
+        row = await session.get(WorkspaceMember, (ws_id, user_id))
+        old = row.role if row is not None else None
+        if old != new_role:
+            refuse_unless_can_change(
+                granting, await actor_role(session, granting, ws_id), old, new_role)
+        planned.append((ws_id, row, old, new_role))
+
+    for ws_id, row, old, new_role in planned:
+        if old == new_role:
+            continue
+        if new_role is None:
+            if row is not None:
+                await session.delete(row)
+        elif row is None:
+            session.add(WorkspaceMember(workspace_id=ws_id, user_id=user_id, role=new_role))
+        else:
+            row.role = new_role
     await session.commit()
 
     from src.security.audit import record_action
 
-    record_action(
-        action="workspace.member_role_changed",
-        actor=actor.email, actor_id=actor.id, workspace_id=ws_id,
-        target=user_id, ip=ip,
-        detail={
-            "old_role": old, "new_role": new_role, "via": via,
-            **({"granted_by": granting.email} if granting is not actor else {}),
-        },
-    )
-    logger.info(
-        "workspace_member_changed ws=%s user=%s %s->%s via=%s by=%s",
-        ws_id, user_id, old, new_role, via, actor.email,
-    )
-    return old, new_role
+    for ws_id, _row, old, new_role in planned:
+        if old == new_role:
+            continue
+        record_action(
+            action="workspace.member_role_changed",
+            actor=actor.email, actor_id=actor.id, workspace_id=ws_id,
+            target=user_id, ip=ip,
+            detail={
+                "old_role": old, "new_role": new_role, "via": via,
+                **({"granted_by": granting.email} if granting is not actor else {}),
+                **(extra_detail or {}),
+            },
+        )
+        logger.info(
+            "workspace_member_changed ws=%s user=%s %s->%s via=%s by=%s",
+            ws_id, user_id, old, new_role, via, actor.email,
+        )
+    return [(ws_id, old, new_role) for ws_id, _row, old, new_role in planned]
 
 
-__all__ = ["actor_role", "change_membership", "refuse_unless_can_change"]
+__all__ = [
+    "actor_role", "change_membership", "change_memberships", "refuse_unless_can_change",
+]

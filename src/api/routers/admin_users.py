@@ -1,6 +1,6 @@
 """Users and their workspace roles — the superadmin's page.
 
-    GET    /api/admin/users?q=                              — search accounts
+    GET    /api/admin/users?q=&no_team_access=              — search accounts
     GET    /api/admin/workspaces                            — every workspace (for the picker)
     GET    /api/admin/users/{user_id}/memberships           — one person's workspaces + roles
     PUT    /api/admin/users/{user_id}/memberships/{ws_id}   — add / change {role}
@@ -26,6 +26,7 @@ from src.api.routers.users import PLATFORM_USER_IDS
 from src.db.models import Workspace, WorkspaceMember
 from src.db.session import get_async_session
 from src.users import User, UserStore
+from src.users.roles import is_superadmin
 
 router = APIRouter(prefix="/api/admin", tags=["admin-users"])
 
@@ -39,6 +40,11 @@ class AdminUserOut(BaseModel):
     is_admin: bool
     is_active: bool
     memberships: int
+    #: password / google / oidc — how the account signs in.
+    sign_in_methods: list[str] = []
+    created_at: str = ""
+    #: A membership in some workspace other than the account's personal one.
+    has_team_access: bool = False
 
 
 class AdminWorkspaceOut(BaseModel):
@@ -71,17 +77,28 @@ def _target(users: UserStore, user_id: str) -> User:
 @router.get("/users", response_model=list[AdminUserOut])
 async def search_users(
     q: str = Query(default="", max_length=200),
+    no_team_access: bool = Query(default=False),
     session: AsyncSession = Depends(get_async_session),
     _su: User = Depends(require_superadmin),
     users: UserStore = Depends(get_users),
 ) -> list[AdminUserOut]:
+    """`no_team_access=true`: only accounts whose one membership (if any) is
+    their own personal workspace — whatever way they sign in — newest first.
+    The people an access request would come from, found without one."""
+    from src.api.routers.access_requests import sign_in_methods, users_with_team_access
+
     needle = q.strip().lower()
     rows = [
         u for u in users.list(active_only=False)
         if u.id not in PLATFORM_USER_IDS
         and (not needle or needle in u.email.lower() or needle in (u.name or "").lower())
     ]
-    rows.sort(key=lambda u: u.email.lower())
+    with_team = await users_with_team_access(session, [u.id for u in rows])
+    if no_team_access:
+        rows = [u for u in rows if u.id not in with_team and not is_superadmin(u)]
+        rows.sort(key=lambda u: u.created_at or "", reverse=True)
+    else:
+        rows.sort(key=lambda u: u.email.lower())
     rows = rows[:_MAX_RESULTS]
     counts: dict[str, int] = {}
     if rows:
@@ -94,6 +111,8 @@ async def search_users(
         AdminUserOut(
             id=u.id, email=u.email, name=u.name or "", is_admin=u.is_admin,
             is_active=u.is_active, memberships=counts.get(u.id, 0),
+            sign_in_methods=sign_in_methods(u), created_at=u.created_at or "",
+            has_team_access=u.id in with_team,
         )
         for u in rows
     ]
