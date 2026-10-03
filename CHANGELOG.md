@@ -22,6 +22,15 @@ derives it from there.
 
 ### Added
 
+- **Administration → Users (`/admin/users`), for the superadmin.** Search
+  accounts, see each person's workspaces and role in each, change a role, add
+  a membership, remove one — so one person can be admin of several
+  workspaces and editor of several others. API: `GET /api/admin/users?q=`,
+  `GET /api/admin/workspaces`, `GET|PUT|DELETE
+  /api/admin/users/{user_id}/memberships[/{ws_id}]`. Every membership change
+  from any page is now audited as `workspace.member_role_changed` (actor,
+  person, workspace, old → new role, which path).
+
 - **Manual prices for LiteLLM proxy aliases.** An alias on a workspace's own
   LiteLLM proxy names whatever the proxy maps it to, so Celmis could price it
   only when the model behind it was in LiteLLM's table; a fine-tune or a
@@ -71,6 +80,82 @@ derives it from there.
   the key entered in the UI.** While either variable is set the UI shows the
   licence as managed by the server environment and the API answers 409 to a
   save or a removal instead of storing a key the variable would shadow.
+- **Who may grant a workspace role.** The superadmin is the env master
+  account (`CELMIS_MASTER_EMAIL` + `CELMIS_MASTER_KEY`) and nobody else; other
+  global admins keep their platform pages but are not superadmins. Granting,
+  changing to or from, and removing **owner, admin or editor** is the
+  superadmin's alone; a workspace's owner/admin manages **members and
+  viewers**. A workspace admin can no longer demote the owner or another
+  admin, nor mint a password-reset link for one. One rule (`can_change`,
+  `src/users/roles.py`) behind every path: member PUT/DELETE, invite create
+  and accept, the Users page. Invites carry only a role their creator may
+  grant (403 otherwise), re-checked against the creator when accepted.
+- **Creating a shared workspace is the superadmin's** (`POST
+  /api/workspaces`); personal workspaces are still provisioned at sign-up.
+  Deleting a workspace takes its owner or the superadmin — no longer any
+  admin.
+- **`editor` is the prompt editor.** Agent system prompts (`PUT/DELETE
+  /api/agents/{name}/prompt`) and review policies (`PUT/DELETE
+  /api/review-policies/{slug}`) need editor, admin or owner of the workspace;
+  the policy write also needs the repository to be registered in that
+  workspace, plus the team grant as before. A member with a `review` grant
+  can no longer rewrite the prompts a repository is reviewed with. Resetting
+  a policy needs `review` on the repo, like saving it (was `admin`).
+- **Team roles** come from the shared role table (`TEAM_ROLES`): the
+  workspace roles plus the team-only `reviewer`; `editor` is now accepted.
+- The workspaces page draws only the controls the signed-in person can use:
+  role pickers offer grantable roles, members above the actor show no
+  change/remove/reset buttons, and a card's invites now act on that card's
+  workspace rather than the active one.
+
+### Security
+
+- **Repository routes no longer reach another workspace's repository.** Every
+  by-slug route under `/api/repos` (index, freshness, vault, pulls,
+  branches, auto-review and branch settings) fell back to "a row this user
+  registered", which could sit in a different workspace: a person removed
+  from a workspace kept indexing its repositories, listing their pull
+  requests and toggling their auto-review — with that workspace's stored
+  token. Now only the active workspace's registration counts.
+- `GET /api/review-policies/{slug}/branches` read any clone on disk by slug;
+  it now requires the repository to be the workspace's.
+- Team/repo grants are looked up among the active workspace's own teams. A
+  grant written in one workspace decided access to another workspace's copy
+  of the same repository.
+- A team can no longer take a person who is not a member of its workspace.
+- Signing up with the master address is refused: the master login adopts a
+  password account holding it, which made a pre-emptive signup a route to
+  superadmin.
+- New test module `tests/security/test_tenant_isolation_matrix.py`: the
+  admin, editor and member of one workspace against ~55 routes of another,
+  via `X-Workspace`, the cookie and direct ids/slugs, with the other
+  workspace's state read back afterwards.
+- **No account takeover through membership.** Inviting an existing account
+  by email enrolled it on the spot, without consent, and the workspace
+  reset-link route then treated that membership as authority to mint a
+  password-reset link. Since every account owns a personal workspace, any
+  signup could take over any non-global-admin account, including the owner
+  or admin of another workspace. Now a direct add happens only for somebody the
+  inviter already shares a workspace with (everyone else gets an invitation
+  to accept), and a workspace reset link requires the right to change the
+  target in *every* workspace they belong to. In multi_tenant mode that in
+  practice leaves the superadmin, or the account itself.
+- Neither reset-link route (`/api/users/{id}/reset-link`,
+  `/api/workspaces/{id}/members/{user}/reset-link`) mints a link for the
+  master identity any more, including a password account the master login
+  adopted by address. Previously a global admin could reset it and log in
+  as the superadmin.
+- `is_superadmin` no longer matches a Google/OIDC-bound account by the
+  master address. It now follows the same rule as the master login's
+  adoption, so tokens such an account already holds do not become superadmin
+  tokens.
+- An invite's granting authority is resolved by the issuer's user id (new
+  column `workspace_invites.created_by_id`, migration `e5a7c2f19d63`). Older
+  rows fall back to the email. Changing `CELMIS_MASTER_EMAIL` no longer voids
+  the superadmin's pending invites.
+- Creating a workspace writes its owner row through the membership writer,
+  so the grant leaves a `workspace.member_role_changed` audit row like every
+  other grant.
 
 ## [0.2.0] — 2026-10-03
 

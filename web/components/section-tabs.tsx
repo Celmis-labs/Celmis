@@ -32,6 +32,9 @@ export type TabDef = {
    * holds every workspace's lines, so it is a platform view living inside a
    * section that is otherwise workspace-scoped. */
   adminOnly?: boolean;
+  /** Hidden from everyone but the superadmin (the env master account):
+   * /admin/users hands out owner/admin/editor, which nobody else may. */
+  superadminOnly?: boolean;
   /** Hidden unless the person may read review analytics — global admin, or
    * owner / admin / editor of the active workspace (useCanViewAnalytics) —
    * and also when /api/capabilities explicitly reports `review_analytics`
@@ -137,6 +140,7 @@ export const SECTION_TABS = {
     { href: "/admin/health", labelKey: "nav.health" },
     { href: "/admin/gdpr", labelKey: "nav.gdpr" },
     { href: "/admin/oauth-clients", labelKey: "nav.oauthClients" },
+    { href: "/admin/users", labelKey: "nav.users", superadminOnly: true },
   ],
 } as const satisfies Record<string, readonly TabDef[]>;
 
@@ -187,6 +191,7 @@ export function SectionTabs({
   // disagree about who may see it.
   const { data: session } = useSession();
   const isAdmin = Boolean(session?.isAdmin);
+  const isSuperadmin = Boolean(session?.isSuperadmin);
   // `undefined` while loading counts as no: a tab that appears late is
   // better than one that appears and is then taken away.
   // Only an explicit `false` from the server hides it (the capabilities
@@ -201,6 +206,7 @@ export function SectionTabs({
     (key
       ? TAB_SETS[key]
           .filter((d: TabDef) => !d.adminOnly || isAdmin)
+          .filter((d: TabDef) => !d.superadminOnly || isSuperadmin)
           .filter((d: TabDef) => !d.analyticsOnly || canAnalytics)
           .map((d: TabDef) => ({
             href: d.href,

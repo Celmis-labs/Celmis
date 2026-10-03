@@ -148,7 +148,13 @@ async def create_reset_link(
     target = users.get_by_id(user_id)
     if target is None or not target.is_active:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    if target.id == "master-admin":
+    # The master IDENTITY, not just the fixed id: a password account the
+    # master login adopted keeps its own id and answers to the master address,
+    # and `is_superadmin` honours it. A reset link for it let any global admin
+    # set its password and log in as the superadmin.
+    from src.users.roles import is_master_identity
+
+    if is_master_identity(target):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The master account authenticates only via CELMIS_MASTER_KEY",

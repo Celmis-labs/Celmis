@@ -2,14 +2,21 @@
 
 Two ways to get someone into a workspace, both admin-only:
 
-  * **By email** — if the account already exists it is added straight away;
-    otherwise an email-bound invite is created that only that address can
-    redeem after signing up.
+  * **By email** — if the account already exists AND already shares a
+    workspace with the inviter, it is added straight away; otherwise an
+    email-bound invite is created that only that address can redeem (after
+    signing up, if need be). A stranger is never enrolled without accepting.
   * **By link** — an open, multi-use, expiring token anyone can redeem.
 
 Only the SHA-256 hash of a token is stored; the raw value is shown once at
 creation. Redeeming is done by an authenticated user (sign up first, then
 accept), which keeps the flow simple and avoids a second account-creation path.
+
+An invite can only carry a role its creator may grant (`can_change` in
+src/users/roles.py): a workspace owner/admin invites members and viewers, the
+superadmin anything. The right is checked twice — when the invite is made, and
+again when it is redeemed, against the creator as they are THEN — so a link
+minted by an admin who has since been removed grants nothing.
 
     GET    /api/invites                 — list active invites (admin)
     POST   /api/invites                 — create email/link invite (admin)
@@ -26,18 +33,20 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import (
+    client_ip,
     current_workspace_id,
     get_current_user,
     get_users,
     require_workspace_admin,
 )
-from src.db.models import Workspace, WorkspaceInvite, WorkspaceMember
+from src.api.memberships import actor_role, change_membership, refuse_unless_can_change
+from src.db.models import Workspace, WorkspaceInvite
 from src.db.session import get_async_session
 from src.users import User, UserStore
 from src.users.roles import VALID_WORKSPACE_ROLES
@@ -143,6 +152,7 @@ async def list_invites(
 @router.post("", response_model=InviteCreated, status_code=201)
 async def create_invite(
     payload: InviteIn,
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
     admin: User = Depends(require_workspace_admin),
     users: UserStore = Depends(get_users),
@@ -150,19 +160,32 @@ async def create_invite(
 ) -> InviteCreated:
     if payload.role not in _VALID_ROLES:
         raise HTTPException(status_code=422, detail=f"role must be one of {sorted(_VALID_ROLES)}")
+    # Only a role the inviter could grant directly — an invite is not a way
+    # around the rule, it is the same grant delivered later.
+    refuse_unless_can_change(admin, await actor_role(session, admin, ws), None, payload.role)
 
-    # Existing account + email invite → just add them, no token round-trip.
+    # Existing account + email invite → just add them, no token round-trip —
+    # but only somebody the inviter already works with. Enrolling a stranger
+    # without their consent made them a member of the inviter's workspace, and
+    # membership is what the workspace reset-link route reads as authority:
+    # sign up (owning a personal workspace), "invite" any address, mint a
+    # reset link, own the account — and every workspace it administers.
+    # PUT /members draws the same line (`visible_user_ids`); everyone else
+    # gets the email-bound token below and has to accept it.
     if payload.email:
         existing = users.get_by_email(str(payload.email))
+        if existing is not None and not admin.is_admin:
+            from src.api.routers.users import visible_user_ids
+
+            if existing.id not in await visible_user_ids(session, admin):
+                existing = None
         if existing is not None:
-            member = await session.get(WorkspaceMember, (ws, existing.id))
-            if member is None:
-                session.add(WorkspaceMember(
-                    workspace_id=ws, user_id=existing.id, role=payload.role,
-                ))
-            else:
-                member.role = payload.role
-            await session.commit()
+            # Same rule as PUT /members: re-roling somebody who is already
+            # an admin/editor/owner is not an invite's to do.
+            await change_membership(
+                session, actor=admin, ws_id=ws, user_id=existing.id,
+                new_role=payload.role, via="invite_direct_add", ip=client_ip(request),
+            )
             logger.info(
                 "invite_direct_add ws=%s user=%s role=%s by=%s",
                 ws, existing.email, payload.role, admin.email,
@@ -184,6 +207,7 @@ async def create_invite(
         max_uses=1 if payload.email else payload.max_uses,
         expires_at=_expiry_for(payload),
         created_by=admin.email,
+        created_by_id=admin.id,
     )
     session.add(row)
     await session.commit()
@@ -242,7 +266,12 @@ async def _load_valid(session: AsyncSession, token: str) -> WorkspaceInvite | No
     )).first()
     if row is None or row.revoked:
         return None
-    if row.expires_at <= datetime.now(UTC):
+    expires_at = row.expires_at
+    if expires_at.tzinfo is None:
+        # Stored as UTC; a driver that drops the zone (SQLite) must not turn
+        # the comparison into a TypeError — a 500 on every redemption.
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at <= datetime.now(UTC):
         return None
     if row.used_count >= row.max_uses:
         return None
@@ -273,11 +302,34 @@ class AcceptIn(BaseModel):
     token: str = Field(min_length=16, max_length=256)
 
 
+def _invite_authority(users: UserStore, row: WorkspaceInvite) -> User | None:
+    """The account whose right to grant this invite is exercising.
+
+    By id: an email is a mutable attribute (CELMIS_MASTER_EMAIL is meant to be
+    changed, and `_master_login` rewrites the master row to the new address),
+    so resolving by it killed every pending invite the issuer made — or, once
+    somebody registered the old address, resolved to the wrong person. Rows
+    written before `created_by_id` existed fall back to the email.
+    """
+    creator_id = getattr(row, "created_by_id", None)
+    if creator_id:
+        creator = users.get_by_id(creator_id)
+    elif row.created_by:
+        creator = users.get_by_email(row.created_by)
+    else:
+        return None
+    if creator is None or not creator.is_active:
+        return None
+    return creator
+
+
 @router.post("/accept")
 async def accept(
     payload: AcceptIn,
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(get_current_user),
+    users: UserStore = Depends(get_users),
 ) -> dict:
     row = await _load_valid(session, payload.token)
     if row is None:
@@ -288,13 +340,20 @@ async def accept(
             detail="This invite was issued for a different email address",
         )
 
-    member = await session.get(WorkspaceMember, (row.workspace_id, user.id))
-    if member is None:
-        session.add(WorkspaceMember(
-            workspace_id=row.workspace_id, user_id=user.id, role=row.role,
-        ))
-    else:
-        member.role = row.role
+    # Re-checked at redemption, against the inviter as they are NOW: an invite
+    # outlives the authority it was minted with (a link may be "never
+    # expires"), and a role that may not be granted today is not granted by a
+    # link from last month. It also stops an invite from re-roling somebody
+    # who already holds a role its creator could not touch — a member-level
+    # link clicked by the owner must not demote them.
+    authority = _invite_authority(users, row)
+    if authority is None:
+        raise HTTPException(
+            status_code=403, detail="The person who issued this invite can no longer grant it")
+    await change_membership(
+        session, actor=user, authority=authority, ws_id=row.workspace_id,
+        user_id=user.id, new_role=row.role, via="invite_accept", ip=client_ip(request),
+    )
     row.used_count += 1
     await session.commit()
     logger.info(

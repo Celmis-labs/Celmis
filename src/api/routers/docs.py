@@ -383,7 +383,7 @@ def regenerate_notes(
     from src.generation.engines import ENGINES
 
     store = get_auto_review_store()
-    cfg = store.get_in_workspace(workspace_id, slug) or store.get(user.id, slug)
+    cfg = store.get_in_workspace(workspace_id, slug)
     if cfg is None:
         raise HTTPException(status_code=404, detail="Repo not registered")
 

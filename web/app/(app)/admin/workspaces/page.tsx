@@ -7,10 +7,17 @@
  * Members are managed here; team→repo research access lives in /admin/access;
  * team→repo review permission lives in /admin/teams (both scoped to the
  * active workspace via the sidebar switcher).
+ *
+ * Every control here is drawn only for someone the API would let use it
+ * (`grantableRoles` / `canChangeMember` in lib/roles.ts, the copy of
+ * `can_change` in src/users/roles.py): a workspace owner/admin manages members
+ * and viewers; owner/admin/editor are the superadmin's to hand out, and only
+ * the superadmin creates a shared workspace.
  */
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSession } from "next-auth/react";
 import { toast } from "sonner";
 import Link from "next/link";
 import {
@@ -24,7 +31,7 @@ import {
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
-import { roleLabel, roleOptions } from "@/lib/roles";
+import { canChangeMember, grantableRoles, roleLabel, roleOptions } from "@/lib/roles";
 import { copyText } from "@/lib/copy";
 import { PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
@@ -80,6 +87,8 @@ export default function WorkspacesPage() {
   const qc = useQueryClient();
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
+  const { data: session } = useSession();
+  const isSuperadmin = Boolean(session?.isSuperadmin);
 
   const me = useQuery({
     queryKey: ["workspaces", "me"],
@@ -121,6 +130,7 @@ export default function WorkspacesPage() {
 
       <SectionTabs set="team" />
 
+      {isSuperadmin ? (
       <Card>
         <CardHeader><CardTitle>{t("admin.workspaces.createTitle")}</CardTitle></CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] items-end">
@@ -138,26 +148,42 @@ export default function WorkspacesPage() {
           </Button>
         </CardContent>
       </Card>
+      ) : (
+        <p className="text-xs text-[var(--color-muted-foreground)]">
+          {t("admin.workspaces.createSuperadminOnly")}
+        </p>
+      )}
 
       {me.isLoading && (
         <div className="text-sm text-[var(--color-muted-foreground)]">{t("admin.workspaces.loading")}</div>
       )}
       {(me.data?.workspaces ?? []).map((w) => (
-        <WorkspaceCard key={w.id} ws={w} activeId={me.data?.active_id ?? null} />
+        <WorkspaceCard
+          key={w.id} ws={w} activeId={me.data?.active_id ?? null}
+          isSuperadmin={isSuperadmin} myId={session?.user?.id ?? ""}
+        />
       ))}
     </PageShell>
   );
 }
 
 
-function WorkspaceCard({ ws, activeId }: { ws: WorkspaceSummary; activeId: string | null }) {
+function WorkspaceCard({ ws, activeId, isSuperadmin, myId }: {
+  ws: WorkspaceSummary; activeId: string | null; isSuperadmin: boolean; myId: string;
+}) {
   const t = useT();
   const token = useToken();
   const qc = useQueryClient();
   const { confirm, dialog } = useConfirm();
   const [expanded, setExpanded] = useState(false);
   const [pickUser, setPickUser] = useState("");
-  const [pickRole, setPickRole] = useState("member");
+  // What this person may hand out HERE — their own role in this workspace,
+  // not their role somewhere else.
+  const grantable = grantableRoles(isSuperadmin, ws.role);
+  const canManage = grantable.length > 0;
+  const canDelete = ws.slug !== "default" && (isSuperadmin || ws.role === "owner");
+  const [pickRole, setPickRole] = useState(
+    grantable.includes("member") ? "member" : (grantable[0] ?? "member"));
 
   const members = useQuery({
     queryKey: ["workspaces", ws.id, "members"],
@@ -167,7 +193,7 @@ function WorkspaceCard({ ws, activeId }: { ws: WorkspaceSummary; activeId: strin
   const users = useQuery({
     queryKey: ["users", "directory"],
     queryFn: () => usersApi.directory(token!),
-    enabled: !!token && expanded,
+    enabled: !!token && expanded && canManage,
   });
 
   const emailById = (id: string) =>
@@ -179,6 +205,15 @@ function WorkspaceCard({ ws, activeId }: { ws: WorkspaceSummary; activeId: strin
       setPickUser("");
       qc.invalidateQueries({ queryKey: ["workspaces", ws.id, "members"] });
       toast.success(t("admin.workspaces.memberAdded"));
+    },
+    onError: (e) => toast.error(t("admin.workspaces.error", { message: (e as Error).message })),
+  });
+  const changeRole = useMutation({
+    mutationFn: ({ uid, role }: { uid: string; role: string }) =>
+      workspacesApi.upsertMember(token!, ws.id, uid, role),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workspaces", ws.id, "members"] });
+      toast.success(t("admin.workspaces.roleChanged"));
     },
     onError: (e) => toast.error(t("admin.workspaces.error", { message: (e as Error).message })),
   });
@@ -212,7 +247,7 @@ function WorkspaceCard({ ws, activeId }: { ws: WorkspaceSummary; activeId: strin
               <code>{ws.slug}</code>{ws.role ? t("admin.workspaces.yourRole", { role: roleLabel(t, ws.role) }) : ""}
             </CardDescription>
           </div>
-          {ws.slug !== "default" && (
+          {canDelete && (
             <Button
               variant="ghost" size="icon"
               onClick={async (e) => {
@@ -245,8 +280,20 @@ function WorkspaceCard({ ws, activeId }: { ws: WorkspaceSummary; activeId: strin
                     {m.name ? (
                       <span className="ml-1 text-xs text-[var(--color-muted-foreground)]">{m.name}</span>
                     ) : null}
-                    {" · "}<Badge variant="outline">{roleLabel(t, m.role)}</Badge>
+                    {" · "}
+                    {canChangeMember(isSuperadmin, ws.role, m.role, m.role) && m.user_id !== myId ? (
+                      <Select
+                        className="inline-flex h-7 w-auto text-xs"
+                        value={m.role}
+                        disabled={changeRole.isPending}
+                        onChange={(v) => { if (v !== m.role) changeRole.mutate({ uid: m.user_id, role: v }); }}
+                        options={roleOptions(t, grantable)}
+                      />
+                    ) : (
+                      <Badge variant="outline">{roleLabel(t, m.role)}</Badge>
+                    )}
                   </span>
+                  {canChangeMember(isSuperadmin, ws.role, m.role, null) && (
                   <div className="flex items-center">
                     <ResetLinkButton wsId={ws.id} userId={m.user_id} email={m.email || emailById(m.user_id)} />
                     <Button
@@ -265,12 +312,14 @@ function WorkspaceCard({ ws, activeId }: { ws: WorkspaceSummary; activeId: strin
                       <Trash2Icon className="h-3.5 w-3.5" />
                     </Button>
                   </div>
+                  )}
                 </div>
               ))}
               {members.data?.length === 0 && (
                 <p className="text-xs text-[var(--color-muted-foreground)]">{t("admin.workspaces.noMembers")}</p>
               )}
             </div>
+            {canManage && (
             <div className="grid grid-cols-[1fr_auto_auto] gap-2 mt-2 items-end">
               <Select
                 value={pickUser} onChange={(v) => setPickUser(v)}
@@ -282,15 +331,21 @@ function WorkspaceCard({ ws, activeId }: { ws: WorkspaceSummary; activeId: strin
               />
               <Select
                 value={pickRole} onChange={(v) => setPickRole(v)}
-                options={roleOptions(t)}
+                options={roleOptions(t, grantable)}
               />
               <Button onClick={() => addMember.mutate()} disabled={!pickUser || addMember.isPending}>
                 {t("admin.workspaces.addButton")}
               </Button>
             </div>
+            )}
+            {!canManage && (
+              <p className="mt-2 text-xs text-[var(--color-muted-foreground)]">
+                {t("admin.workspaces.readOnlyHint")}
+              </p>
+            )}
           </div>
 
-          <InviteSection wsId={ws.id} />
+          {canManage && <InviteSection wsId={ws.id} wsSlug={ws.slug} grantable={grantable} />}
 
           <div className="flex flex-wrap gap-2 pt-1">
             <Link href="/admin/teams" className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-accent)]">
@@ -308,13 +363,16 @@ function WorkspaceCard({ ws, activeId }: { ws: WorkspaceSummary; activeId: strin
 }
 
 
-function InviteSection({ wsId }: { wsId: string }) {
+function InviteSection({ wsId, wsSlug, grantable }: {
+  wsId: string; wsSlug: string; grantable: string[];
+}) {
   const token = useToken();
   const t = useT();
   const qc = useQueryClient();
   const { confirm, dialog } = useConfirm();
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState("member");
+  const [role, setRole] = useState(
+    grantable.includes("member") ? "member" : (grantable[0] ?? "member"));
   const [lastLink, setLastLink] = useState<string | null>(null);
   // Links only — see the mutation. Five minutes is the default because the
   // common case is reading a link out loud on a call.
@@ -322,7 +380,7 @@ function InviteSection({ wsId }: { wsId: string }) {
 
   const invites = useQuery({
     queryKey: ["invites", wsId],
-    queryFn: () => invitesApi.list(token!),
+    queryFn: () => invitesApi.list(token!, wsSlug),
     enabled: !!token,
   });
 
@@ -340,7 +398,7 @@ function InviteSection({ wsId }: { wsId: string }) {
             : { ttl_minutes: 5 }
           : { ttl_days: 14 }),
         max_uses: mode === "link" ? 25 : 1,
-      }),
+      }, wsSlug),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["invites", wsId] });
       if (r.added_directly) {
@@ -360,7 +418,7 @@ function InviteSection({ wsId }: { wsId: string }) {
   });
 
   const revoke = useMutation({
-    mutationFn: (id: string) => invitesApi.revoke(token!, id),
+    mutationFn: (id: string) => invitesApi.revoke(token!, id, wsSlug),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["invites", wsId] }),
     onError: (e) => toast.error(t("admin.workspaces.error", { message: (e as Error).message })),
   });
@@ -377,7 +435,7 @@ function InviteSection({ wsId }: { wsId: string }) {
                onChange={(e) => setEmail(e.target.value)} />
         <Select
           value={role} onChange={(v) => setRole(v)}
-          options={roleOptions(t)}
+          options={roleOptions(t, grantable)}
         />
         <Button size="sm" disabled={!email.trim() || create.isPending}
                 onClick={() => create.mutate("email")}>
