@@ -244,6 +244,16 @@ def _install_validation_redaction(app) -> None:
             errors.append(e)
         return JSONResponse(status_code=422, content={"detail": errors})
 
+    # A repo slug that is not one safe path segment (src/config.py) is refused
+    # by the path helpers themselves, deep inside whatever handler took it.
+    # Answer the way an unknown repository is answered — 404, no detail about
+    # why — rather than a 500 that says "something about this was special".
+    from src.config import InvalidRepoSlug
+
+    @app.exception_handler(InvalidRepoSlug)
+    async def _invalid_repo_slug(request, exc):  # noqa: ANN001, ARG001
+        return JSONResponse(status_code=404, content={"detail": "Repo not found"})
+
 
 
 def _jsonable(value):

@@ -627,15 +627,31 @@ async def prompt_preview(
 @router.get("/{repo_slug:path}/branches", response_model=RepoBranchesOut)
 async def list_branches(
     repo_slug: str,
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
+    ws_id: str = Depends(current_workspace_id),
 ) -> RepoBranchesOut:
     """Discover branches from the local clone. Used to populate the
     'target branches' checkbox list in the UI.
 
     Falls back to an empty list if the repo is not cloned yet (the user can
     still type branch names by hand, or run `analyzer sync` to populate).
+
+    Only for a repository registered to the caller's workspace (the same
+    lookup the /api/repos/{slug}/* routes use). This route ran `git` in
+    `repos_dir / repo_slug` for any string — another tenant's clone, or with
+    `{repo_slug:path}`, any directory `../` could reach. An unregistered repo
+    gets the same empty answer as an uncloned one.
     """
-    from src.config import get_settings
+    from src.api.auto_review import get_auto_review_store
+    from src.config import get_settings, is_valid_repo_slug
+
+    empty = RepoBranchesOut(repo_slug=repo_slug, branches=[], default_branch=None)
+    if not is_valid_repo_slug(repo_slug):
+        return empty
+    store = get_auto_review_store()
+    if (store.get_in_workspace(ws_id, repo_slug)
+            or store.get(user.id, repo_slug)) is None:
+        return empty
 
     settings = get_settings()
     repo_path = settings.repo_path(repo_slug)

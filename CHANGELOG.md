@@ -72,6 +72,41 @@ derives it from there.
   licence as managed by the server environment and the API answers 409 to a
   save or a removal instead of storing a key the variable would shadow.
 
+### Security
+
+- **MCP graph tools are confined to the caller's workspace under
+  `multi_tenant`.** `find_symbol`, `get_symbol`, `find_callers`,
+  `find_callees`, `query_graph`, `cross_repo_edges`, `list_repos` and
+  `list_groups` on the `analyzer mcp serve` server checked the `read:graph`
+  scope and nothing else, and graph files live flat at
+  `<data_dir>/<repo_slug>/graph.fdblite`. Any token with `read:graph` could
+  read another tenant's symbol graph and run read-only Cypher against it by
+  naming its slug. Each tool now requires the repository (or group) to be
+  registered to the caller's workspace and researchable under the access
+  rules; deny-globbed files are filtered from results, and raw Cypher is
+  refused on a repository with path restrictions. Unknown, foreign and refused
+  targets answer exactly like a missing graph. `single_tenant` behaviour is
+  unchanged apart from the slug check below.
+- **Repo slugs are validated before they become paths.** `repo_path`,
+  `repo_data_path`, `repo_graph_path` and `repo_vault_path` refuse anything
+  outside `[A-Za-z0-9._-]`, `..`, `.` and empty strings, and check that the
+  result is a direct child of its base directory. `../` in a slug reached any
+  graph file on the box. The API answers 404 for a refused slug.
+- **The `/mcp` mount's research-access check now includes the tenant binding
+  under `multi_tenant`**, for global admins too, so `get_api_surface`,
+  `get_owner`, `get_architecture`, `route_incident`, `get_review_policy`,
+  `get_my_access` and the project tools refuse a repository registered to
+  another workspace. `list_deprecations` and `get_review` read only the
+  caller's workspace.
+- **REST:** under `multi_tenant`, routes guarded by `require_repo_permission`
+  (`/api/intel/ownership|architecture|reverse-index/{repo_slug}` and their
+  rebuilds, policy writes, repo delete) return 404 for a repository outside
+  the active workspace, global admins included.
+  `GET /api/review-policies/{repo_slug}/branches` no longer runs `git` in an
+  unregistered or traversal path, in any mode. The deprecation consumer scan
+  only walks the deprecation's own workspace's repositories under
+  `multi_tenant`.
+
 ## [0.2.0] — 2026-10-03
 
 ### Added

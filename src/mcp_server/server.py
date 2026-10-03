@@ -29,7 +29,7 @@ from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from src.mcp_server import tools
+from src.mcp_server import tenancy, tools
 from src.mcp_server.scopes import require_scopes
 
 logger = logging.getLogger(__name__)
@@ -72,6 +72,20 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
     else:
         mcp = FastMCP(SERVER_NAME, instructions=SERVER_DESCRIPTION)
 
+    # Every tool below that names a repository or a group asks `tenancy`
+    # first. Under single_tenant that is a slug-syntax check and nothing more;
+    # under multi_tenant it confines the caller to its own workspace, and an
+    # unknown, foreign or refused target reads exactly like a missing one.
+    def _listing_workspace() -> str | None:
+        if not tenancy.enforced():
+            return None
+        from src.mcp_server.identity import resolve_caller
+
+        caller = resolve_caller()
+        # An empty string matches no group: a caller with no workspace owns
+        # none, rather than falling through to the installation-wide view.
+        return caller.workspace_id if tenancy.caller_may_bind(caller) else ""
+
     @mcp.tool(
         name="list_groups",
         description=(
@@ -82,7 +96,9 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
     )
     @require_scopes("read:groups")
     def _list_groups() -> dict[str, Any]:
-        items = tools.list_groups()
+        items = tools.list_groups(workspace_id=_listing_workspace())
+        if tenancy.enforced():
+            items = [g for g in items if tenancy.authorize_group(g.name) is not None]
         return {
             "groups": [
                 {
@@ -107,7 +123,14 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
     )
     @require_scopes("read:groups")
     def _list_repos(group_name: str | None = None) -> dict[str, Any]:
-        items = tools.list_repos(group_name=group_name)
+        if group_name and tenancy.authorize_group(group_name) is None:
+            items = []  # the same answer as a group that does not exist
+        else:
+            items = tools.list_repos(
+                group_name=group_name, workspace_id=_listing_workspace(),
+            )
+        if tenancy.enforced():
+            items = [r for r in items if tenancy.authorize_repo(r.slug) is not None]
         return {
             "repos": [
                 {
@@ -136,7 +159,10 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         repo_slug: str,
         limit: int = 20,
     ) -> dict[str, Any]:
-        items = tools.find_symbol(name=name, repo_slug=repo_slug, limit=limit)
+        dec = tenancy.authorize_repo(repo_slug)
+        items = [] if dec is None else tenancy.visible_rows(
+            tools.find_symbol(name=name, repo_slug=repo_slug, limit=limit), dec,
+        )
         return {
             "name": name,
             "repo_slug": repo_slug,
@@ -156,7 +182,13 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         symbol_id: str,
         repo_slug: str,
     ) -> dict[str, Any] | None:
-        return tools.get_symbol(symbol_id=symbol_id, repo_slug=repo_slug)
+        dec = tenancy.authorize_repo(repo_slug)
+        if dec is None:
+            return None
+        sym = tools.get_symbol(symbol_id=symbol_id, repo_slug=repo_slug)
+        if sym is None or not tenancy.visible_rows([sym], dec):
+            return None
+        return sym
 
     @mcp.tool(
         name="find_callers",
@@ -173,10 +205,16 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         depth: int = 2,
         max_nodes: int = 100,
     ) -> dict[str, Any]:
-        return tools.find_callers(
+        dec = tenancy.authorize_repo(repo_slug)
+        if dec is None:
+            return tools._empty_expansion(repo_slug)
+        out = tools.find_callers(
             symbol_id=symbol_id, repo_slug=repo_slug,
             depth=depth, max_nodes=max_nodes,
         )
+        if "callers" in out:
+            out["callers"] = tenancy.visible_rows(out["callers"], dec)
+        return out
 
     @mcp.tool(
         name="find_callees",
@@ -192,10 +230,16 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         depth: int = 2,
         max_nodes: int = 100,
     ) -> dict[str, Any]:
-        return tools.find_callees(
+        dec = tenancy.authorize_repo(repo_slug)
+        if dec is None:
+            return tools._empty_expansion(repo_slug)
+        out = tools.find_callees(
             symbol_id=symbol_id, repo_slug=repo_slug,
             depth=depth, max_nodes=max_nodes,
         )
+        if "callees" in out:
+            out["callees"] = tenancy.visible_rows(out["callees"], dec)
+        return out
 
     @mcp.tool(
         name="cross_repo_edges",
@@ -209,7 +253,9 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
     )
     @require_scopes("read:groups")
     def _cross_repo_edges(group_name: str) -> dict[str, Any]:
-        edges = tools.cross_repo_edges(group_name=group_name)
+        edges = ([] if tenancy.authorize_group(group_name) is None
+                 else tools.cross_repo_edges(
+                     group_name=group_name, workspace_id=_listing_workspace()))
         return {
             "group": group_name,
             "edges": edges,
@@ -310,8 +356,17 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         repo_slug: str | None = None,
         group_name: str | None = None,
     ) -> dict[str, Any]:
+        if repo_slug:
+            # Raw Cypher returns whatever it asks for, so it cannot be filtered
+            # by path afterwards: allowed only where nothing is concealed.
+            dec = tenancy.authorize_repo(repo_slug)
+            if dec is None or not tenancy.unrestricted(dec):
+                return dict(tools.GRAPH_NOT_FOUND)
+        elif group_name and tenancy.authorize_group(group_name) is None:
+            return dict(tools.GRAPH_NOT_FOUND)
         return tools.query_graph(
             cypher=cypher, repo_slug=repo_slug, group_name=group_name,
+            workspace_id=_listing_workspace(),
         )
 
     # ─── Automation: the write half ──────────────────────────────────
