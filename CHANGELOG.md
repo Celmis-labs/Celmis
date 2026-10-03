@@ -55,11 +55,22 @@ derives it from there.
   as an Edition card. `schema_version` is 2.
 - **LiteLLM proxy as an LLM provider**: point Celmis at an existing LiteLLM
   gateway and use the models it routes, with the gateway's own keys, budgets
-  and logging.
+  and logging. Configured only in the UI by a workspace admin: the URL must be
+  public `https` (no userinfo, query or fragment; private, loopback,
+  link-local, metadata and CGNAT addresses refused after DNS resolution; the
+  connection is pinned to the checked address; no redirects; 2 MB cap), and
+  it is saved only after `/v1/models` answers with that key. URL and key are
+  stored encrypted; the API shows a masked key and a fingerprint, the host to
+  admins only. Model pickers list what the proxy serves. A LAN proxy needs
+  `LITELLM_PROXY_ALLOWED_HOSTS`. Proxy aliases get no `cache_control`
+  breakpoints unless the proxy reports Claude behind them (forwarded to a
+  Gemini free tier they failed every call with a 429).
 - **Issues**: findings followed across a PR's pushes by a line-free
   fingerprint, marked fixed when a later commit removes them, with status
   tabs, filters and per-row status changes (`/issues`, `GET/PATCH
-  /api/issues`).
+  /api/issues`). "Fixed" needs the flagged line itself gone, not just its
+  file changed; a finding the model re-words (new title, new rule id) on the
+  same line re-finds its issue instead of opening a second one.
 - **Pull requests**: every reviewed PR with its state from close/merge
   webhooks, review count and open suggestions (`/pull-requests`).
 - **Ignore globs** per repository review policy: matching paths are skipped
@@ -81,6 +92,10 @@ derives it from there.
 
 ### Fixed
 
+- A review's cost is no longer "unknown" because agents that call no model
+  (cve, structural) ran in it.
+- Tests that pinned LiteLLM's model table (red on `main` since 2026-09-16)
+  read it from the installed version instead.
 - **Google sign-in** no longer links or creates an account for an email
   Google has not verified.
 - **An SSO-only session is not renewed** by `/api/auth/refresh`, so disabling
