@@ -323,7 +323,7 @@ class ReviewBatch:
     cross_repo_callers: int = 0  # unique cross-repo blast radius
     # Stage 11 (BYOK) — sum across all agents; None if any agent had unknown model.
     cost_usd: float | None = None
-    cost_source: str = "unknown"   # 'openrouter_actual' | 'litellm_estimate' | 'unknown' | 'mixed'
+    cost_source: str = "unknown"   # 'openrouter_actual' | 'manual_price' | 'proxy_price' | 'litellm_estimate' | 'unknown' | 'mixed'
     #: Every parameter Celmis changed between what was asked and what was sent,
     #: for every agent of this run — a ceiling clamped to the model max, a
     #: reasoning word or a temperature the provider refused, a fallback model

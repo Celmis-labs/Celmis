@@ -56,7 +56,7 @@ class LLMResult:
     model: str
     finish_reason: str
     cost_usd: float | None
-    cost_source: str        # "openrouter_actual" | "litellm_estimate" | "unknown"
+    cost_source: str        # "openrouter_actual" | "manual_price" | "proxy_price" | "litellm_estimate" | "unknown"
     provider: str           # extracted from model prefix ("anthropic/..." → "anthropic")
     cached_input_tokens: int = 0  # provider-native prompt cache reads (Anthropic)
     #: The model's own output ceiling, when the requested one was above it and
@@ -97,6 +97,11 @@ KeyResolver = Callable[[str], str]
 # Agent gets its own model override (from policy or workspace default).
 ModelResolver = Callable[[str], str]
 
+# price_proxy_call(resolved_model, tokens_in, tokens_out, response_cost,
+# response_source) → (cost_usd | None, cost_source). Workspace proxy only.
+ProxyCallPricer = Callable[[str, int, int, float | None, str],
+                           tuple[float | None, str]]
+
 # on_delta(text_so_far) → False to stop consuming the stream.
 #
 # It receives the whole answer SO FAR rather than the newest fragment: every
@@ -136,6 +141,7 @@ class LLMClient:
         user_id: str | None = None,
         map_explicit_model: Callable[[str], str] | None = None,
         estimate_proxy_cost: Callable[[], bool] | None = None,
+        price_proxy_call: ProxyCallPricer | None = None,
     ) -> None:
         self._resolve_key = resolve_key
         self._resolve_model = resolve_model  # optional — callers can pass model directly
@@ -172,6 +178,10 @@ class LLMClient:
         # turning them into estimates would start feeding budgets that never
         # fired before.
         self._estimate_proxy_cost_hook = estimate_proxy_cost
+        # Prices a workspace-proxy call the one way every cost path does
+        # (src/llm/proxy_pricing.workspace_proxy_cost): manual price, then the
+        # response's own figure, the proxy's declared price, the table.
+        self._price_proxy_call = price_proxy_call
 
     def _estimate_proxy_cost(self) -> bool:
         if not self._estimate_proxy_cost_hook:
@@ -667,7 +677,14 @@ class LLMClient:
 
             from src.llm.pricing import cost_for, extract_actual_cost_usd
             cost_usd, cost_source = extract_actual_cost_usd(response)
-            if (cost_usd is None and provider == "litellm_proxy"
+            if (provider == "litellm_proxy" and self._price_proxy_call
+                    and self._estimate_proxy_cost()):
+                # Pricing never fails a call.
+                with contextlib.suppress(Exception):
+                    cost_usd, cost_source = self._price_proxy_call(
+                        resolved_model, input_tokens, output_tokens,
+                        cost_usd, cost_source)
+            elif (cost_usd is None and provider == "litellm_proxy"
                     and self._resolve_billing_model and self._estimate_proxy_cost()):
                 # A proxy alias / deployment name is in no price table; the
                 # model behind it usually is. Estimate off that — still None
@@ -1158,6 +1175,26 @@ def build_llm_client(
             return _litellm_underlying(p, alias) or alias
         return p.gateway_underlying or p.model or resolved
 
+    def _price_call(resolved: str, tokens_in: int, tokens_out: int,
+                    response_cost: float | None,
+                    response_source: str) -> tuple[float | None, str]:
+        p = _route()
+        if p is None or p.via_gateway or p.provider != "litellm":
+            return response_cost, response_source
+        from src.llm.proxy_pricing import (
+            price_workspace,
+            profile_endpoint,
+            workspace_proxy_cost,
+        )
+        alias = resolved.split("/", 1)[1] if resolved.startswith("litellm_proxy/") \
+            else resolved
+        return workspace_proxy_cost(
+            alias, workspace_id=price_workspace(p.surface, workspace_id),
+            endpoint=profile_endpoint(p), tokens_in=tokens_in,
+            tokens_out=tokens_out, response_cost=response_cost,
+            response_source=response_source,
+        )
+
     return LLMClient(
         resolve_key=_key,
         resolve_model=_model if resolve_model else None,
@@ -1165,6 +1202,7 @@ def build_llm_client(
         resolve_billing_model=_billing_model,
         map_explicit_model=_explicit,
         estimate_proxy_cost=_is_workspace_proxy,
+        price_proxy_call=_price_call,
         user_id=user_id,
         workspace_id=workspace_id,
         # Defaults to the profile surface, which is right for review and for

@@ -86,16 +86,25 @@ def _record_litellm_spend(
         from src.llm.gemini_client import _surface_for
         from src.llm.pricing import cost_for
 
-        if cost_usd is None:
+        if p.provider == "litellm" and not p.via_gateway:
+            # A workspace-proxy alias: manual price → what the response said
+            # → the proxy's declared price → the table price of the model
+            # behind it. One resolver for every path (src/llm/proxy_pricing).
+            from src.llm.proxy_pricing import (
+                price_workspace,
+                profile_endpoint,
+                workspace_proxy_cost,
+            )
+            cost_usd, cost_source = workspace_proxy_cost(
+                p.model, workspace_id=price_workspace(p.surface, workspace_id),
+                endpoint=profile_endpoint(p),
+                tokens_in=tokens_in, tokens_out=tokens_out,
+                response_cost=cost_usd, response_source=cost_source,
+            )
+        elif cost_usd is None:
             cost_usd = cost_for(p.litellm_model, tokens_in, tokens_out)
             if cost_usd is None:
                 cost_usd = cost_for(p.model, tokens_in, tokens_out)
-            if cost_usd is None and p.provider == "litellm":
-                # A proxy alias is in no price table; what it runs on usually
-                # is. Best effort (cached /model/info) — None stays None.
-                underlying = _litellm_underlying(p)
-                if underlying:
-                    cost_usd = cost_for(underlying, tokens_in, tokens_out)
             cost_source = "litellm_estimate" if cost_usd is not None else "unknown"
         record_spend(
             workspace_id=workspace_id,

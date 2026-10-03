@@ -379,7 +379,7 @@ class ReviewRunOut(BaseModel):
     summary: str = ""
     # Stage 11 — cost tracking (BYOK)
     cost_usd: float | None = None
-    cost_source: str | None = None      # 'openrouter_actual' | 'litellm_estimate' | 'unknown' | 'mixed'
+    cost_source: str | None = None      # 'openrouter_actual' | 'manual_price' | 'proxy_price' | 'litellm_estimate' | 'unknown' | 'mixed'
     tokens_input: int = 0
     tokens_output: int = 0
     #: Lifecycle state of the run — 'queued' | 'running' | 'complete' |
