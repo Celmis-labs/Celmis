@@ -109,7 +109,8 @@ the endpoint the provider's callback posts to — the login page needs both.
 EDITION AND LICENCE
 -------------------
 ``edition`` is ``"community"`` or ``"enterprise"``: enterprise when a valid
-licence was loaded at start-up (``src/ee/license.py``), community otherwise —
+licence is in force (``src/ee/license.py`` — loaded at start-up, or entered
+on /admin/health and applied at once), community otherwise —
 including when the ``src/ee`` package is not in the build at all. This file
 does not import ``src.ee``; it reads the licence SUMMARY that
 ``src.ee.mount_enterprise`` leaves on ``app.state.celmis_license``.
@@ -261,6 +262,14 @@ FEATURES: tuple[Feature, ...] = (
     # against full paths — see `prefix_is_mounted`. No page: the login form
     # reads `features.sso` to decide whether to offer the button.
     Feature("sso", ("/api/auth/oidc",), (), license_feature="sso"),
+    # Entering the licence from /admin/health (src/ee/license_router.py,
+    # LICENSE_EE). Mounted whenever src/ee is in the build, licensed or not —
+    # it is how a community install becomes an enterprise one — so it is NOT
+    # gated by a licence feature. Absent only from a build without src/ee,
+    # which is still a complete community edition, hence not counted. No
+    # page: /admin/health belongs to `ops`, and the edition card hides only
+    # the licence form when this reports false.
+    Feature("license", ("/api/license",), (), counts_towards_edition=False),
 )
 
 

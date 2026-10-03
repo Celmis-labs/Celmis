@@ -23,12 +23,19 @@ from fastapi.testclient import TestClient
 
 from src.ee import license as lic
 from src.ee import mount_enterprise
-from tests.ee.licensing import CUSTOMER, TEST_KEY, mint_test_license, trust_test_key
+from tests.ee.licensing import (
+    CUSTOMER,
+    TEST_KEY,
+    isolate_license_store,
+    mint_test_license,
+    trust_test_key,
+)
 
 
 @pytest.fixture()
-def trusted(monkeypatch):
+def trusted(monkeypatch, tmp_path):
     trust_test_key(monkeypatch)
+    isolate_license_store(monkeypatch, tmp_path)
     monkeypatch.delenv(lic.ENV_KEY, raising=False)
     monkeypatch.delenv(lic.ENV_FILE, raising=False)
 
