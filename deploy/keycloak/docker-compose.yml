@@ -18,6 +18,11 @@
 #   AUTH_OIDC_CLIENT_SECRET=celmis-dev-secret
 #   AUTH_OIDC_NAME=Keycloak
 #   OIDC_ADMIN_ROLE=celmis-admin
+#   CELMIS_LICENSE_KEY=<a licence whose features include sso>
+#
+# SSO is an enterprise feature: without a valid licence granting `sso` the
+# API does not mount /api/auth/oidc and the web shows no SSO button, however
+# the variables above are set. See ee/README.md, "Configuring a licence".
 #
 # The issuer must be ONE address that both the browser and the Celmis
 # containers can reach, because the `iss` claim is compared exactly.

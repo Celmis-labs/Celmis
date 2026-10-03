@@ -234,8 +234,19 @@ class ReviewOrchestrator:
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
 
         # ── Build agent context (passes custom_rules from policy + matching folder_rules) ──
+        # The agents get the PR with the FILTERED diff text. Compliance and
+        # breaking-change build their prompts from `raw_diff`, and the CVE
+        # agent reads lockfile sections from it: handed the whole text they
+        # read — and sent to the model — files the repository said must never
+        # be read, and an early ignored section could push the code a rule is
+        # about out of a truncated prompt. `batch.pull_request` keeps the
+        # whole diff for the run row's diff view.
+        agent_pr = pr
+        if ignore_globs:
+            import dataclasses
+            agent_pr = dataclasses.replace(pr, raw_diff=review_diff)
         context = self._build_context(
-            pr, policy=policy, user_id=user_id, workspace_id=workspace_id,
+            agent_pr, policy=policy, user_id=user_id, workspace_id=workspace_id,
         )
 
         batch.cross_repo_callers = context.cross_repo_callers_count

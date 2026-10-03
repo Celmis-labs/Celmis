@@ -187,3 +187,92 @@ def test_google_unverified_email_does_not_create_an_account(client, users, monke
     r = client.post("/api/auth/google", json={"id_token": "x"})
     assert r.status_code == 403
     assert users.get_by_email("victim@corp.example") is None
+
+
+# ─── the master address is never an external identity ──────────────
+
+MASTER_EMAIL = "root@example.com"
+MASTER_KEY = "sk-master-correct-horse-battery"
+
+
+def _google_says(monkeypatch, **claims):
+    from src.api.routers import auth as auth_router
+
+    monkeypatch.setenv("GOOGLE_OAUTH_CLIENT_ID", "g-client")
+    payload = {"aud": "g-client", "iss": "https://accounts.google.com",
+               "sub": "g-master", "email": MASTER_EMAIL, "email_verified": "true",
+               **claims}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(auth_router, "build_client", lambda **k: _Client())
+
+
+def test_google_cannot_create_the_master_address_before_the_first_master_login(
+        client, users, monkeypatch):
+    """No account holds the master email yet. A verified Google identity for
+    it must not create one: the first master login would adopt that account
+    and the Google identity would sign in as global admin from then on."""
+    monkeypatch.setenv("CELMIS_MASTER_EMAIL", MASTER_EMAIL)
+    monkeypatch.setenv("CELMIS_MASTER_KEY", MASTER_KEY)
+    _google_says(monkeypatch, email="Root@Example.com")
+    assert client.post("/api/auth/google", json={"id_token": "x"}).status_code == 403
+    assert users.get_by_email(MASTER_EMAIL) is None
+    assert users.get_by_google_sub("g-master") is None
+
+    r = client.post("/api/auth/login", json={"email": MASTER_EMAIL, "password": MASTER_KEY})
+    assert r.status_code == 200, r.text
+    master = users.get_by_email(MASTER_EMAIL)
+    assert master.id == "master-admin" and master.google_sub is None
+
+
+def test_the_master_login_does_not_adopt_an_externally_bound_account(
+        client, users, monkeypatch):
+    """An account bound to Google/SSO that already carries the master email
+    (created before the env named it) is refused, not made global admin."""
+    from src.users import User, UserAuthMethod
+
+    users.create(User(id="g-user", email=MASTER_EMAIL,
+                      auth_method=UserAuthMethod.GOOGLE_OAUTH, google_sub="g-master"))
+    users.create(User(id="sso-user", email="ops@example.com",
+                      auth_method=UserAuthMethod.OIDC,
+                      oidc_iss=ISSUER, oidc_sub="kc-ops"))
+    monkeypatch.setenv("CELMIS_MASTER_KEY", MASTER_KEY)
+
+    monkeypatch.setenv("CELMIS_MASTER_EMAIL", MASTER_EMAIL)
+    r = client.post("/api/auth/login", json={"email": MASTER_EMAIL, "password": MASTER_KEY})
+    assert r.status_code == 401
+    assert users.get_by_id("g-user").is_admin is False
+
+    monkeypatch.setenv("CELMIS_MASTER_EMAIL", "ops@example.com")
+    r = client.post("/api/auth/login", json={"email": "ops@example.com", "password": MASTER_KEY})
+    assert r.status_code == 401
+    assert users.get_by_id("sso-user").is_admin is False
+    assert users.get_by_id("master-admin") is None
+
+
+def test_a_google_identity_bound_to_the_master_address_is_refused(
+        client, users, monkeypatch):
+    """Found by subject, not by email: the guard runs on that branch too."""
+    from src.users import User, UserAuthMethod
+
+    users.create(User(id="g-user", email=MASTER_EMAIL,
+                      auth_method=UserAuthMethod.GOOGLE_OAUTH, google_sub="g-master"))
+    monkeypatch.setenv("CELMIS_MASTER_EMAIL", MASTER_EMAIL)
+    _google_says(monkeypatch, email="someone-else@example.com")
+    assert client.post("/api/auth/google", json={"id_token": "x"}).status_code == 403

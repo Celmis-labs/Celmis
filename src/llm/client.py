@@ -439,6 +439,8 @@ class LLMClient:
             prompt=prompt,
             system_instruction=system_instruction,
             redacted_code=redacted_code,
+            cache_breakpoints=_cache_breakpoints_welcome(
+                resolved_model, self._workspace_id),
         )
 
         with self._audit.track(
@@ -921,18 +923,52 @@ def _rebuild_response(
     )
 
 
+def _cache_breakpoints_welcome(resolved_model: str, workspace_id: str) -> bool:
+    """May this call carry `cache_control` breakpoints?
+
+    Everywhere but a workspace's own LiteLLM proxy, yes — that is the
+    behaviour every direct provider and the installation gateway have always
+    had. Behind a proxy alias Celmis does not know which model answers, and
+    the proxy forwards the markers as-is: in front of Gemini they become a
+    `cachedContents` request, which a free-tier project refuses outright
+    (429 "TotalCachedContentStorageTokensPerModelFreeTier ... limit=0"). That
+    took down every review agent and the Celmis agent on the first live
+    proxy. So the markers go only when the proxy's own /model/info says the
+    alias runs on Claude, where they are the 75%-input-tokens win.
+    """
+    if not resolved_model.startswith("litellm_proxy/"):
+        return True
+    try:
+        from src.llm import litellm_proxy
+        ep = litellm_proxy.resolve_endpoint(workspace_id)
+    except Exception:  # noqa: BLE001 — no readable endpoint means not ours
+        return True
+    if ep is None:
+        return True  # the installation gateway, which Celmis provisioned itself
+    alias = resolved_model.split("/", 1)[1]
+    try:
+        underlying = litellm_proxy.underlying_model(ep, alias) or ""
+    except Exception:  # noqa: BLE001 — unknown upstream: send nothing it may refuse
+        return False
+    return underlying.startswith("anthropic/") or "claude" in underlying.lower()
+
+
 def _build_messages(
     *,
     prompt: str,
     system_instruction: str | None,
     redacted_code: str,
+    cache_breakpoints: bool = True,
 ) -> list[dict[str, Any]]:
     """OpenAI-style messages. LiteLLM normalises to each provider's format.
 
     `cache_control` breakpoints are added on the big blocks (system prompt +
     code context) so Anthropic's prompt cache kicks in when multiple agents
-    share the same content. This is the free 75%-input-tokens win.
+    share the same content. This is the free 75%-input-tokens win. They are
+    left out when `cache_breakpoints` is False — see
+    `_cache_breakpoints_welcome`.
     """
+    cache = {"cache_control": {"type": "ephemeral"}} if cache_breakpoints else {}
     messages: list[dict[str, Any]] = []
     if system_instruction:
         messages.append({
@@ -941,7 +977,7 @@ def _build_messages(
                 {
                     "type": "text",
                     "text": system_instruction,
-                    "cache_control": {"type": "ephemeral"},
+                    **cache,
                 },
             ],
         })
@@ -951,7 +987,7 @@ def _build_messages(
         user_parts.append({
             "type": "text",
             "text": f"## Source code (redacted)\n{redacted_code}",
-            "cache_control": {"type": "ephemeral"},
+            **cache,
         })
     user_parts.append({"type": "text", "text": prompt})
 

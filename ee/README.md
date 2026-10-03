@@ -105,15 +105,21 @@ authorisation boundary. Every endpoint still does its own 401 and 403.
 Give the **API** container one of:
 
 ```bash
-CELMIS_LICENSE_KEY=eyJhbGciOiJFZERTQSIs...   # the token itself
-CELMIS_LICENSE_FILE=/run/secrets/celmis.license   # or a file holding it
+CELMIS_LICENSE_KEY=eyJhbGciOiJFZERTQSIs...        # the token itself
+CELMIS_LICENSE_FILE=/workspace/data/celmis.license  # or a file holding it
 ```
+
+A file must be somewhere the API container can see. The shipped
+`docker-compose.yml` mounts only the `workspace_data` volume at
+`/workspace/data` (and the vault), so put the file there — a path like
+`/run/secrets/...` works only if you add that mount or secret yourself.
 
 The variable wins when both are set. Restart the API; the log says
 `license_valid customer=... features=... expires_at=...`, and `/admin/health`
-shows the edition. SSO additionally needs the `AUTH_OIDC_*` variables on the
-web container and `OIDC_*` (or the same `AUTH_OIDC_*`) on the API — see
-`.env.example`.
+shows the edition. SSO additionally needs the `AUTH_OIDC_*` variables, which
+the shipped compose forwards to both the web and the API container — see
+`.env.example`. (The API also accepts bare `OIDC_ISSUER` / `OIDC_CLIENT_ID`,
+but compose does not forward those names, so under it they never arrive.)
 
 ## Minting a licence
 

@@ -31,8 +31,9 @@ exception.
     unqualified AGPL. It now covers single sign-on and review analytics, in
     `src/ee/`, `web/ee/` and `tests/ee/`.
 
-    Everything else in this repository — the whole of `src/`, `web/`,
-    `tests/`, `scripts/` and the deployment files — is AGPL-3.0, including the
+    Everything else in this repository — `src/`, `web/` and `tests/` outside
+    their `ee/` directories, `scripts/` and the deployment files — is
+    AGPL-3.0, including the
     audit console, the usage and spend views, the compliance checks and the
     installation metrics. Those are not held back: a team self-hosting Celmis
     is exactly the audience this licence is chosen for, and taking their audit

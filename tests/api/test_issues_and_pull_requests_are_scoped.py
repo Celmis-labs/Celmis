@@ -82,6 +82,12 @@ PRS = [
      "number": 9, "title": "Bump deps", "author": "dana", "state": "open",
      "reviews_count": 1, "last_review_status": "failed",
      "opened_at": _ago(3), "updated_at": _ago(2)},
+    # Written by a close webhook for a PR Celmis never reviewed (a skipped
+    # draft, one opened before the install). Kept for its state, never listed.
+    {"id": "p10", "workspace_id": WS, "provider": "github", "repo": "acme/never",
+     "number": 10, "title": "Old draft", "author": "dana", "state": "closed",
+     "reviews_count": 0, "last_review_status": None,
+     "opened_at": _ago(0.1), "updated_at": _ago(0.1)},
 ]
 
 
@@ -174,3 +180,5 @@ async def test_pull_requests_list(monkeypatch) -> None:
         assert [p["number"] for p in body["items"]] == [8]
         body = (await c.get("/api/pull-requests?state=merged")).json()
         assert body["total"] == 1
+        body = (await c.get("/api/pull-requests?state=closed")).json()
+        assert body["total"] == 0, "a PR Celmis never reviewed is listed"

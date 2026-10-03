@@ -26,7 +26,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { AnimatePresence } from "motion/react";
 import * as m from "motion/react-m";
 import {
@@ -37,7 +37,7 @@ import { useT } from "@/lib/i18n";
 import { AGENT_WIDGET_OPEN_KEY } from "@/lib/agent-session";
 import { useToken } from "@/lib/use-token";
 import {
-  Reply, newSessionId, sendsOnEnter, useAutomationThread,
+  Reply, newSessionId, sendsOnEnter, useAutomationThread, type Run,
 } from "@/components/automation/thread";
 import { Button } from "@/components/ui/button";
 
@@ -70,6 +70,17 @@ function setOpen(open: boolean): void {
   openListeners.forEach((fn) => fn());
 }
 
+/** Close the panel. With focus inside it, focus would drop to <body> when
+ *  the panel unmounts and the next Tab would start from the top of the page,
+ *  so it goes back to the button that opened it. Focus on the page beneath
+ *  (the panel is not modal) is left where it is. */
+function closeReturningFocus(launcher: HTMLButtonElement | null): void {
+  const panel = document.getElementById("agent-panel");
+  const inside = !!panel && panel.contains(document.activeElement);
+  setOpen(false);
+  if (inside) launcher?.focus();
+}
+
 /** Where the button would sit on top of something that is already there.
  *
  *  /automation is the full view of this same conversation. The Q&A chat and
@@ -99,6 +110,24 @@ const SUGGESTIONS = [
   "agentWidget.q.repos",
 ] as const;
 
+/** What a screen reader is told when a reply lands: the newest turn's note,
+ *  once it is no longer being read, and only for a turn that settled after
+ *  the panel opened — reopening the panel must not read the last answer of
+ *  yesterday aloud. Links are read as their words.
+ *
+ *  This is the ONLY live text in the panel. The transcript itself used to be
+ *  the live region, and while a reply streams it is rewritten every 400 ms,
+ *  so a screen reader re-announced a growing paragraph over and over. */
+export function replyToAnnounce(
+  thread: Pick<Run, "id" | "status" | "note" | "error">[],
+  settledAtOpen: ReadonlySet<string> | null,
+): string {
+  if (!settledAtOpen) return "";
+  const last = thread[thread.length - 1];
+  if (!last || last.status === "reading" || settledAtOpen.has(last.id)) return "";
+  return (last.note || last.error || "").replace(/\[([^\]\n]+)\]\([^)\n]*\)/g, "$1");
+}
+
 /** Spring for the panel: quick to arrive, settles without a wobble. */
 const PANEL_SPRING = { type: "spring", stiffness: 420, damping: 34, mass: 0.8 } as const;
 
@@ -108,13 +137,16 @@ export function AgentWidget() {
   const pathname = usePathname();
   const open = useSyncExternalStore(subscribeOpen, readOpen, () => false);
   const hidden = HIDDEN_ON.some((re) => re.test(pathname));
+  const launcher = useRef<HTMLButtonElement>(null);
+
+  const close = () => closeReturningFocus(launcher.current);
 
   // Escape closes, from anywhere — the panel is not modal, so focus may well
   // be on the page beneath it.
   useEffect(() => {
     if (!open || hidden) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented) setOpen(false);
+      if (e.key === "Escape" && !e.defaultPrevented) closeReturningFocus(launcher.current);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -125,7 +157,7 @@ export function AgentWidget() {
   return (
     <>
       <AnimatePresence>
-        {open && <AgentPanel key="agent-panel" />}
+        {open && <AgentPanel key="agent-panel" onClose={close} />}
       </AnimatePresence>
 
       {/* Bottom-right, clear of the home indicator and the notch's side
@@ -133,6 +165,7 @@ export function AgentWidget() {
           above the page and its sticky bar (z-10), below the phone drawer's
           backdrop (z-30) so opening the menu dims it like everything else. */}
       <m.button
+        ref={launcher}
         type="button"
         onClick={() => setOpen(!open)}
         aria-label={open ? t("agentWidget.close") : t("agentWidget.open")}
@@ -163,13 +196,24 @@ export function AgentWidget() {
   );
 }
 
-function AgentPanel() {
+function AgentPanel({ onClose }: { onClose: () => void }) {
   const t = useT();
   const composer = useRef<HTMLTextAreaElement>(null);
   const {
-    sessionId, selectSession, thread, reading, draft, setDraft, send,
+    sessionId, selectSession, history, thread, reading, draft, setDraft, send,
     dismissed, setDismissed, scrollRef, propose, stop, confirm,
   } = useAutomationThread();
+
+  // The turns already settled when the thread first loaded in this panel.
+  // Set during render, once (React's "adjust state while rendering"): an
+  // effect would announce one stale reply in the render before it ran.
+  const [settledAtOpen, setSettledAtOpen] = useState<ReadonlySet<string> | null>(null);
+  if (settledAtOpen === null && history.isSuccess) {
+    setSettledAtOpen(new Set(
+      thread.filter((r) => r.status !== "reading").map((r) => r.id),
+    ));
+  }
+  const announcement = replyToAnnounce(thread, settledAtOpen);
 
   // Focus the composer when the panel opens — with a mouse. On a phone that
   // would throw up the keyboard over the answer the person opened it to read.
@@ -219,7 +263,7 @@ function AgentPanel() {
         </button>
         <Link
           href="/automation"
-          onClick={() => setOpen(false)}
+          onClick={onClose}
           title={t("agentWidget.fullView")}
           aria-label={t("agentWidget.fullView")}
           className="grid size-9 place-items-center rounded-md text-[var(--color-muted-foreground)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)] sm:size-8"
@@ -228,7 +272,7 @@ function AgentPanel() {
         </Link>
         <button
           type="button"
-          onClick={() => setOpen(false)}
+          onClick={onClose}
           title={t("agentWidget.close")}
           aria-label={t("agentWidget.close")}
           className="grid size-9 place-items-center rounded-md text-[var(--color-muted-foreground)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)] sm:size-8"
@@ -237,10 +281,12 @@ function AgentPanel() {
         </button>
       </header>
 
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </p>
       <div
         ref={scrollRef}
         className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3"
-        aria-live="polite"
       >
         {recent.length === 0 ? (
           <div className="space-y-3 px-1 py-2">

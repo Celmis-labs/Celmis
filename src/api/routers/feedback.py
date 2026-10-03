@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api import deps as deps_module
 from src.api.deps import current_workspace_id, get_current_user
 from src.db.models import FindingFeedback
 from src.db.session import get_async_session
@@ -44,6 +45,52 @@ def finding_key(file_path: str, line: int, title: str, rule_id: str | None = Non
     """
     basis = f"{rule_id or ''}|{file_path}|{line}|{title.strip()[:120]}"
     return hashlib.sha256(basis.encode()).hexdigest()[:20]
+
+
+def _issue_scope(
+    user: User, ws: str, run_id: str,
+) -> tuple[bool, tuple[str, str, int] | None]:
+    """(may this user change the run's issue?, the run's PR or None).
+
+    The feedback itself is anyone's opinion, but carrying it onto the PR's
+    issue CHANGES the issue — the thing PATCH /api/issues allows from member
+    up only. A viewer's verdict is recorded and stops there.
+
+    The PR comes from the run row, so the issue is found whichever of the
+    PR's runs the feedback was given on; a run of another workspace yields
+    none.
+    """
+    if not user.is_admin:
+        role = deps_module.workspace_role(user.id, ws)
+        if role not in deps_module.ISSUE_WRITE_ROLES:
+            return False, None
+    try:
+        from src.api.review_runs import get_review_run_store
+
+        found = get_review_run_store().pr_of(run_id)
+    except Exception as exc:  # noqa: BLE001 — the run-id match still works
+        logger.warning("feedback_run_pr_lookup_failed run=%s err=%s", run_id, exc)
+        found = None
+    if found is None or found[0] != ws:
+        return True, None
+    return True, found[1:]
+
+
+async def _sync_issue(
+    user: User, ws: str, run_id: str, *, state: str | None,
+    file_path: str, title: str, rule_id: str | None,
+) -> None:
+    import asyncio
+
+    from src.review.issues import apply_feedback
+
+    allowed, pr = await asyncio.to_thread(_issue_scope, user, ws, run_id)
+    if not allowed:
+        return
+    await asyncio.to_thread(
+        apply_feedback, workspace_id=ws, run_id=run_id, state=state,
+        file_path=file_path, title=title, rule_id=rule_id, pr=pr,
+    )
 
 
 class FeedbackIn(BaseModel):
@@ -135,11 +182,8 @@ async def upsert_feedback(
         run_id, payload.finding_key, payload.state, payload.agent, user.email,
     )
     if payload.file_path and payload.title is not None:
-        import asyncio
-
-        from src.review.issues import apply_feedback
-        await asyncio.to_thread(
-            apply_feedback, workspace_id=ws, run_id=run_id, state=payload.state,
+        await _sync_issue(
+            user, ws, run_id, state=payload.state,
             file_path=payload.file_path, title=payload.title,
             rule_id=payload.rule_id,
         )
@@ -153,7 +197,7 @@ async def upsert_feedback(
 async def clear_feedback(
     run_id: str, fkey: str,
     session: AsyncSession = Depends(get_async_session),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     ws: str = Depends(current_workspace_id),
     file_path: str | None = None,
     title: str | None = None,
@@ -171,11 +215,8 @@ async def clear_feedback(
     if file_path and title is not None:
         # Undoing a dismissal reopens the issue it dismissed — and only that:
         # `apply_feedback` leaves a status somebody set elsewhere alone.
-        import asyncio
-
-        from src.review.issues import apply_feedback
-        await asyncio.to_thread(
-            apply_feedback, workspace_id=ws, run_id=run_id, state=None,
+        await _sync_issue(
+            user, ws, run_id, state=None,
             file_path=file_path, title=title, rule_id=rule_id,
         )
 

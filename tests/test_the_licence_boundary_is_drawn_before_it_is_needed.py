@@ -34,6 +34,7 @@ helpful preamble and silently un-licenses the project again.
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 
@@ -214,3 +215,16 @@ def test_the_old_distribution_name_still_resolves():
     assert _DISTRIBUTIONS == DISTRIBUTIONS, (
         "src/vault/provenance.py carries its own copy and it has drifted"
     )
+
+
+def test_no_tree_with_enterprise_code_is_called_wholly_agpl():
+    """Once `src/ee/` held code, "the whole of `src/` is AGPL" contradicted
+    the exception two paragraphs earlier, in the file that defines it."""
+    text = " ".join((ROOT / "LICENSING.md").read_text(encoding="utf-8").split())
+    for top in ("src", "web", "tests"):
+        ee = ROOT / top / "ee"
+        if ee.is_dir() and any(p.is_file() for p in ee.rglob("*")):
+            assert not re.search(rf"whole of[^.]*`{top}/`", text), (
+                f"LICENSING.md calls the whole of {top}/ AGPL, but {top}/ee/ "
+                f"is under LICENSE_EE"
+            )

@@ -18,6 +18,9 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useT } from "@/lib/i18n";
 import { SsoButton } from "@/ee/sso/sso-button";
+import { forgetAgentSession } from "@/lib/agent-session";
+
+const SSO_ERROR_TOAST_ID = "sso-error";
 
 export function LoginForm({
   passwordLogin,
@@ -83,11 +86,22 @@ function LoginInner({ passwordLogin, ssoName }: { passwordLogin: boolean; ssoNam
       });
   }, []);
 
-  // NextAuth sends OAuth/OIDC failures back here as ?error=...
+  // NextAuth sends OAuth/OIDC failures back here as ?error=..., and so does
+  // auth.ts when the API refuses the id_token. `t` changes identity when a
+  // lazily loaded dictionary arrives or the language is switched here, so
+  // the effect re-runs: the fixed id makes that update the one toast (now in
+  // the right language) instead of stacking another.
   const authError = params.get("error");
   useEffect(() => {
-    if (authError) toast.error(t("auth.sso.failed"));
+    if (authError) toast.error(t("auth.sso.failed"), { id: SSO_ERROR_TOAST_ID });
   }, [authError, t]);
+
+  // Reaching the sign-in page means there is no session — including one that
+  // expired, where the proxy redirects here without a sign-out. Drop the
+  // agent state the sign-out buttons would have dropped (lib/agent-session.ts).
+  useEffect(() => {
+    forgetAgentSession();
+  }, []);
 
   const onCredentials = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();

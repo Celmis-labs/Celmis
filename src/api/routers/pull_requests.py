@@ -70,7 +70,12 @@ async def list_pull_requests(
     _user: User = Depends(get_current_user),
     ws: str = Depends(current_workspace_id),
 ) -> PullRequestList:
-    where = [ReviewPullRequest.workspace_id == ws]
+    # A close/merge webhook writes a row for any PR of a bound repository —
+    # one never reviewed included (a skipped draft, one opened before the
+    # install) — so the state of a review still running when it closed is not
+    # lost. This page is what Celmis REVIEWED: such rows stay out of it.
+    reviewed = ReviewPullRequest.reviews_count > 0
+    where = [ReviewPullRequest.workspace_id == ws, reviewed]
     if repo:
         where.append(or_(ReviewPullRequest.repo == repo,
                          ReviewPullRequest.repo_slug == repo))
@@ -122,7 +127,8 @@ async def list_pull_requests(
 
     repos = sorted({
         str(r) for (r,) in (await session.execute(
-            select(ReviewPullRequest.repo).where(ReviewPullRequest.workspace_id == ws)
+            select(ReviewPullRequest.repo).where(
+                ReviewPullRequest.workspace_id == ws, reviewed)
             .distinct()
         )).all() if r
     })

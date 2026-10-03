@@ -486,6 +486,24 @@ def test_models_split_by_mode_or_name(store, proxy):
     assert (out.generation, out.embedding) == (["chat-a"], ["vectors"])
 
 
+def test_a_member_listing_models_never_learns_the_proxy_host(store, proxy):
+    """GET /config hides the host from non-admins; the models list must not
+    hand it back through a proxy error. The saved host now resolves to a
+    private address, which is the error that names both host and IP."""
+    from src.api.routers.llm import provider_models
+
+    _save()
+    litellm_proxy.reset_cache()
+    DNS[HOST] = ["10.0.3.4"]
+    with patch("src.api.deps.is_workspace_admin", return_value=False):
+        member = provider_models("litellm", user=_MEMBER, workspace_id="ws-a")
+    assert member.generation == [] and member.detail
+    assert HOST not in member.detail and "10.0.3.4" not in member.detail
+    with patch("src.api.deps.is_workspace_admin", return_value=True):
+        admin = provider_models("litellm", user=_MEMBER, workspace_id="ws-a")
+    assert HOST in admin.detail
+
+
 # ─── 7. Isolation, Test, logs ─────────────────────────────────────────
 
 

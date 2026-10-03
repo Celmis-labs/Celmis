@@ -423,6 +423,11 @@ services:
       # only the LAN (public hosts and the cloud metadata address stay
       # refused; see src/security/egress.py).
       EGRESS_ALLOW_PRIVATE_NETWORK: "${EGRESS_ALLOW_PRIVATE_NETWORK:-false}"
+      # A workspace LiteLLM proxy on the LAN (src/llm/litellm_proxy.py) is
+      # refused unless its host is listed here. JSON list; the default is
+      # `[]`, not empty — pydantic cannot parse "" as a list and the API
+      # would not start.
+      LITELLM_PROXY_ALLOWED_HOSTS: '${LITELLM_PROXY_ALLOWED_HOSTS:-[]}'
       # Path overrides — у container працюємо з mount points
       WORKSPACE_DIR: /workspace/data
       # One-time DB reset switch. Set RESET_ONCE=<any token> in .env to wipe all

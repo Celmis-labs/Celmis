@@ -31,6 +31,7 @@ import {
 } from "lucide-react";
 
 import { api, llmApi } from "@/lib/api";
+import { isInAppHref } from "@/lib/in-app-href";
 import { AGENT_SESSION_KEY } from "@/lib/agent-session";
 import { cn } from "@/lib/utils";
 import { useToken } from "@/lib/use-token";
@@ -460,7 +461,7 @@ export function NoteText({
           a: ({ href, children }) =>
             streaming ? (
               <span className="font-medium text-[var(--color-brand)]">{children}</span>
-            ) : href && href.startsWith("/") && !href.startsWith("//") ? (
+            ) : isInAppHref(href) ? (
               <Link
                 href={href}
                 className="font-medium text-[var(--color-brand)] underline decoration-[var(--color-brand)]/40 underline-offset-2 transition-colors hover:decoration-[var(--color-brand)]"

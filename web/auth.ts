@@ -25,6 +25,18 @@ import { OIDC_EXCHANGE_PATH, OIDC_PROVIDER_ID, oidcProviders } from "@/ee/sso/oi
 /** How often the jwt callback re-reads /api/auth/me (is_admin). */
 const ME_RECHECK_MS = 5 * 60 * 1000;
 
+/** Where a sign-in the API refused lands: /login shows auth.sso.failed for
+ *  any ?error=. Without it the OAuth callback "succeeded" with no Celmis
+ *  token and the proxy bounced the user to /login with no message. */
+const SSO_REJECTED_URL = "/login?error=SsoRejected";
+
+/** The backend endpoint that exchanges this provider's id_token, if any. */
+function exchangePathFor(provider: string | undefined): string | null {
+  if (provider === "google") return "/api/auth/google";
+  if (provider === OIDC_PROVIDER_ID) return OIDC_EXCHANGE_PATH;
+  return null;
+}
+
 /** Exchange a provider id_token at a backend endpoint and load the user. */
 async function exchangeIdToken(path: string, idToken: string) {
   const tok = await api<TokenResponse>(path, {
@@ -98,39 +110,43 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     ...oidcProviders(),
   ],
   callbacks: {
-    jwt: async ({ token, user, account }) => {
-      // Initial sign-in via Credentials provider — token comes back from authorize()
+    // Google / OIDC: exchange the id_token for our JWT HERE, not in `jwt`.
+    // `signIn` can refuse with a redirect, so an API rejection (no sso
+    // licence, domain not allowed, issuer/audience mismatch, master address)
+    // reaches /login as ?error= and the form says so. Without an adapter
+    // Auth.js hands this same `user` object to `jwt` below, which stores it
+    // exactly like a Credentials sign-in.
+    signIn: async ({ user, account }) => {
+      const exchangePath = exchangePathFor(account?.provider);
+      if (!exchangePath) return true;
+      if (!account?.id_token) return SSO_REJECTED_URL;
+      try {
+        const { tok, me } = await exchangeIdToken(exchangePath, account.id_token);
+        Object.assign(user, {
+          id: me.id,
+          email: me.email,
+          name: me.name || me.email,
+          celmisToken: tok.access_token,
+          celmisExpiresAt: tok.expires_at,
+          isAdmin: me.is_admin,
+        });
+        return true;
+      } catch {
+        return SSO_REJECTED_URL;
+      }
+    },
+    jwt: async ({ token, user }) => {
+      // Initial sign-in: Credentials (authorize()) or Google/OIDC (signIn above).
       if (user && (user as { celmisToken?: string }).celmisToken) {
         const u = user as { id: string; email: string; name: string; celmisToken: string; celmisExpiresAt: string; isAdmin: boolean };
         token.celmisToken = u.celmisToken;
         token.celmisExpiresAt = u.celmisExpiresAt;
         token.isAdmin = u.isAdmin;
         token.userId = u.id;
+        token.email = u.email;
+        token.name = u.name;
         token.meCheckedAt = Date.now();
         return token;
-      }
-
-      // Initial sign-in via Google or OIDC — exchange id_token for our JWT
-      const exchangePath =
-        account?.provider === "google"
-          ? "/api/auth/google"
-          : account?.provider === OIDC_PROVIDER_ID
-            ? OIDC_EXCHANGE_PATH
-            : null;
-      if (exchangePath && account?.id_token) {
-        try {
-          const { tok, me } = await exchangeIdToken(exchangePath, account.id_token);
-          token.celmisToken = tok.access_token;
-          token.celmisExpiresAt = tok.expires_at;
-          token.userId = me.id;
-          token.isAdmin = me.is_admin;
-          token.meCheckedAt = Date.now();
-          token.email = me.email;
-          token.name = me.name || me.email;
-        } catch {
-          // backend rejected — drop celmis fields so middleware logs out
-          delete token.celmisToken;
-        }
       }
 
       // Stage 21 — silent session refresh. When the backend token is

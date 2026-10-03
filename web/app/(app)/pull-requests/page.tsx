@@ -17,6 +17,7 @@ import {
   type ReviewedPullRequest,
   type ReviewedPullRequestList,
 } from "@/lib/api";
+import { clampedOffset } from "@/lib/paging";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { formatDate, formatDateTime } from "@/lib/format";
@@ -65,6 +66,17 @@ export default function PullRequestsPage() {
     enabled: !!token,
     placeholderData: keepPreviousData,
   });
+
+  // A page emptied under the reader (its last row closed, or a filter
+  // elsewhere shrank the list) moves back to the last page that has rows,
+  // instead of showing "nothing here" with no pager to leave by.
+  const shrunkTo = list.data && !list.isPlaceholderData
+    ? clampedOffset(list.data.offset, list.data.total, list.data.items.length, PAGE)
+    : null;
+  // Adjusted during render, not in an effect: the empty page is never
+  // committed. `clampedOffset` only ever moves the offset down, and the next
+  // render sees placeholder data, so this settles in one step.
+  if (shrunkTo !== null) setOffset(shrunkTo);
 
   const pick = (set: (v: string) => void) => (v: string) => {
     set(v);

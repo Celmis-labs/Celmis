@@ -899,6 +899,9 @@ class ReviewIssue(Base):
     fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     file_path: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     line: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: The text of the flagged line (see issues.plan_sync): an unrepeated
+    #: issue whose line is still in the new diff is not fixed.
+    anchor: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent: Mapped[str | None] = mapped_column(Text, nullable=True)
     rule_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     category: Mapped[str] = mapped_column(Text, nullable=False, server_default="other")

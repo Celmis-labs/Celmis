@@ -2014,7 +2014,8 @@ def provider_models(
                    "with the base_url; the probe reports the server's models",
         )
     if provider == _LITELLM_PROVIDER:
-        return _litellm_models(workspace_id)
+        return _litellm_models(
+            workspace_id, show_host=_can_see_proxy_host(user, workspace_id))
     key = get_provider_key(provider, workspace_id)
     if not key:
         return ProviderModelsOut(provider=provider, generation=[], embedding=[],
@@ -2056,12 +2057,17 @@ def provider_models(
     )
 
 
-def _litellm_models(workspace_id: str) -> ProviderModelsOut:
+def _litellm_models(workspace_id: str, *, show_host: bool = False) -> ProviderModelsOut:
     """The proxy's model list, split generation / embedding.
 
     The split uses /model/info's `mode` when the virtual key may read it, and
     the name otherwise ("embed" in the id). Every alias lands in one of the
     two lists, never dropped.
+
+    Any member may list the models, but only a workspace admin may see the
+    proxy's host (`_can_see_proxy_host`, the rule GET /config follows). A
+    proxy error names the host and, for a refused address, the IPs it
+    resolved to — so a non-admin gets the failure without that text.
     """
     from src.llm import litellm_proxy
 
@@ -2073,8 +2079,11 @@ def _litellm_models(workspace_id: str) -> ProviderModelsOut:
     try:
         _target, ids = litellm_proxy.list_models(ep.base_url, ep.api_key)
     except litellm_proxy.LiteLLMProxyError as exc:
+        detail = str(exc) if show_host else (
+            "the LiteLLM proxy is unreachable or its address is refused — "
+            "a workspace admin can see why in the LLM settings")
         return ProviderModelsOut(provider=prov, generation=[], embedding=[],
-                                 detail=str(exc))
+                                 detail=detail)
     modes = {a: (v or {}).get("mode") for a, v in litellm_proxy.cached_model_info(ep).items()}
     gen: list[str] = []
     emb: list[str] = []

@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from src.api.deps import client_ip, get_users
 from src.api.jwt_auth import issue_token
-from src.api.routers.auth import _MASTER_ADMIN_ID, _is_master_account
+from src.api.routers.auth import _MASTER_ADMIN_ID, _is_master_account, _is_master_email
 from src.api.schemas import OidcCallbackRequest, TokenResponse
 from src.ee.sso import oidc
 from src.security.audit import record_action
@@ -86,11 +86,19 @@ def oidc_callback(
     verified = oidc.email_is_verified(claims)
 
     user = users.get_by_oidc(config.issuer, sub)
+    if _is_master_email(email) or (user is not None and _is_master_account(user)):
+        # The master account signs in ONLY with CELMIS_MASTER_KEY. An IdP
+        # user that carries the master email must not inherit it — and must
+        # not CREATE it either: before the first master login no account
+        # holds that address, and `_master_login` would adopt the new one.
+        # Checked after the subject lookup too, for an identity bound earlier.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account cannot use single sign-on",
+        )
     if user is None:
         existing = users.get_by_email(email)
         if existing is not None and _is_master_account(existing):
-            # The master account signs in ONLY with CELMIS_MASTER_KEY. An IdP
-            # user that happens to carry the master email must not inherit it.
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="This account cannot use single sign-on",
@@ -155,7 +163,7 @@ def oidc_callback(
     # revoking only with OIDC_ADMIN_ROLE_SYNC=true, so an admin promoted by
     # hand (CLI) is not demoted the first time they use SSO.
     if config.admin_role:
-        has_role = config.admin_role in oidc.token_roles(claims)
+        has_role = config.admin_role in oidc.token_roles(claims, config.client_id)
         if has_role and not user.is_admin:
             user.is_admin = True
             users.update(user)

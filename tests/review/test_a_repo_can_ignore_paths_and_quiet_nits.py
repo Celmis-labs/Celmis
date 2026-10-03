@@ -136,6 +136,40 @@ def test_a_pr_the_globs_cover_entirely_is_skipped_with_the_reason() -> None:
     assert batch.comment_min_severity == "error"
 
 
+def test_the_agents_never_see_an_ignored_section_and_the_run_row_keeps_it() -> None:
+    """Compliance and breaking-change build their prompts from the context's
+    `raw_diff`. Handed the whole text, they sent the ignored files to the
+    model and let an early ignored section crowd the code out of a truncated
+    prompt. The run row's diff view still gets the whole diff."""
+    pr = _pr([_hunk("src/app.py"), _hunk("docs/guide.md")])
+    seen: list[PullRequest] = []
+
+    class _Stop(Exception):
+        pass
+
+    class _Provider:
+        def fetch_pull_request(self, repo, number):
+            return pr
+
+    def _capture(agent_pr, **kw):
+        seen.append(agent_pr)
+        raise _Stop
+
+    orch = ReviewOrchestrator(agents=[])
+    orch._load_policy = lambda slug: {  # type: ignore[method-assign]
+        "enabled": True, "target_branches": [], "ignore_globs": ["docs/**"],
+        "comment_min_severity": None,
+    }
+    orch._build_context = _capture  # type: ignore[method-assign]
+    with pytest.raises(_Stop):
+        orch.review("gitlab", "g/p", 5, post_comments=False, provider=_Provider())
+    [agent_pr] = seen
+    assert "src/app.py" in agent_pr.raw_diff
+    assert "docs/guide.md" not in agent_pr.raw_diff
+    assert [h.file_path for h in agent_pr.hunks] == ["src/app.py"]
+    assert "docs/guide.md" in pr.raw_diff, "the run row's diff view lost the file"
+
+
 # ─── threshold ───────────────────────────────────────────────────────
 
 
@@ -281,5 +315,5 @@ def test_the_scope_line_names_ignore_globs_apart_from_the_skip_list() -> None:
     b = _batch(None)
     b.skipped_files = ["yarn.lock", "docs/a.md (ignore glob)", "docs/b.md (ignore glob)"]
     summary = _format_summary(b, marker="<!-- m -->")
-    assert "Skipped: 1 files (lock/binary/generated/too large)" in summary
+    assert "Skipped: 1 file (lock/binary/generated/too large)" in summary
     assert "ignore globs: 2 files" in summary

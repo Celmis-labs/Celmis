@@ -210,8 +210,33 @@ def test_roles_are_read_from_realm_access_and_groups():
     roles = oidc.token_roles({
         "realm_access": {"roles": ["celmis-admin"]},
         "groups": ["/platform"],
-    })
+    }, CLIENT_ID)
     assert {"celmis-admin", "platform", "/platform"} <= roles
+
+
+def test_client_roles_count_only_for_the_celmis_client():
+    """A client-roles mapper without a client filter puts every client of the
+    realm into resource_access. `admin` on another client is not a Celmis
+    role, so it must not reach the global-admin check."""
+    claims = {"resource_access": {
+        "grafana": {"roles": ["admin"]},
+        CLIENT_ID: {"roles": ["celmis-admin"]},
+    }}
+    roles = oidc.token_roles(claims, CLIENT_ID)
+    assert "celmis-admin" in roles
+    assert "admin" not in roles
+
+
+def test_an_admin_role_on_another_client_does_not_make_a_celmis_admin(
+        client, users, monkeypatch):
+    monkeypatch.setenv("OIDC_ADMIN_ROLE", "admin")
+    tok = _token(resource_access={"grafana": {"roles": ["admin"]}})
+    assert client.post("/api/auth/oidc", json={"id_token": tok}).status_code == 200
+    assert users.get_by_oidc(ISSUER, "kc-subject-1").is_admin is False
+
+    tok = _token(resource_access={CLIENT_ID: {"roles": ["admin"]}})
+    assert client.post("/api/auth/oidc", json={"id_token": tok}).status_code == 200
+    assert users.get_by_oidc(ISSUER, "kc-subject-1").is_admin is True
 
 
 def test_email_verified_accepts_the_string_form():
@@ -338,6 +363,77 @@ def test_the_master_account_cannot_be_reached_through_sso(client, users, monkeyp
     r = client.post("/api/auth/oidc", json={"id_token": _token(email="root@example.com")})
     assert r.status_code == 403
     assert users.get_by_id("master-admin").oidc_sub is None
+
+
+def test_sso_cannot_create_the_master_address_before_the_first_master_login(
+        client, users, monkeypatch):
+    """No account holds the master email yet. An IdP identity for it must not
+    create one: the first master login would adopt it, and from then on the
+    IdP user would sign in by subject as a global admin."""
+    monkeypatch.setenv("CELMIS_MASTER_EMAIL", "root@example.com")
+    monkeypatch.setenv("CELMIS_MASTER_KEY", "sk-master-correct-horse-battery")
+    r = client.post("/api/auth/oidc", json={"id_token": _token(email="ROOT@example.com")})
+    assert r.status_code == 403
+    assert users.get_by_oidc(ISSUER, "kc-subject-1") is None
+    assert users.get_by_email("root@example.com") is None
+
+    r = client.post("/api/auth/login", json={
+        "email": "root@example.com", "password": "sk-master-correct-horse-battery"})
+    assert r.status_code == 200, r.text
+    master = users.get_by_id("master-admin")
+    assert master is not None and master.oidc_sub is None
+
+
+def test_an_sso_identity_bound_to_the_master_address_is_refused(
+        client, users, monkeypatch):
+    """Found by (iss, sub), not by email: the guard runs on that branch too,
+    whatever address the token now carries."""
+    assert client.post("/api/auth/oidc", json={"id_token": _token()}).status_code == 200
+    monkeypatch.setenv("CELMIS_MASTER_EMAIL", "dev@example.com")
+    r = client.post("/api/auth/oidc", json={"id_token": _token(email="other@example.com")})
+    assert r.status_code == 403
+
+
+def test_an_erased_sso_user_can_sign_in_again_as_a_new_account(
+        client, users, monkeypatch):
+    """GDPR erasure drops the IdP subject like it drops google_sub. Left on
+    the erased row, it would be found by (iss, sub) and refused as disabled,
+    and the unique index would block a fresh account: locked out for good."""
+    import asyncio
+
+    from src.api.routers import gdpr
+
+    assert client.post("/api/auth/oidc", json={"id_token": _token()}).status_code == 200
+    original = users.get_by_oidc(ISSUER, "kc-subject-1")
+
+    class _Session:
+        async def scalars(self, *_a, **_k):
+            class _R:
+                def all(self):
+                    return []
+            return _R()
+
+        async def commit(self):
+            return None
+
+    class _Creds:
+        def list(self, **_k):
+            return []
+
+    monkeypatch.setattr("src.users.get_user_store", lambda: users)
+    monkeypatch.setattr("src.credentials.get_credential_store", lambda: _Creds())
+    from src.users import User
+    admin = User(id="admin-1", email="admin@example.com", is_admin=True)
+    asyncio.run(gdpr.erase_user(original.id, session=_Session(), admin=admin))
+
+    erased = users.get_by_id(original.id)
+    assert erased.oidc_iss is None and erased.oidc_sub is None
+    assert users.get_by_oidc(ISSUER, "kc-subject-1") is None
+
+    r = client.post("/api/auth/oidc", json={"id_token": _token()})
+    assert r.status_code == 200, r.text
+    fresh = users.get_by_oidc(ISSUER, "kc-subject-1")
+    assert fresh.id != original.id and fresh.is_active
 
 
 def test_admin_role_grants_and_sync_revokes(client, users, monkeypatch):

@@ -106,6 +106,11 @@ NOT_OURS = {
     "SMTP_PASSWORD": "your mail server's — optional, only for digests/invites",
     "CELMIS_LICENSE_KEY": "a Celmis Enterprise licence — optional; without it "
                           "the community edition runs (no SSO, no analytics)",
+    # A switch whose NAME contains a secret word, not a secret: empty keeps
+    # email+password sign-in on. Listed so the guard below does not exit 3
+    # on every fresh install.
+    "AUTH_PASSWORD_LOGIN": "a switch, not a secret — empty keeps password "
+                           "sign-in; `false` for SSO only",
 }
 
 ASSIGN = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")

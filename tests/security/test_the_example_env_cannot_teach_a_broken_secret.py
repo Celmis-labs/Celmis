@@ -236,3 +236,24 @@ def test_the_setup_script_can_fill_every_secret_the_example_assigns():
         "scripts/init-env.sh has neither a generator nor a stated reason for "
         "these, so they stay empty without a word:\n  " + "\n  ".join(unaccounted)
     )
+
+
+def test_a_fresh_install_runs_the_setup_script_to_the_end():
+    """The documented first step — `cp .env.example .env && ./scripts/init-env.sh`
+    — must exit 0 on a clean checkout. A switch whose name merely contains
+    PASSWORD (AUTH_PASSWORD_LOGIN) tripped the unknown-secret guard and made
+    every fresh install exit 3, which the static checks above did not see."""
+    import subprocess
+    import tempfile
+
+    script = ROOT / "scripts" / "init-env.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = pathlib.Path(tmp) / ".env"
+        result = subprocess.run(
+            [str(script)], cwd=ROOT, capture_output=True, text=True,
+            env={**os.environ, "CELMIS_ENV_FILE": str(env_path)},
+        )
+        written = env_path.read_text() if env_path.exists() else ""
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "UNACCOUNTED" not in result.stdout
+    assert re.search(r"^CREDENTIAL_MASTER_KEY=\S{44}$", written, re.M)

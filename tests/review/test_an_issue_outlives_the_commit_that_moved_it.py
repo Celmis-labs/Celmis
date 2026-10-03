@@ -5,8 +5,10 @@ pull request. The line is NOT in it: a push that adds lines above a defect
 moves the defect without fixing it. These tests pin that, the rule for
 "fixed in a subsequent commit" (the issue was not found again AND its file
 changed between the two reviewed heads), and the cases that must leave an
-issue open: same head, partial run, the finder that raised it did not run,
-no previous diff to compare against.
+issue open: same head, no stage answered, the finder that raised it did not
+run (failed — what makes a run partial — or skipped), no previous diff to
+compare against. A partial run still judges the issues of the agents that
+did answer: it moves the baseline, so not judging there lost those fixes.
 
 The persistence half runs on sqlite with the real models — the suite has no
 Postgres, and JSONB is rendered as JSON on sqlite for the test only.
@@ -113,7 +115,7 @@ def _existing(fp: str, path: str = "src/a.py", agent: str = "defect",
 
 
 def _plan(existing, found=(), **kw):
-    args = dict(run_complete=True, head_sha="h2", prev_head_sha="h1",
+    args = dict(run_reviewed=True, head_sha="h2", prev_head_sha="h1",
                 prev_file_hashes={"src/a.py": "old"},
                 new_file_hashes={"src/a.py": "new"},
                 reviewed_files={"src/a.py"})
@@ -132,7 +134,7 @@ def test_an_unrepeated_issue_in_an_untouched_file_stays_open() -> None:
 
 @pytest.mark.parametrize("kw", [
     {"head_sha": "h1"},                  # the same head reviewed again
-    {"run_complete": False},             # a stage did not answer
+    {"run_reviewed": False},             # no stage answered
     {"prev_file_hashes": None},          # nothing to compare against
     {"new_file_hashes": {}},             # no diff on the new run
     {"agents_not_run": ["defect"]},      # its finder did not look
@@ -264,14 +266,34 @@ def test_a_failed_or_skipped_run_moves_nothing(engine) -> None:
     )
 
 
-def test_a_partial_run_records_but_fixes_nothing(engine) -> None:
-    record_review_run(_result("h1", _diff("-a\n+b\n"), [_f(10)]),
+def _sec(line: int) -> Finding:
+    return Finding(file_path="src/a.py", line=line, title="Token in log",
+                   severity=FindingSeverity.ERROR, rule_id="sec.log",
+                   agent="security", body="b")
+
+
+def test_a_partial_run_judges_what_its_answering_agents_looked_at(engine) -> None:
+    """h2 fixes the defect, and the security agent fails on h2. The defect
+    agent DID look: its issue is fixed by h2. The security issue is not
+    judged — its finder did not look. The baseline moves to h2 either way,
+    so a fix not judged here would never be judged at all."""
+    record_review_run(_result("h1", _diff("-a\n+b\n"), [_f(10), _sec(3)]),
                       run_id="r1", workspace_id="ws", status="complete",
                       engine=engine)
     record_review_run(_result("h2", _diff("-a\n+c\n"), [], failed=["security"]),
                       run_id="r2", workspace_id="ws", status="partial",
                       engine=engine)
-    assert _issues(engine)[0].status == "open"
+    by_agent = {i.agent: i for i in _issues(engine)}
+    assert (by_agent["defect"].status, by_agent["defect"].fixed_in_sha) == ("fixed", "h2")
+    assert by_agent["security"].status == "open"
+    # h3 is complete and leaves a.py as h2 had it: nothing more to judge, and
+    # the defect fix is not lost.
+    record_review_run(_result("h3", _diff("-a\n+c\n"), [_sec(3)]),
+                      run_id="r3", workspace_id="ws", status="complete",
+                      engine=engine)
+    by_agent = {i.agent: i for i in _issues(engine)}
+    assert by_agent["defect"].status == "fixed"
+    assert by_agent["security"].status == "open"
 
 
 def test_closing_unmerged_resolves_and_merging_does_not(engine) -> None:
@@ -286,6 +308,83 @@ def test_closing_unmerged_resolves_and_merging_does_not(engine) -> None:
                     number=7, state="closed", engine=engine)
     issue = _issues(engine)[0]
     assert (issue.status, issue.resolution_source) == ("resolved", "pr_closed")
+
+
+def test_reopening_the_pr_reopens_what_the_close_resolved(engine) -> None:
+    kw = dict(workspace_id="ws", provider="github", repo="acme/api", number=7,
+              engine=engine)
+    record_review_run(_result("h1", _diff("-a\n+b\n"), [_f(10)]),
+                      run_id="r1", workspace_id="ws", status="complete",
+                      engine=engine)
+    record_pr_state(state="closed", **kw)
+    assert _issues(engine)[0].status == "resolved"
+    record_pr_state(state="open", **kw)
+    issue = _issues(engine)[0]
+    assert (issue.status, issue.resolution_source, issue.closed_at) == ("open", None, None)
+    # The defect is found again on the reopened PR: still open, seen twice.
+    record_review_run(_result("h2", _diff("-a\n+c\n"), [_f(10)]),
+                      run_id="r2", workspace_id="ws", status="complete",
+                      engine=engine)
+    issue = _issues(engine)[0]
+    assert (issue.status, issue.occurrences) == ("open", 2)
+
+
+def test_a_reopen_does_not_undo_a_persons_resolution(engine) -> None:
+    kw = dict(workspace_id="ws", provider="github", repo="acme/api", number=7,
+              engine=engine)
+    record_review_run(_result("h1", _diff("-a\n+b\n"), [_f(10)]),
+                      run_id="r1", workspace_id="ws", status="complete",
+                      engine=engine)
+    with Session(engine) as s:
+        row = s.execute(select(ReviewIssue)).scalar_one()
+        row.status, row.resolution_source = "resolved", "manual"
+        s.commit()
+    record_pr_state(state="closed", **kw)
+    record_pr_state(state="open", **kw)
+    assert (_issues(engine)[0].status, _issues(engine)[0].resolution_source) == (
+        "resolved", "manual")
+
+
+def test_a_refound_close_resolution_reopens_only_on_an_open_pr() -> None:
+    found = found_issues([_f(10)])
+    fp = found[0].fingerprint
+    closed = [_existing(fp, status="resolved", source="pr_closed")]
+    assert _plan(closed, found).refound[0][2] is True
+    assert _plan(closed, found, pr_open=False).refound[0][2] is False
+
+
+def test_a_review_finishing_after_the_close_files_its_issues_resolved(engine) -> None:
+    """The close landed while the review ran: the run's snapshot still says
+    open, the row says closed — and the row is newer."""
+    record_pr_state(workspace_id="ws", provider="github", repo="acme/api",
+                    number=7, state="closed", engine=engine)
+    record_review_run(_result("h1", _diff("-a\n+b\n"), [_f(10)]),
+                      run_id="r1", workspace_id="ws", status="complete",
+                      engine=engine)
+    issue = _issues(engine)[0]
+    assert (issue.status, issue.resolution_source) == ("resolved", "pr_closed")
+    assert issue.closed_at is not None
+    assert _pr_row(engine).state == "closed"
+
+
+def test_feedback_on_a_run_between_the_first_and_the_latest_reaches_the_issue(
+    engine,
+) -> None:
+    for i in (1, 2, 3):
+        record_review_run(_result(f"h{i}", _diff(f"-a\n+{i}\n"), [_f(10)]),
+                          run_id=f"r{i}", workspace_id="ws", status="complete",
+                          engine=engine)
+    kw = dict(workspace_id="ws", file_path="src/a.py", title="Unchecked return",
+              rule_id="defect.ret", engine=engine)
+    assert apply_feedback(run_id="r2", state="dismissed",
+                          pr=("github", "acme/api", 7), **kw) == 1
+    assert _issues(engine)[0].status == "dismissed"
+    # Another PR's coordinates match nothing.
+    assert apply_feedback(run_id="r2", state=None,
+                          pr=("github", "acme/api", 8), **kw) == 0
+    assert apply_feedback(run_id="r2", state=None,
+                          pr=("github", "acme/api", 7), **kw) == 1
+    assert _issues(engine)[0].status == "open"
 
 
 def test_dismissing_the_finding_dismisses_the_issue_and_undo_reopens(engine) -> None:
@@ -412,3 +511,66 @@ def test_the_ledger_never_breaks_the_review(caplog) -> None:
                       run_id="r1", workspace_id="ws", status="complete",
                       engine=_Broken())
     assert "review_issues_sync_failed" in caplog.text
+
+
+# ─── the flagged line, not the file ─────────────────────────────────────
+#
+# The first live run: one commit fixed `refund` in app/orders.py, the model did
+# not repeat a divide-by-zero further down the same file, and the file's
+# section hash had moved — so the untouched divide-by-zero was called fixed.
+
+_DIFF_V1 = """diff --git a/app/orders.py b/app/orders.py
+--- a/app/orders.py
++++ b/app/orders.py
+@@ -18,0 +19,8 @@
++def refund(total_cents: int, refunded_cents: int) -> int:
++    remaining = total_cents + refunded_cents
++    return remaining
++
++
++def average_item_price(items):
++    return subtotal(items) // len(items)
++
+"""
+
+_DIFF_V2 = _DIFF_V1.replace(
+    "remaining = total_cents + refunded_cents", "remaining = total_cents - refunded_cents")
+
+
+def _orders_plan(existing, found=()):
+    from src.review.issues import anchors_present, file_section_hashes, plan_sync
+    return plan_sync(
+        existing, list(found), run_reviewed=True, head_sha="b", prev_head_sha="a",
+        prev_file_hashes=file_section_hashes(_DIFF_V1),
+        new_file_hashes=file_section_hashes(_DIFF_V2),
+        reviewed_files={"app/orders.py"},
+        new_anchors=anchors_present(_DIFF_V2),
+    )
+
+
+def test_the_anchor_is_the_flagged_lines_text():
+    from src.review.issues import anchor_at
+    assert anchor_at(_DIFF_V1, "app/orders.py", 25) == "return subtotal(items) // len(items)"
+    assert anchor_at(_DIFF_V1, "app/orders.py", 20) == "remaining = total_cents + refunded_cents"
+    assert anchor_at(_DIFF_V1, "app/other.py", 20) is None
+    assert anchor_at(_DIFF_V1, "app/orders.py", None) is None
+
+
+def test_an_untouched_line_in_a_changed_file_stays_open():
+    from src.review.issues import ExistingIssue, anchor_at
+    div = ExistingIssue(id="div", fingerprint="f-div", file_path="app/orders.py",
+                        agent="defect", status="open", resolution_source=None,
+                        anchor=anchor_at(_DIFF_V1, "app/orders.py", 25))
+    refund = ExistingIssue(id="ref", fingerprint="f-ref", file_path="app/orders.py",
+                           agent="defect", status="open", resolution_source=None,
+                           anchor=anchor_at(_DIFF_V1, "app/orders.py", 20))
+    plan = _orders_plan([div, refund])
+    assert plan.fixed == ["ref"]
+
+
+def test_an_issue_without_an_anchor_keeps_the_file_rule():
+    # Rows written before the anchor existed: the old rule still decides.
+    from src.review.issues import ExistingIssue
+    old = ExistingIssue(id="old", fingerprint="f-old", file_path="app/orders.py",
+                        agent="defect", status="open", resolution_source=None)
+    assert _orders_plan([old]).fixed == ["old"]

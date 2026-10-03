@@ -231,6 +231,43 @@ def _stream_defaults(
     return (temperature if temperature is not None else 0.3), max_output_tokens
 
 
+def completion_route(p: Profile) -> dict:
+    """The `api_base` a chat call for this profile must carry, as kwargs.
+
+    One place for the rule, because every call site that built it by hand
+    was a chance to skip it — and three non-streaming callers (architecture
+    summary, both deps reports) did, passing only model + key:
+
+      * gateway → the installation gateway's URL. Explicit, even though the
+        SDK would read LITELLM_PROXY_API_BASE for `litellm_proxy/…` chat
+        calls — the embedding path does NOT read it.
+      * openai_compatible (self-hosted) → its own base URL, or refuse. The
+        model string is "openai/<model>", so with no api_base litellm would
+        not fail — it would post this workspace's prompt to api.openai.com.
+      * litellm (the workspace's own proxy) → its own URL via
+        `require_api_base`, or refuse. "litellm_proxy/<alias>" with no
+        api_base goes to LITELLM_PROXY_API_BASE — the INSTALLATION's gateway,
+        carrying this tenant's virtual key and prompt.
+      * anything else → {} (a vendor's own endpoint).
+
+    Raises rather than returns {} for the two refusals: a missing address is
+    never a reason to send the call somewhere else.
+    """
+    if p.via_gateway:
+        return {"api_base": p.gateway_url}
+    if p.provider == "openai_compatible":
+        if not p.api_base:
+            raise RuntimeError(
+                "self-hosted LLM profile has no base URL — set it in "
+                "/settings/llm; refusing to default to api.openai.com"
+            )
+        return {"api_base": p.api_base}
+    if p.provider == "litellm":
+        from src.llm.litellm_proxy import require_api_base
+        return {"api_base": require_api_base(p.api_base)}
+    return {}
+
+
 async def _litellm_stream(
     p: Profile, *, prompt: str, system_instruction: str | None,
     temperature: float | None, max_output_tokens: int | None,
@@ -248,30 +285,7 @@ async def _litellm_stream(
         messages.append({"role": "system", "content": system_instruction})
     messages.append({"role": "user", "content": prompt})
     temp, max_tokens = _stream_defaults(p, temperature, max_output_tokens)
-    kwargs: dict = {}
-    if p.via_gateway:
-        # Explicit, even though the SDK would also read LITELLM_PROXY_API_BASE
-        # for `litellm_proxy/…` chat calls — the embedding path does NOT read it
-        # (it falls back to OPENAI_API_BASE), so both call shapes pass it.
-        kwargs["api_base"] = p.gateway_url
-    elif p.provider == "openai_compatible":
-        # Self-hosted profile: the model string is "openai/<model>", so litellm
-        # WITHOUT an explicit api_base would not fail — it would post this
-        # workspace's prompt to api.openai.com, authenticated with the
-        # "local-no-key" sentinel (or a real local token, leaking that too).
-        # A missing address therefore refuses instead of defaulting, same
-        # fail-closed direction as the gateway refusal in _attach_gateway.
-        if not p.api_base:
-            raise RuntimeError(
-                "self-hosted LLM profile has no base URL — set it in "
-                "/settings/llm; refusing to default to api.openai.com"
-            )
-        kwargs["api_base"] = p.api_base
-    elif p.provider == "litellm":
-        # Workspace LiteLLM proxy: "litellm_proxy/<alias>" without api_base
-        # would go to LITELLM_PROXY_API_BASE — the installation's gateway.
-        from src.llm.litellm_proxy import require_api_base
-        kwargs["api_base"] = require_api_base(p.api_base)
+    kwargs: dict = completion_route(p)
     from src.ops.telemetry import record_llm_call
     record_llm_call()
     # Audit: the native Gemini stream writes one record per call, so the gateway

@@ -90,6 +90,7 @@ async def export_user_data(
     profile = {
         "id": target.id, "email": target.email, "name": target.name,
         "auth_method": target.auth_method.value,
+        "oidc_iss": target.oidc_iss, "oidc_sub": target.oidc_sub,
         "is_admin": target.is_admin, "is_active": target.is_active,
         "scopes": list(target.scopes or []),
         "created_at": str(target.created_at),
@@ -205,6 +206,12 @@ async def erase_user(
         name="",
         is_active=False,
         google_sub=None,
+        # The IdP subject is a personal identifier like google_sub. Left in
+        # place it also binds the erased row: the next SSO sign-in of that
+        # person finds it by (iss, sub) and is refused as disabled, and the
+        # unique (iss, sub) index blocks a fresh account — locked out for good.
+        oidc_iss=None,
+        oidc_sub=None,
         password_hash=None,
     )
     store.update(anonymised)

@@ -9,13 +9,13 @@
 
 import { use, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { toast } from "sonner";
 import { BuildingIcon, CheckIcon, XCircleIcon } from "lucide-react";
 
 import { invitesApi } from "@/lib/api";
+import { forgetAgentSession } from "@/lib/agent-session";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { roleLabel } from "@/lib/roles";
@@ -26,7 +26,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 export default function InvitePage({ params }: { params: Promise<{ token: string }> }) {
   const { token: inviteToken } = use(params);
   const t = useT();
-  const router = useRouter();
   const jwt = useToken();
   const { status } = useSession();
   const [busy, setBusy] = useState(false);
@@ -41,10 +40,14 @@ export default function InvitePage({ params }: { params: Promise<{ token: string
     setBusy(true);
     try {
       const r = await invitesApi.accept(jwt, inviteToken);
-      // Switch the active workspace to the one we just joined.
+      // Switch the active workspace to the one we just joined. Same contract
+      // as the workspace switcher (lib/agent-session.ts): drop the agent's
+      // session from the previous workspace and finish with a full page load,
+      // so neither the stored session id nor any in-memory cache carries over.
       document.cookie = `x-workspace=${r.workspace_slug}; path=/; max-age=31536000; SameSite=Lax`;
+      forgetAgentSession();
       toast.success(t("invite.joined", { workspace: r.workspace_slug, role: roleLabel(t, r.role) }));
-      router.push("/dashboard");
+      window.location.assign("/dashboard");
     } catch (err) {
       toast.error((err as Error).message);
     } finally {

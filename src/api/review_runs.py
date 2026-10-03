@@ -672,6 +672,19 @@ class ReviewRunStore:
             ).fetchone()
         return self._row_to_run(row) if row else None
 
+    def pr_of(self, run_id: str) -> tuple[str, str, str, int] | None:
+        """(workspace_id, provider, repo, number) of the PR a run reviewed, or
+        None when the row is missing or predates the PR columns."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT workspace_id, pr_provider, pr_repo, pr_number "
+                "FROM review_runs WHERE id = ?", (run_id,),
+            ).fetchone()
+        if not row or not (row["pr_provider"] and row["pr_repo"] and row["pr_number"]):
+            return None
+        return (row["workspace_id"] or "default", row["pr_provider"],
+                row["pr_repo"], int(row["pr_number"]))
+
     def list_for_user(self, user_id: str, *, limit: int = 50) -> list[ReviewRun]:
         with self._connect() as conn:
             rows = conn.execute(

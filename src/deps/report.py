@@ -120,10 +120,13 @@ def run_api_report(prompt: str, workspace_id: str, temperature: float = 0.2) -> 
     # LiteLLM for every provider, Google included — see src/llm/completion.py
     # for why the direct google-genai branch is gone.
     import litellm
+
+    from src.llm.completion import completion_route
     resp = litellm.completion(
         model=p.litellm_model, api_key=p.api_key,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature, max_tokens=4096, timeout=120,
+        **completion_route(p),
     )
     # Spend ledger (surface=deps).
     from src.llm.completion import record_completion_spend

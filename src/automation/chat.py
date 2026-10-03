@@ -580,7 +580,11 @@ def _parse(text: str) -> Plan:
             # that runs two of the three things asked for is worse than one
             # that admits it.
             logger.info("automation_chat_unknown_action action=%s", action)
-            return Plan(note=f"There is no action called {action!r}.",
+            # The name is the model's text echoed back, and a note is
+            # rendered as markdown when it carries `](/` — so it goes through
+            # the same link allow-list as every other note.
+            return Plan(note=keep_known_links(
+                            f"There is no action called {action!r}."),
                         language=_language(data))
         arguments = raw.get("arguments")
         steps.append(Step(

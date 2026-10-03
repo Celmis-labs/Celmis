@@ -1,5 +1,7 @@
 """Celmis — code intelligence and AI pull-request review across repositories."""
 
+import os as _os
+
 #: The distribution names an installed build may carry, newest first.
 #:
 #: The project was renamed from "code-analysis-system" to "celmis" before the
@@ -35,3 +37,21 @@ DISTRIBUTIONS = ("celmis-platform", "celmis", "code-analysis-system")
 #: 0.1.0 is what the four duplicated copies said before they were collapsed
 #: into this one, and what `web/package.json` still says.
 __version__ = "0.1.31"
+
+
+# LiteLLM is a library here, not a proxy, and must not read a `.env` of its own.
+#
+# `import litellm` runs `dotenv.load_dotenv()` unless LITELLM_MODE says
+# otherwise, and with no path that walks up from litellm's OWN file in
+# site-packages. In a checkout whose virtualenv sits in the main tree, that
+# finds the main tree's `.env` — not this worktree's, and not the one Settings
+# was told to read — and copies it into `os.environ` the first time anything
+# imports litellm. Every setting read after that point sees different values
+# from every setting read before it, so configuration depended on import order:
+# a cached `get_review_settings()` built before the first LLM call disagreed
+# with a fresh `ReviewSettings()` built after it. Configuration reaches this
+# process through the environment and through Settings' explicit `env_file`,
+# never as a side effect of importing a dependency. `setdefault`, so an
+# operator who sets LITELLM_MODE still decides.
+_os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+del _os

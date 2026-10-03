@@ -97,10 +97,13 @@ def generate_summary(
         # without one, so the same call covers both and nothing here is bound
         # to one vendor's SDK.
         import litellm
+
+        from src.llm.completion import completion_route
         resp = litellm.completion(
             model=p.litellm_model, api_key=p.api_key,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2, max_tokens=2048, timeout=120,
+            **completion_route(p),
         )
         text = resp.choices[0].message.content or ""
         model_used = p.litellm_model

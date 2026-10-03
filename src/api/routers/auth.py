@@ -89,10 +89,21 @@ def _master_email() -> str:
     return os.environ.get("CELMIS_MASTER_EMAIL", "").strip().lower()
 
 
+def _is_master_email(email: str | None) -> bool:
+    """True when ``email`` is the address CELMIS_MASTER_EMAIL names.
+
+    Checked against the CLAIMED address of an external sign-in, not only
+    against an account that already carries it: before the first master-key
+    login no account holds the master email, and an IdP identity created
+    under it would be adopted by `_master_login` (and so made global admin).
+    """
+    master = _master_email()
+    return bool(master and (email or "").strip().lower() == master)
+
+
 def _is_master_account(user: User) -> bool:
     """The break-glass identity: never linkable to an external sign-in."""
-    master = _master_email()
-    return user.id == _MASTER_ADMIN_ID or bool(master and user.email == master)
+    return user.id == _MASTER_ADMIN_ID or _is_master_email(user.email)
 
 
 def _master_login(req, users: UserStore,
@@ -154,7 +165,20 @@ def _master_login(req, users: UserStore,
     #
     # Reproduced by pointing CELMIS_MASTER_EMAIL at a second address:
     #     UserExistsError: id 'master-admin' already exists
-    user = users.get_by_id(_MASTER_ADMIN_ID) or users.get_by_email(master_email)
+    user = users.get_by_id(_MASTER_ADMIN_ID)
+    if user is None:
+        user = users.get_by_email(master_email)
+        if user is not None and (user.has_google or user.has_oidc):
+            # An account bound to an external identity already holds the
+            # master address. Adopting it would make that Google/IdP identity
+            # global admin, and it would keep signing in through that identity
+            # with the rights the master key granted. Refuse: the operator has
+            # a collision to resolve, not a login to complete.
+            logger.error(
+                "master_admin_email_bound_to_external_identity id=%s email=%s "
+                "— set CELMIS_MASTER_EMAIL to an address no SSO/Google "
+                "account uses", user.id, master_email)
+            return None
     if user is None:
         user = User(
             id=_MASTER_ADMIN_ID,
@@ -375,6 +399,15 @@ def google_callback(
         )
 
     user = users.get_by_google_sub(sub)
+    if _is_master_email(email) or (user is not None and _is_master_account(user)):
+        # The master account signs in ONLY with CELMIS_MASTER_KEY. Refused on
+        # the claimed address as well, so a Google identity cannot create the
+        # master-email account before the first master login and have
+        # `_master_login` adopt it.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account cannot use Google sign-in",
+        )
     if user is None:
         # Linking by email hands the existing account to whoever controls this
         # Google identity, so the address must be one Google has verified.
@@ -582,7 +615,7 @@ async def forgot_password(
     out: dict = {"ok": True, "detail": "If that address exists, a reset link was created."}
     if user is None or not user.is_active:
         return out
-    if user.id == _MASTER_ADMIN_ID or user.email == _master_email():
+    if _is_master_account(user):
         # The master account authenticates ONLY via CELMIS_MASTER_KEY. A
         # reset link would let whoever controls the (fictional) mail domain
         # set a DB password on it — closing that path keeps the env key the

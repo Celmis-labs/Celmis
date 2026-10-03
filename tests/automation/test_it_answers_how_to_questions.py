@@ -181,3 +181,82 @@ def test_every_label_the_guide_quotes_is_on_screen():
     assert quoted, "the guide quotes no labels; the check would pass vacuously"
     stale = [q for q in quoted if q not in strings]
     assert not stale, f"guide quotes labels that are not in en.json: {stale}"
+
+
+@pytest.mark.parametrize("text", [
+    # Reference-style: the definition makes `[x][a]` (and a bare `[a]`) a link.
+    "[x][a]\n\n[a]: /\\evil.com",
+    "see [a]\n\n   [a]: https://evil.example",
+    # A space or angle brackets before the destination is still a link.
+    "[x]( /\\evil.com)",
+    "[x](</\\evil.com>)",
+    '[x](/connections "title")',
+    # A backslash is a slash to the browser: `/\evil.com` is another site.
+    "[x](/\\evil.com)",
+    "[x](/\\\\evil.com)",
+    # Autolinks.
+    "<https://evil.example/x>",
+    "<javascript:alert(1)>",
+])
+def test_no_markdown_link_shape_survives_unless_it_is_a_guide_route(text):
+    """Whatever react-markdown would turn into an anchor must either be a
+    guide route written exactly or come back as plain text."""
+    # A CommonMark parser decides what is a link, not another regex. It comes
+    # in through rich; the skip only bites on an install without it.
+    MarkdownIt = pytest.importorskip("markdown_it").MarkdownIt
+
+    from src.automation.guide import GUIDE_ROUTES, keep_known_links
+
+    out = keep_known_links(text)
+    tokens = MarkdownIt("commonmark").parse(out)
+    hrefs = [
+        child.attrs.get("href")
+        for tok in tokens for child in (tok.children or [])
+        if child.type == "link_open"
+    ]
+    assert all(h in GUIDE_ROUTES for h in hrefs), (out, hrefs)
+
+
+def test_an_exact_guide_link_is_still_kept_beside_a_stripped_one():
+    from src.automation.guide import keep_known_links
+
+    assert keep_known_links("[ok](/connections) [x]( /\\evil.com)") == (
+        "[ok](/connections) x")
+
+
+def test_an_invented_action_name_cannot_carry_a_link(monkeypatch):
+    from src.automation.chat import interpret
+
+    seen: dict = {}
+    _stub_client(monkeypatch, {
+        "language": "en", "note": "",
+        "steps": [{"action": "[open](/\\\\evil.com)", "arguments": {}}],
+    }, seen)
+    plan = interpret("do it", workspace_id="ws", user_id="u")
+    assert plan.note == "There is no action called 'open'."
+
+
+@pytest.mark.parametrize("route", ["/issues", "/pull-requests", "/analytics"])
+def test_the_review_pages_are_in_the_guide(route):
+    from src.automation.guide import GUIDE_ROUTES
+
+    assert route in GUIDE_ROUTES
+
+
+def test_every_workspace_section_tab_is_linkable():
+    """A page in the section tabs that the guide does not name is a page the
+    agent cannot point anybody to — its link is stripped to plain words."""
+    import re
+
+    from src.automation.guide import GUIDE_ROUTES
+
+    src = (_REPO / "web" / "components" / "section-tabs.tsx").read_text()
+    body = src[src.index("export const SECTION_TABS"):]
+    body = body[:body.index("\n}")]
+    tabs = re.findall(r'\{ href: "([^"]+)"[^}]*\}', body)
+    admin_only = set(re.findall(r'\{ href: "([^"]+)"[^}]*adminOnly: true', body))
+    # The platform-admin section is not a workspace user's to be sent to.
+    platform = body[body.index("  admin: ["):]
+    platform_routes = set(re.findall(r'href: "([^"]+)"', platform))
+    missing = sorted(set(tabs) - admin_only - platform_routes - GUIDE_ROUTES)
+    assert tabs and not missing, f"section tabs the guide does not name: {missing}"

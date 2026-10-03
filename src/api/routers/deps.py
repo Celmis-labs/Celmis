@@ -291,10 +291,13 @@ def _api_report(prompt: str, workspace_id: str, temperature: float) -> str:
     # LiteLLM for every provider, Google included — see src/llm/completion.py
     # for why the direct google-genai branch is gone.
     import litellm
+
+    from src.llm.completion import completion_route
     resp = litellm.completion(
         model=p.litellm_model, api_key=p.api_key,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature, max_tokens=4096, timeout=120,
+        **completion_route(p),
     )
     # Spend ledger (surface=deps) — the Google branch bills itself inside
     # GeminiClient, this one has to be recorded explicitly.

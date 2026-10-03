@@ -28,7 +28,7 @@ GUIDE = """\
 
 - [Dashboard](/dashboard): overview; [Setup wizard](/onboarding) walks through the first repository; [What you can do](/capabilities).
 - [Repositories](/repositories): add a repository (paste a URL or pick one from a connected provider), start indexing, see index state. Also [Dependencies](/dependencies) (audits), [Docs](/docs) (generated documentation), [Repo intelligence](/admin/intel).
-- [Code review](/reviews): past and running PR reviews; trigger a review by PR URL. [Review policies](/admin/review-policies), [Review agents](/admin/agents), [Compliance](/admin/compliance), [Deprecations](/admin/deprecations).
+- [Code review](/reviews): past and running PR reviews; trigger a review by PR URL. [Issues](/issues): findings followed across a PR's pushes (open, fixed, dismissed). [Pull requests](/pull-requests): the reviewed PRs and their state. [Analytics](/analytics): review trends for owners, admins and editors (enterprise licence). [Review policies](/admin/review-policies), [Review agents](/admin/agents), [Compliance](/admin/compliance), [Deprecations](/admin/deprecations).
 - [Ask the code](/projects): a project groups indexed repositories so one question searches all of them. [All chats](/chats), [Code search](/search).
 - [Claude agent](/claude): connect a Claude subscription token, then run coding sessions against a repository.
 - [Celmis agent](/automation): this conversation as a full page, with the list of past chats. Also opened from the round button at the bottom right of every page.
@@ -67,6 +67,11 @@ automatic review per repository there, or ask this agent to do it for a set.
   policy, then the "Prompt & rules" tab — the prompt template and folder rules
   live there. Other tabs: General & branches, Models & limits, MCP sources,
   Agents (per-policy agent prompt overrides).
+- Which files a review reads and which findings become comments: the
+  "Review output" card on the policy's General & branches tab. "Ignore paths
+  (one glob per line)" skips paths such as `vendor/**` on top of the built-in
+  skip list; "Post comments for" sets the lowest severity posted as a PR
+  comment (lower ones are still counted in the summary).
 - Workspace-wide agent prompts: [Review agents](/admin/agents) lists the
   specialised reviewers; "Edit prompt" opens one, saves a workspace override,
   and "Reset to default" restores the built-in text.
@@ -96,6 +101,19 @@ Admins and owners change settings and invite people on
 #: answer may keep.
 _LINK = re.compile(r"\[([^\]\n]+)\]\(([^)\s]*)\)")
 
+#: Every other inline-link shape markdown accepts: a space before the
+#: destination, `<...>`, a title. Matched loosely so nothing that a markdown
+#: renderer turns into a link slips past the exact form above.
+_ANY_INLINE_LINK = re.compile(r"\[([^\]\n]+)\]\(([^)\n]*)\)")
+
+#: A link reference definition — `[a]: /\\host` — which turns `[x][a]` or a
+#: bare `[a]` anywhere in the note into a link the inline pattern never sees.
+#: The guide uses none, so an answer keeps none.
+_REFERENCE_DEFINITION = re.compile(r"^ {0,3}\[[^\]\n]+\]:.*$\n?", re.M)
+
+#: `<scheme:...>` autolinks. Nothing outside the app is linkable.
+_AUTOLINK = re.compile(r"<([a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^<>\s]*)>")
+
 
 def _routes(text: str) -> frozenset[str]:
     return frozenset(
@@ -123,6 +141,10 @@ def _known(href: str) -> bool:
     provider's site is linking to a page nobody here checked, and the
     connections page already links to the right screen of each provider.
     """
+    # A backslash is a slash to a browser (`/\\evil.com` is `//evil.com`, an
+    # other site), and whitespace or control characters are stripped by it.
+    if re.search(r"[\\\s\x00-\x1f]", href):
+        return False
     path = href.split("#", 1)[0].split("?", 1)[0].rstrip("/") or "/"
     if not path.startswith("/") or path.startswith("//"):
         return False
@@ -141,9 +163,12 @@ def keep_known_links(text: str) -> str:
     never reaches the page that renders this as markdown.
     """
     def _one(m: re.Match[str]) -> str:
-        return m.group(0) if _known(m.group(2)) else m.group(1)
+        exact = _LINK.fullmatch(m.group(0))
+        return m.group(0) if exact and _known(exact.group(2)) else m.group(1)
 
-    return _LINK.sub(_one, text or "")
+    text = _REFERENCE_DEFINITION.sub("", text or "")
+    text = _AUTOLINK.sub(lambda m: m.group(1), text)
+    return _ANY_INLINE_LINK.sub(_one, text)
 
 
 def guide_links(text: str) -> list[dict[str, str]]:

@@ -240,12 +240,15 @@ def email_is_verified(claims: dict[str, Any]) -> bool:
     return value is True
 
 
-def token_roles(claims: dict[str, Any]) -> set[str]:
-    """Every role/group name the token carries, from the usual places.
+def token_roles(claims: dict[str, Any], client_id: str) -> set[str]:
+    """Every role/group name the token carries for THIS client.
 
-    Keycloak: ``realm_access.roles`` and ``resource_access.<client>.roles``.
-    Others: a flat ``roles`` or ``groups`` claim. Group paths ("/admins") are
-    matched both with and without the leading slash.
+    Keycloak: ``realm_access.roles`` and ``resource_access.<client_id>.roles``
+    — only Celmis's own client entry. A client-roles mapper without a client
+    filter puts every client of the realm into ``resource_access``; merging
+    them would let ``admin`` on, say, the Grafana client grant global Celmis
+    admin. Others: a flat ``roles`` or ``groups`` claim. Group paths
+    ("/admins") are matched both with and without the leading slash.
     """
     found: set[str] = set()
 
@@ -264,9 +267,9 @@ def token_roles(claims: dict[str, Any]) -> set[str]:
         add(realm.get("roles"))
     resources = claims.get("resource_access")
     if isinstance(resources, dict):
-        for entry in resources.values():
-            if isinstance(entry, dict):
-                add(entry.get("roles"))
+        entry = resources.get(client_id)
+        if isinstance(entry, dict):
+            add(entry.get("roles"))
     add(claims.get("roles"))
     add(claims.get("groups"))
     return found

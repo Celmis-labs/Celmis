@@ -16,7 +16,8 @@ Issues are per PR: the unique key is (workspace, repo, PR number,
 fingerprint), so the same defect on two PRs is two issues with two fates.
 
 Fixed in a subsequent commit — `plan_sync()`:
-    When a COMPLETE run on the same PR at a NEW head finishes, an open issue
+    When a reviewed run (complete, or partial) on the same PR at a NEW head
+    finishes, an open issue
     whose fingerprint it did not find again is marked `fixed`
     (resolution_source=auto_next_commit, fixed_in_sha=the new head) only if
     its file changed between the two heads. "Changed" is read from the diffs:
@@ -25,15 +26,28 @@ Fixed in a subsequent commit — `plan_sync()`:
       - no previous diff recorded (first run after this shipped) — unknown;
       - the same head reviewed again — a model not repeating itself is not a
         fix;
-      - a partial run, or the agent that raised it failed / was skipped — the
-        finder that would have repeated it did not look;
+      - the agent that raised it failed (what makes a run partial) or was
+        skipped — the finder that would have repeated it did not look. The
+        rest of a partial run's agents did look, so their issues are judged:
+        a partial run moves the baseline, and refusing to judge in it lost
+        every fix made in that commit for good;
       - the file's hunks did not reach the agents (skipped for size, a skip
         list, an ignore glob, or the file left the diff) — nobody looked;
       - the issue's rule was hidden by the deny-list this run — it may have
-        been found and dropped.
+        been found and dropped;
+      - the flagged line (`anchor`, its text on the head that raised it) is
+        still in the file's new diff: the commit changed the file elsewhere.
+        This is the case that went wrong first — a refund fixed in the same
+        file closed an untouched divide-by-zero the model did not repeat.
     A section hash also moves when the base branch moves under a rebase; that
     can call an untouched file changed. It cannot call a changed file
     untouched, which is the error that would hide a live defect.
+
+Closed unmerged — `record_pr_state()`:
+    Closing resolves the PR's open issues (resolution_source=pr_closed) and
+    reopening the PR reopens exactly those. A review that finishes after the
+    close (it was already running) files its new issues as resolved too, so a
+    closed PR never carries an open issue nobody will ever resolve.
 
 Category — `categorize()`: see the docstring; derived from the agent and
 keywords in rule_id/title, because rule ids are free text from the model.
@@ -185,6 +199,68 @@ def file_section_hashes(raw_diff: str | None) -> dict[str, str]:
     return out
 
 
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _new_side_lines(raw_diff: str | None) -> dict[str, dict[int, str]]:
+    """{path: {new-file line number: text}} for every added or context line.
+
+    The right-hand side of each hunk, as the reviewed head has it. Both sides
+    of a rename get the lines, like `file_section_hashes`.
+    """
+    out: dict[str, dict[int, str]] = {}
+    if not raw_diff:
+        return out
+    lines: dict[int, str] = {}
+    paths: tuple[str, ...] = ()
+    n = 0
+
+    def flush() -> None:
+        for p in paths:
+            out.setdefault(p, {}).update(lines)
+
+    for raw in raw_diff.splitlines():
+        if raw.startswith("diff --git "):
+            flush()
+            m = _DIFF_HEADER.match(raw)
+            paths = tuple(dict.fromkeys((m.group(1), m.group(2)))) if m else ()
+            lines = {}
+            n = 0
+            continue
+        h = _HUNK_HEADER.match(raw)
+        if h:
+            n = int(h.group(1))
+            continue
+        if not n or raw.startswith(("---", "+++")):
+            continue
+        if raw.startswith("+") or raw.startswith(" "):
+            lines[n] = raw[1:]
+            n += 1
+        # "-" lines and "\\ No newline" do not exist on the new side.
+    flush()
+    return out
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split())
+
+
+def anchor_at(raw_diff: str | None, path: str, line: int | None) -> str | None:
+    """The text of `path`:`line` on the reviewed head, if the diff shows it."""
+    if not path or not isinstance(line, int):
+        return None
+    text = _new_side_lines(raw_diff).get(path, {}).get(line)
+    text = _norm(text) if text is not None else ""
+    return text or None
+
+
+def anchors_present(raw_diff: str | None) -> dict[str, set[str]]:
+    """{path: normalised texts of every new-side line} — what an anchor is
+    looked up in."""
+    return {p: {_norm(t) for t in ls.values() if _norm(t)}
+            for p, ls in _new_side_lines(raw_diff).items()}
+
+
 # ─── Planning (pure) ───────────────────────────────────────────────
 
 
@@ -213,6 +289,7 @@ class ExistingIssue:
     status: str
     resolution_source: str | None
     rule_id: str | None = None
+    anchor: str | None = None
 
 
 @dataclass
@@ -259,7 +336,7 @@ def plan_sync(
     existing: list[ExistingIssue],
     found: list[FoundIssue],
     *,
-    run_complete: bool,
+    run_reviewed: bool,
     head_sha: str | None,
     prev_head_sha: str | None,
     prev_file_hashes: dict[str, str] | None,
@@ -267,6 +344,8 @@ def plan_sync(
     agents_not_run: Iterable[str] = (),
     reviewed_files: Iterable[str] | None = None,
     hidden_rules: Iterable[str] = (),
+    pr_open: bool = True,
+    new_anchors: dict[str, set[str]] | None = None,
 ) -> SyncPlan:
     """What to do with this PR's issue rows after one run. No I/O.
 
@@ -279,6 +358,16 @@ def plan_sync(
     not known — judges nothing. `hidden_rules` are rule ids whose findings the
     prefilter's deny-list dropped this run: such a finding WAS found again and
     then hidden, which is not a fix.
+
+    `run_reviewed` is False for a run in which no stage answered; a partial
+    run IS reviewed — its failed agents arrive in `agents_not_run`, and only
+    their issues are left unjudged. `pr_open` is False once the PR was closed
+    unmerged: an issue that close resolved is then not reopened by a review
+    that was still running when it closed.
+
+    `new_anchors` ({path: texts of the new head's diff lines}, see
+    `anchors_present`) keeps open an issue whose flagged line is still there
+    unchanged: the file moving elsewhere is not the defect going away.
     """
     plan = SyncPlan()
     by_fp = {e.fingerprint: e for e in existing}
@@ -292,11 +381,17 @@ def plan_sync(
         # A fix the machine inferred and the next run contradicted is a
         # regression — the issue comes back. A person's decision (dismissed,
         # resolved, or fixed by hand) is not overruled by a model.
-        reopen = e.status == "fixed" and e.resolution_source == "auto_next_commit"
+        # The close of a PR is a machine decision too: refound on a PR that is
+        # open again, it is live.
+        reopen = (
+            (e.status == "fixed" and e.resolution_source == "auto_next_commit")
+            or (pr_open and e.status == "resolved"
+                and e.resolution_source == "pr_closed")
+        )
         plan.refound.append((e.id, f, reopen))
 
     can_judge = (
-        run_complete
+        run_reviewed
         and bool(head_sha) and bool(prev_head_sha)
         and head_sha != prev_head_sha
         and prev_file_hashes is not None
@@ -324,8 +419,13 @@ def plan_sync(
         if before is None and after is None:
             # The file is in neither diff we can read: nothing says it changed.
             continue
-        if before != after:
-            plan.fixed.append(e.id)
+        if before == after:
+            continue
+        if e.anchor and new_anchors is not None and e.anchor in new_anchors.get(e.file_path, set()):
+            # The commit changed this file somewhere else; the line the
+            # finding pointed at is still exactly as it was.
+            continue
+        plan.fixed.append(e.id)
     return plan
 
 
@@ -504,8 +604,12 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
             s.commit()
             return
 
-        new_hashes = file_section_hashes(getattr(pr, "raw_diff", "") or "")
+        raw_diff = getattr(pr, "raw_diff", "") or ""
+        new_hashes = file_section_hashes(raw_diff)
         head_sha = getattr(pr, "head_sha", None) or None
+        # The ROW's state, not the run's snapshot: a close webhook that landed
+        # while this review ran is newer than the PR this run fetched.
+        pr_closed_unmerged = row.state == "closed"
 
         existing_rows = s.execute(select(ReviewIssue).where(
             ReviewIssue.workspace_id == workspace_id,
@@ -518,11 +622,13 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
                 id=r.id, fingerprint=r.fingerprint, file_path=r.file_path,
                 agent=r.agent, status=r.status,
                 resolution_source=r.resolution_source, rule_id=r.rule_id,
+                anchor=r.anchor,
             ) for r in existing_rows],
             found_issues(batch.findings),
             # The stages, not the delivery: a review whose every agent
-            # answered and whose comments failed to post still looked.
-            run_complete=_stage_status(batch, status) == "complete",
+            # answered and whose comments failed to post still looked. A
+            # partial one looked too, minus its failed agents (passed below).
+            run_reviewed=_stage_status(batch, status) in ("complete", "partial"),
             head_sha=head_sha, prev_head_sha=prev_head,
             prev_file_hashes=prev_hashes, new_file_hashes=new_hashes,
             agents_not_run=[
@@ -531,15 +637,23 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
             ],
             reviewed_files=_reviewed_files(pr),
             hidden_rules=list((getattr(batch, "dropped_by_rule", None) or {}).keys()),
+            pr_open=not pr_closed_unmerged,
+            new_anchors=anchors_present(raw_diff) if raw_diff else None,
         )
 
         for f in plan.create:
             s.add(ReviewIssue(
                 workspace_id=workspace_id, repo_slug=repo_slug,
                 fingerprint=f.fingerprint, file_path=f.file_path, line=f.line,
+                anchor=anchor_at(raw_diff, f.file_path, f.line),
                 agent=f.agent, rule_id=f.rule_id, category=f.category,
                 severity=f.severity, title=f.title, body=f.body,
-                suggestion=f.suggestion, status="open",
+                suggestion=f.suggestion,
+                # Closed while this run was in flight: record what it found,
+                # resolved the way the close resolved the rest.
+                status="resolved" if pr_closed_unmerged else "open",
+                resolution_source="pr_closed" if pr_closed_unmerged else None,
+                closed_at=now if pr_closed_unmerged else None,
                 pr_provider=provider, pr_repo=repo, pr_number=number,
                 pr_url=getattr(pr, "url", None) or None,
                 first_run_id=run_id, last_run_id=run_id,
@@ -549,6 +663,7 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
         for issue_id, f, reopen in plan.refound:
             r = by_id[issue_id]
             r.line = f.line
+            r.anchor = anchor_at(raw_diff, f.file_path, f.line) or r.anchor
             r.severity = f.severity
             r.title = f.title
             r.body = f.body
@@ -610,9 +725,14 @@ def record_pr_state(
     """A provider said the PR was merged or closed (or reopened). Never raises.
 
     Closing UNMERGED resolves the PR's open issues (resolution_source
-    pr_closed): the code they were raised on will never land. A merge leaves
-    them open on purpose — "found by Celmis, merged anyway" is exactly the
-    number the analytics page reports.
+    pr_closed): the code they were raised on will never land. Reopening puts
+    those back to open. A merge leaves them open on purpose — "found by
+    Celmis, merged anyway" is exactly the number the analytics page reports.
+
+    The PR row is created when missing, with reviews_count=0: a review that
+    is still running when the close lands must find the closed state. The
+    Pull requests list shows only rows with a review (reviews_count > 0), so
+    a PR Celmis never reviewed does not appear there.
     """
     if state not in ("open", "merged", "closed"):
         return False
@@ -634,17 +754,29 @@ def record_pr_state(
             if url:
                 row.url = url
             row.updated_at = now
+            of_pr = (
+                ReviewIssue.workspace_id == workspace_id,
+                ReviewIssue.pr_provider == provider,
+                ReviewIssue.pr_repo == repo,
+                ReviewIssue.pr_number == int(number),
+            )
             if state == "closed":
                 for issue in s.execute(select(ReviewIssue).where(
-                    ReviewIssue.workspace_id == workspace_id,
-                    ReviewIssue.pr_provider == provider,
-                    ReviewIssue.pr_repo == repo,
-                    ReviewIssue.pr_number == int(number),
-                    ReviewIssue.status == "open",
+                    *of_pr, ReviewIssue.status == "open",
                 )).scalars():
                     issue.status = "resolved"
                     issue.resolution_source = "pr_closed"
                     issue.closed_at = now
+            elif state == "open":
+                # Reopened: what the close resolved is live again. Only what
+                # the CLOSE resolved — a person's resolution stands.
+                for issue in s.execute(select(ReviewIssue).where(
+                    *of_pr, ReviewIssue.status == "resolved",
+                    ReviewIssue.resolution_source == "pr_closed",
+                )).scalars():
+                    issue.status = "open"
+                    issue.resolution_source = None
+                    issue.closed_at = None
             s.commit()
         return True
     except Exception as exc:  # noqa: BLE001
@@ -656,6 +788,7 @@ def record_pr_state(
 def apply_feedback(
     *, workspace_id: str, run_id: str, state: str | None,
     file_path: str | None, title: str | None, rule_id: str | None,
+    pr: tuple[str, str, int] | None = None,
     engine=None,
 ) -> int:
     """Map a finding's accept/dismiss onto its issue. Returns rows changed.
@@ -665,6 +798,12 @@ def apply_feedback(
     the review page's only way to undo a dismissal) → an issue dismissed BY
     feedback reopens; on an open issue accepted changes nothing, because
     "this is real" is what open already says.
+
+    `pr` is the run's (provider, repo, number). With it the issue is found by
+    its PR and fingerprint, so feedback given on ANY run of the PR reaches it
+    — an issue keeps only its first and its latest run id, and feedback on a
+    run in between matched nothing. Without it (a run row from before the PR
+    columns) the run ids are all there is.
     Never raises.
     """
     if not file_path or title is None:
@@ -678,11 +817,18 @@ def apply_feedback(
         fp = fingerprint(rule_id, file_path, title)
         changed = 0
         with Session(engine or _engine()) as s:
+            if pr is not None:
+                provider, repo, number = pr
+                scope = (ReviewIssue.pr_provider == provider,
+                         ReviewIssue.pr_repo == repo,
+                         ReviewIssue.pr_number == int(number))
+            else:
+                scope = (or_(ReviewIssue.last_run_id == run_id,
+                             ReviewIssue.first_run_id == run_id),)
             rows = s.execute(select(ReviewIssue).where(
                 ReviewIssue.workspace_id == workspace_id,
                 ReviewIssue.fingerprint == fp,
-                or_(ReviewIssue.last_run_id == run_id,
-                    ReviewIssue.first_run_id == run_id),
+                *scope,
             )).scalars().all()
             for r in rows:
                 if state == "dismissed" and r.status == "open":

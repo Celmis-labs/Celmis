@@ -275,6 +275,10 @@ def _posting_line(batch: ReviewBatch) -> str:
     return "_" + " · ".join(parts) + "_"
 
 
+def _files(n: int) -> str:
+    return "file" if n == 1 else "files"
+
+
 def _format_summary(batch: ReviewBatch, marker: str) -> str:
     """Top-level summary comment markdown — universal for all 3 providers."""
     pr = batch.pull_request
@@ -345,10 +349,10 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
         other = len(batch.skipped_files) - by_glob
         if other:
             lines.append(
-                f"- Skipped: {other} files (lock/binary/generated/too large)")
+                f"- Skipped: {other} {_files(other)} (lock/binary/generated/too large)")
         if by_glob:
             lines.append(
-                f"- Ignored by this repository's ignore globs: {by_glob} files")
+                f"- Ignored by this repository's ignore globs: {by_glob} {_files(by_glob)}")
     lines.append("")
 
     # Telemetry
