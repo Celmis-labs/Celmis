@@ -1027,8 +1027,9 @@ export const llmApi = {
   deleteLiteLLM: (token: string) =>
     api<LLMConfig>("/api/llm/litellm", { token, method: "DELETE" }),
   /** Every alias on this workspace's proxy with its effective price. */
-  litellmPrices: (token: string) =>
-    api<ModelPrices>("/api/llm/litellm/prices", { token }),
+  /** `refresh` re-reads the proxy's /model/info instead of the cached copy. */
+  litellmPrices: (token: string, refresh = false) =>
+    api<ModelPrices>(`/api/llm/litellm/prices${refresh ? "?refresh=true" : ""}`, { token }),
   /** Set (or, with null, remove) manual prices — workspace admin only. */
   saveLitellmPrices: (token: string, body: ModelPricesUpdate) =>
     api<ModelPrices>("/api/llm/litellm/prices", { token, method: "PUT", json: body }),

@@ -317,22 +317,27 @@ def set_profile(surface: str, *, provider: str, model: str | None,
                 dimensions: int | None = None, workspace_id: str = "default") -> None:
     if surface not in PROFILE_NAMES:
         raise ValueError(f"unknown profile {surface!r}")
-    from src.api.routers.llm import _load_workspace_config, _save_workspace_config
+    from src.api.routers.llm import (
+        _load_workspace_config,
+        _save_workspace_config,
+        workspace_config_lock,
+    )
     # Embeddings config is shared (see resolve_profile) — write it to the
     # default tenant so every workspace embeds into the same Qdrant collection.
     effective_ws = "default" if surface == "embeddings" else workspace_id
-    blob = _load_workspace_config(effective_ws)
-    profs = dict(blob.get("profiles") or {})
-    entry = {"provider": provider, "model": model}
-    if surface == "embeddings" and dimensions:
-        entry["dimensions"] = int(dimensions)
-    profs[surface] = entry
-    blob["profiles"] = profs
-    # Keep legacy fields mirrored for the review profile (back-compat).
-    if surface == "review":
-        blob["provider"] = provider
-        blob["model"] = model
-    _save_workspace_config(blob, updated_by="llm_profiles", workspace_id=effective_ws)
+    with workspace_config_lock(effective_ws):
+        blob = _load_workspace_config(effective_ws)
+        profs = dict(blob.get("profiles") or {})
+        entry = {"provider": provider, "model": model}
+        if surface == "embeddings" and dimensions:
+            entry["dimensions"] = int(dimensions)
+        profs[surface] = entry
+        blob["profiles"] = profs
+        # Keep legacy fields mirrored for the review profile (back-compat).
+        if surface == "review":
+            blob["provider"] = provider
+            blob["model"] = model
+        _save_workspace_config(blob, updated_by="llm_profiles", workspace_id=effective_ws)
 
 
 def embeddings_signature() -> str:

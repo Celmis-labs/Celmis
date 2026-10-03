@@ -553,6 +553,12 @@ def underlying_model(ep: Endpoint | None, alias: str) -> str | None:
     return (cached_model_info(ep).get(alias) or {}).get("underlying") or None
 
 
+def forget_model_info(ep: Endpoint) -> None:
+    """Drop the cached ``/model/info`` of one endpoint; the next read refetches."""
+    with _CACHE_LOCK:
+        _MODEL_INFO_CACHE.pop((ep.base_url, ep.fingerprint), None)
+
+
 def reset_cache() -> None:
     with _CACHE_LOCK:
         _MODEL_INFO_CACHE.clear()
@@ -619,6 +625,7 @@ __all__ = [
     "delete_endpoint",
     "fetch_model_info",
     "cached_model_info",
+    "forget_model_info",
     "underlying_model",
     "reset_cache",
     "is_usable_key",

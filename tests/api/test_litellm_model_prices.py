@@ -311,3 +311,148 @@ def test_saving_the_llm_form_keeps_the_prices(store, proxy):
         put_config(LLMConfigIn(docs_language="de"), _request(), user=_ADMIN,
                    workspace_id="ws-a")
     assert _stored()["custom-ft"]["input_per_mtok"] == 3
+
+
+# ─── 6. The page and the ledger give the same answer ─────────────────
+
+
+def _billed(alias: str, ws: str = "ws-a"):
+    from src.llm.proxy_pricing import workspace_proxy_cost
+
+    return workspace_proxy_cost(
+        alias, workspace_id=ws, endpoint=litellm_proxy.resolve_endpoint(ws),
+        tokens_in=1_000_000, tokens_out=0)
+
+
+def test_an_alias_named_after_a_known_model_is_not_priced_as_that_model(store, proxy):
+    # "gpt-4o" is in LiteLLM's table; what the alias runs on is not. Pricing
+    # it by its name would be the very misattribution manual prices fix.
+    proxy.info["gpt-4o"] = ("hosted_vllm/llama-3-70b", "chat", None, None)
+    _connect()
+    row = _rows(_get())["gpt-4o"]
+    assert row.price_source == "unknown"
+    assert _billed("gpt-4o") == (None, "unknown")
+
+
+def test_a_refused_model_info_leaves_page_and_ledger_both_unknown(store, proxy):
+    proxy.info["gpt-4o-mini"] = (None, None, None, None)
+    real = proxy.handle
+
+    def refuse_info(transport, request):
+        if request.url.path == "/model/info":
+            return httpx.Response(403, json={"error": "virtual key"})
+        return real(transport, request)
+
+    proxy.handle = refuse_info
+    _connect()
+    row = _rows(_get())["gpt-4o-mini"]
+    assert (row.price_source, row.underlying) == ("unknown", None)
+    assert _billed("gpt-4o-mini") == (None, "unknown")
+
+
+def test_page_and_ledger_agree_on_every_alias(store, proxy):
+    _connect()
+    _put({"custom-ft": {"input_per_mtok": 3, "output_per_mtok": 4}})
+    label = {"manual_price": "manual", "proxy_price": "proxy",
+             "litellm_estimate": "litellm", "unknown": "unknown"}
+    for alias, row in _rows(_get()).items():
+        cost, source = _billed(alias)
+        assert label[source] == row.price_source, alias
+        if cost is None:
+            assert row.input_per_mtok is None
+        else:
+            assert cost == pytest.approx(row.input_per_mtok)  # 1M input tokens
+
+
+# ─── 7. A fresh read of the proxy's prices ───────────────────────────
+
+
+def test_refresh_rereads_the_prices_the_proxy_declares(store, proxy):
+    from src.api.routers.llm import get_litellm_prices
+
+    _connect()
+    assert _rows(_get())["custom-ft"].price_source == "unknown"
+    proxy.info["custom-ft"] = ("acme/finetune-x", "chat", 5e-6, 6e-6)
+    # The cached copy (billing's, up to an hour) still answers…
+    assert _rows(_get())["custom-ft"].price_source == "unknown"
+    # …until the page asks for a fresh read.
+    with patch("src.api.deps.is_workspace_admin", return_value=False):
+        out = get_litellm_prices(refresh=True, user=_MEMBER, workspace_id="ws-a")
+    row = _rows(out)["custom-ft"]
+    assert (row.price_source, row.input_per_mtok) == ("proxy", 5.0)
+    # and billing in this process sees the same fresh price
+    assert _billed("custom-ft") == (pytest.approx(5.0), "proxy_price")
+
+
+# ─── 8. Concurrent writers of the config blob ────────────────────────
+
+
+def test_a_price_saved_while_the_llm_form_saves_is_not_lost(store, proxy):
+    """put_config loads the blob, rebuilds it and saves it whole. A price
+    saved between its load and its save used to be overwritten."""
+    import threading
+
+    import src.api.routers.llm as llm_router
+    from src.api.routers.llm import LLMConfigIn, put_config
+
+    _connect()
+    real_load = llm_router._load_workspace_config
+    form_loaded = threading.Event()
+
+    def slow_load(ws="default"):
+        cfg = real_load(ws)
+        if threading.current_thread().name == "form" and not form_loaded.is_set():
+            form_loaded.set()
+            # Widen the window between put_config's load and its save.
+            threading.Event().wait(0.4)
+        return cfg
+
+    errors: list[BaseException] = []
+
+    def form():
+        try:
+            put_config(LLMConfigIn(docs_language="de"), _request(), user=_ADMIN,
+                       workspace_id="ws-a")
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    def price():
+        try:
+            _put({"custom-ft": {"input_per_mtok": 3, "output_per_mtok": 4}})
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    with patch.object(llm_router, "_load_workspace_config", slow_load), \
+            patch("src.api.deps.is_workspace_admin", return_value=True):
+        t_form = threading.Thread(target=form, name="form")
+        t_form.start()
+        assert form_loaded.wait(5)
+        t_price = threading.Thread(target=price, name="price")
+        t_price.start()
+        t_form.join(10)
+        t_price.join(10)
+
+    assert not errors, errors
+    from src.api.routers.llm import _load_workspace_config
+
+    cfg = _load_workspace_config("ws-a")
+    assert cfg["model_prices"]["custom-ft"]["input_per_mtok"] == 3
+    assert cfg.get("docs_language") == "de"
+
+
+def test_the_config_lock_is_per_workspace_and_reentrant():
+    import threading
+
+    from src.api.routers.llm import workspace_config_lock
+
+    with workspace_config_lock("ws-a"), workspace_config_lock("ws-a"):
+        other = threading.Event()
+
+        def take_other():
+            with workspace_config_lock("ws-b"):
+                other.set()
+
+        t = threading.Thread(target=take_other)
+        t.start()
+        t.join(2)
+        assert other.is_set()

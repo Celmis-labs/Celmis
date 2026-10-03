@@ -22,9 +22,20 @@ every cost path that bills a workspace-proxy call asks this module (the review
                             ``output_cost_per_token``.
   4. ``litellm_estimate`` — an estimate LiteLLM made off the response, then
                             LiteLLM's table price of the model behind the
-                            alias (``litellm_params.model``), then the alias
-                            name itself as a last resort.
+                            alias (``litellm_params.model``).
   5. ``unknown``          — None. Never a made-up number.
+
+The alias NAME is never looked up in the table: an alias called "gpt-4o"
+may run anything, and pricing it as GPT-4o is exactly the misattribution
+manual prices exist to stop. When the model behind the alias is unknown (or
+/model/info is refused), the answer is ``unknown`` and the settings page asks
+for a price.
+
+Steps 1, 3 and the table half of 4 are :func:`resolve_alias_price` — the
+same function the settings page calls — so the page and the ledger cannot
+disagree about an alias. Only the two response-borne steps (an amount
+charged, LiteLLM's own estimate) are billing-only: the page has no response
+to read them from.
 
 Best effort throughout: pricing never fails a call. The installation gateway
 (``Profile.via_gateway``) never comes through here.
@@ -204,22 +215,21 @@ def workspace_proxy_cost(
     The order is the module docstring's.
     """
     try:
-        manual = manual_price(load_manual_prices(workspace_id).get(alias))
-        if manual is not None:
-            return manual.cost(tokens_in, tokens_out), SOURCE_MANUAL
+        manual = load_manual_prices(workspace_id)
+        own = manual_price(manual.get(alias))
+        if own is not None:
+            return own.cost(tokens_in, tokens_out), SOURCE_MANUAL
         if response_cost is not None and response_source == SOURCE_ACTUAL:
             return float(response_cost), SOURCE_ACTUAL
-        info = _model_info(endpoint)
-        entry = info.get(alias) or {}
-        declared = proxy_price(entry)
-        if declared is not None:
-            return declared.cost(tokens_in, tokens_out), SOURCE_PROXY
+        # The settings page's own chain (manual is already ruled out above).
+        static = resolve_alias_price(alias, workspace_id=workspace_id,
+                                     manual={}, info=_model_info(endpoint))
+        if static is not None and static.source == SOURCE_PROXY:
+            return static.cost(tokens_in, tokens_out), SOURCE_PROXY
         if response_cost is not None:
             return float(response_cost), response_source or SOURCE_TABLE
-        for name in (entry.get("underlying"), alias):
-            table = table_price(name)
-            if table is not None:
-                return table.cost(tokens_in, tokens_out), SOURCE_TABLE
+        if static is not None:
+            return static.cost(tokens_in, tokens_out), static.source
     except Exception as exc:  # noqa: BLE001 — pricing never fails a call
         logger.debug("workspace_proxy_cost_failed err=%s", type(exc).__name__)
         if response_cost is not None:

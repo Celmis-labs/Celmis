@@ -43,6 +43,13 @@ derives it from there.
   (admin-only write, validated before anything is written, audited as
   `llm_model_price.updated`), and apply to calls made after they are saved —
   past ledger rows are not rewritten. The installation gateway is unchanged.
+  An alias is no longer priced by its own name: one called `gpt-4o` that runs
+  something else, or whose `/model/info` the proxy refuses, is Unknown both in
+  the table and in the ledger (the two share one resolver). The proxy's
+  declared prices are cached for up to an hour; **Refresh from proxy**
+  (`GET /api/llm/litellm/prices?refresh=true`) re-reads them. Writers of the
+  workspace LLM config are now serialised per workspace, so saving the main
+  LLM form at the same moment as a price no longer drops the price.
 
 ## [0.2.0] — 2026-10-03
 

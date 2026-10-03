@@ -68,11 +68,16 @@ def set_workspace_language(language: str, workspace_id: str = "default") -> str:
             f"unsupported documentation language {language!r}; "
             f"expected one of {', '.join(sorted(DOC_LANGUAGES))}"
         )
-    from src.api.routers.llm import _load_workspace_config, _save_workspace_config
+    from src.api.routers.llm import (
+        _load_workspace_config,
+        _save_workspace_config,
+        workspace_config_lock,
+    )
 
-    blob = _load_workspace_config(workspace_id) or {}
-    blob[CONFIG_KEY] = language
-    _save_workspace_config(blob, updated_by="docs_language", workspace_id=workspace_id)
+    with workspace_config_lock(workspace_id):
+        blob = _load_workspace_config(workspace_id) or {}
+        blob[CONFIG_KEY] = language
+        _save_workspace_config(blob, updated_by="docs_language", workspace_id=workspace_id)
     logger.info("docs_language_set ws=%s language=%s", workspace_id, language)
     return language
 
@@ -137,11 +142,16 @@ def set_workspace_engine(engine: str, workspace_id: str = "default") -> str:
         raise ValueError(
             f"unsupported documentation engine {engine!r}; "
             f"expected one of {', '.join(ENGINES)}")
-    from src.api.routers.llm import _load_workspace_config, _save_workspace_config
+    from src.api.routers.llm import (
+        _load_workspace_config,
+        _save_workspace_config,
+        workspace_config_lock,
+    )
 
-    blob = _load_workspace_config(workspace_id) or {}
-    blob[ENGINE_CONFIG_KEY] = engine
-    _save_workspace_config(blob, updated_by="docs_engine", workspace_id=workspace_id)
+    with workspace_config_lock(workspace_id):
+        blob = _load_workspace_config(workspace_id) or {}
+        blob[ENGINE_CONFIG_KEY] = engine
+        _save_workspace_config(blob, updated_by="docs_engine", workspace_id=workspace_id)
     logger.info("docs_engine_set ws=%s engine=%s", workspace_id, engine)
     return engine
 

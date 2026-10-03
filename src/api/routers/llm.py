@@ -42,6 +42,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC
 from typing import Any, Literal
 
@@ -398,6 +401,31 @@ def _validated_base_url(raw: object) -> str:
                    "(e.g. http://127.0.0.1:11434/v1)",
         )
     return url
+
+
+_CONFIG_LOCKS: dict[str, threading.RLock] = {}
+_CONFIG_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def workspace_config_lock(workspace_id: str = "default") -> Iterator[None]:
+    """Serialise load → modify → save of one workspace's LLM config blob.
+
+    The blob is one row rewritten whole, so two writers that both load it,
+    change different keys and save lose one of the two changes (PUT /config
+    rebuilds the blob from what it loaded; PUT /litellm/prices writes
+    ``model_prices``). Every writer holds this lock from its load to its save.
+    Re-entrant, so a locked writer may call another locked helper.
+
+    Process-local: it covers the API's single uvicorn worker (Dockerfile,
+    docker-compose). Running several API workers would need a database lock
+    here instead.
+    """
+    key = workspace_slot(workspace_id or "default")
+    with _CONFIG_LOCKS_GUARD:
+        lock = _CONFIG_LOCKS.setdefault(key, threading.RLock())
+    with lock:
+        yield
 
 
 def _load_workspace_config(workspace_id: str = "default") -> dict[str, Any]:
@@ -1108,6 +1136,15 @@ def put_config(
     request: Request,
     user: User = Depends(require_workspace_admin),
     workspace_id: str = Depends(current_workspace_id),
+) -> LLMConfigOut:
+    # Held for the whole handler: it loads the blob, rebuilds it and saves it
+    # whole, so a price saved in between would otherwise be overwritten.
+    with workspace_config_lock(workspace_id):
+        return _put_config(payload, request, user, workspace_id)
+
+
+def _put_config(
+    payload: LLMConfigIn, request: Request, user: User, workspace_id: str,
 ) -> LLMConfigOut:
     from src.credentials import get_credential_store
 
@@ -2167,7 +2204,9 @@ def _per_mtok(per_token: float) -> float:
     return round(per_token * PER_MTOK, 6)
 
 
-def _model_prices(workspace_id: str, *, show_host: bool) -> ModelPricesOut:
+def _model_prices(
+    workspace_id: str, *, show_host: bool, refresh: bool = False,
+) -> ModelPricesOut:
     from src.llm import litellm_proxy
     from src.llm.proxy_pricing import load_manual_prices, manual_price, resolve_alias_price
 
@@ -2184,6 +2223,10 @@ def _model_prices(workspace_id: str, *, show_host: bool) -> ModelPricesOut:
         detail = str(exc) if show_host else (
             "the LiteLLM proxy is unreachable or its address is refused — "
             "a workspace admin can see why in the LLM settings")
+    if ids is not None and refresh:
+        # The proxy operator may have just added an alias or fixed its price;
+        # read /model/info again instead of the copy cached for billing.
+        litellm_proxy.forget_model_info(ep)
     info = litellm_proxy.cached_model_info(ep) if ids is not None else {}
 
     def _row(alias: str, *, stale: bool) -> ModelPriceRowOut:
@@ -2218,6 +2261,7 @@ def _model_prices(workspace_id: str, *, show_host: bool) -> ModelPricesOut:
 
 @router.get("/litellm/prices", response_model=ModelPricesOut)
 def get_litellm_prices(
+    refresh: bool = False,
     user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> ModelPricesOut:
@@ -2225,9 +2269,12 @@ def get_litellm_prices(
 
     Any member may read it. No URL, host or key in the answer; a proxy error
     is shown verbatim only to a workspace admin (the rule GET /config uses).
+    Proxy-declared prices come from ``/model/info``, cached for up to an hour
+    for billing; ``?refresh=true`` re-reads it now (and billing in this
+    process then uses the fresh copy too).
     """
     admin = _can_see_proxy_host(user, workspace_id)
-    out = _model_prices(workspace_id, show_host=admin)
+    out = _model_prices(workspace_id, show_host=admin, refresh=refresh)
     out.can_edit = admin and out.connected
     return out
 
@@ -2279,30 +2326,33 @@ def put_litellm_prices(
                 "not offered by the LiteLLM proxy: "
                 + ", ".join(m[:120] for m in missing[:10])))
 
-    cfg = _load_workspace_config(workspace_id)
-    before = {k: v for k, v in (cfg.get(CONFIG_KEY) or {}).items() if isinstance(v, dict)}
-    prices = dict(before)
     now = datetime.now(UTC).isoformat()
     changes: list[dict[str, Any]] = []
-    for alias, value in payload.prices.items():
-        old = before.get(alias)
-        old_view = ({"input_per_mtok": old.get("input_per_mtok"),
-                     "output_per_mtok": old.get("output_per_mtok")} if old else None)
-        if value is None:
-            if alias in prices:
-                prices.pop(alias)
-                changes.append({"alias": alias, "old": old_view, "new": None})
-            continue
-        new_view = {"input_per_mtok": float(value.input_per_mtok),
-                    "output_per_mtok": float(value.output_per_mtok)}
-        if old_view == new_view:
-            continue
-        prices[alias] = {**new_view, "updated_by": user.email or user.id,
-                         "updated_at": now}
-        changes.append({"alias": alias, "old": old_view, "new": new_view})
+    with workspace_config_lock(workspace_id):
+        cfg = _load_workspace_config(workspace_id)
+        before = {k: v for k, v in (cfg.get(CONFIG_KEY) or {}).items()
+                  if isinstance(v, dict)}
+        prices = dict(before)
+        for alias, value in payload.prices.items():
+            old = before.get(alias)
+            old_view = ({"input_per_mtok": old.get("input_per_mtok"),
+                         "output_per_mtok": old.get("output_per_mtok")} if old else None)
+            if value is None:
+                if alias in prices:
+                    prices.pop(alias)
+                    changes.append({"alias": alias, "old": old_view, "new": None})
+                continue
+            new_view = {"input_per_mtok": float(value.input_per_mtok),
+                        "output_per_mtok": float(value.output_per_mtok)}
+            if old_view == new_view:
+                continue
+            prices[alias] = {**new_view, "updated_by": user.email or user.id,
+                             "updated_at": now}
+            changes.append({"alias": alias, "old": old_view, "new": new_view})
+        if changes:
+            cfg[CONFIG_KEY] = prices
+            _save_workspace_config(cfg, updated_by=user.email, workspace_id=workspace_id)
     if changes:
-        cfg[CONFIG_KEY] = prices
-        _save_workspace_config(cfg, updated_by=user.email, workspace_id=workspace_id)
         logger.info("litellm_model_prices_saved workspace=%s user=%s changes=%d",
                     workspace_id, user.email, len(changes))
         record_action(
@@ -2445,9 +2495,10 @@ def reindex_embeddings(
             enq += 1
 
     sig = embeddings_signature()
-    cfg = _load_workspace_config()
-    cfg["embeddings_indexed_signature"] = sig
-    _save_workspace_config(cfg, updated_by=user.email)
+    with workspace_config_lock("default"):
+        cfg = _load_workspace_config()
+        cfg["embeddings_indexed_signature"] = sig
+        _save_workspace_config(cfg, updated_by=user.email)
     detail = f"queued {enq} repo re-embed job(s) with the current embeddings profile"
     if recreated:
         detail += " (vector collection recreated for the new embedding width)"
@@ -2516,11 +2567,12 @@ def _record_verified(*, user_email: str, provider: str, workspace_id: str = "def
     """
     from datetime import datetime
 
-    cfg = _load_workspace_config(workspace_id)
-    cfg["connection_last_verified"] = datetime.now(UTC).isoformat()
-    if set_default_provider and not cfg.get("provider"):
-        cfg["provider"] = provider  # first-time convenience
-    _save_workspace_config(cfg, updated_by=user_email, workspace_id=workspace_id)
+    with workspace_config_lock(workspace_id):
+        cfg = _load_workspace_config(workspace_id)
+        cfg["connection_last_verified"] = datetime.now(UTC).isoformat()
+        if set_default_provider and not cfg.get("provider"):
+            cfg["provider"] = provider  # first-time convenience
+        _save_workspace_config(cfg, updated_by=user_email, workspace_id=workspace_id)
 
 
 __all__ = ["router"]

@@ -77,8 +77,37 @@ export function LiteLLMModelPrices({ fingerprint }: { fingerprint: string }) {
     onError: (e) => toast.error(t("settings.llm.error", { message: (e as Error).message })),
   });
 
+  const refresh = useMutation({
+    mutationFn: () => llmApi.litellmPrices(token!, true),
+    onSuccess: (data) => qc.setQueryData(queryKey, data),
+    onError: (e) => toast.error(t("llm.litellm.prices.loadError", { message: (e as Error).message })),
+  });
+
   const data = prices.data;
-  if (!data || !data.connected) return null;
+  // The parent mounts this only for a connected proxy, so "no data yet" is
+  // loading or a failed request — never "nothing to show".
+  if (!data) {
+    return (
+      <div className="space-y-1 pt-2">
+        <div className="text-sm font-medium">{t("llm.litellm.prices.title")}</div>
+        {prices.isError ? (
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-[var(--color-destructive)]">
+            <span>
+              {t("llm.litellm.prices.loadError", { message: (prices.error as Error)?.message ?? "" })}
+            </span>
+            <Button size="sm" variant="outline" onClick={() => prices.refetch()}>
+              {t("llm.litellm.prices.retry")}
+            </Button>
+          </div>
+        ) : (
+          <p className="text-[11px] text-[var(--color-muted-foreground)]">
+            {t("llm.litellm.prices.loading")}
+          </p>
+        )}
+      </div>
+    );
+  }
+  if (!data.connected) return null;
   const canEdit = data.can_edit;
 
   const draftFor = (r: ModelPriceRow): Draft => drafts[r.alias] ?? {
@@ -94,8 +123,18 @@ export function LiteLLMModelPrices({ fingerprint }: { fingerprint: string }) {
     <div className="space-y-2 pt-2">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div className="text-sm font-medium">{t("llm.litellm.prices.title")}</div>
-        <div className="text-[11px] text-[var(--color-muted-foreground)]">
-          {t("llm.litellm.prices.unit")}
+        <div className="flex items-center gap-2">
+          <div className="text-[11px] text-[var(--color-muted-foreground)]">
+            {t("llm.litellm.prices.unit")}
+          </div>
+          <Button
+            size="sm" variant="ghost"
+            disabled={refresh.isPending || prices.isFetching}
+            title={t("llm.litellm.prices.refreshHint")}
+            onClick={() => refresh.mutate()}
+          >
+            {t("llm.litellm.prices.refresh")}
+          </Button>
         </div>
       </div>
       <p className="text-[11px] text-[var(--color-muted-foreground)]">
