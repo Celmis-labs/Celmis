@@ -76,15 +76,21 @@ calls home. Its claims:
 that is the only import of `src.ee` anywhere in the AGPL code
 (`tests/api/test_the_community_build_needs_no_ee.py` reads the import graph to
 keep it so). `mount_enterprise` verifies the licence and mounts the router of
-each feature it grants, and only those. A missing, unreadable, forged,
+each feature it grants, and only those — plus the licence router
+(`src/ee/license_router.py`, `/api/license`), always, because that is how a
+community installation becomes an enterprise one. It is the first call of
+`apply_license`, which is idempotent and runs again whenever the licence is
+changed from the UI. A missing, unreadable, forged,
 tampered, wrong-algorithm, wrong-issuer, not-yet-valid or expired licence
 mounts nothing: the process starts as the **community edition** and logs why —
 a `WARNING` naming the reason (never the token) for a licence that was given
 and failed, an `INFO` line when none was given at all.
 
 A process can outlive its licence, so every enterprise route also re-checks the
-expiry per request and answers 403 once it has passed. Restarting after expiry
-unmounts them.
+licence in force per request and answers 403 once it has expired, been removed
+or been replaced by one that does not grant the feature. Restarting after
+expiry unmounts them; removing or replacing it from the UI unmounts them at
+once.
 
 **What the rest of the product sees.** `/api/capabilities` reads availability
 from the route table, so an unmounted feature reports `available: false` with
@@ -100,9 +106,29 @@ Note what the check is *not*: `capabilities.py` says so itself, and it must
 stay true — a licence decides whether a route is **mounted**. It is not an
 authorisation boundary. Every endpoint still does its own 401 and 403.
 
-## Configuring a licence
+## Installing a licence
 
-Give the **API** container one of:
+Two ways, and the environment wins when both are used.
+
+**From the UI (no restart).** Sign in as a global admin, open
+**Admin → Health**, paste the key into the Edition card and press
+**Activate**. The API verifies it (`PUT /api/license`); a key that does not
+verify — wrong signature, expired, not yet valid, wrong issuer, granting no
+feature this build has, or far too large — is refused with the reason and
+nothing is stored. A valid one is stored encrypted in the credential store
+(`src/ee/license_store.py`: an installation-wide slot, not a workspace one, in
+the workspace volume — it survives restarts and container rebuilds) and
+applied **at once**: the features it grants are mounted, `/api/capabilities`
+reports `enterprise` on the next request, and the Analytics tab and the SSO
+button appear without a reload. **Remove licence** (`DELETE /api/license`)
+takes them away just as fast: their routes are unmounted, and every
+enterprise route re-checks the licence in force per request, so a request
+already in flight is refused with 403. Replacing a licence with one that drops
+a feature does the same for that feature. Each save, replacement and removal
+is an audit row (`license.saved` / `license.replaced` / `license.removed`)
+naming the admin, the customer, the features and the expiry — never the key.
+
+**From the environment.** Give the **API** container one of:
 
 ```bash
 CELMIS_LICENSE_KEY=eyJhbGciOiJFZERTQSIs...        # the token itself
@@ -114,12 +140,21 @@ A file must be somewhere the API container can see. The shipped
 `/workspace/data` (and the vault), so put the file there — a path like
 `/run/secrets/...` works only if you add that mount or secret yourself.
 
-The variable wins when both are set. Restart the API; the log says
-`license_valid customer=... features=... expires_at=...`, and `/admin/health`
-shows the edition. SSO additionally needs the `AUTH_OIDC_*` variables, which
-the shipped compose forwards to both the web and the API container — see
-`.env.example`. (The API also accepts bare `OIDC_ISSUER` / `OIDC_CLIENT_ID`,
-but compose does not forward those names, so under it they never arrive.)
+**Precedence:** `CELMIS_LICENSE_KEY` > `CELMIS_LICENSE_FILE` > the key entered
+in the UI. While either variable is set the licence is *managed by the server
+environment*: the Edition card shows it read-only, and `PUT`/`DELETE
+/api/license` answer 409 rather than store a key the variable would silently
+shadow. The variable wins even when what it holds does not verify. Restart
+the API after changing it; the log says `license_valid source=env_key
+customer=... features=... expires_at=...`, and `/admin/health` shows the
+edition. SSO additionally needs the `AUTH_OIDC_*` variables, which the shipped
+compose forwards to both the web and the API container — see `.env.example`.
+(The API also accepts bare `OIDC_ISSUER` / `OIDC_CLIENT_ID`, but compose does
+not forward those names, so under it they never arrive.)
+
+A UI change applies to the API process that received it. A deployment running
+several API replicas picks it up on the others at their next restart; the
+shipped compose runs one.
 
 ## Minting a licence
 
