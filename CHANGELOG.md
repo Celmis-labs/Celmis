@@ -20,6 +20,8 @@ derives it from there.
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-10-03
+
 ### Added
 
 - **Access requests.** A signed-in person whose only workspace is their
