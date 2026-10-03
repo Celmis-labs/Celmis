@@ -663,8 +663,8 @@ async def list_branches(
     Only for a repository registered to the caller's workspace (the same
     lookup the /api/repos/{slug}/* routes use). This route ran `git` in
     `repos_dir / repo_slug` for any string — another tenant's clone, or with
-    `{repo_slug:path}`, any directory `../` could reach. An unregistered repo
-    gets the same empty answer as an uncloned one.
+    `{repo_slug:path}`, any directory `../` could reach. An unregistered,
+    foreign or unaddressable repo gets 404, like the /api/repos/{slug}/* routes.
 
     Under multi_tenant the workspace row is the only authority: the
     user-keyed fallback (`store.get(user.id, slug)`) ignores the workspace, so
@@ -675,15 +675,17 @@ async def list_branches(
     from src.config import get_settings, is_valid_repo_slug
     from src.deployment import is_multi_tenant
 
-    empty = RepoBranchesOut(repo_slug=repo_slug, branches=[], default_branch=None)
+    # Unknown, foreign and unaddressable slugs all get the same 404 the
+    # /api/repos/{slug}/* routes give: no tenant learns another's repo exists.
+    not_found = HTTPException(status_code=404, detail="Repo not registered")
     if not is_valid_repo_slug(repo_slug):
-        return empty
+        raise not_found
     store = get_auto_review_store()
     registered = store.get_in_workspace(ws_id, repo_slug)
     if registered is None and not is_multi_tenant():
         registered = store.get(user.id, repo_slug)
     if registered is None:
-        return empty
+        raise not_found
 
     settings = get_settings()
     repo_path = settings.repo_path(repo_slug)

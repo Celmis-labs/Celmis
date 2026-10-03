@@ -142,10 +142,11 @@ async def test_branches_only_for_the_callers_own_repo(registry, tmp_path):
     user = User(id="user-a", email="a@x")
 
     own = await list_branches(SLUG_A, user=user, ws_id=WS_A)
-    foreign = await list_branches(SLUG_B, user=user, ws_id=WS_A)
+    with pytest.raises(HTTPException) as foreign:
+        await list_branches(SLUG_B, user=user, ws_id=WS_A)
 
     assert "alpha-main" in own.branches
-    assert foreign.branches == [] and foreign.default_branch is None
+    assert foreign.value.status_code == 404
 
 
 @pytest.mark.parametrize("slug", [f"../repos/{SLUG_B}", f"x/../../repos/{SLUG_B}",
@@ -153,8 +154,9 @@ async def test_branches_only_for_the_callers_own_repo(registry, tmp_path):
 async def test_branches_refuses_traversal(registry, slug):
     from src.api.routers.review_policies import list_branches
 
-    out = await list_branches(slug, user=User(id="user-a", email="a@x"), ws_id=WS_A)
-    assert out.branches == []
+    with pytest.raises(HTTPException) as refused:
+        await list_branches(slug, user=User(id="user-a", email="a@x"), ws_id=WS_A)
+    assert refused.value.status_code == 404
 
 
 # ─── an invalid slug anywhere in the API is a 404 ───────────────────
@@ -321,8 +323,9 @@ async def test_branches_ignore_a_row_left_in_a_workspace_the_user_left(
     _git_clone_at(get_settings().repo_path(SLUG_B), "beta-secret-branch")
     former = User(id=f"user-{WS_B}", email="b@x")
 
-    out = await list_branches(SLUG_B, user=former, ws_id=WS_A)
-    assert out.branches == [] and out.default_branch is None
+    with pytest.raises(HTTPException) as refused:
+        await list_branches(SLUG_B, user=former, ws_id=WS_A)
+    assert refused.value.status_code == 404
 
 
 async def test_branches_single_tenant_keeps_the_user_fallback(registry,
