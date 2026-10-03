@@ -326,8 +326,14 @@ def trigger_index(
     """
     from src.repos.indexing import IndexError_, index_repo_sync
 
+    # The ACTIVE workspace's registration only. A fallback to "a row this
+    # user registered" used to follow, and that row may sit in another
+    # workspace: somebody removed from workspace B kept indexing, listing PRs
+    # and reading branches of B's repositories — with B's stored token, since
+    # the row carries B's workspace id. Every by-slug route here asks the
+    # same single question.
     store = get_auto_review_store()
-    cfg = store.get_in_workspace(workspace_id, slug) or store.get(user.id, slug)
+    cfg = store.get_in_workspace(workspace_id, slug)
     if cfg is None:
         raise HTTPException(status_code=404, detail="Repo not registered")
     try:
@@ -412,7 +418,7 @@ def check_freshness(
     # would be enough to make this instance reach out with THEIR credential
     # and queue work in THEIR queue.
     store = get_auto_review_store()
-    if (store.get_in_workspace(workspace_id, slug) or store.get(user.id, slug)) is None:
+    if (store.get_in_workspace(workspace_id, slug)) is None:
         raise HTTPException(status_code=404, detail="Repo not registered")
 
     result = check_repo(slug, workspace_id=workspace_id, user_id=user.id,
@@ -543,7 +549,7 @@ def trigger_generate_vault(
     Requires a resolvable LLM key (Connections/LLM Setup, or env).
     """
     store = get_auto_review_store()
-    cfg = store.get_in_workspace(workspace_id, slug) or store.get(user.id, slug)
+    cfg = store.get_in_workspace(workspace_id, slug)
     if cfg is None:
         raise HTTPException(status_code=404, detail="Repo not registered")
 
@@ -634,7 +640,7 @@ def toggle_auto_review(
     workspace_id: str = Depends(current_workspace_id),
 ) -> RepoOut:
     store = get_auto_review_store()
-    cfg = store.get_in_workspace(workspace_id, slug) or store.get(user.id, slug)
+    cfg = store.get_in_workspace(workspace_id, slug)
     if cfg is None:
         raise HTTPException(status_code=404, detail="Repo not registered")
     cfg.enabled = req.enabled
@@ -668,7 +674,7 @@ def set_repo_branch(
     a request handler would race a running index job).
     """
     store = get_auto_review_store()
-    cfg = store.get_in_workspace(workspace_id, slug) or store.get(user.id, slug)
+    cfg = store.get_in_workspace(workspace_id, slug)
     if cfg is None:
         raise HTTPException(status_code=404, detail="Repo not registered")
 
@@ -1306,7 +1312,7 @@ def list_open_prs(
 ) -> list[PullRequestSummary]:
     """Return open PRs/MRs for a registered repo with optional branch + sort."""
     store = get_auto_review_store()
-    cfg = store.get_in_workspace(workspace_id, slug) or store.get(user.id, slug)
+    cfg = store.get_in_workspace(workspace_id, slug)
     if cfg is None:
         raise HTTPException(status_code=404, detail="Repo not registered")
     creds = resolve_git_credential(cfg.provider, user_id=user.id, workspace_id=cfg.workspace_id)
@@ -1336,7 +1342,7 @@ def list_branches(
 ) -> list[str]:
     """List target branches for a repo (for branch filter dropdown)."""
     store = get_auto_review_store()
-    cfg = store.get_in_workspace(workspace_id, slug) or store.get(user.id, slug)
+    cfg = store.get_in_workspace(workspace_id, slug)
     if cfg is None:
         raise HTTPException(status_code=404, detail="Repo not registered")
     creds = resolve_git_credential(cfg.provider, user_id=user.id, workspace_id=cfg.workspace_id)

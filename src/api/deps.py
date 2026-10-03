@@ -18,6 +18,21 @@ def get_users() -> UserStore:
     return get_user_store()
 
 
+def sync_database_url() -> str:
+    """The DATABASE_URL for a blocking engine (the sync role lookups below).
+
+    The async URL names an async driver; the blocking lookups need its sync
+    sibling. SQLite is mapped too, so the role checks can be exercised over a
+    real database file in tests instead of being replaced wholesale.
+    """
+    from src.db.session import get_database_url
+
+    url = get_database_url()
+    if url.startswith("sqlite+aiosqlite://"):
+        return "sqlite://" + url[len("sqlite+aiosqlite://"):]
+    return url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+
+
 def _bearer_token(authorization: str | None) -> str:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(
@@ -67,6 +82,22 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
     if not user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Admin scope required",
+        )
+    return user
+
+
+def require_superadmin(user: User = Depends(get_current_user)) -> User:
+    """The env master account only (src/users/roles.py `is_superadmin`).
+
+    NOT every global admin: an OIDC_ADMIN_ROLE admin keeps the platform pages
+    (`require_admin`) but cannot hand out owner/admin/editor or create a shared
+    workspace — those are the master account's.
+    """
+    from src.users.roles import is_superadmin
+
+    if not is_superadmin(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin required",
         )
     return user
 
@@ -231,14 +262,21 @@ async def _effective_repo_permission(
         return "admin", True
     from sqlalchemy import select
 
-    from src.db.models import RepoTeamAccess, TeamMember
+    from src.db.models import RepoTeamAccess, Team, TeamMember
     from src.db.session import get_async_session
 
     async for s in get_async_session():
         candidates = repo_grant_candidates(repo_slug, workspace_id)
-        all_grants = (await s.scalars(
-            select(RepoTeamAccess).where(RepoTeamAccess.repo_slug.in_(candidates))
-        )).all()
+        stmt = select(RepoTeamAccess).where(RepoTeamAccess.repo_slug.in_(candidates))
+        if workspace_id:
+            # Only THIS workspace's teams. `repo_team_access` is keyed by slug
+            # alone, and two tenants can register the same repository: without
+            # this a grant written in workspace B both counted as "grants
+            # exist" in A (denying A's members) and, through a team of B the
+            # caller sits in, granted them A's copy of the repo.
+            stmt = stmt.join(Team, Team.id == RepoTeamAccess.team_id).where(
+                Team.workspace_id == workspace_id)
+        all_grants = (await s.scalars(stmt)).all()
         if not all_grants:
             return None, False
         team_ids = {g.team_id for g in all_grants}
@@ -316,11 +354,7 @@ async def current_workspace_id(
     from sqlalchemy.orm import Session as _Session
 
     from src.db.models import Workspace, WorkspaceMember
-    from src.db.session import get_database_url
-    sync_url = get_database_url().replace(
-        "postgresql+asyncpg://", "postgresql+psycopg://"
-    )
-    eng = create_engine(sync_url, pool_pre_ping=True)
+    eng = create_engine(sync_database_url(), pool_pre_ping=True)
     try:
         with _Session(eng) as s:
             if header_slug:
@@ -375,16 +409,13 @@ def is_workspace_admin(user: User, workspace_id: str) -> bool:
     from sqlalchemy.orm import Session as _Session
 
     from src.db.models import WorkspaceMember
-    from src.db.session import get_database_url
-
-    sync_url = get_database_url().replace(
-        "postgresql+asyncpg://", "postgresql+psycopg://"
-    )
-    eng = create_engine(sync_url, pool_pre_ping=True)
+    eng = create_engine(sync_database_url(), pool_pre_ping=True)
     try:
         with _Session(eng) as s:
+            from src.users.roles import WORKSPACE_ADMIN_ROLES
+
             m = s.get(WorkspaceMember, (workspace_id, user.id))
-            return m is not None and m.role in ("owner", "admin")
+            return m is not None and m.role in WORKSPACE_ADMIN_ROLES
     finally:
         eng.dispose()
 
@@ -426,12 +457,7 @@ def workspace_role(user_id: str, workspace_id: str) -> str | None:
     from sqlalchemy.orm import Session as _Session
 
     from src.db.models import WorkspaceMember
-    from src.db.session import get_database_url
-
-    sync_url = get_database_url().replace(
-        "postgresql+asyncpg://", "postgresql+psycopg://"
-    )
-    eng = create_engine(sync_url, pool_pre_ping=True)
+    eng = create_engine(sync_database_url(), pool_pre_ping=True)
     try:
         with _Session(eng) as s:
             m = s.get(WorkspaceMember, (workspace_id, user_id))
@@ -459,6 +485,32 @@ async def require_analytics_access(
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Analytics requires owner, admin or editor on this workspace",
+    )
+
+
+async def require_prompt_editor(
+    user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> User:
+    """Editor, admin or owner of the ACTIVE workspace (or a global admin).
+
+    The gate for what an editor is FOR: agent system prompts and per-repo
+    review policies. It is deliberately not `require_workspace_admin` — an
+    editor holds none of the admin powers (members, invites, teams, keys,
+    connections) — and not open to members and viewers either.
+    """
+    if user.is_admin:
+        return user
+    import asyncio
+
+    from src.users.roles import PROMPT_EDITOR_ROLES
+
+    role = await asyncio.to_thread(workspace_role, user.id, workspace_id)
+    if role in PROMPT_EDITOR_ROLES:
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Editing prompts requires editor, admin or owner on this workspace",
     )
 
 

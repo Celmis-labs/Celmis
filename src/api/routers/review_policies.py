@@ -31,7 +31,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import current_workspace_id, get_current_user, require_repo_permission
+from src.api.deps import (
+    current_workspace_id,
+    get_current_user,
+    require_prompt_editor,
+    require_repo_permission,
+)
 from src.api.schemas import (
     FolderRule,
     RepoBranchesOut,
@@ -501,6 +506,25 @@ def _default_out(
     )
 
 
+def _require_repo_in_workspace(repo_slug: str, ws_id: str) -> None:
+    """404 unless `repo_slug` is registered in `ws_id`.
+
+    `repo_review_policies` is keyed by slug alone and the write path used to
+    create a row for ANY slug it was handed. A policy row is only ever read
+    for a repository of the workspace that owns it, so one written for a
+    repository this workspace does not have is at best junk — and, since the
+    slug is the primary key, it squatted the slug: the workspace that really
+    registers that repository later was refused its own policy (404 above).
+    Either registered spelling is accepted, as for team grants.
+    """
+    from src.api.auto_review import get_auto_review_store
+
+    for cfg in get_auto_review_store().list_for_workspace(ws_id):
+        if repo_slug in (cfg.repo_slug, cfg.full_name):
+            return
+    raise HTTPException(status_code=404, detail="Repository not registered in this workspace")
+
+
 # ─── Endpoints ────────────────────────────────────────────────────────
 
 
@@ -628,6 +652,7 @@ async def prompt_preview(
 async def list_branches(
     repo_slug: str,
     _user: User = Depends(get_current_user),
+    ws_id: str = Depends(current_workspace_id),
 ) -> RepoBranchesOut:
     """Discover branches from the local clone. Used to populate the
     'target branches' checkbox list in the UI.
@@ -635,6 +660,10 @@ async def list_branches(
     Falls back to an empty list if the repo is not cloned yet (the user can
     still type branch names by hand, or run `analyzer sync` to populate).
     """
+    # The clone lives on a shared disk; a slug is not a permission. Without
+    # this, any signed-in user read the branch names of another tenant's repo.
+    await asyncio.to_thread(_require_repo_in_workspace, repo_slug, ws_id)
+
     from src.config import get_settings
 
     settings = get_settings()
@@ -712,11 +741,18 @@ async def upsert_policy(
     repo_slug: str,
     payload: ReviewPolicyIn,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_prompt_editor),
     _perm: User = Depends(require_repo_permission("review")),
     ws_id: str = Depends(current_workspace_id),
 ) -> ReviewPolicyOut:
-    """Create or fully replace the policy for `repo_slug` in the caller's ws."""
+    """Create or fully replace the policy for `repo_slug` in the caller's ws.
+
+    Three gates, each answering a different question: editor/admin/owner of
+    the workspace (the prompt template, folder rules and per-agent prompt
+    overrides are prompts — the editor's job, not a member's); the repository
+    is this workspace's; and the caller's teams grant `review` on it.
+    """
+    await asyncio.to_thread(_require_repo_in_workspace, repo_slug, ws_id)
     row = await session.get(RepoReviewPolicy, repo_slug)
     if row is not None and row.workspace_id != ws_id:
         # Policy rows are PK'd by repo_slug alone; refuse to overwrite one owned
@@ -841,11 +877,14 @@ async def upsert_policy(
 async def reset_policy(
     repo_slug: str,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(get_current_user),
-    _perm: User = Depends(require_repo_permission("admin")),
+    user: User = Depends(require_prompt_editor),
+    # `review`, the same as saving: PUT replaces the whole policy, so a reset
+    # demanding more than a save only made the editor's undo the hard part.
+    _perm: User = Depends(require_repo_permission("review")),
     ws_id: str = Depends(current_workspace_id),
 ) -> None:
     """Reset to default (delete the row) — only within the caller's workspace."""
+    await asyncio.to_thread(_require_repo_in_workspace, repo_slug, ws_id)
     row = await session.get(RepoReviewPolicy, repo_slug)
     if row is None or row.workspace_id != ws_id:
         return

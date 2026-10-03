@@ -8,6 +8,9 @@
                                               this agent at the workspace level.
     DELETE /api/agents/{name}/prompt        — reset to built-in default.
 
+Both writes need editor, admin or owner of the active workspace
+(`require_prompt_editor`): editing prompts is what the editor role is for.
+
 Storage: uses the existing credential store as a generic key/value under
 provider="__agent_prompt__" to avoid a new migration for something small.
 The value is Fernet-encrypted like any other secret — cheap, safe, and
@@ -24,7 +27,7 @@ from pydantic import BaseModel, Field
 from src.api.deps import (
     current_workspace_id,
     get_current_user,
-    require_workspace_admin,
+    require_prompt_editor,
 )
 from src.llm.keys import workspace_slot
 from src.users import User
@@ -259,7 +262,7 @@ def get_agent(
 def override_prompt(
     name: str,
     payload: AgentPromptIn,
-    user: User = Depends(require_workspace_admin),
+    user: User = Depends(require_prompt_editor),
     workspace_id: str = Depends(current_workspace_id),
 ) -> AgentOut:
     """Workspace-level override of an agent's system prompt.
@@ -277,7 +280,7 @@ def override_prompt(
 
 @router.delete("/{name}/prompt", response_model=AgentOut)
 def reset_prompt(
-    name: str, user: User = Depends(require_workspace_admin),
+    name: str, user: User = Depends(require_prompt_editor),
     workspace_id: str = Depends(current_workspace_id),
 ) -> AgentOut:
     if name not in _AGENTS:

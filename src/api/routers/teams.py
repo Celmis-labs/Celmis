@@ -33,15 +33,19 @@ from src.api.deps import (
     get_current_user,
     require_workspace_admin,
 )
-from src.db.models import RepoTeamAccess, Team, TeamMember
+from src.db.models import RepoTeamAccess, Team, TeamMember, WorkspaceMember
 from src.db.session import get_async_session
 from src.users import User
+from src.users.roles import TEAM_ROLES
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/teams", tags=["teams"])
 
-_VALID_ROLES = {"owner", "admin", "reviewer", "member", "viewer"}
+#: A team role is a label inside the team (what the team may do to a repo is
+#: its `RepoTeamAccess.permission`). The table lives in src/users/roles.py with
+#: the workspace roles — this module's own copy had already missed `editor`.
+_VALID_ROLES = TEAM_ROLES
 _VALID_PERMS = {"admin", "review", "read"}
 _PERM_RANK = {"read": 1, "review": 2, "admin": 3}
 
@@ -187,8 +191,13 @@ async def upsert_member(
 ) -> MemberOut:
     if payload.role not in _VALID_ROLES:
         raise HTTPException(status_code=400,
-                            detail=f"role must be one of {_VALID_ROLES}")
+                            detail=f"role must be one of {sorted(_VALID_ROLES)}")
     await _team_in_workspace(session, team_id, ws_id)
+    # A team is a subset of the workspace's people. Putting somebody from
+    # outside it into a team handed them the team's repo grants without ever
+    # making them a member — the side door around the invite/grant rules.
+    if await session.get(WorkspaceMember, (ws_id, user_id)) is None:
+        raise HTTPException(status_code=404, detail="Not a member of this workspace")
     row = await session.get(TeamMember, (team_id, user_id))
     if row is None:
         row = TeamMember(team_id=team_id, user_id=user_id, role=payload.role)

@@ -10,11 +10,16 @@ workspace comes from:
 
 Endpoints:
     GET    /api/workspaces               — my workspaces + active hint
-    POST   /api/workspaces               — create (admin)
-    DELETE /api/workspaces/{id}          — delete (owner or global admin)
+    POST   /api/workspaces               — create a shared workspace (superadmin)
+    DELETE /api/workspaces/{id}          — delete (owner or superadmin)
     GET    /api/workspaces/{id}/members
     PUT    /api/workspaces/{id}/members/{user_id}
     DELETE /api/workspaces/{id}/members/{user_id}
+
+Who may write a membership is `can_change` in src/users/roles.py, applied by
+src/api/memberships.py for every route that writes one: owner/admin/editor are
+the superadmin's to grant, change and remove; an owner/admin of the workspace
+manages members and viewers.
 """
 
 from __future__ import annotations
@@ -29,11 +34,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import get_current_user
+from src.api.deps import client_ip, get_current_user, require_superadmin
+from src.api.memberships import actor_role, change_membership, refuse_unless_can_change
 from src.db.models import Workspace, WorkspaceMember
 from src.db.session import get_async_session
 from src.users import User
-from src.users.roles import VALID_WORKSPACE_ROLES, WORKSPACE_ROLE_RANK
+from src.users.roles import (
+    VALID_WORKSPACE_ROLES,
+    WORKSPACE_ADMIN_ROLES,
+    WORKSPACE_ROLE_RANK,
+    is_superadmin,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +96,7 @@ async def _require_ws_admin(session: AsyncSession, user: User, ws_id: str) -> No
     if user.is_admin:
         return
     m = await session.get(WorkspaceMember, (ws_id, user.id))
-    if m is None or m.role not in ("owner", "admin"):
+    if m is None or m.role not in WORKSPACE_ADMIN_ROLES:
         raise HTTPException(status_code=403, detail="Requires owner/admin on this workspace")
 
 
@@ -169,11 +180,13 @@ async def list_my_workspaces(
 async def create_workspace(
     payload: WorkspaceIn,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_superadmin),
 ) -> WorkspaceOut:
-    # Multi-tenant model: any authenticated user may create their own
-    # workspace and becomes its owner. No global admin required — each user
-    # is the admin of the workspaces they create.
+    # A SHARED workspace is the superadmin's to create: its creator becomes
+    # its owner, and owner is a role only the superadmin hands out — letting
+    # anybody create one was letting anybody grant themselves "owner".
+    # Everybody still gets a personal workspace of their own, provisioned at
+    # signup/login (src/api/workspace_provision.py), not through this route.
     if not _SLUG_PAT.match(payload.slug):
         raise HTTPException(status_code=400, detail="invalid slug")
     ws = Workspace(
@@ -201,7 +214,11 @@ async def delete_workspace(
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(get_current_user),
 ) -> None:
-    await _require_ws_admin(session, user, ws_id)
+    # The owner, or the superadmin. An admin may not: deleting the workspace
+    # takes the owner's work with it, a bigger act than demoting them, which
+    # an admin is not allowed either.
+    if not is_superadmin(user) and await actor_role(session, user, ws_id) != "owner":
+        raise HTTPException(status_code=403, detail="Only the owner can delete this workspace")
     ws = await session.get(Workspace, ws_id)
     if ws is None:
         return
@@ -246,8 +263,17 @@ async def member_reset_link(
     owner/admin power (the global-admin variant lives in /api/users).
     A tenant admin must never mint a takeover link for a global admin."""
     await _require_ws_admin(session, user, ws_id)
-    if await session.get(WorkspaceMember, (ws_id, user_id)) is None:
+    member = await session.get(WorkspaceMember, (ws_id, user_id))
+    if member is None:
         raise HTTPException(status_code=404, detail="Not a member of this workspace")
+    # A reset link is a takeover of the account it is minted for, so it is
+    # bounded by the same rule as changing that member: a workspace admin may
+    # mint one for a member or viewer, never for another admin, an editor or
+    # the owner — otherwise "cannot demote the owner" was one click from
+    # "can become the owner".
+    if user_id != user.id:
+        refuse_unless_can_change(
+            user, await actor_role(session, user, ws_id), member.role, member.role)
     from src.users.store import get_user_store
     target = get_user_store().get_by_id(user_id)
     if target is None or not target.is_active:
@@ -264,11 +290,13 @@ async def member_reset_link(
 
 @router.put("/{ws_id}/members/{user_id}", response_model=MemberOut)
 async def upsert_member(
-    ws_id: str, user_id: str, payload: MemberIn,
+    ws_id: str, user_id: str, payload: MemberIn, request: Request,
     session: AsyncSession = Depends(get_async_session),
     admin: User = Depends(get_current_user),
 ) -> MemberOut:
-    await _require_ws_admin(session, admin, ws_id)
+    superadmin = is_superadmin(admin)
+    if not superadmin:
+        await _require_ws_admin(session, admin, ws_id)
     if payload.role not in _VALID_ROLES:
         raise HTTPException(status_code=400,
                             detail=f"role must be one of {sorted(_VALID_ROLES)}")
@@ -295,26 +323,28 @@ async def upsert_member(
                 status_code=403,
                 detail="Invite this person by email or link — they have to accept.",
             )
-        row = WorkspaceMember(workspace_id=ws_id, user_id=user_id, role=payload.role)
-        session.add(row)
-    else:
-        row.role = payload.role
-    await session.commit()
-    return MemberOut(user_id=row.user_id, role=row.role)
+    _old, new = await change_membership(
+        session, actor=admin, ws_id=ws_id, user_id=user_id,
+        new_role=payload.role, via="workspace_members", ip=client_ip(request),
+    )
+    return MemberOut(user_id=user_id, role=new or payload.role)
 
 
 @router.delete("/{ws_id}/members/{user_id}", status_code=204)
 async def remove_member(
-    ws_id: str, user_id: str,
+    ws_id: str, user_id: str, request: Request,
     session: AsyncSession = Depends(get_async_session),
     admin: User = Depends(get_current_user),
 ) -> None:
-    await _require_ws_admin(session, admin, ws_id)
+    if not is_superadmin(admin):
+        await _require_ws_admin(session, admin, ws_id)
     row = await session.get(WorkspaceMember, (ws_id, user_id))
     if row is None:
         return
-    await session.delete(row)
-    await session.commit()
+    await change_membership(
+        session, actor=admin, ws_id=ws_id, user_id=user_id,
+        new_role=None, via="workspace_members", ip=client_ip(request),
+    )
 
 
 __all__ = ["router", "resolve_active_workspace"]

@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src.api.routers import access as access_router
+from src.api.routers import admin_users as admin_users_router
 from src.api.routers import agents as agents_router
 from src.api.routers import alerts as alerts_router
 from src.api.routers import apply_fix as apply_fix_router
@@ -528,6 +529,7 @@ def build_app() -> FastAPI:
     # Stage 22 — fine-grained research access + user directory
     app.include_router(access_router.router)
     app.include_router(users_router.router)
+    app.include_router(admin_users_router.router)
     # Stage 23 — LLM spend ledger + workspace budgets
     app.include_router(spend_router.router)
     app.include_router(feedback_router.router)

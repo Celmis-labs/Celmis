@@ -147,8 +147,13 @@ async def policy_api(workspace: dict, *, rows: list[dict] | None = None):
 
     original_perm = deps_module._effective_repo_permission
     original_cfg = llm_router._load_workspace_config
+    original_registered = policies_router._require_repo_in_workspace
     deps_module._effective_repo_permission = _permitted
     llm_router._load_workspace_config = lambda workspace_id="default": workspace
+    # The repository counts as this workspace's. Who may write a policy, and
+    # for which repository, is tests/api/test_roles_editor_and_users_page.py;
+    # this file is about what a permitted write stores.
+    policies_router._require_repo_in_workspace = lambda _slug, _ws: None
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://policies") as c:
@@ -156,6 +161,7 @@ async def policy_api(workspace: dict, *, rows: list[dict] | None = None):
     finally:
         deps_module._effective_repo_permission = original_perm
         llm_router._load_workspace_config = original_cfg
+        policies_router._require_repo_in_workspace = original_registered
         await engine.dispose()
 
 

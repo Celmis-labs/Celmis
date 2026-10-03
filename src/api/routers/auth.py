@@ -38,6 +38,7 @@ from src.users import (
     hash_password,
     verify_password,
 )
+from src.users.roles import MASTER_ADMIN_ID, is_master_email, is_superadmin, master_email
 from src.users.scopes import STANDARD_SCOPES, held_scopes
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ def _user_to_out(user: User) -> UserOut:
         email=user.email,
         name=user.name,
         is_admin=user.is_admin,
+        is_superadmin=is_superadmin(user),
         auth_method=user.auth_method.value,
         has_password=user.has_password,
         has_google=user.has_google,
@@ -80,13 +82,14 @@ def _user_to_out(user: User) -> UserOut:
     )
 
 
-_MASTER_ADMIN_ID = "master-admin"
+_MASTER_ADMIN_ID = MASTER_ADMIN_ID
 
 
 def _master_email() -> str:
     """No in-code default: the master identity exists ONLY when the operator
-    explicitly sets CELMIS_MASTER_EMAIL in the env (alongside the key)."""
-    return os.environ.get("CELMIS_MASTER_EMAIL", "").strip().lower()
+    explicitly sets CELMIS_MASTER_EMAIL in the env (alongside the key).
+    The one copy lives in src/users/roles.py, beside `is_superadmin`."""
+    return master_email()
 
 
 def _is_master_email(email: str | None) -> bool:
@@ -97,8 +100,7 @@ def _is_master_email(email: str | None) -> bool:
     login no account holds the master email, and an IdP identity created
     under it would be adopted by `_master_login` (and so made global admin).
     """
-    master = _master_email()
-    return bool(master and (email or "").strip().lower() == master)
+    return is_master_email(email)
 
 
 def _is_master_account(user: User) -> bool:
@@ -261,6 +263,16 @@ def signup(req: SignupRequest, request: Request,
            users: UserStore = Depends(get_users)) -> TokenResponse:
     if not password_login_enabled():
         raise _password_login_disabled()
+    if _is_master_email(req.email):
+        # The master address is the superadmin's. `_master_login` adopts an
+        # existing password account that holds it, so a signup under it before
+        # the operator's first master login would be adopted — with the
+        # signer's own password still working — as global admin AND superadmin.
+        # The SSO exchange already refuses this address; signup did not.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This address is reserved on this server",
+        )
     existing = users.get_by_email(req.email)
     if existing is not None:
         raise HTTPException(
