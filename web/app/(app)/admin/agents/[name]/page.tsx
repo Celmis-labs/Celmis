@@ -10,6 +10,7 @@ import { ArrowLeftIcon, RotateCcwIcon, SaveIcon } from "lucide-react";
 import { agentsApi } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
+import { useCanEditPrompts } from "@/lib/use-analytics-access";
 import { PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import {
@@ -28,6 +29,8 @@ export default function AgentEditPage() {
   const token = useToken();
   const qc = useQueryClient();
   const t = useT();
+  // undefined while the membership loads: drawn disabled until it is known.
+  const canEdit = useCanEditPrompts() === true;
   const { confirm, dialog } = useConfirm();
 
   const agent = useQuery({
@@ -189,6 +192,9 @@ export default function AgentEditPage() {
         </CardContent>
       </Card>
 
+      {!canEdit && (
+        <p className="text-xs text-[var(--color-muted-foreground)]">{t("roles.promptsReadOnly")}</p>
+      )}
       <div className="clear-agent-launcher flex items-center justify-between sticky bottom-0 bg-[var(--color-background)] border-t border-[var(--color-border)] py-3">
         <Button
           variant="ghost"
@@ -199,7 +205,7 @@ export default function AgentEditPage() {
             });
             if (ok) reset.mutate();
           }}
-          disabled={reset.isPending || !a.has_override}
+          disabled={!canEdit || reset.isPending || !a.has_override}
         >
           <RotateCcwIcon className="h-4 w-4 mr-1" /> {t("admin.agents.detail.resetToDefault")}
         </Button>
@@ -211,7 +217,7 @@ export default function AgentEditPage() {
           )}
           <Button
             onClick={() => save.mutate()}
-            disabled={save.isPending || !dirty}
+            disabled={!canEdit || save.isPending || !dirty}
           >
             <SaveIcon className="h-4 w-4 mr-1" />
             {save.isPending ? t("admin.agents.detail.saving") : t("admin.agents.detail.saveOverride")}

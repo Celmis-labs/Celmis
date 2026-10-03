@@ -287,6 +287,10 @@ function WorkspaceSwitcher() {
                 </button>
               ))}
             </div>
+            {/* Creating a shared workspace is the superadmin's (its creator
+                becomes owner, a role nobody else may hand out); everyone
+                already has a personal workspace of their own. */}
+            {data?.isSuperadmin && (
             <button
               onClick={() => { setOpen(false); setName(""); setDialogOpen(true); }}
               className="flex w-full items-center gap-2 border-t border-[var(--color-border)] px-3 py-2 text-xs font-medium text-[var(--color-brand)] transition-colors hover:bg-[var(--color-accent)]"
@@ -294,6 +298,7 @@ function WorkspaceSwitcher() {
             <PlusIcon className="h-3.5 w-3.5" />
             {t("shell.newWorkspace")}
           </button>
+            )}
         </div>,
         document.body,
       )}

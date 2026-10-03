@@ -85,6 +85,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             celmisToken: tok.access_token,
             celmisExpiresAt: tok.expires_at,
             isAdmin: me.is_admin,
+            isSuperadmin: Boolean(me.is_superadmin),
           };
         } catch {
           return null;
@@ -129,6 +130,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           celmisToken: tok.access_token,
           celmisExpiresAt: tok.expires_at,
           isAdmin: me.is_admin,
+          isSuperadmin: Boolean(me.is_superadmin),
         });
         return true;
       } catch {
@@ -138,10 +140,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     jwt: async ({ token, user }) => {
       // Initial sign-in: Credentials (authorize()) or Google/OIDC (signIn above).
       if (user && (user as { celmisToken?: string }).celmisToken) {
-        const u = user as { id: string; email: string; name: string; celmisToken: string; celmisExpiresAt: string; isAdmin: boolean };
+        const u = user as { id: string; email: string; name: string; celmisToken: string; celmisExpiresAt: string; isAdmin: boolean; isSuperadmin?: boolean };
         token.celmisToken = u.celmisToken;
         token.celmisExpiresAt = u.celmisExpiresAt;
         token.isAdmin = u.isAdmin;
+        token.isSuperadmin = Boolean(u.isSuperadmin);
         token.userId = u.id;
         token.email = u.email;
         token.name = u.name;
@@ -181,6 +184,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         try {
           const me = await api<UserOut>("/api/auth/me", { token: token.celmisToken as string });
           token.isAdmin = me.is_admin;
+          token.isSuperadmin = Boolean(me.is_superadmin);
           token.meCheckedAt = Date.now();
         } catch {
           // backend unreachable or token refused — keep the last known value
@@ -198,6 +202,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       session.celmisToken = (token.celmisToken as string | undefined) ?? null;
       session.celmisExpiresAt = (token.celmisExpiresAt as string | undefined) ?? null;
       session.isAdmin = Boolean(token.isAdmin);
+      session.isSuperadmin = Boolean(token.isSuperadmin);
       return session;
     },
   },

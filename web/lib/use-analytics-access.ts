@@ -36,6 +36,16 @@ export function useCanEditIssues(): boolean | undefined {
   return useActiveRoleIn(ISSUE_WRITE_ROLES);
 }
 
+/** Roles that may edit agent prompts and review policies — `PROMPT_EDITOR_ROLES`
+ *  in src/users/roles.py (`require_prompt_editor`). The editor role exists
+ *  for exactly this; a member or viewer gets a 403, so the Save is not drawn
+ *  as if it would work. */
+const PROMPT_EDITOR_ROLES = new Set(["owner", "admin", "editor"]);
+
+export function useCanEditPrompts(): boolean | undefined {
+  return useActiveRoleIn(PROMPT_EDITOR_ROLES);
+}
+
 function useActiveRoleIn(roles: Set<string>): boolean | undefined {
   const { data: session } = useSession();
   const token = useToken();

@@ -25,6 +25,7 @@ import {
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
+import { useCanEditPrompts } from "@/lib/use-analytics-access";
 import {
   AgentLLMRow, DEFAULT_AGENT_MAX_OUTPUT, agentDraftFrom, agentEntryToSave,
   agentMaxOutError, agentMaxOutLimit, storedReasoning, useAgentCapabilities,
@@ -199,6 +200,8 @@ export default function ReviewPolicyEditPage() {
   const token = useToken();
   const qc = useQueryClient();
   const t = useT();
+  // undefined while the membership loads: drawn disabled until it is known.
+  const canEdit = useCanEditPrompts() === true;
   const { confirm, dialog } = useConfirm();
 
   const policy = useQuery({
@@ -1190,6 +1193,9 @@ export default function ReviewPolicyEditPage() {
         </DialogContent>
       </Dialog>
 
+      {!canEdit && (
+        <p className="text-xs text-[var(--color-muted-foreground)]">{t("roles.promptsReadOnly")}</p>
+      )}
       <div className="clear-agent-launcher flex items-center justify-between sticky bottom-0 bg-[var(--color-background)] border-t border-[var(--color-border)] py-3">
         <Button
           variant="ghost"
@@ -1200,7 +1206,7 @@ export default function ReviewPolicyEditPage() {
             });
             if (ok) reset.mutate();
           }}
-          disabled={reset.isPending}
+          disabled={!canEdit || reset.isPending}
         >
           <RotateCcwIcon className="h-4 w-4 mr-1" /> {t("admin.reviewPolicies.detail.resetButton")}
         </Button>
@@ -1227,7 +1233,7 @@ export default function ReviewPolicyEditPage() {
           )}
           <Button
             onClick={() => save.mutate()}
-            disabled={save.isPending || !dirty || saveBlocked}
+            disabled={!canEdit || save.isPending || !dirty || saveBlocked}
           >
             <SaveIcon className="h-4 w-4 mr-1" />
             {save.isPending

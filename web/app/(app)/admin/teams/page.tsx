@@ -19,6 +19,7 @@ import {
 import { api, teamsApi, type RepoOut, type Team } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
+import { TEAM_ROLES } from "@/lib/roles";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import {
@@ -31,8 +32,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 
-const MEMBER_ROLE_OPTIONS = ["owner", "admin", "reviewer", "member", "viewer"]
-  .map((r) => ({ value: r, label: r }));
+// One list for the API and the UI: TEAM_ROLES in src/users/roles.py.
+const MEMBER_ROLE_OPTIONS = TEAM_ROLES.map((r) => ({ value: r, label: r }));
 const REPO_PERM_OPTIONS = ["admin", "review", "read"].map((r) => ({ value: r, label: r }));
 
 export default function TeamsPage() {

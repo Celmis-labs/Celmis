@@ -106,6 +106,8 @@ export interface UserOut {
   email: string;
   name: string;
   is_admin: boolean;
+  /** The env master account (src/users/roles.py `is_superadmin`). */
+  is_superadmin?: boolean;
   auth_method: string;
   has_password: boolean;
   has_google: boolean;
@@ -1541,6 +1543,33 @@ export const workspacesApi = {
     }),
 };
 
+// ─── Superadmin: people and their workspace roles (/admin/users) ─────
+
+export type AdminUser = {
+  id: string; email: string; name: string;
+  is_admin: boolean; is_active: boolean; memberships: number;
+};
+export type AdminWorkspace = { id: string; name: string; slug: string };
+export type UserMembership = {
+  workspace_id: string; workspace_name: string; workspace_slug: string; role: string;
+};
+
+export const adminUsersApi = {
+  search: (token: string, q: string) =>
+    api<AdminUser[]>(`/api/admin/users?q=${encodeURIComponent(q)}`, { token }),
+  workspaces: (token: string) => api<AdminWorkspace[]>("/api/admin/workspaces", { token }),
+  memberships: (token: string, userId: string) =>
+    api<UserMembership[]>(`/api/admin/users/${encodeURIComponent(userId)}/memberships`, { token }),
+  setRole: (token: string, userId: string, wsId: string, role: string) =>
+    api<UserMembership[]>(
+      `/api/admin/users/${encodeURIComponent(userId)}/memberships/${encodeURIComponent(wsId)}`,
+      { token, method: "PUT", json: { role } }),
+  remove: (token: string, userId: string, wsId: string) =>
+    api<UserMembership[]>(
+      `/api/admin/users/${encodeURIComponent(userId)}/memberships/${encodeURIComponent(wsId)}`,
+      { token, method: "DELETE" }),
+};
+
 // ─── Stage 22 — user directory + fine-grained research access ────────
 
 export type UserDirectoryEntry = {
@@ -1953,17 +1982,26 @@ export type InvitePreview = {
   email_bound: boolean; valid: boolean; detail: string;
 };
 
+/** Invites act on the ACTIVE workspace. A page that lists several workspaces
+ *  names the one it means, so a card's invite lands in that card's workspace
+ *  and not in whichever one the switcher last picked. */
+const wsHeader = (wsSlug?: string): HeadersInit | undefined =>
+  wsSlug ? { "X-Workspace": wsSlug } : undefined;
+
 export const invitesApi = {
-  list: (token: string) => api<Invite[]>("/api/invites", { token }),
+  list: (token: string, wsSlug?: string) =>
+    api<Invite[]>("/api/invites", { token, headers: wsHeader(wsSlug) }),
   create: (token: string, body: {
     email?: string | null; role: string; ttl_days?: number; max_uses?: number;
     /** Minutes until the invite dies. Wins over ttl_days when both are sent. */
     ttl_minutes?: number;
     /** Link invites only — the server ignores it for an emailed invite. */
     never_expires?: boolean;
-  }) => api<InviteCreated>("/api/invites", { token, method: "POST", json: body }),
-  revoke: (token: string, id: string) =>
-    api<void>(`/api/invites/${id}`, { token, method: "DELETE" }),
+  }, wsSlug?: string) => api<InviteCreated>("/api/invites", {
+    token, method: "POST", json: body, headers: wsHeader(wsSlug),
+  }),
+  revoke: (token: string, id: string, wsSlug?: string) =>
+    api<void>(`/api/invites/${id}`, { token, method: "DELETE", headers: wsHeader(wsSlug) }),
   preview: (inviteToken: string) =>
     api<InvitePreview>(`/api/invites/preview/${inviteToken}`),
   accept: (token: string, inviteToken: string) =>

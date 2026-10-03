@@ -226,6 +226,39 @@ To promote a normal account:
 docker compose exec api analyzer auth make-admin you@example.com
 ```
 
+A promoted account (or one an `OIDC_ADMIN_ROLE` makes admin) is a **global
+admin**: system status, ops, compliance, every workspace visible. It is not
+the **superadmin** — that is the master account alone, and it is the only one
+that can hand out the roles below that carry power.
+
+### Workspace roles
+
+Every workspace is a tenant, and a person can hold a different role in each
+— admin of one, editor of two others.
+
+| Role | Can do in that workspace |
+|---|---|
+| `viewer` | read |
+| `member` | read; change a review issue's status |
+| `editor` | the prompt editor: agent system prompts, per-repo review policies (prompt template, folder rules, per-agent prompt overrides), analytics. No members, invites, teams, LLM keys, git connections or licence |
+| `admin` | editor's rights, plus members and viewers, invites, teams, LLM keys, git connections |
+| `owner` | admin's rights, plus deleting the workspace |
+
+Who may grant what:
+
+- **owner, admin, editor** — the superadmin only: granting, changing to or
+  from, removing. A workspace admin cannot demote the owner or another admin.
+- **member, viewer** — the superadmin, or that workspace's owner/admin
+  (directly or by invite; an invite carries only a role its creator could
+  grant, re-checked when it is accepted).
+- **Shared workspaces** are created by the superadmin. Everybody gets a
+  personal workspace of their own at sign-up and is its owner.
+
+The superadmin manages people across workspaces on **Administration →
+Users** (`/admin/users`); every membership change, from any page, is written
+to the audit log with the actor, the person, the workspace and the old and
+new role.
+
 ---
 
 ## Connect a repository
