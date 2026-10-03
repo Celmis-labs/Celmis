@@ -33,9 +33,18 @@ import pytest
 SMALL_MODEL = "openai/gpt-4"
 #: Same, at 8192 — big enough that a doubling crosses it and a single call does not.
 MID_MODEL = "gemini/gemini-2.0-flash"
-#: LiteLLM has NO entry for this: `gemini-3-pro-preview` is mapped, the release
-#: name is not. A self-hosted `openai/<name>` behaves identically.
-UNMAPPED_MODEL = "gemini/gemini-3-pro"
+#: LiteLLM has NO entry for this, and never will: a name made up for the test.
+#: (It used to be `gemini/gemini-3-pro`, until a LiteLLM release mapped it and
+#: CI went red on main.) A self-hosted `openai/<name>` behaves identically.
+UNMAPPED_MODEL = "gemini/celmis-test-unmapped-model"
+
+
+def _ceiling(model: str) -> int:
+    """What the INSTALLED LiteLLM says the model accepts. Read, not pinned:
+    the table moves between releases (65535 became 65536, 8192 grew), and the
+    code under test reads the same table."""
+    import litellm
+    return int(litellm.get_model_info(model)["max_output_tokens"])
 
 VALID = '[{"reasoning": "line 1 reads x before it is assigned", "file": "a.py", "line": 1, "severity": "critical", "title": "t", "body": "b"}]'
 
@@ -205,7 +214,7 @@ def test_a_mapped_model_reports_what_litellm_holds():
 
     assert caps["known"] is True
     assert caps["source"] == "litellm"
-    assert caps["max_output_tokens"] == 65535
+    assert caps["max_output_tokens"] == _ceiling("gemini/gemini-3-flash-preview")
     assert caps["supports_reasoning"] is True
     assert caps["reasoning_kind"] == "effort"
     assert "high" in caps["reasoning_values"]
@@ -245,26 +254,29 @@ def test_the_corrective_retry_doubles_but_stops_at_the_model_ceiling(
 
     The commonest unreadable reply is one truncated by the output budget, so
     the second attempt doubles it — deterministically, which is the whole
-    reason a verbatim resend would be pointless. 6000 doubles to 12000 and the
-    model stops at 8192: without the clamp the correction is a 400, and the
-    agent fails on a retry that existed to rescue it.
+    reason a verbatim resend would be pointless. The first budget is set just
+    under the model's ceiling, so the doubled one crosses it and must be cut
+    to it: without the clamp the correction is a 400, and the agent fails on
+    a retry that existed to rescue it.
     """
     from src.review.settings import AgentLLMSettings
 
+    ceiling = _ceiling(SMALL_MODEL)
+    first = ceiling - 96
     fake = fake_litellm(["not json at all", VALID])
     agent, ctx = _agent_and_context(
-        _client(tmp_path, MID_MODEL),
-        {"architect": AgentLLMSettings(max_output_tokens=6000)},
+        _client(tmp_path, SMALL_MODEL),
+        {"architect": AgentLLMSettings(max_output_tokens=first)},
     )
 
     result = agent.review(ctx)
 
-    assert fake.budgets == [6000, 8192], (
+    assert fake.budgets == [first, ceiling], (
         f"attempt budgets were {fake.budgets}; the first is the configured "
-        "6000, the second is 12000 cut down to what the model accepts"
+        f"{first}, the second is {first * 2} cut down to what the model accepts"
     )
     assert len(result.findings) == 1, "the corrective retry stopped working"
-    assert result.max_output_tokens_clamped_to == 8192
+    assert result.max_output_tokens_clamped_to == ceiling
 
 
 def test_a_retry_that_stays_under_the_ceiling_doubles_untouched(

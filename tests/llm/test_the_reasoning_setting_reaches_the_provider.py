@@ -206,9 +206,9 @@ def test_a_token_budget_is_not_smuggled_in_as_an_effort(tmp_path, fake_litellm):
 
 
 def test_an_unmapped_model_is_not_guessed_at(tmp_path, fake_litellm):
-    """Fail closed. LiteLLM has no entry for `gemini-3-pro`, so what it takes
+    """Fail closed. LiteLLM has no entry for a made-up model name, so what it takes
     is unknown — and unknown does not get a guess sent to it."""
-    _generate(_client(tmp_path, "gemini/gemini-3-pro"), reasoning="high")
+    _generate(_client(tmp_path, "gemini/celmis-test-unmapped-model"), reasoning="high")
 
     kwargs = fake_litellm.kwargs_seen[0]
     assert "reasoning_effort" not in kwargs and "thinking" not in kwargs
