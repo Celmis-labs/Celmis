@@ -210,7 +210,10 @@ export function InviteView({
                         <button
                           type="button"
                           className="underline"
-                          onClick={() => void signOut({ callbackUrl: `/login?next=${encodeURIComponent(back)}` })}
+                          onClick={() => {
+                            forgetAgentSession();
+                            void signOut({ callbackUrl: `/login?next=${encodeURIComponent(back)}` });
+                          }}
                         >
                           {t("invite.switchAccount")}
                         </button>

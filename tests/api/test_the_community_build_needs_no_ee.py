@@ -123,6 +123,9 @@ WEB_IMPORTERS = {
     "auth.ts",
     "app/login/page.tsx",
     "app/login/login-form.tsx",
+    # The invite landing page offers the same SSO button as /login, behind the
+    # same capability check (web/lib/sso-offer.ts → `ssoName`).
+    "app/invite/[token]/invite-view.tsx",
     "app/(app)/analytics/page.tsx",
 }
 

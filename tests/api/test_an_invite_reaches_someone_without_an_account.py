@@ -369,3 +369,87 @@ async def test_the_invite_is_emailed_when_smtp_is_configured(tmp_path, monkeypat
         assert r.status_code == 201
         assert r.json()["emailed"] is True and r.json()["invite_url"]
         assert sent and sent[0][0] == NEWBIE and r.json()["token"] in sent[0][2]
+
+
+# ─── the automatic path only adds people who are not in yet ──────────
+
+
+async def test_a_password_account_linked_to_google_is_not_auto_redeemed(tmp_path, monkeypatch):
+    """Somebody pre-registered the invitee's address with a password. The
+    invitee's verified Google sign-in links into that account — and must not
+    pour the invite's access into an account the squatter can sign in to."""
+    async with world(tmp_path, monkeypatch, extra_routers=_auth_routers()) as w:
+        r = await w.client.post("/api/auth/signup", json={"email": NEWBIE, "password": PASSWORD})
+        assert r.status_code == 200, r.text
+        token = await _invite(w)
+        _google(monkeypatch, email=NEWBIE, verified="true")
+        g = await w.client.post("/api/auth/google", json={"id_token": "x"})
+        assert g.status_code == 200, g.text
+        _adopt(w, "newbie", NEWBIE)
+        assert w.users["newbie"].has_password and w.users["newbie"].has_google
+        assert await w.role("newbie", "ws-a") is None
+        assert (await _invite_row(w, token)).used_count == 0
+        assert not [a for a in w.audit if a["action"] == "workspace.member_role_changed"
+                    and a["detail"]["via"] == "invite_auto_redeem"]
+        # The link, which went to the real mailbox, still works.
+        ok = await w.client.post("/api/invites/accept", json={"token": token},
+                                 headers=w.h("newbie"))
+        assert ok.status_code == 200, ok.text
+
+
+def _google_only_account(w):
+    import src.users.store as users_mod
+    from src.users import User, UserAuthMethod
+
+    users_mod._default_store.create(User(
+        id="u-g-newbie", email=NEWBIE, auth_method=UserAuthMethod.GOOGLE_OAUTH,
+        google_sub="g-newbie"))
+    _adopt(w, "newbie", NEWBIE)
+
+
+@pytest.mark.parametrize("inviter, invite_role, held", [
+    ("admin_a", "viewer", "member"),   # a workspace admin may make that change
+    ("su", "viewer", "editor"),        # the superadmin may make any change
+])
+async def test_a_stale_invite_never_re_roles_an_existing_member(
+        tmp_path, monkeypatch, inviter, invite_role, held):
+    """Invited as viewer, then given a higher role another way. A routine
+    Google sign-in must leave that role alone, and use the invite up."""
+    from src.db.models import WorkspaceMember
+
+    async with world(tmp_path, monkeypatch, extra_routers=_auth_routers()) as w:
+        token = await _invite(w, who=inviter, role=invite_role)
+        _google_only_account(w)
+        async with w.factory() as s:
+            s.add(WorkspaceMember(workspace_id=w.ws["ws-a"], user_id=w.uid("newbie"),
+                                  role=held))
+            await s.commit()
+
+        _google(monkeypatch, email=NEWBIE, verified="true")
+        r = await w.client.post("/api/auth/google", json={"id_token": "x"})
+        assert r.status_code == 200, r.text
+        assert await w.role("newbie", "ws-a") == held
+        assert (await _invite_row(w, token)).used_count == 1
+        assert not [a for a in w.audit if a["action"] == "workspace.member_role_changed"
+                    and a["target"] == w.uid("newbie")]
+        skipped = [a for a in w.audit if a["action"] == "invite.auto_redeem_skipped"]
+        assert skipped and skipped[-1]["detail"] == {"reason": "already_member"}
+
+
+async def test_a_removed_member_is_not_put_back_by_a_stale_invite(tmp_path, monkeypatch):
+    """Added another way while an invite was still live, then removed: the
+    removal revokes the invite, so the next verified sign-in grants nothing."""
+    async with world(tmp_path, monkeypatch, extra_routers=_auth_routers()) as w:
+        token = await _invite(w)
+        _google_only_account(w)
+        path = f"/api/admin/users/{w.uid('newbie')}/memberships/{w.ws['ws-a']}"
+        assert (await w.client.put(path, json={"role": "member"},
+                                   headers=w.h("su"))).status_code == 200
+        assert (await w.client.delete(path, headers=w.h("su"))).status_code == 200
+        assert (await _invite_row(w, token)).revoked is True
+        assert [a["action"] for a in w.audit].count("invite.revoked_on_removal") == 1
+
+        _google(monkeypatch, email=NEWBIE, verified="true")
+        r = await w.client.post("/api/auth/google", json={"id_token": "x"})
+        assert r.status_code == 200, r.text
+        assert await w.role("newbie", "ws-a") is None

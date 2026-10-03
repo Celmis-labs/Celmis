@@ -374,3 +374,93 @@ async def test_the_users_filter_is_superadmin_only(tmp_path, monkeypatch, who):
     async with world(tmp_path, monkeypatch) as w:
         r = await w.client.get("/api/admin/users?no_team_access=true", headers=w.h(who))
         assert r.status_code == 403
+
+
+# ─── cancel racing an approval ───────────────────────────────────────
+
+
+async def test_a_cancel_that_loses_the_race_to_an_approval_is_409(tmp_path, monkeypatch):
+    """The requester's cancel read the row as pending; the superadmin's
+    approval committed before the cancel wrote. The cancel must not overwrite
+    "approved" with "cancelled" over memberships that now exist. Simulated by
+    approving inside the cancel's read."""
+    import src.api.routers.access_requests as ar
+
+    real = ar._pending_of
+
+    async with world(tmp_path, monkeypatch) as w:
+        rid = (await w.client.post(CREATE, json={}, headers=w.h("loner"))).json()["id"]
+
+        async def _read_then_lose_the_race(session, user_id):
+            row = await real(session, user_id)
+            ok = await w.client.post(f"{ADMIN}/{rid}/approve", headers=w.h("su"), json={
+                "grants": [{"workspace_id": w.ws["ws-a"], "role": "viewer"}]})
+            assert ok.status_code == 200, ok.text
+            return row
+
+        monkeypatch.setattr(ar, "_pending_of", _read_then_lose_the_race)
+        r = await w.client.delete(ME, headers=w.h("loner"))
+        assert r.status_code == 409, r.text
+        assert (await _rows(w))[0].status == "approved"
+        assert await w.role("loner", "ws-a") == "viewer"
+        me = (await w.client.get(ME, headers=w.h("loner"))).json()
+        assert [g["role"] for g in me["request"]["grants"]] == ["viewer"]
+        assert "access_request.cancelled" not in _actions(w)
+
+
+# ─── access granted some other way closes the request ────────────────
+
+
+async def test_a_grant_from_the_users_page_closes_the_pending_request(tmp_path, monkeypatch):
+    async with world(tmp_path, monkeypatch) as w:
+        await _personal(w, "loner")
+        await w.client.post(CREATE, json={}, headers=w.h("loner"))
+        put = await w.client.put(
+            f"/api/admin/users/{w.uid('loner')}/memberships/{w.ws['ws-a']}",
+            json={"role": "member"}, headers=w.h("su"))
+        assert put.status_code == 200, put.text
+
+        [row] = await _rows(w)
+        assert row.status == "approved" and row.decided_by == "root@acme-corp.io"
+        me = (await w.client.get(ME, headers=w.h("loner"))).json()
+        assert me["request"]["status"] == "approved"   # the page stops polling
+        assert [(g["workspace_name"], g["role"]) for g in me["request"]["grants"]] == [
+            ("Alpha", "member")]
+        listed = (await w.client.get(f"{ADMIN}?status=pending", headers=w.h("su"))).json()
+        assert listed == []
+        assert _actions(w) == ["access_request.created", "access_request.resolved_by_grant"]
+        # Already decided: the superadmin cannot decide it a second time.
+        again = await w.client.post(f"{ADMIN}/{row.id}/reject", json={"reason": "x"},
+                                    headers=w.h("su"))
+        assert again.status_code == 409
+
+
+async def test_an_accepted_invite_closes_the_pending_request(tmp_path, monkeypatch):
+    async with world(tmp_path, monkeypatch) as w:
+        await w.client.post(CREATE, json={}, headers=w.h("loner"))
+        inv = await w.client.post("/api/invites", json={"role": "viewer"},
+                                  headers=w.h("admin_a", "ws-a"))
+        assert inv.status_code == 201, inv.text
+        ok = await w.client.post("/api/invites/accept", json={"token": inv.json()["token"]},
+                                 headers=w.h("loner"))
+        assert ok.status_code == 200, ok.text
+        assert (await _rows(w))[0].status == "approved"
+
+
+async def test_a_personal_workspace_or_a_role_change_leaves_the_request_pending(
+        tmp_path, monkeypatch):
+    """Only a NEW team membership answers the request."""
+    from src.db.models import WorkspaceMember
+
+    async with world(tmp_path, monkeypatch) as w:
+        own = await _personal(w, "loner")
+        await w.client.post(CREATE, json={}, headers=w.h("loner"))
+        # Their own personal workspace (removed then re-added by the superadmin).
+        async with w.factory() as s:
+            await s.delete(await s.get(WorkspaceMember, (own, w.uid("loner"))))
+            await s.commit()
+        put = await w.client.put(f"/api/admin/users/{w.uid('loner')}/memberships/{own}",
+                                 json={"role": "owner"}, headers=w.h("su"))
+        assert put.status_code == 200, put.text
+        assert (await _rows(w))[0].status == "pending"
+        assert "access_request.resolved_by_grant" not in _actions(w)

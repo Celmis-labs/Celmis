@@ -28,7 +28,13 @@ An approval writes every grant through `change_memberships`
 row, with via="access_request" — in ONE transaction together with the request
 row: one grant that cannot be applied and none of them are. Deciding a
 request that is no longer pending is 409, so a double click or two
-superadmin tabs cannot approve and then reject the same request.
+superadmin tabs cannot approve and then reject the same request. A cancel is
+a conditional write (still pending, or 409), so it cannot overwrite an
+approval that committed between its read and its write.
+
+Access given some other way — the superadmin's Users page, an accepted
+invite — closes a pending request as approved, with the grants listed; that
+happens inside the membership writer, so no route can forget it.
 
 Email: when SMTP is configured (src/notifications/mailer.py, the mailer the
 invites and password resets already use) the requester is told of a decision
@@ -45,7 +51,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import case, select
+from sqlalchemy import case, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -328,8 +334,19 @@ async def cancel_access_request(
     row = await _pending_of(session, user.id)
     if row is None:
         raise HTTPException(status_code=404, detail="No pending access request")
-    row.status = "cancelled"
-    row.updated_at = datetime.now(UTC)
+    # Conditional on still being pending: an approval that commits between
+    # the read above and this write holds the row lock, and a plain UPDATE by
+    # id would then overwrite "approved" with "cancelled" over memberships
+    # that were granted. Zero rows means somebody decided first.
+    result = await session.execute(
+        update(AccessRequest)
+        .where(AccessRequest.id == row.id, AccessRequest.status == "pending")
+        .values(status="cancelled", updated_at=datetime.now(UTC))
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount == 0:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="This request was already decided")
     await session.commit()
     _audit("access_request.cancelled", actor=user, row=row, ip=client_ip(request))
     logger.info("access_request_cancelled id=%s user=%s", row.id, user.email)

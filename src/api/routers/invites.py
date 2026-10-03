@@ -466,6 +466,19 @@ async def accept(
 # email; matching invites by it would hand that person's invitations to
 # whoever signed up first. A password account opens the link — which travelled
 # to the real mailbox — and accepts it there.
+#
+# That includes an account that holds a password AND a Google/SSO identity.
+# Google sign-in links itself to an existing account by verified address, so
+# somebody who pre-registered the victim's address with a password ends up
+# sharing the account the victim's Google sign-in lands in. Redeeming there
+# would put the invite's access into an account the squatter can sign in to,
+# before the victim has seen anything. Such an account accepts through the
+# link like any password account.
+#
+# And the automatic path only ever ADDS somebody. An invite for a workspace
+# the person is already a member of is consumed without touching their role:
+# a stale viewer invite must not silently demote the editor they have since
+# become. (Clicking the link is an explicit choice and keeps its behaviour.)
 
 
 async def redeem_invites_for_verified_email(
@@ -487,6 +500,9 @@ async def redeem_invites_for_verified_email(
     address = (verified_email or "").strip().lower()
     if not address or address != (user.email or "").strip().lower() or not user.is_active:
         return []
+    if user.has_password:
+        logger.info("invite_auto_redeem_skipped_password_account user=%s", user.id)
+        return []
     invite_ids = list((await session.scalars(
         select(WorkspaceInvite.id).where(
             func.lower(WorkspaceInvite.email) == address,
@@ -501,6 +517,21 @@ async def redeem_invites_for_verified_email(
         if row is None or _invalid_reason(row) is not None:
             continue
         ws_id = row.workspace_id
+        if await session.get(WorkspaceMember, (ws_id, user.id)) is not None:
+            # Already in: the automatic path never re-roles. The invite is
+            # used up so it cannot apply later (say, after a removal).
+            row.used_count += 1
+            await session.commit()
+            logger.info("invite_auto_redeem_already_member id=%s ws=%s user=%s",
+                        invite_id, ws_id, user.email)
+            from src.security.audit import record_action
+
+            record_action(
+                action="invite.auto_redeem_skipped", actor=user.email,
+                actor_id=user.id, workspace_id=ws_id, target=invite_id,
+                ip=ip, detail={"reason": "already_member"},
+            )
+            continue
         try:
             await _redeem(session, row=row, user=user, users=users,
                           via="invite_auto_redeem", ip=ip)

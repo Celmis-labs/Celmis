@@ -26,7 +26,9 @@ derives it from there.
   personal one — password, Google or SSO — can ask for access in general
   (dashboard banner, `/access-request`, optional comment up to 1000
   characters; one pending at a time, cancellable, re-askable after a
-  rejection). The request names no workspace and the requester sees none
+  rejection; a cancel racing an approval is 409, never a "cancelled" request
+  over granted memberships; access given another way — the Users page, an
+  accepted invite — closes it as approved). The request names no workspace and the requester sees none
   until it is approved. The superadmin alone decides on **Administration →
   Access requests**: approve with one or more (workspace, role) pairs, applied
   atomically through the membership writer (`change_memberships`, one audit
@@ -52,8 +54,11 @@ derives it from there.
   email-bound invites for the address the identity provider marks verified
   are redeemed automatically, through the same path as accepting the link —
   the inviter's right re-checked, audited, single use. Password accounts are
-  never redeemed by their address (it is not verified); they accept through
-  the link.
+  never redeemed by their address (it is not verified), including one that
+  also has Google/SSO linked; they accept through the link. The automatic
+  path never changes an existing member's role (the invite is used up,
+  `invite.auto_redeem_skipped`), and removing a member revokes the live
+  invites addressed to them for that workspace (`invite.revoked_on_removal`).
 
 - **Administration → Users (`/admin/users`), for the superadmin.** Search
   accounts, see each person's workspaces and role in each, change a role, add

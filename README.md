@@ -285,7 +285,11 @@ redeemed at sign-in, through the same accept path (grant rule re-checked,
 audited, single use). A **password account is never redeemed by its
 address**: Celmis does not verify the address typed at sign-up, so anyone can
 register somebody else's email. A password account opens the link it was
-sent, and accepts there.
+sent, and accepts there — and so does an account that has a password **and**
+Google/SSO linked to it, since whoever set that password can still sign in.
+The automatic path only ever **adds** somebody: an invite for a workspace the
+person is already in is used up without touching their role, and removing a
+member revokes the live invites addressed to them for that workspace.
 
 **Access requests.** A signed-in person whose only workspace is their
 personal one sees *"You have no access to team workspaces yet — send a
@@ -296,7 +300,9 @@ requester is shown none until it is approved. The **superadmin only** decides,
 on **Administration → Access requests** (`/admin/access-requests`): approve
 with one or more (workspace, role) pairs — applied all or nothing, each
 membership audited with `via="access_request"` — or reject with a reason the
-requester reads. Decided requests stay listed as history. The requester sees
+requester reads. Access given another way (the Users page, an accepted
+invite) closes a pending request as approved. Decided requests stay listed as
+history. The requester sees
 the decision on `/access-request` and as a toast on their next visit, and an
 approved workspace appears in the switcher without signing out. With SMTP
 configured the requester is also emailed the decision, and the master address

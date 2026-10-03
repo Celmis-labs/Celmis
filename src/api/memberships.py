@@ -12,16 +12,31 @@ after a fix to the first.
 Now every one of them calls `change_membership`, which asks the single rule
 in src/users/roles.py (`can_change`), writes the row, and records the change
 in the audit log (actor, user, workspace, old → new).
+
+Two pieces of state hang off a membership and are kept true here, in the
+same transaction, so no route can forget them:
+
+  * a REMOVAL revokes the live email-bound invites addressed to that person
+    for that workspace. Otherwise a stale invite would put them straight back
+    — silently, at their next verified Google/SSO sign-in.
+  * a GRANT to a team workspace (not the person's own personal one) closes
+    their pending access request as approved, listing what was granted.
+    Otherwise an admin who adds somebody from /admin/users leaves the request
+    pending forever, the requester's page polling for a decision that never
+    comes. The approval route itself (via="access_request") decides its own
+    row and is left alone.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 from fastapi import HTTPException
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.models import Workspace, WorkspaceMember
+from src.db.models import AccessRequest, Workspace, WorkspaceInvite, WorkspaceMember
 from src.users import User
 from src.users.roles import VALID_WORKSPACE_ROLES, can_change
 
@@ -105,9 +120,12 @@ async def change_memberships(
     """
     granting = authority if authority is not None else actor
     planned: list[tuple[str, WorkspaceMember | None, str | None, str | None]] = []
+    workspaces: dict[str, Workspace] = {}
     for ws_id, new_role in changes:
-        if await session.get(Workspace, ws_id) is None:
+        ws = await session.get(Workspace, ws_id)
+        if ws is None:
             raise HTTPException(status_code=404, detail="workspace not found")
+        workspaces[ws_id] = ws
         row = await session.get(WorkspaceMember, (ws_id, user_id))
         old = row.role if row is not None else None
         if old != new_role:
@@ -125,9 +143,30 @@ async def change_memberships(
             session.add(WorkspaceMember(workspace_id=ws_id, user_id=user_id, role=new_role))
         else:
             row.role = new_role
+    revoked = await _revoke_invites_on_removal(session, user_id=user_id, planned=planned)
+    resolved = None
+    if via != "access_request":
+        resolved = await _resolve_pending_request(
+            session, actor=actor, user_id=user_id, planned=planned,
+            workspaces=workspaces, via=via)
     await session.commit()
 
     from src.security.audit import record_action
+
+    for ws_id, invite_ids in revoked.items():
+        record_action(
+            action="invite.revoked_on_removal", actor=actor.email, actor_id=actor.id,
+            workspace_id=ws_id, target=user_id, ip=ip,
+            detail={"invite_ids": invite_ids, "via": via},
+        )
+    if resolved is not None:
+        record_action(
+            action="access_request.resolved_by_grant", actor=actor.email,
+            actor_id=actor.id, target=user_id, ip=ip,
+            detail={"request_id": resolved.id, "via": via,
+                    "grants": [{"workspace_id": g["workspace_id"], "role": g["role"]}
+                               for g in resolved.grants]},
+        )
 
     for ws_id, _row, old, new_role in planned:
         if old == new_role:
@@ -147,6 +186,79 @@ async def change_memberships(
             ws_id, user_id, old, new_role, via, actor.email,
         )
     return [(ws_id, old, new_role) for ws_id, _row, old, new_role in planned]
+
+
+async def _revoke_invites_on_removal(
+    session: AsyncSession, *, user_id: str,
+    planned: list[tuple[str, WorkspaceMember | None, str | None, str | None]],
+) -> dict[str, list[str]]:
+    """Stage `revoked=True` on the live email-bound invites for a removed
+    member's address in that workspace. Returns {workspace_id: [invite ids]}."""
+    removed = [ws_id for ws_id, _row, old, new in planned if old is not None and new is None]
+    if not removed:
+        return {}
+    try:
+        from src.users.store import get_user_store
+
+        target = get_user_store().get_by_id(user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("invite_revoke_on_removal_lookup_failed user=%s err=%s", user_id, exc)
+        return {}
+    email = ((target.email if target else "") or "").strip().lower()
+    if not email:
+        return {}
+    rows = (await session.scalars(
+        select(WorkspaceInvite).where(
+            WorkspaceInvite.workspace_id.in_(removed),
+            func.lower(WorkspaceInvite.email) == email,
+            WorkspaceInvite.revoked.is_(False),
+            WorkspaceInvite.used_count < WorkspaceInvite.max_uses,
+        )
+    )).all()
+    out: dict[str, list[str]] = {}
+    for inv in rows:
+        inv.revoked = True
+        out.setdefault(inv.workspace_id, []).append(inv.id)
+    return out
+
+
+async def _resolve_pending_request(
+    session: AsyncSession, *, actor: User, user_id: str,
+    planned: list[tuple[str, WorkspaceMember | None, str | None, str | None]],
+    workspaces: dict[str, Workspace], via: str,
+) -> AccessRequest | None:
+    """Stage the user's pending access request as approved when this change
+    gives them a team workspace they were not in. Returns the row, or None."""
+    from src.api.workspace_provision import personal_slug
+
+    granted = [
+        (workspaces[ws_id], new) for ws_id, _row, old, new in planned
+        if old is None and new is not None
+        and workspaces[ws_id].slug != personal_slug(user_id)
+    ]
+    if not granted:
+        return None
+    req = (await session.scalars(
+        select(AccessRequest).where(
+            AccessRequest.user_id == user_id, AccessRequest.status == "pending",
+        ).with_for_update()
+    )).first()
+    # Re-checked in Python: the row may already be in this session's identity
+    # map with a decision staged on it.
+    if req is None or req.status != "pending":
+        return None
+    now = datetime.now(UTC)
+    req.status = "approved"
+    req.decided_by = actor.email
+    req.decided_at = now
+    req.updated_at = now
+    req.decision_note = f"Granted directly ({via})"
+    req.grants = [
+        {"workspace_id": ws.id, "workspace_name": ws.name,
+         "workspace_slug": ws.slug, "role": role}
+        for ws, role in granted
+    ]
+    return req
 
 
 __all__ = [
