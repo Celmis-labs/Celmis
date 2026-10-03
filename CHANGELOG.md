@@ -20,6 +20,8 @@ derives it from there.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-03
+
 ### Added
 
 - **Celmis Enterprise Edition, and the licence that switches it on.** Two new
