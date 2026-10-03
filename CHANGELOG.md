@@ -20,6 +20,30 @@ derives it from there.
 
 ## [Unreleased]
 
+### Added
+
+- **Manual prices for LiteLLM proxy aliases.** An alias on a workspace's own
+  LiteLLM proxy names whatever the proxy maps it to, so Celmis could price it
+  only when the model behind it was in LiteLLM's table; a fine-tune or a
+  custom upstream was recorded with an unknown cost. Settings → LLM now shows
+  a **Model prices** table under the connected proxy: every alias, its mode,
+  the model behind it, the effective price in USD per 1M input/output tokens
+  and where that price came from (Manual / Proxy / LiteLLM table / Unknown).
+  A workspace admin can set a price per alias or reset it to automatic;
+  members see the table read-only. One resolver
+  (`src/llm/proxy_pricing.py`) now prices every workspace-proxy call — review
+  and agent calls, chat streaming, embeddings and the spend ledger — in this
+  order: the manual price, an amount the response says was charged, the price
+  the proxy declares in `/model/info` (`input_cost_per_token` /
+  `output_cost_per_token`, which was ignored until now), LiteLLM's table price
+  of the underlying model, unknown. New `cost_source` values `manual_price`
+  and `proxy_price`. Embeddings use the default workspace's prices, because
+  they run on its proxy. Prices are stored per workspace in the LLM config
+  (`model_prices`), set through `GET`/`PUT /api/llm/litellm/prices`
+  (admin-only write, validated before anything is written, audited as
+  `llm_model_price.updated`), and apply to calls made after they are saved —
+  past ledger rows are not rewritten. The installation gateway is unchanged.
+
 ## [0.2.0] — 2026-10-03
 
 ### Added

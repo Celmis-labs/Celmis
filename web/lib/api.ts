@@ -895,6 +895,36 @@ export type LiteLLMSaveResult = {
   models: string[];
 };
 
+/** Where an alias's effective price came from — see src/llm/proxy_pricing.py. */
+export type ModelPriceSource = "manual" | "proxy" | "litellm" | "unknown";
+
+/** One alias on the workspace's LiteLLM proxy and what a call to it costs,
+ *  USD per 1M tokens (null when nobody knows). */
+export type ModelPriceRow = {
+  alias: string;
+  mode: string | null;
+  underlying: string | null;
+  price_source: ModelPriceSource;
+  input_per_mtok: number | null;
+  output_per_mtok: number | null;
+  manual: { input_per_mtok: number; output_per_mtok: number; updated_at: string | null } | null;
+  /** A manual price for an alias the proxy no longer lists. */
+  stale: boolean;
+};
+
+/** GET/PUT /api/llm/litellm/prices. */
+export type ModelPrices = {
+  connected: boolean;
+  can_edit: boolean;
+  prices: ModelPriceRow[];
+  detail: string;
+};
+
+/** PUT body: null removes the manual price for that alias. */
+export type ModelPricesUpdate = {
+  prices: Record<string, { input_per_mtok: number; output_per_mtok: number } | null>;
+};
+
 export type EffectiveEmbeddings = {
   provider: string;
   model: string;
@@ -996,6 +1026,12 @@ export const llmApi = {
   /** Remove this workspace's LiteLLM proxy row (URL + virtual key). */
   deleteLiteLLM: (token: string) =>
     api<LLMConfig>("/api/llm/litellm", { token, method: "DELETE" }),
+  /** Every alias on this workspace's proxy with its effective price. */
+  litellmPrices: (token: string) =>
+    api<ModelPrices>("/api/llm/litellm/prices", { token }),
+  /** Set (or, with null, remove) manual prices — workspace admin only. */
+  saveLitellmPrices: (token: string, body: ModelPricesUpdate) =>
+    api<ModelPrices>("/api/llm/litellm/prices", { token, method: "PUT", json: body }),
   localSetupGuide: (token: string) =>
     api<LocalSetupGuide>("/api/llm/local-setup-guide", { token }),
   providerModels: (token: string, provider: string) =>
