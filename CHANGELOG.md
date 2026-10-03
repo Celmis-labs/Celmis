@@ -50,6 +50,27 @@ derives it from there.
   (`GET /api/llm/litellm/prices?refresh=true`) re-reads them. Writers of the
   workspace LLM config are now serialised per workspace, so saving the main
   LLM form at the same moment as a price no longer drops the price.
+- **The enterprise licence can be entered from the UI.** A global admin
+  pastes the key into the Edition card on **Admin → Health**
+  (`GET`/`PUT`/`DELETE /api/license`, `src/ee/license_router.py`). It is
+  verified first — an invalid, expired, not-yet-valid, wrong-issuer,
+  featureless or oversized key is refused with the reason and nothing is
+  stored — then kept encrypted in the credential store under an
+  installation-wide slot, and applied without a restart: the granted features
+  are mounted, `/api/capabilities` reports `enterprise` at once, and the
+  Analytics tab and the SSO button appear without a reload. Removing it, or
+  replacing it with one that drops a feature, unmounts those routes at once,
+  and the per-request licence check now reads the licence in force rather
+  than the one captured at start-up. Save, replace and remove are audited
+  (customer, features, expiry — never the key). See
+  [`ee/README.md`](ee/README.md#installing-a-licence).
+
+### Changed
+
+- **Licence precedence is `CELMIS_LICENSE_KEY` > `CELMIS_LICENSE_FILE` >
+  the key entered in the UI.** While either variable is set the UI shows the
+  licence as managed by the server environment and the API answers 409 to a
+  save or a removal instead of storing a key the variable would shadow.
 
 ## [0.2.0] — 2026-10-03
 

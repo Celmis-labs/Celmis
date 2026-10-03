@@ -19,9 +19,11 @@ network, so the only facts a licence can carry are the ones signed into it.
 WHERE IT COMES FROM
 -------------------
 ``CELMIS_LICENSE_KEY`` (the token itself) or ``CELMIS_LICENSE_FILE`` (a path
-to a file holding it). The variable wins when both are set — it is the one a
-container orchestrator injects, and a stale file left in a volume must not
-outrank it.
+to a file holding it), or — when neither is set — the token a global admin
+entered on ``/admin/health`` (``src/ee/license_store.py``). The variable wins
+over the file — it is the one a container orchestrator injects, and a stale
+file left in a volume must not outrank it — and either environment source
+wins over the UI, which refuses to save while one is set.
 
 WHAT IT IS NOT
 --------------
@@ -44,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -105,6 +108,7 @@ class License:
         return {
             "edition": "enterprise",
             "customer": self.customer,
+            "issued_at": self.issued_at.isoformat(),
             "expires_at": self.expires_at.isoformat(),
             "features": sorted(self.features),
         }
@@ -208,28 +212,93 @@ def configured_token(env: dict[str, str] | None = None) -> tuple[str | None, str
     return None, ""
 
 
-def load_license(env: dict[str, str] | None = None) -> License | None:
-    """The configured licence, or None for the community edition. Logs why."""
+#: Where the licence in force came from. Labels, never values.
+SOURCE_ENV_KEY = "env_key"
+SOURCE_ENV_FILE = "env_file"
+SOURCE_UI = "ui"
+_SOURCE_OF = {ENV_KEY: SOURCE_ENV_KEY, ENV_FILE: SOURCE_ENV_FILE}
+
+#: `Loaded.problem` when the UI slot exists but could not be read.
+STORED_UNREADABLE = "stored licence unreadable"
+
+
+def env_source(env: dict[str, str] | None = None) -> str | None:
+    """Which environment variable manages the licence, if any — set and
+    non-empty, whether or not what it holds verifies. An operator who set one
+    owns the licence; the UI must not store something it would shadow."""
+    env = os.environ if env is None else env
+    if (env.get(ENV_KEY) or "").strip():
+        return SOURCE_ENV_KEY
+    if (env.get(ENV_FILE) or "").strip():
+        return SOURCE_ENV_FILE
+    return None
+
+
+@dataclass(frozen=True)
+class Loaded:
+    """The outcome of looking for a licence: what is in force, where it came
+    from, and — when one was given and refused — why. Never the token."""
+
+    license: License | None
+    source: str | None
+    problem: str | None = None
+
+
+def load(
+    env: dict[str, str] | None = None,
+    *,
+    stored: Callable[[], str | None] | None = None,
+) -> Loaded:
+    """The licence in force. Precedence: ``CELMIS_LICENSE_KEY`` >
+    ``CELMIS_LICENSE_FILE`` > the token stored from the UI (`stored`).
+
+    The environment wins even when what it holds does not verify: falling
+    back to the stored token then would make the licence in force depend on
+    whether the operator's variable happens to be valid today.
+    """
     token, where = configured_token(env)
+    source = _SOURCE_OF.get(where)
+    if source is None and stored is not None:
+        try:
+            token = stored()
+        except Exception as exc:  # noqa: BLE001 — a licence problem never stops the process
+            # A licence may be stored but could not be read. Say so, rather
+            # than look exactly like an installation that never had one.
+            logger.warning("license_stored_unreadable err=%s — running as the "
+                           "community edition", type(exc).__name__)
+            return Loaded(None, SOURCE_UI, STORED_UNREADABLE)
+        source = SOURCE_UI if token else None
     if token is None:
-        if not where:
-            logger.info("license_absent — community edition (set %s or %s to "
-                        "enable enterprise features)", ENV_KEY, ENV_FILE)
-        return None
+        if source is None:
+            logger.info("license_absent — community edition (set %s or %s, or "
+                        "enter a licence on /admin/health, to enable enterprise "
+                        "features)", ENV_KEY, ENV_FILE)
+            return Loaded(None, None)
+        return Loaded(None, source, "licence file unreadable")
     try:
         lic = verify(token)
     except LicenseError as exc:
         # The reason, never the token: it names a customer.
         logger.warning(
             "license_invalid source=%s reason=%s — enterprise features are NOT "
-            "mounted; running as the community edition", where, exc,
+            "mounted; running as the community edition", source, exc,
         )
-        return None
+        return Loaded(None, source, str(exc))
     logger.info(
-        "license_valid customer=%s features=%s expires_at=%s",
-        lic.customer, ",".join(sorted(lic.features)), lic.expires_at.isoformat(),
+        "license_valid source=%s customer=%s features=%s expires_at=%s",
+        source, lic.customer, ",".join(sorted(lic.features)),
+        lic.expires_at.isoformat(),
     )
-    return lic
+    return Loaded(lic, source)
+
+
+def load_license(
+    env: dict[str, str] | None = None,
+    *,
+    stored: Callable[[], str | None] | None = None,
+) -> License | None:
+    """The configured licence, or None for the community edition. Logs why."""
+    return load(env, stored=stored).license
 
 
 __all__ = [
@@ -237,9 +306,16 @@ __all__ = [
     "ISSUER",
     "KNOWN_FEATURES",
     "PUBLIC_KEY_PEM",
+    "SOURCE_ENV_FILE",
+    "SOURCE_ENV_KEY",
+    "SOURCE_UI",
+    "STORED_UNREADABLE",
     "License",
     "LicenseError",
+    "Loaded",
     "configured_token",
+    "env_source",
+    "load",
     "load_license",
     "verify",
 ]

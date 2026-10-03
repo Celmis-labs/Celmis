@@ -46,7 +46,7 @@ LICENSED = {"sso", "analytics"}
 
 
 @pytest.fixture(scope="module", params=EDITIONS)
-def app(request):
+def app(request, tmp_path_factory):
     """The real application, built as each edition in turn.
 
     The licence is read once, inside `build_app`; the key patch and the
@@ -59,9 +59,16 @@ def app(request):
     os.environ.setdefault("GEMINI_API_KEY", "test-key-12345678")
     from src.api.main import build_app
     from src.ee import license as lic
-    from tests.ee.licensing import mint_test_license, trust_test_key
+    from tests.ee.licensing import (
+        isolate_license_store,
+        mint_test_license,
+        trust_test_key,
+    )
 
     mp = pytest.MonkeyPatch()
+    # Never the developer's own store: a licence entered in their UI would
+    # turn the community run enterprise.
+    isolate_license_store(mp, tmp_path_factory.mktemp("license-store"))
     mp.delenv(lic.ENV_KEY, raising=False)
     mp.delenv(lic.ENV_FILE, raising=False)
     if request.param == "enterprise":
