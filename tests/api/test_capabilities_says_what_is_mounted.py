@@ -437,7 +437,11 @@ def test_caching_headers_keep_one_callers_document_to_itself(client):
     r = client.get("/api/capabilities")
 
     assert r.headers["cache-control"] == "no-store"
-    assert r.headers["vary"] == "Authorization"
+    # What matters is that Authorization is among the keys a cache must vary
+    # on. CORS middleware adds "Origin" too on some Starlette releases (it
+    # did in CI and not locally) — a stricter cache key, not a leak.
+    vary = {v.strip().lower() for v in r.headers["vary"].split(",")}
+    assert "authorization" in vary
 
 
 # ─── failing safe, in the direction that is safe here ────────────────
