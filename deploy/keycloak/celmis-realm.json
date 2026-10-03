@@ -61,7 +61,7 @@
   "users": [
     {
       "username": "admin",
-      "email": "admin@celmis.test",
+      "email": "admin@example.com",
       "firstName": "Celmis",
       "lastName": "Admin",
       "enabled": true,
@@ -71,7 +71,7 @@
     },
     {
       "username": "dev",
-      "email": "dev@celmis.test",
+      "email": "dev@example.com",
       "firstName": "Dev",
       "lastName": "User",
       "enabled": true,
@@ -81,7 +81,7 @@
     },
     {
       "username": "unverified",
-      "email": "unverified@celmis.test",
+      "email": "unverified@example.com",
       "firstName": "Not",
       "lastName": "Verified",
       "enabled": true,

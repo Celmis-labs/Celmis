@@ -7,9 +7,9 @@
 # imported from celmis-realm.json on first start:
 #
 #   client  celmis-web / celmis-dev-secret  (redirects localhost:3000, :8081)
-#   users   admin@celmis.test / admin-dev-pass       (realm role celmis-admin)
-#           dev@celmis.test / dev-dev-pass           (verified email)
-#           unverified@celmis.test / unverified-dev-pass (email NOT verified)
+#   users   admin@example.com / admin-dev-pass       (realm role celmis-admin)
+#           dev@example.com / dev-dev-pass           (verified email)
+#           unverified@example.com / unverified-dev-pass (email NOT verified)
 #
 # Then, in .env (web + api read the same names):
 #

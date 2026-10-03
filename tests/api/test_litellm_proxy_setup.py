@@ -391,6 +391,29 @@ def test_get_config_never_carries_the_key_or_url(store, proxy):
     assert admin.litellm.host == HOST
 
 
+def test_a_shared_litellm_profile_does_not_show_the_proxy_url(store):
+    """The embeddings profile is the default tenant's and is resolved for
+    every caller. Found live: GET /config handed the operator's proxy URL to
+    a member of an unrelated workspace through `profiles.embeddings.base_url`.
+    """
+    from src.api.routers.llm import get_config
+    from src.llm.profiles import Profile, resolve_profile
+
+    def fake(name, ws="default"):
+        if name == "embeddings":
+            return Profile(surface="embeddings", provider="litellm", model="embedding-2-test",
+                           api_key="", api_base=BASE, dimensions=3072)
+        return resolve_profile(name, ws)
+
+    with patch("src.llm.profiles.resolve_profile", side_effect=fake), \
+            patch("src.api.deps.is_workspace_admin", return_value=False):
+        cfg = get_config(user=_MEMBER, workspace_id="ws-b")
+    assert cfg.profiles["embeddings"].provider == "litellm"
+    assert cfg.profiles["embeddings"].base_url is None
+    dumped = cfg.model_dump_json()
+    assert BASE not in dumped and HOST not in dumped
+
+
 # ─── 5. Only workspace admins ─────────────────────────────────────────
 
 

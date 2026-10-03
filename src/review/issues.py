@@ -254,6 +254,21 @@ def anchor_at(raw_diff: str | None, path: str, line: int | None) -> str | None:
     return text or None
 
 
+NEAR_WINDOW = 2
+
+
+def near_lines(raw_diff: str | None, path: str, line: int | None,
+               *, _cache: dict | None = None) -> frozenset[str]:
+    """Normalised texts of `path` lines `line`±NEAR_WINDOW on the new side."""
+    if not path or not isinstance(line, int):
+        return frozenset()
+    side = (_cache if _cache is not None else _new_side_lines(raw_diff)).get(path, {})
+    return frozenset(
+        t for n in range(line - NEAR_WINDOW, line + NEAR_WINDOW + 1)
+        if (t := _norm(side.get(n, "")))
+    )
+
+
 def anchors_present(raw_diff: str | None) -> dict[str, set[str]]:
     """{path: normalised texts of every new-side line} — what an anchor is
     looked up in."""
@@ -278,6 +293,9 @@ class FoundIssue:
     title: str
     body: str
     suggestion: str | None
+    #: Normalised texts of the head's lines around `line` (see `near_lines`):
+    #: what lets a re-worded finding re-find the issue it already is.
+    near: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -332,6 +350,31 @@ def found_issues(findings: Iterable[Any]) -> list[FoundIssue]:
     return list(by_fp.values())
 
 
+def _reworded(f: FoundIssue, existing: list[ExistingIssue],
+              claimed: set[str], exact: set[str]) -> ExistingIssue | None:
+    """An open issue this finding is, re-worded by the model, or None.
+
+    Titles come from a model, so the same defect arrives as "Division by zero
+    on empty totals list" one push and "Potential ZeroDivisionError on empty
+    list" the next — two fingerprints, two rows. The flagged line is the
+    stable part: same file, same agent, and the issue's line text within
+    NEAR_WINDOW lines of where this finding points. One finding claims at most
+    one issue, an issue is claimed at most once per run, and an issue its own
+    fingerprint already found this run is not up for grabs.
+    """
+    if not f.near:
+        return None
+    for e in existing:
+        if (e.id in claimed or e.fingerprint in exact
+                or e.status != "open" or not e.anchor
+                or e.file_path != f.file_path
+                or (e.agent or "") != (f.agent or "")):
+            continue
+        if e.anchor in f.near:
+            return e
+    return None
+
+
 def plan_sync(
     existing: list[ExistingIssue],
     found: list[FoundIssue],
@@ -372,12 +415,20 @@ def plan_sync(
     plan = SyncPlan()
     by_fp = {e.fingerprint: e for e in existing}
     found_fps = set()
+    claimed: set[str] = set()
+    exact = {f.fingerprint for f in found if f.fingerprint in by_fp}
     for f in found:
         found_fps.add(f.fingerprint)
         e = by_fp.get(f.fingerprint)
         if e is None:
-            plan.create.append(f)
-            continue
+            e = _reworded(f, existing, claimed, exact)
+            if e is None:
+                plan.create.append(f)
+                continue
+            # The same defect under a new title: it re-finds that issue, and
+            # the issue's fingerprint counts as found for the fix check below.
+            found_fps.add(e.fingerprint)
+        claimed.add(e.id)
         # A fix the machine inferred and the next run contradicted is a
         # regression — the issue comes back. A person's decision (dismissed,
         # resolved, or fixed by hand) is not overruled by a model.
@@ -617,6 +668,10 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
             ReviewIssue.pr_number == number,
         )).scalars().all()
         by_id = {r.id: r for r in existing_rows}
+        found = found_issues(batch.findings)
+        side = _new_side_lines(raw_diff)
+        for f in found:
+            f.near = near_lines(raw_diff, f.file_path, f.line, _cache=side)
         plan = plan_sync(
             [ExistingIssue(
                 id=r.id, fingerprint=r.fingerprint, file_path=r.file_path,
@@ -624,7 +679,7 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
                 resolution_source=r.resolution_source, rule_id=r.rule_id,
                 anchor=r.anchor,
             ) for r in existing_rows],
-            found_issues(batch.findings),
+            found,
             # The stages, not the delivery: a review whose every agent
             # answered and whose comments failed to post still looked. A
             # partial one looked too, minus its failed agents (passed below).

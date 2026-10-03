@@ -453,7 +453,12 @@ class ReviewOrchestrator:
             batch.tokens_out += r.tokens_out
             if r.cost_usd is not None:
                 cost_sum += r.cost_usd
-            elif r.error is None or r.tokens_in or r.tokens_out:
+            elif r.tokens_in or r.tokens_out or (r.error is None and r.model_used):
+                # A clean agent counts only if it called a model: cve and
+                # structural answer from the code alone (no tokens, no
+                # model_used) and blanked the total of every run they were in
+                # — every review showed "unknown cost" while the spend ledger
+                # held the real figure.
                 # No cost figure makes the run's total a guess — but only if
                 # this agent actually spent something. An agent that failed
                 # before a single token left the process (no key configured

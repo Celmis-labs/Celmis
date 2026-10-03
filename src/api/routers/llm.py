@@ -975,7 +975,12 @@ def get_config(
         p = resolve_profile(name, workspace_id)
         profiles_out[name] = ProfileOut(
             provider=p.provider, model=p.model, dimensions=p.dimensions,
-            base_url=p.api_base,
+            # A LiteLLM profile's api_base is the proxy URL, which only a
+            # workspace admin may see (as a host, on the proxy row). The
+            # embeddings profile is the default tenant's and is resolved for
+            # every caller, so leaving it here showed the operator's proxy
+            # to every member of every workspace.
+            base_url=None if p.provider == _LITELLM_PROVIDER else p.api_base,
         )
         used_providers.add(p.provider)
 

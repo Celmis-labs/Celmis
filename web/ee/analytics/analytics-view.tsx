@@ -173,7 +173,8 @@ function Dashboard({ s }: { s: AnalyticsSummary }) {
         />
         <Kpi
           label={t("analytics.kpi.cost")}
-          value={money(s.cost_usd.total)}
+          // No run with a known price: "$0.00" would read as free.
+          value={s.cost_usd.runs_with_cost ? money(s.cost_usd.total) : "—"}
           hint={t("analytics.kpi.costHint", {
             avg: money(s.cost_usd.avg_per_review),
             unknown: s.cost_usd.runs_with_unknown_cost,

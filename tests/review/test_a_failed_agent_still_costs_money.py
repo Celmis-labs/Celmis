@@ -241,3 +241,26 @@ def test_a_clean_run_totals_exactly_what_its_agents_spent(run):
     assert batch.cost_usd == pytest.approx(0.10)
     assert batch.cost_source == "litellm_estimate"
     assert batch.run_status is ReviewRunStatus.COMPLETE
+
+
+def test_an_agent_that_never_calls_a_model_does_not_blank_the_total(run):
+    """cve and structural read the code, not a model: no tokens, no
+    model_used, no error. Live, every review carried "unknown cost" because of
+    them while the spend ledger held the real figure."""
+    batch = run(
+        _Agent("architect", tokens_in=800, tokens_out=100, cost_usd=0.07,
+               cost_source="litellm_estimate", model_used="litellm_proxy/flash"),
+        _Agent("structural"),
+        _Agent("cve"),
+    )
+    assert batch.cost_usd == pytest.approx(0.07)
+
+
+def test_a_model_call_with_no_usage_and_no_price_is_still_unknown(run):
+    """The case the old `error is None` clause stood for: a model answered,
+    reported no usage, and nobody priced it — that is not zero."""
+    batch = run(
+        _Agent("architect", tokens_in=800, tokens_out=100, cost_usd=0.07),
+        _Agent("security", model_used="litellm_proxy/flash"),
+    )
+    assert batch.cost_usd is None
