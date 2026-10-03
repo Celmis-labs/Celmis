@@ -1548,6 +1548,11 @@ export const workspacesApi = {
 export type AdminUser = {
   id: string; email: string; name: string;
   is_admin: boolean; is_active: boolean; memberships: number;
+  /** password / google / oidc */
+  sign_in_methods?: string[];
+  created_at?: string;
+  /** A membership other than the account's own personal workspace. */
+  has_team_access?: boolean;
 };
 export type AdminWorkspace = { id: string; name: string; slug: string };
 export type UserMembership = {
@@ -1555,8 +1560,10 @@ export type UserMembership = {
 };
 
 export const adminUsersApi = {
-  search: (token: string, q: string) =>
-    api<AdminUser[]>(`/api/admin/users?q=${encodeURIComponent(q)}`, { token }),
+  search: (token: string, q: string, noTeamAccess = false) =>
+    api<AdminUser[]>(
+      `/api/admin/users?q=${encodeURIComponent(q)}${noTeamAccess ? "&no_team_access=true" : ""}`,
+      { token }),
   workspaces: (token: string) => api<AdminWorkspace[]>("/api/admin/workspaces", { token }),
   memberships: (token: string, userId: string) =>
     api<UserMembership[]>(`/api/admin/users/${encodeURIComponent(userId)}/memberships`, { token }),
@@ -1569,6 +1576,53 @@ export const adminUsersApi = {
       `/api/admin/users/${encodeURIComponent(userId)}/memberships/${encodeURIComponent(wsId)}`,
       { token, method: "DELETE" }),
 };
+
+// ─── Access requests (src/api/routers/access_requests.py) ────────────
+
+export type AccessRequestStatus = "pending" | "approved" | "rejected" | "cancelled";
+export type AccessGrant = {
+  workspace_id: string; workspace_name: string; workspace_slug?: string; role: string;
+};
+
+/** The requester's own view: never names a workspace unless approved. */
+export type MyAccessRequest = {
+  id: string; status: AccessRequestStatus; comment: string; created_at: string;
+  decided_at: string | null; decision_note: string | null; grants: AccessGrant[];
+};
+export type MyAccess = {
+  eligible: boolean; has_team_access: boolean; request: MyAccessRequest | null;
+};
+
+export type AdminAccessRequest = {
+  id: string; user_id: string; email: string; name: string;
+  sign_in_methods: string[]; user_active: boolean; comment: string;
+  status: AccessRequestStatus; created_at: string; updated_at: string | null;
+  decided_by: string | null; decided_at: string | null; decision_note: string | null;
+  grants: AccessGrant[];
+};
+
+export const accessRequestsApi = {
+  me: (token: string) => api<MyAccess>("/api/access-requests/me", { token }),
+  create: (token: string, comment: string) =>
+    api<MyAccessRequest>("/api/access-requests", { token, method: "POST", json: { comment } }),
+  cancel: (token: string) =>
+    api<void>("/api/access-requests/me", { token, method: "DELETE" }),
+  list: (token: string, status: AccessRequestStatus | "all" = "all") =>
+    api<AdminAccessRequest[]>(`/api/admin/access-requests?status=${status}`, { token }),
+  approve: (token: string, id: string, grants: { workspace_id: string; role: string }[]) =>
+    api<AdminAccessRequest>(`/api/admin/access-requests/${encodeURIComponent(id)}/approve`, {
+      token, method: "POST", json: { grants },
+    }),
+  reject: (token: string, id: string, reason: string) =>
+    api<AdminAccessRequest>(`/api/admin/access-requests/${encodeURIComponent(id)}/reject`, {
+      token, method: "POST", json: { reason },
+    }),
+};
+
+/** Fired after something changed which workspaces the signed-in user is in
+ *  (an approved access request, an accepted invite); the workspace switcher
+ *  listens and re-reads /api/workspaces without a sign-out. */
+export const WORKSPACES_CHANGED_EVENT = "celmis:workspaces-changed";
 
 // ─── Stage 22 — user directory + fine-grained research access ────────
 
@@ -1975,11 +2029,19 @@ export type Invite = {
 
 export type InviteCreated = Invite & {
   token?: string | null; invite_url?: string | null; added_directly?: boolean;
+  /** SMTP is configured and the link was handed to the mailer. */
+  emailed?: boolean;
 };
+
+/** Why a link cannot be used (src/api/routers/invites.py INVALID_DETAIL). */
+export type InviteInvalidReason = "not_found" | "revoked" | "expired" | "used";
 
 export type InvitePreview = {
   workspace_id: string; workspace_name: string; role: string;
   email_bound: boolean; valid: boolean; detail: string;
+  reason?: InviteInvalidReason | "";
+  /** Display name (or email) of whoever sent the invite. */
+  invited_by?: string;
 };
 
 /** Invites act on the ACTIVE workspace. A page that lists several workspaces
@@ -2005,7 +2067,11 @@ export const invitesApi = {
   preview: (inviteToken: string) =>
     api<InvitePreview>(`/api/invites/preview/${inviteToken}`),
   accept: (token: string, inviteToken: string) =>
-    api<{ ok: boolean; workspace_id: string; workspace_slug: string; role: string }>(
+    api<{
+      ok: boolean; workspace_id: string; workspace_slug: string; role: string;
+      /** Redeemed earlier by this same address (a click, or a verified sign-in). */
+      already?: boolean;
+    }>(
       "/api/invites/accept", { token, method: "POST", json: { token: inviteToken } }),
 };
 

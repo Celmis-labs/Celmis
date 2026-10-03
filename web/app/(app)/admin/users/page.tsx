@@ -8,9 +8,15 @@
  * others in one place. Every change goes through the same API rule and audit
  * row as the workspace members page (`change_membership`,
  * src/api/memberships.py) — nothing here is decided by the page itself.
+ *
+ * "No team access" lists the accounts whose only workspace is their own
+ * personal one — however they sign in — newest first, so the superadmin can
+ * add them somewhere without waiting for an access request.
+ * `?filter=no-team-access` opens the page with it on.
  */
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -20,6 +26,7 @@ import { adminUsersApi, type AdminUser } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { roleOptions } from "@/lib/roles";
+import { formatDateTime } from "@/lib/format";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import { Badge } from "@/components/ui/badge";
@@ -29,17 +36,33 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 
 export default function AdminUsersPage() {
+  // useSearchParams needs a Suspense boundary above it to prerender.
+  return (
+    <Suspense fallback={null}>
+      <AdminUsersInner />
+    </Suspense>
+  );
+}
+
+function methodLabel(t: (k: string) => string, m: string): string {
+  return ["password", "google", "oidc"].includes(m) ? t(`admin.accessRequests.method.${m}`) : m;
+}
+
+function AdminUsersInner() {
   const t = useT();
   const token = useToken();
   const { data: session } = useSession();
+  const params = useSearchParams();
   const [q, setQ] = useState("");
+  const [noTeam, setNoTeam] = useState(params.get("filter") === "no-team-access");
   const [selected, setSelected] = useState<AdminUser | null>(null);
 
   const users = useQuery({
-    queryKey: ["admin-users", q],
-    queryFn: () => adminUsersApi.search(token!, q.trim()),
+    queryKey: ["admin-users", q, noTeam],
+    queryFn: () => adminUsersApi.search(token!, q.trim(), noTeam),
     enabled: !!token && Boolean(session?.isSuperadmin),
   });
 
@@ -74,6 +97,13 @@ export default function AdminUsersPage() {
                 aria-label={t("admin.users.searchPlaceholder")}
               />
             </div>
+            <label className="flex items-center gap-2 text-xs">
+              <Switch checked={noTeam} onCheckedChange={setNoTeam} aria-label={t("admin.users.noTeamAccess")} />
+              <span>{t("admin.users.noTeamAccess")}</span>
+            </label>
+            {noTeam && (
+              <p className="text-[11px] text-[var(--color-muted-foreground)]">{t("admin.users.noTeamAccessHint")}</p>
+            )}
             {users.isLoading && (
               <p className="text-sm text-[var(--color-muted-foreground)]">{t("admin.users.loading")}</p>
             )}
@@ -94,8 +124,16 @@ export default function AdminUsersPage() {
                       {u.name ? (
                         <span className="block truncate text-xs text-[var(--color-muted-foreground)]">{u.name}</span>
                       ) : null}
+                      {noTeam && u.created_at ? (
+                        <span className="block truncate text-[11px] text-[var(--color-muted-foreground)]">
+                          {t("admin.users.joined", { when: formatDateTime(u.created_at) })}
+                        </span>
+                      ) : null}
                     </span>
                     <span className="flex shrink-0 items-center gap-1">
+                      {noTeam && (u.sign_in_methods ?? []).map((m) => (
+                        <Badge key={m} variant="outline">{methodLabel(t, m)}</Badge>
+                      ))}
                       {u.is_admin && <Badge variant="outline">{t("admin.users.globalAdmin")}</Badge>}
                       {!u.is_active && <Badge variant="outline">{t("admin.users.inactive")}</Badge>}
                       <Badge variant="outline">{t("admin.users.workspacesCount", { n: String(u.memberships) })}</Badge>

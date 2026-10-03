@@ -22,6 +22,39 @@ derives it from there.
 
 ### Added
 
+- **Access requests.** A signed-in person whose only workspace is their
+  personal one — password, Google or SSO — can ask for access in general
+  (dashboard banner, `/access-request`, optional comment up to 1000
+  characters; one pending at a time, cancellable, re-askable after a
+  rejection). The request names no workspace and the requester sees none
+  until it is approved. The superadmin alone decides on **Administration →
+  Access requests**: approve with one or more (workspace, role) pairs, applied
+  atomically through the membership writer (`change_memberships`, one audit
+  row each, `via="access_request"`), or reject with a required reason.
+  Deciding twice is 409; create, cancel, approve and reject are audited. The
+  decision shows on `/access-request` and as a toast on the next visit, the
+  switcher re-reads its list, and with SMTP configured the requester is
+  emailed. New table `access_requests` (migration `f6b1d3a8c240`). API:
+  `POST|GET|DELETE /api/access-requests[/me]`, `GET
+  /api/admin/access-requests?status=`, `POST
+  /api/admin/access-requests/{id}/approve|reject`.
+- **Administration → Users: "No team access" filter**
+  (`GET /api/admin/users?no_team_access=true`) — accounts with no workspace
+  but their personal one, any sign-in method, newest first, with their
+  sign-in methods and sign-up date.
+- **Invites reach people without an account, end to end.** The landing page
+  says who sent the invite, and signed out offers sign-in, sign-up (when
+  password login is on), Google and SSO, each returning to the link. A dead
+  link says whether it expired, was revoked or was used; opening a used link
+  again as the person it was for opens the workspace. The inviter is told
+  when the link was also emailed.
+- **Invites are redeemed at a verified Google / SSO sign-in.** Pending
+  email-bound invites for the address the identity provider marks verified
+  are redeemed automatically, through the same path as accepting the link —
+  the inviter's right re-checked, audited, single use. Password accounts are
+  never redeemed by their address (it is not verified); they accept through
+  the link.
+
 - **Administration → Users (`/admin/users`), for the superadmin.** Search
   accounts, see each person's workspaces and role in each, change a role, add
   a membership, remove one — so one person can be admin of several

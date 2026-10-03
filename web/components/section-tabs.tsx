@@ -141,6 +141,7 @@ export const SECTION_TABS = {
     { href: "/admin/gdpr", labelKey: "nav.gdpr" },
     { href: "/admin/oauth-clients", labelKey: "nav.oauthClients" },
     { href: "/admin/users", labelKey: "nav.users", superadminOnly: true },
+    { href: "/admin/access-requests", labelKey: "nav.accessRequests", superadminOnly: true },
   ],
 } as const satisfies Record<string, readonly TabDef[]>;
 

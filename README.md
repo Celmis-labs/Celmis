@@ -263,7 +263,55 @@ Who may grant what:
 The superadmin manages people across workspaces on **Administration →
 Users** (`/admin/users`); every membership change, from any page, is written
 to the audit log with the actor, the person, the workspace and the old and
-new role.
+new role. Its **No team access** filter lists the accounts whose only
+workspace is their personal one — whatever way they sign in — newest first.
+
+### Getting in: invites and access requests
+
+**An invite for somebody without an account.** Inviting an email address
+that has no account creates an email-bound, single-use link. The inviter sees
+it (copy it from the Team page); when SMTP is configured it is also emailed.
+Opened signed out, `/invite/<token>` shows the workspace, the role and who
+sent it, and offers sign-in, sign-up (when `AUTH_PASSWORD_LOGIN` allows it),
+Google and company SSO (when enabled); each comes back to the link to accept.
+Accepting re-checks that the inviter may still grant that role, is audited,
+and uses the link up. An expired, revoked or used link says which; an
+email-bound link opened by another account is refused.
+
+**Automatic redemption — verified addresses only.** When somebody signs in
+with Google or company SSO and the identity provider marks the email as
+verified (`email_verified`), the pending invites addressed to that email are
+redeemed at sign-in, through the same accept path (grant rule re-checked,
+audited, single use). A **password account is never redeemed by its
+address**: Celmis does not verify the address typed at sign-up, so anyone can
+register somebody else's email. A password account opens the link it was
+sent, and accepts there.
+
+**Access requests.** A signed-in person whose only workspace is their
+personal one sees *"You have no access to team workspaces yet — send a
+request"* on the dashboard and at `/access-request`, with an optional comment
+(up to 1000 characters). One pending request at a time; it can be cancelled,
+and a new one sent after a rejection. The request names no workspace, and the
+requester is shown none until it is approved. The **superadmin only** decides,
+on **Administration → Access requests** (`/admin/access-requests`): approve
+with one or more (workspace, role) pairs — applied all or nothing, each
+membership audited with `via="access_request"` — or reject with a reason the
+requester reads. Decided requests stay listed as history. The requester sees
+the decision on `/access-request` and as a toast on their next visit, and an
+approved workspace appears in the switcher without signing out. With SMTP
+configured the requester is also emailed the decision, and the master address
+a new request; there is no other notification channel.
+
+| | |
+|---|---|
+| `POST /api/access-requests` `{comment?}` | ask (409 if one is pending, or the account already has team access) |
+| `GET /api/access-requests/me` | eligibility and the latest request |
+| `DELETE /api/access-requests/me` | cancel the pending one |
+| `GET /api/admin/access-requests?status=` | superadmin: list, pending first |
+| `POST /api/admin/access-requests/{id}/approve` `{grants:[{workspace_id, role}]}` | superadmin: one or more, unique, existing, not personal workspaces |
+| `POST /api/admin/access-requests/{id}/reject` `{reason}` | superadmin: reason required |
+
+Deciding a request that is no longer pending answers 409.
 
 ---
 

@@ -109,7 +109,8 @@ def test_the_login_page_forgets_the_agent_session() -> None:
 
 
 def test_accepting_an_invite_switches_workspace_like_the_switcher() -> None:
-    page = _code(WEB / "app" / "invite" / "[token]" / "page.tsx")
+    # The client half of the invite page (page.tsx is its server wrapper).
+    page = _code(WEB / "app" / "invite" / "[token]" / "invite-view.tsx")
     accept = _block(page, "const accept = async")
     cookie = accept.index("x-workspace=")
     forget = accept.index("forgetAgentSession();")
