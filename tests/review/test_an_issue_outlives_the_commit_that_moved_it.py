@@ -583,21 +583,24 @@ def test_an_issue_without_an_anchor_keeps_the_file_rule():
 # lower — a second row for one defect.
 
 
-def _found(title, line, *, agent="defect", path="app/orders.py", diff=_DIFF_V1):
-    from src.review.issues import FoundIssue, fingerprint, near_lines
+def _found(title, line, *, agent="defect", path="app/orders.py", diff=_DIFF_V1,
+           rule=None):
+    from src.review.issues import FoundIssue, _new_side_lines, _norm, fingerprint, near_lines
     return FoundIssue(
-        fingerprint=fingerprint(None, path, title), file_path=path, line=line,
-        agent=agent, rule_id=None, category="bug", severity="error",
+        fingerprint=fingerprint(rule, path, title), file_path=path, line=line,
+        agent=agent, rule_id=rule, category="bug", severity="error",
         title=title, body="", suggestion=None,
-        near=near_lines(diff, path, line))
+        near=near_lines(diff, path, line),
+        at_line=_norm(_new_side_lines(diff).get(path, {}).get(line, ("", False))[0]))
 
 
-def _open(id_, title, line, *, agent="defect"):
+def _open(id_, title, line, *, agent="defect", rule=None):
     from src.review.issues import ExistingIssue, anchor_at, fingerprint
     return ExistingIssue(
-        id=id_, fingerprint=fingerprint(None, "app/orders.py", title),
+        id=id_, fingerprint=fingerprint(rule, "app/orders.py", title),
         file_path="app/orders.py", agent=agent, status="open",
-        resolution_source=None, anchor=anchor_at(_DIFF_V1, "app/orders.py", line))
+        resolution_source=None, rule_id=rule, title=title, category="bug",
+        anchor=anchor_at(_DIFF_V1, "app/orders.py", line))
 
 
 def _same_head(existing, found):
@@ -606,11 +609,34 @@ def _same_head(existing, found):
                      prev_head_sha="a", prev_file_hashes={}, new_file_hashes={})
 
 
-def test_a_reworded_finding_one_line_off_refinds_the_issue():
-    plan = _same_head([_open("div", "Division by zero on empty totals list", 25)],
-                      [_found("Potential ZeroDivisionError on empty list", 24)])
+def test_a_reworded_finding_on_the_same_line_refinds_the_issue():
+    # Live: new title AND a new rule id from the model, same flagged line.
+    plan = _same_head([_open("div", "Division by zero on empty totals list", 25,
+                             rule="defect.zero_div")],
+                      [_found("Potential ZeroDivisionError on empty list", 25,
+                              rule="defect.division")])
     assert plan.create == []
     assert [r[0] for r in plan.refound] == ["div"]
+
+
+def test_the_same_rule_one_line_off_refinds_the_issue():
+    plan = _same_head([_open("div", "Division by zero on empty totals list", 25,
+                             rule="defect.zero_div")],
+                      [_found("Potential ZeroDivisionError on empty list", 24,
+                              rule="defect.zero_div")])
+    assert [r[0] for r in plan.refound] == ["div"]
+
+
+def test_the_same_title_under_a_new_rule_refinds_the_issue():
+    plan = _same_head([_open("ix", "IndexError on empty baskets list", 25, rule="defect.a")],
+                      [_found("IndexError on empty baskets list", 24, rule="defect.b")])
+    assert [r[0] for r in plan.refound] == ["ix"]
+
+
+def test_nothing_shared_and_a_line_off_is_a_new_issue():
+    plan = _same_head([_open("div", "Division by zero on empty totals list", 25)],
+                      [_found("Potential ZeroDivisionError on empty list", 24)])
+    assert plan.refound == [] and len(plan.create) == 1
 
 
 def test_another_agent_or_a_far_line_is_a_new_issue():
@@ -623,7 +649,7 @@ def test_another_agent_or_a_far_line_is_a_new_issue():
 def test_one_issue_is_claimed_once_and_exact_matches_win():
     title = "Division by zero on empty totals list"
     plan = _same_head([_open("div", title, 25)],
-                      [_found("Potential ZeroDivisionError on empty list", 24),
+                      [_found("Potential ZeroDivisionError on empty list", 25),
                        _found(title, 25)])
     assert [r[0] for r in plan.refound] == ["div"]
     assert [f.title for f in plan.create] == ["Potential ZeroDivisionError on empty list"]
@@ -633,7 +659,7 @@ def test_a_reworded_refind_is_not_called_fixed_on_the_next_head():
     from src.review.issues import file_section_hashes, plan_sync
     plan = plan_sync(
         [_open("div", "Division by zero on empty totals list", 25)],
-        [_found("Potential ZeroDivisionError on empty list", 24, diff=_DIFF_V2)],
+        [_found("Potential ZeroDivisionError on empty list", 25, diff=_DIFF_V2)],
         run_reviewed=True, head_sha="b", prev_head_sha="a",
         prev_file_hashes=file_section_hashes(_DIFF_V1),
         new_file_hashes=file_section_hashes(_DIFF_V2),

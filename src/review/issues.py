@@ -323,6 +323,8 @@ class FoundIssue:
     #: Normalised texts of the head's lines around `line` (see `near_lines`):
     #: what lets a re-worded finding re-find the issue it already is.
     near: frozenset[str] = frozenset()
+    #: Normalised text of the flagged line itself ("" when not in the diff).
+    at_line: str = ""
 
 
 @dataclass
@@ -336,6 +338,7 @@ class ExistingIssue:
     rule_id: str | None = None
     anchor: str | None = None
     category: str | None = None
+    title: str = ""
 
 
 @dataclass
@@ -390,9 +393,11 @@ def _reworded(f: FoundIssue, existing: list[ExistingIssue],
     Titles come from a model, so the same defect arrives as "Division by zero
     on empty totals list" one push and "Potential ZeroDivisionError on empty
     list" the next — two fingerprints, two rows. What must agree instead:
-    same file and agent; the same rule when both name one, else the same
-    category; and the issue's anchor — a distinctive line the PR added, see
-    `anchor_at` — within NEAR_WINDOW lines of where this finding points.
+    same file and agent, and the issue's anchor — a distinctive line the PR
+    added, see `anchor_at` — within NEAR_WINDOW lines of where this finding
+    points when the rule id or the normalised title agrees; when neither does
+    (rule ids are model text and drift), the same category and the anchor ON
+    the flagged line itself.
     Fixed-line agents never match this way. One finding claims at most one
     issue, an issue is claimed at most once per run, and an issue its own
     fingerprint already found this run is not up for grabs.
@@ -405,10 +410,17 @@ def _reworded(f: FoundIssue, existing: list[ExistingIssue],
                 or e.file_path != f.file_path
                 or (e.agent or "") != (f.agent or "")):
             continue
-        if e.rule_id and f.rule_id:
-            if e.rule_id != f.rule_id:
-                continue
-        elif e.category and e.category != f.category:
+        same_rule = bool(e.rule_id and f.rule_id and e.rule_id == f.rule_id)
+        same_title = bool(e.title) and normalize_title(e.title) == normalize_title(f.title)
+        if e.category and e.category != f.category and not (same_rule or same_title):
+            continue
+        if not (same_rule or same_title):
+            # Rule ids are free text from the model too ("defect.zero_div",
+            # then "defect.division"), so differing ones prove nothing — but
+            # without a shared rule or title only the exact flagged line
+            # will do, not a neighbour of it.
+            if e.anchor == f.at_line:
+                return e
             continue
         if e.anchor in f.near:
             return e
@@ -713,12 +725,14 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
         side = _new_side_lines(raw_diff)
         for f in found:
             f.near = near_lines(raw_diff, f.file_path, f.line, _cache=side)
+            if isinstance(f.line, int):
+                f.at_line = _norm(side.get(f.file_path, {}).get(f.line, ("", False))[0])
         plan = plan_sync(
             [ExistingIssue(
                 id=r.id, fingerprint=r.fingerprint, file_path=r.file_path,
                 agent=r.agent, status=r.status,
                 resolution_source=r.resolution_source, rule_id=r.rule_id,
-                anchor=r.anchor, category=r.category,
+                anchor=r.anchor, category=r.category, title=r.title or "",
             ) for r in existing_rows],
             found,
             # The stages, not the delivery: a review whose every agent
