@@ -223,6 +223,21 @@ class LLMClient:
 
     # ── Sync generate (used by review agents in ThreadPoolExecutor) ──
 
+    def _cache_breakpoints_for(self, resolved_model: str, provider: str) -> bool:
+        workspace_proxy = False
+        underlying = None
+        if provider == "litellm_proxy" and self._estimate_proxy_cost:
+            try:
+                workspace_proxy = bool(self._estimate_proxy_cost())
+                if workspace_proxy and self._resolve_billing_model:
+                    underlying = self._resolve_billing_model(resolved_model)
+            except Exception:  # noqa: BLE001 — unknown route: be conservative
+                workspace_proxy, underlying = True, None
+        return _cache_breakpoints_welcome(
+            workspace_proxy=workspace_proxy,
+            alias=resolved_model.split("/", 1)[-1],
+            underlying=underlying)
+
     def generate(
         self,
         *,
@@ -439,8 +454,7 @@ class LLMClient:
             prompt=prompt,
             system_instruction=system_instruction,
             redacted_code=redacted_code,
-            cache_breakpoints=_cache_breakpoints_welcome(
-                resolved_model, self._workspace_id),
+            cache_breakpoints=self._cache_breakpoints_for(resolved_model, provider),
         )
 
         with self._audit.track(
@@ -923,7 +937,8 @@ def _rebuild_response(
     )
 
 
-def _cache_breakpoints_welcome(resolved_model: str, workspace_id: str) -> bool:
+def _cache_breakpoints_welcome(*, workspace_proxy: bool, alias: str,
+                               underlying: str | None) -> bool:
     """May this call carry `cache_control` breakpoints?
 
     Everywhere but a workspace's own LiteLLM proxy, yes — that is the
@@ -935,21 +950,15 @@ def _cache_breakpoints_welcome(resolved_model: str, workspace_id: str) -> bool:
     took down every review agent and the Celmis agent on the first live
     proxy. So the markers go only when the proxy's own /model/info says the
     alias runs on Claude, where they are the 75%-input-tokens win.
+
+    `workspace_proxy` is the ROUTE of this call (the client factory's
+    predicate), not "this workspace has a proxy saved": a gateway call in a
+    workspace that also keeps a proxy is still a gateway call.
     """
-    if not resolved_model.startswith("litellm_proxy/"):
+    if not workspace_proxy:
         return True
-    try:
-        from src.llm import litellm_proxy
-        ep = litellm_proxy.resolve_endpoint(workspace_id)
-    except Exception:  # noqa: BLE001 — no readable endpoint means not ours
-        return True
-    if ep is None:
-        return True  # the installation gateway, which Celmis provisioned itself
-    alias = resolved_model.split("/", 1)[1]
-    try:
-        underlying = litellm_proxy.underlying_model(ep, alias) or ""
-    except Exception:  # noqa: BLE001 — unknown upstream: send nothing it may refuse
-        return False
+    if not underlying or underlying == alias:
+        return False  # the proxy could not say what runs behind the alias
     return underlying.startswith("anthropic/") or "claude" in underlying.lower()
 
 

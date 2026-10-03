@@ -202,16 +202,19 @@ def file_section_hashes(raw_diff: str | None) -> dict[str, str]:
 _HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
-def _new_side_lines(raw_diff: str | None) -> dict[str, dict[int, str]]:
-    """{path: {new-file line number: text}} for every added or context line.
+def _new_side_lines(raw_diff: str | None) -> dict[str, dict[int, tuple[str, bool]]]:
+    """{path: {new-file line number: (text, added?)}} for every added or
+    context line — the right-hand side of each hunk, as the reviewed head has
+    it. Both sides of a rename get the lines, like `file_section_hashes`.
 
-    The right-hand side of each hunk, as the reviewed head has it. Both sides
-    of a rename get the lines, like `file_section_hashes`.
+    `---`/`+++` are file headers only before a section's first hunk: inside a
+    hunk "+++ x" is an added line whose content is "++ x" (TOML front matter,
+    `++i;`), and skipping it would shift every later number.
     """
-    out: dict[str, dict[int, str]] = {}
+    out: dict[str, dict[int, tuple[str, bool]]] = {}
     if not raw_diff:
         return out
-    lines: dict[int, str] = {}
+    lines: dict[int, tuple[str, bool]] = {}
     paths: tuple[str, ...] = ()
     n = 0
 
@@ -231,12 +234,15 @@ def _new_side_lines(raw_diff: str | None) -> dict[str, dict[int, str]]:
         if h:
             n = int(h.group(1))
             continue
-        if not n or raw.startswith(("---", "+++")):
-            continue
-        if raw.startswith("+") or raw.startswith(" "):
-            lines[n] = raw[1:]
+        if not n:
+            continue  # section headers (index, ---, +++, mode lines)
+        if raw.startswith("+"):
+            lines[n] = (raw[1:], True)
             n += 1
-        # "-" lines and "\\ No newline" do not exist on the new side.
+        elif raw.startswith(" "):
+            lines[n] = (raw[1:], False)
+            n += 1
+        # "-" lines and "\\ No newline at end of file" are not on the new side.
     flush()
     return out
 
@@ -245,13 +251,41 @@ def _norm(text: str) -> str:
     return " ".join(text.split())
 
 
+#: An anchor must say something: "}" or "return None" is on every other line.
+ANCHOR_MIN_CHARS = 8
+
+
+def _distinctive(text: str) -> bool:
+    return sum(ch.isalnum() for ch in text) >= ANCHOR_MIN_CHARS
+
+
 def anchor_at(raw_diff: str | None, path: str, line: int | None) -> str | None:
-    """The text of `path`:`line` on the reviewed head, if the diff shows it."""
+    """The text of `path`:`line` on the reviewed head — only when the PR ADDED
+    that line, it says something, and it occurs once in the file's diff.
+
+    A context line can leave the next diff without leaving the file, so its
+    absence would prove nothing; a short or repeated line would be "still
+    there" forever. Those findings keep the plain file rule.
+    """
     if not path or not isinstance(line, int):
         return None
-    text = _new_side_lines(raw_diff).get(path, {}).get(line)
-    text = _norm(text) if text is not None else ""
-    return text or None
+    side = _new_side_lines(raw_diff).get(path, {})
+    got = side.get(line)
+    if got is None or not got[1]:
+        return None
+    text = _norm(got[0])
+    if not text or not _distinctive(text):
+        return None
+    if sum(1 for t, _ in side.values() if _norm(t) == text) != 1:
+        return None
+    return text
+
+
+def anchors_present(raw_diff: str | None) -> dict[str, set[str]]:
+    """{path: normalised texts of every new-side line} — what an anchor is
+    looked up in."""
+    return {p: {_norm(t) for t, _ in ls.values() if _norm(t)}
+            for p, ls in _new_side_lines(raw_diff).items()}
 
 
 NEAR_WINDOW = 2
@@ -265,15 +299,8 @@ def near_lines(raw_diff: str | None, path: str, line: int | None,
     side = (_cache if _cache is not None else _new_side_lines(raw_diff)).get(path, {})
     return frozenset(
         t for n in range(line - NEAR_WINDOW, line + NEAR_WINDOW + 1)
-        if (t := _norm(side.get(n, "")))
+        if (t := _norm(side.get(n, ("", False))[0]))
     )
-
-
-def anchors_present(raw_diff: str | None) -> dict[str, set[str]]:
-    """{path: normalised texts of every new-side line} — what an anchor is
-    looked up in."""
-    return {p: {_norm(t) for t in ls.values() if _norm(t)}
-            for p, ls in _new_side_lines(raw_diff).items()}
 
 
 # ─── Planning (pure) ───────────────────────────────────────────────
@@ -308,13 +335,14 @@ class ExistingIssue:
     resolution_source: str | None
     rule_id: str | None = None
     anchor: str | None = None
+    category: str | None = None
 
 
 @dataclass
 class SyncPlan:
     create: list[FoundIssue] = field(default_factory=list)
-    #: (existing id, the finding that re-found it, reopen?)
-    refound: list[tuple[str, FoundIssue, bool]] = field(default_factory=list)
+    #: (existing id, the finding that re-found it, reopen?, re-worded?)
+    refound: list[tuple[str, FoundIssue, bool, bool]] = field(default_factory=list)
     #: ids of open issues the new head fixed
     fixed: list[str] = field(default_factory=list)
 
@@ -350,25 +378,37 @@ def found_issues(findings: Iterable[Any]) -> list[FoundIssue]:
     return list(by_fp.values())
 
 
+#: Agents that pin every finding to line 1 of a file (a manifest, the first
+#: changed file): position says nothing about which defect it is.
+_FIXED_LINE_AGENTS = frozenset({"cve", "compliance", "breaking_change"})
+
+
 def _reworded(f: FoundIssue, existing: list[ExistingIssue],
               claimed: set[str], exact: set[str]) -> ExistingIssue | None:
     """An open issue this finding is, re-worded by the model, or None.
 
     Titles come from a model, so the same defect arrives as "Division by zero
     on empty totals list" one push and "Potential ZeroDivisionError on empty
-    list" the next — two fingerprints, two rows. The flagged line is the
-    stable part: same file, same agent, and the issue's line text within
-    NEAR_WINDOW lines of where this finding points. One finding claims at most
-    one issue, an issue is claimed at most once per run, and an issue its own
+    list" the next — two fingerprints, two rows. What must agree instead:
+    same file and agent; the same rule when both name one, else the same
+    category; and the issue's anchor — a distinctive line the PR added, see
+    `anchor_at` — within NEAR_WINDOW lines of where this finding points.
+    Fixed-line agents never match this way. One finding claims at most one
+    issue, an issue is claimed at most once per run, and an issue its own
     fingerprint already found this run is not up for grabs.
     """
-    if not f.near:
+    if not f.near or (f.agent or "") in _FIXED_LINE_AGENTS:
         return None
     for e in existing:
         if (e.id in claimed or e.fingerprint in exact
                 or e.status != "open" or not e.anchor
                 or e.file_path != f.file_path
                 or (e.agent or "") != (f.agent or "")):
+            continue
+        if e.rule_id and f.rule_id:
+            if e.rule_id != f.rule_id:
+                continue
+        elif e.category and e.category != f.category:
             continue
         if e.anchor in f.near:
             return e
@@ -420,6 +460,7 @@ def plan_sync(
     for f in found:
         found_fps.add(f.fingerprint)
         e = by_fp.get(f.fingerprint)
+        reworded = e is None
         if e is None:
             e = _reworded(f, existing, claimed, exact)
             if e is None:
@@ -439,7 +480,7 @@ def plan_sync(
             or (pr_open and e.status == "resolved"
                 and e.resolution_source == "pr_closed")
         )
-        plan.refound.append((e.id, f, reopen))
+        plan.refound.append((e.id, f, reopen, reworded))
 
     can_judge = (
         run_reviewed
@@ -677,7 +718,7 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
                 id=r.id, fingerprint=r.fingerprint, file_path=r.file_path,
                 agent=r.agent, status=r.status,
                 resolution_source=r.resolution_source, rule_id=r.rule_id,
-                anchor=r.anchor,
+                anchor=r.anchor, category=r.category,
             ) for r in existing_rows],
             found,
             # The stages, not the delivery: a review whose every agent
@@ -715,8 +756,15 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
                 first_seen_sha=head_sha, last_seen_sha=head_sha,
                 occurrences=1, first_seen_at=now, last_seen_at=now,
             ))
-        for issue_id, f, reopen in plan.refound:
+        for issue_id, f, reopen, reworded in plan.refound:
             r = by_id[issue_id]
+            if reworded:
+                # Re-key to the wording the review now shows, so a dismiss on
+                # this finding (apply_feedback matches by fingerprint) lands.
+                # Unique-safe: no row held this fingerprint (else it would
+                # have matched exactly), and found_issues has one per print.
+                r.fingerprint = f.fingerprint
+                r.rule_id = f.rule_id
             r.line = f.line
             r.anchor = anchor_at(raw_diff, f.file_path, f.line) or r.anchor
             r.severity = f.severity

@@ -639,3 +639,69 @@ def test_a_reworded_refind_is_not_called_fixed_on_the_next_head():
         new_file_hashes=file_section_hashes(_DIFF_V2),
         reviewed_files={"app/orders.py"})
     assert plan.fixed == [] and [r[0] for r in plan.refound] == ["div"]
+
+
+# ─── what an anchor may be, and what a re-wording must share ────────────
+
+
+def test_a_trivial_or_repeated_or_context_line_is_no_anchor():
+    from src.review.issues import anchor_at
+    diff = ("diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,5 @@\n"
+            " def keep_this_context_line():\n"
+            "+    }\n"
+            "+    total = compute_the_total(items)\n"
+            "+    total = compute_the_total(items)\n"
+            "+    unique_and_meaningful_line = 1\n")
+    assert anchor_at(diff, "x.py", 1) is None   # context: may leave the diff
+    assert anchor_at(diff, "x.py", 2) is None   # "}" says nothing
+    assert anchor_at(diff, "x.py", 3) is None   # repeated in the file's diff
+    assert anchor_at(diff, "x.py", 5) == "unique_and_meaningful_line = 1"
+
+
+def test_an_added_line_that_starts_with_plus_plus_keeps_the_numbering():
+    from src.review.issues import anchor_at
+    diff = ("diff --git a/post.md b/post.md\nnew file mode 100644\n--- /dev/null\n"
+            "+++ b/post.md\n@@ -0,0 +1,4 @@\n"
+            "++++\n+title = \"hello world post\"\n++++\n+the actual body sentence\n")
+    assert anchor_at(diff, "post.md", 2) == 'title = "hello world post"'
+    assert anchor_at(diff, "post.md", 4) == "the actual body sentence"
+
+
+def test_a_different_rule_next_to_the_anchor_is_a_new_issue():
+    from src.review.issues import ExistingIssue, FoundIssue, anchor_at, near_lines
+    e = ExistingIssue(id="a", fingerprint="fp-a", file_path="app/orders.py",
+                      agent="defect", status="open", resolution_source=None,
+                      rule_id="defect.zero", anchor=anchor_at(_DIFF_V1, "app/orders.py", 25))
+    f = FoundIssue(fingerprint="fp-b", file_path="app/orders.py", line=24,
+                   agent="defect", rule_id="defect.overflow", category="bug",
+                   severity="error", title="Overflow", body="", suggestion=None,
+                   near=near_lines(_DIFF_V1, "app/orders.py", 24))
+    plan = _same_head([e], [f])
+    assert plan.refound == [] and len(plan.create) == 1
+
+
+def test_fixed_line_agents_never_match_by_position():
+    from src.review.issues import ExistingIssue, FoundIssue, near_lines
+    e = ExistingIssue(id="c", fingerprint="fp-c", file_path="app/orders.py",
+                      agent="compliance", status="open", resolution_source=None,
+                      anchor="def refund(total_cents: int, refunded_cents: int) -> int:")
+    f = FoundIssue(fingerprint="fp-d", file_path="app/orders.py", line=19,
+                   agent="compliance", rule_id=None, category="other",
+                   severity="error", title="Another policy", body="", suggestion=None,
+                   near=near_lines(_DIFF_V1, "app/orders.py", 19))
+    plan = _same_head([e], [f])
+    assert plan.refound == [] and len(plan.create) == 1
+
+
+def test_a_reworded_refind_is_rekeyed_so_feedback_reaches_it(engine) -> None:
+    body = "+    totals_divided = sum(totals) / len(totals)\n"
+    record_review_run(_result("h1", _diff(body), [_f(1, "Division by zero")]),
+                      run_id="r1", workspace_id="ws", status="complete", engine=engine)
+    record_review_run(_result("h1", _diff(body), [_f(1, "Possible ZeroDivisionError")]),
+                      run_id="r2", workspace_id="ws", status="complete", engine=engine)
+    [issue] = _issues(engine)
+    assert issue.title == "Possible ZeroDivisionError" and issue.occurrences == 2
+    n = apply_feedback(workspace_id="ws", run_id="r2", state="dismissed",
+                       file_path="src/a.py", title="Possible ZeroDivisionError",
+                       rule_id="defect.ret", engine=engine)
+    assert n == 1 and _issues(engine)[0].status == "dismissed"
