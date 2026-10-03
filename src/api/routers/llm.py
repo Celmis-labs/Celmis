@@ -42,6 +42,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC
 from typing import Any, Literal
 
@@ -398,6 +401,31 @@ def _validated_base_url(raw: object) -> str:
                    "(e.g. http://127.0.0.1:11434/v1)",
         )
     return url
+
+
+_CONFIG_LOCKS: dict[str, threading.RLock] = {}
+_CONFIG_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def workspace_config_lock(workspace_id: str = "default") -> Iterator[None]:
+    """Serialise load → modify → save of one workspace's LLM config blob.
+
+    The blob is one row rewritten whole, so two writers that both load it,
+    change different keys and save lose one of the two changes (PUT /config
+    rebuilds the blob from what it loaded; PUT /litellm/prices writes
+    ``model_prices``). Every writer holds this lock from its load to its save.
+    Re-entrant, so a locked writer may call another locked helper.
+
+    Process-local: it covers the API's single uvicorn worker (Dockerfile,
+    docker-compose). Running several API workers would need a database lock
+    here instead.
+    """
+    key = workspace_slot(workspace_id or "default")
+    with _CONFIG_LOCKS_GUARD:
+        lock = _CONFIG_LOCKS.setdefault(key, threading.RLock())
+    with lock:
+        yield
 
 
 def _load_workspace_config(workspace_id: str = "default") -> dict[str, Any]:
@@ -1109,6 +1137,15 @@ def put_config(
     user: User = Depends(require_workspace_admin),
     workspace_id: str = Depends(current_workspace_id),
 ) -> LLMConfigOut:
+    # Held for the whole handler: it loads the blob, rebuilds it and saves it
+    # whole, so a price saved in between would otherwise be overwritten.
+    with workspace_config_lock(workspace_id):
+        return _put_config(payload, request, user, workspace_id)
+
+
+def _put_config(
+    payload: LLMConfigIn, request: Request, user: User, workspace_id: str,
+) -> LLMConfigOut:
     from src.credentials import get_credential_store
 
     store = get_credential_store()
@@ -1210,6 +1247,9 @@ def put_config(
         "docs_language": resolve_docs_language(
             payload.docs_language or prev.get("docs_language")),
         "docs_engine": payload.docs_engine or prev.get("docs_engine") or "api",
+        # Owned by PUT /api/llm/litellm/prices, never by this form — carried
+        # over untouched, or saving the form would wipe every manual price.
+        "model_prices": dict(prev.get("model_prices") or {}),
     }
     # Merge per-surface profile updates.
     if payload.profiles:
@@ -2101,6 +2141,231 @@ def _litellm_models(workspace_id: str, *, show_host: bool = False) -> ProviderMo
     )
 
 
+# ─── Manual prices for workspace-proxy aliases ───────────────────────
+#
+# An alias on the workspace's own proxy is priced, in this order: a price a
+# workspace admin sets here → the price the proxy declares in /model/info →
+# LiteLLM's table price of the model behind the alias → unknown. The resolver
+# is src/llm/proxy_pricing.py and every cost path uses it; this is only where
+# the first step is stored (the workspace LLM config blob, key
+# "model_prices", USD per 1M tokens — not secret) and where the effective
+# result is shown.
+
+_PRICE_SOURCE_LABEL = {"manual_price": "manual", "proxy_price": "proxy",
+                       "litellm_estimate": "litellm"}
+
+
+class ModelPriceIn(BaseModel):
+    """One alias's manual price, USD per 1M tokens."""
+
+    model_config = {"extra": "forbid"}
+
+    input_per_mtok: float = Field(..., strict=True, ge=0, le=1000, allow_inf_nan=False)
+    output_per_mtok: float = Field(..., strict=True, ge=0, le=1000, allow_inf_nan=False)
+
+
+class ModelPricesIn(BaseModel):
+    """{alias: price | null} — null removes the manual price for that alias."""
+
+    model_config = {"extra": "forbid"}
+
+    prices: dict[str, ModelPriceIn | None]
+
+
+class ModelPriceManualOut(BaseModel):
+    input_per_mtok: float
+    output_per_mtok: float
+    updated_at: str | None = None
+
+
+class ModelPriceRowOut(BaseModel):
+    alias: str
+    mode: str | None = None
+    underlying: str | None = None
+    price_source: Literal["manual", "proxy", "litellm", "unknown"] = "unknown"
+    input_per_mtok: float | None = None
+    output_per_mtok: float | None = None
+    manual: ModelPriceManualOut | None = None
+    #: A manual price for an alias the proxy no longer lists.
+    stale: bool = False
+
+
+class ModelPricesOut(BaseModel):
+    connected: bool = False
+    can_edit: bool = False
+    prices: list[ModelPriceRowOut] = Field(default_factory=list)
+    detail: str = ""
+
+
+def _per_mtok(per_token: float) -> float:
+    from src.llm.proxy_pricing import PER_MTOK
+
+    # Rounded so 0.15 / 1e6 * 1e6 reads back as 0.15, not 0.15000000000000002.
+    return round(per_token * PER_MTOK, 6)
+
+
+def _model_prices(
+    workspace_id: str, *, show_host: bool, refresh: bool = False,
+) -> ModelPricesOut:
+    from src.llm import litellm_proxy
+    from src.llm.proxy_pricing import load_manual_prices, manual_price, resolve_alias_price
+
+    ep = litellm_proxy.resolve_endpoint(workspace_id)
+    if ep is None:
+        return ModelPricesOut(connected=False, detail="no LiteLLM proxy configured")
+    manual = load_manual_prices(workspace_id)
+    detail = ""
+    ids: list[str] | None
+    try:
+        _target, ids = litellm_proxy.list_models(ep.base_url, ep.api_key)
+    except litellm_proxy.LiteLLMProxyError as exc:
+        ids = None
+        detail = str(exc) if show_host else (
+            "the LiteLLM proxy is unreachable or its address is refused — "
+            "a workspace admin can see why in the LLM settings")
+    if ids is not None and refresh:
+        # The proxy operator may have just added an alias or fixed its price;
+        # read /model/info again instead of the copy cached for billing.
+        litellm_proxy.forget_model_info(ep)
+    info = litellm_proxy.cached_model_info(ep) if ids is not None else {}
+
+    def _row(alias: str, *, stale: bool) -> ModelPriceRowOut:
+        entry = info.get(alias) or {}
+        stored = manual.get(alias)
+        own = manual_price(stored)
+        eff = own if stale else resolve_alias_price(
+            alias, workspace_id=workspace_id, manual=manual, info=info)
+        return ModelPriceRowOut(
+            alias=alias, mode=entry.get("mode"), underlying=entry.get("underlying"),
+            price_source=_PRICE_SOURCE_LABEL.get(eff.source, "unknown") if eff else "unknown",
+            input_per_mtok=_per_mtok(eff.input_per_token) if eff else None,
+            output_per_mtok=_per_mtok(eff.output_per_token) if eff else None,
+            manual=ModelPriceManualOut(
+                input_per_mtok=_per_mtok(own.input_per_token),
+                output_per_mtok=_per_mtok(own.output_per_token),
+                updated_at=str(stored.get("updated_at") or "") or None,
+            ) if own is not None and stored is not None else None,
+            stale=stale,
+        )
+
+    if ids is None:
+        # The proxy did not answer: show what is stored, without guessing
+        # which of it is stale.
+        rows = [_row(a, stale=False) for a in sorted(manual)]
+    else:
+        current = sorted(set(ids))
+        rows = [_row(a, stale=False) for a in current]
+        rows += [_row(a, stale=True) for a in sorted(set(manual) - set(current))]
+    return ModelPricesOut(connected=True, prices=rows, detail=detail)
+
+
+@router.get("/litellm/prices", response_model=ModelPricesOut)
+def get_litellm_prices(
+    refresh: bool = False,
+    user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> ModelPricesOut:
+    """Every alias on this workspace's proxy with its effective price.
+
+    Any member may read it. No URL, host or key in the answer; a proxy error
+    is shown verbatim only to a workspace admin (the rule GET /config uses).
+    Proxy-declared prices come from ``/model/info``, cached for up to an hour
+    for billing; ``?refresh=true`` re-reads it now (and billing in this
+    process then uses the fresh copy too).
+    """
+    admin = _can_see_proxy_host(user, workspace_id)
+    out = _model_prices(workspace_id, show_host=admin, refresh=refresh)
+    out.can_edit = admin and out.connected
+    return out
+
+
+@router.put("/litellm/prices", response_model=ModelPricesOut)
+def put_litellm_prices(
+    payload: ModelPricesIn,
+    request: Request,
+    user: User = Depends(require_workspace_admin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> ModelPricesOut:
+    """Set or remove manual prices for this workspace's proxy aliases.
+
+    Every check runs before anything is written: at most 200 aliases, each
+    price finite and within [0, 1000] USD per 1M tokens (the schema), and a
+    price may only be SET for an alias the proxy currently lists (null —
+    removal — is always allowed, so a stale entry can be cleared). A price
+    applies to calls made after it is saved; ledger rows already written are
+    not rewritten.
+    """
+    from datetime import datetime
+
+    from src.llm import litellm_proxy
+    from src.llm.proxy_pricing import CONFIG_KEY, MAX_ALIASES
+
+    if len(payload.prices) > MAX_ALIASES:
+        raise HTTPException(status_code=422, detail=(
+            f"at most {MAX_ALIASES} aliases per request"))
+    for alias in payload.prices:
+        if not alias or len(alias) > 256 or alias != alias.strip():
+            raise HTTPException(status_code=422, detail=(
+                f"invalid alias '{alias[:120]}'"))
+    ep = litellm_proxy.resolve_endpoint(workspace_id)
+    if ep is None:
+        raise HTTPException(status_code=409, detail=(
+            "no LiteLLM proxy configured for this workspace — save its URL "
+            "and key in Settings → LLM before setting model prices"))
+    to_set = [a for a, v in payload.prices.items() if v is not None]
+    if to_set:
+        try:
+            _target, ids = litellm_proxy.list_models(ep.base_url, ep.api_key)
+        except litellm_proxy.LiteLLMProxyError as exc:
+            raise HTTPException(status_code=422, detail=(
+                "cannot verify the aliases against the LiteLLM proxy: "
+                f"{exc}")) from exc
+        missing = sorted(set(to_set) - set(ids))
+        if missing:
+            raise HTTPException(status_code=422, detail=(
+                "not offered by the LiteLLM proxy: "
+                + ", ".join(m[:120] for m in missing[:10])))
+
+    now = datetime.now(UTC).isoformat()
+    changes: list[dict[str, Any]] = []
+    with workspace_config_lock(workspace_id):
+        cfg = _load_workspace_config(workspace_id)
+        before = {k: v for k, v in (cfg.get(CONFIG_KEY) or {}).items()
+                  if isinstance(v, dict)}
+        prices = dict(before)
+        for alias, value in payload.prices.items():
+            old = before.get(alias)
+            old_view = ({"input_per_mtok": old.get("input_per_mtok"),
+                         "output_per_mtok": old.get("output_per_mtok")} if old else None)
+            if value is None:
+                if alias in prices:
+                    prices.pop(alias)
+                    changes.append({"alias": alias, "old": old_view, "new": None})
+                continue
+            new_view = {"input_per_mtok": float(value.input_per_mtok),
+                        "output_per_mtok": float(value.output_per_mtok)}
+            if old_view == new_view:
+                continue
+            prices[alias] = {**new_view, "updated_by": user.email or user.id,
+                             "updated_at": now}
+            changes.append({"alias": alias, "old": old_view, "new": new_view})
+        if changes:
+            cfg[CONFIG_KEY] = prices
+            _save_workspace_config(cfg, updated_by=user.email, workspace_id=workspace_id)
+    if changes:
+        logger.info("litellm_model_prices_saved workspace=%s user=%s changes=%d",
+                    workspace_id, user.email, len(changes))
+        record_action(
+            action="llm_model_price.updated", actor=user.email, actor_id=user.id,
+            workspace_id=workspace_id, target=_LITELLM_PROVIDER,
+            ip=client_ip(request),
+            detail={"unit": "usd_per_1m_tokens", "changes": changes},
+        )
+    out = _model_prices(workspace_id, show_host=True)
+    out.can_edit = True
+    return out
+
+
 class ReindexOut(BaseModel):
     enqueued: int
     repos: list[str]
@@ -2230,9 +2495,10 @@ def reindex_embeddings(
             enq += 1
 
     sig = embeddings_signature()
-    cfg = _load_workspace_config()
-    cfg["embeddings_indexed_signature"] = sig
-    _save_workspace_config(cfg, updated_by=user.email)
+    with workspace_config_lock("default"):
+        cfg = _load_workspace_config()
+        cfg["embeddings_indexed_signature"] = sig
+        _save_workspace_config(cfg, updated_by=user.email)
     detail = f"queued {enq} repo re-embed job(s) with the current embeddings profile"
     if recreated:
         detail += " (vector collection recreated for the new embedding width)"
@@ -2301,11 +2567,12 @@ def _record_verified(*, user_email: str, provider: str, workspace_id: str = "def
     """
     from datetime import datetime
 
-    cfg = _load_workspace_config(workspace_id)
-    cfg["connection_last_verified"] = datetime.now(UTC).isoformat()
-    if set_default_provider and not cfg.get("provider"):
-        cfg["provider"] = provider  # first-time convenience
-    _save_workspace_config(cfg, updated_by=user_email, workspace_id=workspace_id)
+    with workspace_config_lock(workspace_id):
+        cfg = _load_workspace_config(workspace_id)
+        cfg["connection_last_verified"] = datetime.now(UTC).isoformat()
+        if set_default_provider and not cfg.get("provider"):
+            cfg["provider"] = provider  # first-time convenience
+        _save_workspace_config(cfg, updated_by=user_email, workspace_id=workspace_id)
 
 
 __all__ = ["router"]

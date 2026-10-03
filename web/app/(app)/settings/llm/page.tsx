@@ -35,6 +35,7 @@ import {
   agentMaxOutError, agentMaxOutLimit, storedReasoning, useAgentCapabilities,
   type AgentDraft,
 } from "@/components/agent-llm-controls";
+import { LiteLLMModelPrices } from "@/components/litellm-model-prices";
 import { LocalSetupGuidePanel } from "@/components/local-setup-guide";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
@@ -436,6 +437,7 @@ function LiteLLMProxyRow({ config, isAdmin, onSaved }: { config: LLMConfig; isAd
       // A new URL or key is a different proxy: its model list replaces the
       // cached one even though "connected" may have stayed true.
       void qc.invalidateQueries({ queryKey: ["provider-models", LITELLM] });
+      void qc.invalidateQueries({ queryKey: ["litellm-prices"] });
       onSaved();
     },
     onError: (e) => setError((e as Error).message),
@@ -509,6 +511,7 @@ function LiteLLMProxyRow({ config, isAdmin, onSaved }: { config: LLMConfig; isAd
       <p className="text-[11px] text-[var(--color-muted-foreground)]">
         {isAdmin ? t("llm.litellm.hint") : t("llm.litellm.adminOnly")}
       </p>
+      {st?.connected && <LiteLLMModelPrices fingerprint={st.fingerprint ?? ""} />}
       {error && <TestResultPanel outcome={{ error }} />}
     </div>
   );

@@ -484,11 +484,19 @@ def delete_endpoint(workspace_id: str) -> bool:
 
 
 def fetch_model_info(ep: Endpoint) -> dict[str, dict]:
-    """``GET /model/info`` → {alias: {"underlying": str|None, "mode": str|None}}.
+    """``GET /model/info`` → {alias: {"underlying", "mode",
+    "input_cost_per_token", "output_cost_per_token"}} (each value or None).
+
+    The two prices are what the proxy operator declares for the alias in
+    ``model_info`` — kept only when they are real, finite, non-negative
+    numbers (an explicit 0 is a price; missing/None/garbage is None). Their
+    use is src/llm/proxy_pricing.py's.
 
     Best effort: a virtual key may be refused this route, and then the answer
     is ``{}`` — callers degrade to "unknown", never fail.
     """
+    from src.llm.proxy_pricing import clean_price
+
     try:
         target = validate_target(ep.base_url)
         status, body = request_json(target, "GET", "/model/info", ep.api_key)
@@ -503,9 +511,13 @@ def fetch_model_info(ep: Endpoint) -> dict[str, dict]:
             continue
         params = item.get("litellm_params") or {}
         info = item.get("model_info") or {}
+        if not isinstance(info, dict):
+            info = {}
         out[str(item["model_name"])] = {
             "underlying": (params.get("model") if isinstance(params, dict) else None) or None,
-            "mode": (info.get("mode") if isinstance(info, dict) else None) or None,
+            "mode": info.get("mode") or None,
+            "input_cost_per_token": clean_price(info.get("input_cost_per_token")),
+            "output_cost_per_token": clean_price(info.get("output_cost_per_token")),
         }
     return out
 
@@ -539,6 +551,12 @@ def underlying_model(ep: Endpoint | None, alias: str) -> str | None:
     if ep is None or not alias:
         return None
     return (cached_model_info(ep).get(alias) or {}).get("underlying") or None
+
+
+def forget_model_info(ep: Endpoint) -> None:
+    """Drop the cached ``/model/info`` of one endpoint; the next read refetches."""
+    with _CACHE_LOCK:
+        _MODEL_INFO_CACHE.pop((ep.base_url, ep.fingerprint), None)
 
 
 def reset_cache() -> None:
@@ -607,6 +625,7 @@ __all__ = [
     "delete_endpoint",
     "fetch_model_info",
     "cached_model_info",
+    "forget_model_info",
     "underlying_model",
     "reset_cache",
     "is_usable_key",

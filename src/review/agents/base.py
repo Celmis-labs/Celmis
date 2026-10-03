@@ -344,7 +344,7 @@ class AgentRunResult:
     skipped_stages: dict[str, str] = field(default_factory=dict)
     # Stage 11 — cost accounting per call
     cost_usd: float | None = None
-    cost_source: str | None = None  # 'openrouter_actual' | 'litellm_estimate' | 'unknown'
+    cost_source: str | None = None  # 'openrouter_actual' | 'manual_price' | 'proxy_price' | 'litellm_estimate' | 'unknown'
     model_used: str | None = None
     #: The model's own output ceiling, when it was lower than the configured
     #: one and the call was cut down to it. None when nothing was clamped.
