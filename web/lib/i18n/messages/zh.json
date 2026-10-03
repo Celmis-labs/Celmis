@@ -1350,6 +1350,7 @@
   "onboarding.ws.nameLabel": "工作区名称",
   "onboarding.ws.namePlaceholder": "我的团队",
   "onboarding.ws.title": "创建你的工作区",
+  "onboarding.ws.askSuperadmin": "Only the superadmin creates shared workspaces. Sign out and back in to get your personal workspace back, or ask the superadmin to add you to one.",
   "projects.availableReposTitle": "可用于问答的仓库",
   "projects.chats.detail.backToProject": "返回项目",
   "projects.chats.detail.blockedReposPrefix": "部分功能位于仓库 ",

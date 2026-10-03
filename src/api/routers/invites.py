@@ -2,9 +2,10 @@
 
 Two ways to get someone into a workspace, both admin-only:
 
-  * **By email** — if the account already exists it is added straight away;
-    otherwise an email-bound invite is created that only that address can
-    redeem after signing up.
+  * **By email** — if the account already exists AND already shares a
+    workspace with the inviter, it is added straight away; otherwise an
+    email-bound invite is created that only that address can redeem (after
+    signing up, if need be). A stranger is never enrolled without accepting.
   * **By link** — an open, multi-use, expiring token anyone can redeem.
 
 Only the SHA-256 hash of a token is stored; the raw value is shown once at
@@ -163,9 +164,21 @@ async def create_invite(
     # around the rule, it is the same grant delivered later.
     refuse_unless_can_change(admin, await actor_role(session, admin, ws), None, payload.role)
 
-    # Existing account + email invite → just add them, no token round-trip.
+    # Existing account + email invite → just add them, no token round-trip —
+    # but only somebody the inviter already works with. Enrolling a stranger
+    # without their consent made them a member of the inviter's workspace, and
+    # membership is what the workspace reset-link route reads as authority:
+    # sign up (owning a personal workspace), "invite" any address, mint a
+    # reset link, own the account — and every workspace it administers.
+    # PUT /members draws the same line (`visible_user_ids`); everyone else
+    # gets the email-bound token below and has to accept it.
     if payload.email:
         existing = users.get_by_email(str(payload.email))
+        if existing is not None and not admin.is_admin:
+            from src.api.routers.users import visible_user_ids
+
+            if existing.id not in await visible_user_ids(session, admin):
+                existing = None
         if existing is not None:
             # Same rule as PUT /members: re-roling somebody who is already
             # an admin/editor/owner is not an invite's to do.
@@ -194,6 +207,7 @@ async def create_invite(
         max_uses=1 if payload.email else payload.max_uses,
         expires_at=_expiry_for(payload),
         created_by=admin.email,
+        created_by_id=admin.id,
     )
     session.add(row)
     await session.commit()
@@ -289,10 +303,21 @@ class AcceptIn(BaseModel):
 
 
 def _invite_authority(users: UserStore, row: WorkspaceInvite) -> User | None:
-    """The account whose right to grant this invite is exercising."""
-    if not row.created_by:
+    """The account whose right to grant this invite is exercising.
+
+    By id: an email is a mutable attribute (CELMIS_MASTER_EMAIL is meant to be
+    changed, and `_master_login` rewrites the master row to the new address),
+    so resolving by it killed every pending invite the issuer made — or, once
+    somebody registered the old address, resolved to the wrong person. Rows
+    written before `created_by_id` existed fall back to the email.
+    """
+    creator_id = getattr(row, "created_by_id", None)
+    if creator_id:
+        creator = users.get_by_id(creator_id)
+    elif row.created_by:
+        creator = users.get_by_email(row.created_by)
+    else:
         return None
-    creator = users.get_by_email(row.created_by)
     if creator is None or not creator.is_active:
         return None
     return creator

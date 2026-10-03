@@ -1350,6 +1350,7 @@
   "onboarding.ws.nameLabel": "Nome do espaço de trabalho",
   "onboarding.ws.namePlaceholder": "A minha equipa",
   "onboarding.ws.title": "Crie seu espaço de trabalho",
+  "onboarding.ws.askSuperadmin": "Only the superadmin creates shared workspaces. Sign out and back in to get your personal workspace back, or ask the superadmin to add you to one.",
   "projects.availableReposTitle": "Repositórios disponíveis para Q&A",
   "projects.chats.detail.backToProject": "Voltar ao projeto",
   "projects.chats.detail.blockedReposPrefix": "Parte da funcionalidade está localizada em repositórios ",

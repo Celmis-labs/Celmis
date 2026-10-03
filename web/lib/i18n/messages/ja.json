@@ -1350,6 +1350,7 @@
   "onboarding.ws.nameLabel": "ワークスペース名",
   "onboarding.ws.namePlaceholder": "マイチーム",
   "onboarding.ws.title": "自分のワークスペースを作成",
+  "onboarding.ws.askSuperadmin": "Only the superadmin creates shared workspaces. Sign out and back in to get your personal workspace back, or ask the superadmin to add you to one.",
   "projects.availableReposTitle": "Q&A に使えるリポジトリ",
   "projects.chats.detail.backToProject": "プロジェクトに戻る",
   "projects.chats.detail.blockedReposPrefix": "機能の一部は次のリポジトリにあります: ",

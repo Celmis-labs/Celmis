@@ -130,6 +130,32 @@ derives it from there.
   admin, editor and member of one workspace against ~55 routes of another,
   via `X-Workspace`, the cookie and direct ids/slugs, with the other
   workspace's state read back afterwards.
+- **No account takeover through membership.** Inviting an existing account
+  by email enrolled it on the spot, without consent, and the workspace
+  reset-link route then treated that membership as authority to mint a
+  password-reset link. Since every account owns a personal workspace, any
+  signup could take over any non-global-admin account, including the owner
+  or admin of another workspace. Now a direct add happens only for somebody the
+  inviter already shares a workspace with (everyone else gets an invitation
+  to accept), and a workspace reset link requires the right to change the
+  target in *every* workspace they belong to. In multi_tenant mode that in
+  practice leaves the superadmin, or the account itself.
+- Neither reset-link route (`/api/users/{id}/reset-link`,
+  `/api/workspaces/{id}/members/{user}/reset-link`) mints a link for the
+  master identity any more, including a password account the master login
+  adopted by address. Previously a global admin could reset it and log in
+  as the superadmin.
+- `is_superadmin` no longer matches a Google/OIDC-bound account by the
+  master address. It now follows the same rule as the master login's
+  adoption, so tokens such an account already holds do not become superadmin
+  tokens.
+- An invite's granting authority is resolved by the issuer's user id (new
+  column `workspace_invites.created_by_id`, migration `e5a7c2f19d63`). Older
+  rows fall back to the email. Changing `CELMIS_MASTER_EMAIL` no longer voids
+  the superadmin's pending invites.
+- Creating a workspace writes its owner row through the membership writer,
+  so the grant leaves a `workspace.member_role_changed` audit row like every
+  other grant.
 
 ## [0.2.0] — 2026-10-03
 

@@ -20,6 +20,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useSession } from "next-auth/react";
 import {
   AlertTriangleIcon, ArrowRightIcon, BotIcon, BuildingIcon,
   CheckCircle2Icon, CircleIcon, CompassIcon, DatabaseIcon, FolderGit2Icon,
@@ -344,6 +345,11 @@ function WorkspaceStep({
   const t = useT();
   const qc = useQueryClient();
   const [name, setName] = useState("");
+  // POST /api/workspaces is the superadmin's alone; anyone else would get a
+  // bare 403 from this button. Everybody else's own workspace is provisioned
+  // at sign-in, so they are told how to get it back instead.
+  const { data: session } = useSession();
+  const isSuperadmin = Boolean(session?.isSuperadmin);
 
   const create = useMutation({
     mutationFn: () => workspacesApi.create(token!, name.trim(), slugify(name), ""),
@@ -365,7 +371,10 @@ function WorkspaceStep({
           {activeSlug === "default" && <> · <span className="text-amber-600 dark:text-amber-400">{t("onboarding.ws.defaultWarn")}</span></>}
         </div>
       )}
-      {!done && (
+      {!done && !isSuperadmin && (
+        <p className="text-xs text-[var(--color-muted-foreground)]">{t("onboarding.ws.askSuperadmin")}</p>
+      )}
+      {!done && isSuperadmin && (
         <div className="flex items-end gap-2">
           <div className="flex-1">
             <Label>{t("onboarding.ws.nameLabel")}</Label>

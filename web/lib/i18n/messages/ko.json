@@ -1350,6 +1350,7 @@
   "onboarding.ws.nameLabel": "워크스페이스 이름",
   "onboarding.ws.namePlaceholder": "내 팀",
   "onboarding.ws.title": "워크스페이스 만들기",
+  "onboarding.ws.askSuperadmin": "Only the superadmin creates shared workspaces. Sign out and back in to get your personal workspace back, or ask the superadmin to add you to one.",
   "projects.availableReposTitle": "Q&A에 쓸 수 있는 저장소",
   "projects.chats.detail.backToProject": "프로젝트로 돌아가기",
   "projects.chats.detail.blockedReposPrefix": "기능 일부는 다음 저장소에 있습니다: ",

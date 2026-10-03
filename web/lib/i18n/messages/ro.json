@@ -1350,6 +1350,7 @@
   "onboarding.ws.nameLabel": "Numele workspace-ului",
   "onboarding.ws.namePlaceholder": "Echipa mea",
   "onboarding.ws.title": "Creează-ți workspace-ul",
+  "onboarding.ws.askSuperadmin": "Only the superadmin creates shared workspaces. Sign out and back in to get your personal workspace back, or ask the superadmin to add you to one.",
   "projects.availableReposTitle": "Repository-uri disponibile pentru Q&A",
   "projects.chats.detail.backToProject": "Înapoi la proiect",
   "projects.chats.detail.blockedReposPrefix": "O parte din funcționalitate se află în repository-urile ",

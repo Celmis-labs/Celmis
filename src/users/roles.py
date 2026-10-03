@@ -93,26 +93,46 @@ def is_master_email(email: str | None) -> bool:
     return bool(master and (email or "").strip().lower() == master)
 
 
+def is_master_identity(user: Any) -> bool:
+    """The account IS the master identity: the fixed id, or the master address.
+
+    No flag checks — this is the "never mint a password-reset link for it"
+    test, which must hold however the account is currently flagged.
+    """
+    if user is None:
+        return False
+    return getattr(user, "id", None) == MASTER_ADMIN_ID or is_master_email(
+        getattr(user, "email", None))
+
+
 def is_superadmin(user: Any) -> bool:
     """The env master account — and nobody else.
 
-    Three conditions, each closing a different door:
+    Conditions, each closing a different door:
 
       * the identity is the master one: the fixed id ``master-admin``, or the
         address CELMIS_MASTER_EMAIL names (a password account the master login
         adopted keeps its own id);
+      * matched by ADDRESS, the account carries no Google/OIDC binding. That
+        is the rule `_master_login` adopts by — it refuses such an account —
+        and the two must agree: otherwise an SSO-bound global admin whose
+        address the operator later named as master became superadmin through
+        the JWT or personal token it already held, without the key;
       * ``is_admin`` is set. Somebody who signs up with the master address
         before the operator's first master login is NOT the master: only
-        `_master_login`, which checked the key, sets the flag on that account,
-        and the SSO exchange refuses the address outright;
+        `_master_login`, which checked the key, sets the flag on that account
+        (and signup refuses the address);
       * the account is active.
     """
     if user is None:
         return False
     if not getattr(user, "is_admin", False) or not getattr(user, "is_active", True):
         return False
-    return getattr(user, "id", None) == MASTER_ADMIN_ID or is_master_email(
-        getattr(user, "email", None))
+    if getattr(user, "id", None) == MASTER_ADMIN_ID:
+        return True
+    if getattr(user, "has_google", False) or getattr(user, "has_oidc", False):
+        return False
+    return is_master_email(getattr(user, "email", None))
 
 
 def grantable_roles(actor: Any, actor_role: str | None) -> frozenset[str]:
@@ -136,7 +156,8 @@ def can_change(
     them. `actor_role` is the actor's OWN role in that workspace (None when
     they are not a member). Every path that writes a membership asks this:
     PUT/DELETE members, invite create and accept, the superadmin Users page,
-    workspace creation.
+    workspace creation (the creator's owner row), and — as a bound, not a
+    write — the workspace reset link.
     """
     if new_role is not None and new_role not in VALID_WORKSPACE_ROLES:
         return False

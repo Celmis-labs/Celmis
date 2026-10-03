@@ -1,8 +1,9 @@
 """Writing a workspace membership — the one path every route goes through.
 
-Members can be added, re-roled or removed from five places: PUT/DELETE
+Members can be added, re-roled or removed from six places: PUT/DELETE
 /api/workspaces/{id}/members, an invite created for an existing account, an
-invite accepted, and the superadmin's Users page. Each used to write the row
+invite accepted, the superadmin's Users page, and the owner row of a newly
+created workspace. Each used to write the row
 itself, and each had its own idea of who was allowed to — so "an admin can
 demote the owner" was true on one route and would have stayed true on another
 after a fix to the first.

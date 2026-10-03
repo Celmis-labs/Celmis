@@ -151,3 +151,31 @@ def test_nobody_can_sign_up_as_the_master_address(tmp_path):
         signup(req, SimpleNamespace(headers={}, client=None), users)
     assert exc.value.status_code == 403
     assert users.get_by_email(MASTER) is None
+
+
+# ─── an SSO-bound account is never the master by address ─────────────
+
+
+@pytest.mark.parametrize("binding", ["google_sub", "oidc_sub"])
+def test_an_sso_bound_admin_holding_the_master_address_is_not_superadmin(binding):
+    """`_master_login` refuses to adopt such an account; `is_superadmin` must
+    agree, or the tokens it already holds become superadmin tokens the moment
+    the operator names its address as master — without the key."""
+    from src.users import User
+
+    u = User(id="u-sso", email=MASTER, name="sso", is_admin=True, **{binding: "sub-1"})
+    assert not is_superadmin(u)
+    # The fixed id stays the master whatever it is bound to.
+    assert is_superadmin(User(id="master-admin", email=MASTER, name="m", is_admin=True))
+    # And a password account adopted by address still is.
+    assert is_superadmin(User(id="u-adopted", email=MASTER, name="a", is_admin=True))
+
+
+def test_the_master_identity_is_known_without_flags():
+    """The reset-link guard asks this: identity, not current rights."""
+    from src.users.roles import is_master_identity
+
+    assert is_master_identity(_u("master-admin", "elsewhere@acme-corp.io"))
+    assert is_master_identity(_u("u-x", MASTER.upper(), is_admin=False, is_active=False))
+    assert not is_master_identity(_u("u-x", "ops@acme-corp.io", is_admin=True))
+    assert not is_master_identity(None)

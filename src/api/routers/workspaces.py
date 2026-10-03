@@ -43,6 +43,7 @@ from src.users.roles import (
     VALID_WORKSPACE_ROLES,
     WORKSPACE_ADMIN_ROLES,
     WORKSPACE_ROLE_RANK,
+    is_master_identity,
     is_superadmin,
 )
 
@@ -179,6 +180,7 @@ async def list_my_workspaces(
 @router.post("", response_model=WorkspaceOut, status_code=201)
 async def create_workspace(
     payload: WorkspaceIn,
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(require_superadmin),
 ) -> WorkspaceOut:
@@ -194,13 +196,18 @@ async def create_workspace(
         description=payload.description, created_by=user.email,
     )
     session.add(ws)
-    # Creator becomes owner.
-    session.add(WorkspaceMember(workspace_id=ws.id, user_id=user.id, role="owner"))
     try:
-        await session.commit()
+        await session.flush()
     except Exception as exc:  # noqa: BLE001
         await session.rollback()
         raise HTTPException(status_code=400, detail=f"create failed: {exc}") from exc
+    # Creator becomes owner — through the one membership writer, so the grant
+    # is checked by the same rule as every other and leaves the same audit
+    # row (actor, user, workspace, None → owner). It commits the workspace too.
+    await change_membership(
+        session, actor=user, ws_id=ws.id, user_id=user.id, new_role="owner",
+        via="workspace_create", ip=client_ip(request),
+    )
     logger.info("workspace_created id=%s slug=%s by=%s", ws.id, ws.slug, user.email)
     return WorkspaceOut(
         id=ws.id, name=ws.name, slug=ws.slug,
@@ -252,6 +259,18 @@ async def list_members(
     return out
 
 
+async def _refuse_unless_can_change_everywhere(
+    session: AsyncSession, actor: User, user_id: str,
+) -> None:
+    """403 unless `actor` could change `user_id` in every workspace they are in."""
+    rows = (await session.scalars(
+        select(WorkspaceMember).where(WorkspaceMember.user_id == user_id)
+    )).all()
+    for row in rows:
+        refuse_unless_can_change(
+            actor, await actor_role(session, actor, row.workspace_id), row.role, row.role)
+
+
 @router.post("/{ws_id}/members/{user_id}/reset-link")
 async def member_reset_link(
     ws_id: str,
@@ -271,13 +290,24 @@ async def member_reset_link(
     # mint one for a member or viewer, never for another admin, an editor or
     # the owner — otherwise "cannot demote the owner" was one click from
     # "can become the owner".
-    if user_id != user.id:
-        refuse_unless_can_change(
-            user, await actor_role(session, user, ws_id), member.role, member.role)
+    #
+    # And it is bounded by EVERY workspace the account belongs to, not just
+    # this one: the link hands over the whole account, so a "member here" who
+    # is admin or owner of another workspace is a takeover of that workspace.
+    # Membership here is cheap to arrange (an invite, an enrolment), so this
+    # workspace's row alone cannot be the authority. In multi_tenant mode
+    # every account owns a personal workspace, so in practice only the
+    # superadmin (or the account itself) passes — which is the point.
     from src.users.store import get_user_store
     target = get_user_store().get_by_id(user_id)
     if target is None or not target.is_active:
         raise HTTPException(status_code=404, detail="User not found")
+    if is_master_identity(target):
+        raise HTTPException(
+            status_code=403,
+            detail="The master account authenticates only via CELMIS_MASTER_KEY")
+    if user_id != user.id:
+        await _refuse_unless_can_change_everywhere(session, user, user_id)
     if target.is_admin and not user.is_admin:
         raise HTTPException(
             status_code=403, detail="Cannot reset a global admin's password")

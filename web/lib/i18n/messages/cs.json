@@ -1350,6 +1350,7 @@
   "onboarding.ws.nameLabel": "Název workspacu",
   "onboarding.ws.namePlaceholder": "Můj tým",
   "onboarding.ws.title": "Vytvořte si workspace",
+  "onboarding.ws.askSuperadmin": "Only the superadmin creates shared workspaces. Sign out and back in to get your personal workspace back, or ask the superadmin to add you to one.",
   "projects.availableReposTitle": "Repa dostupná pro Q&A",
   "projects.chats.detail.backToProject": "Zpět na projekt",
   "projects.chats.detail.blockedReposPrefix": "Část funkcionality je v repozitářích ",

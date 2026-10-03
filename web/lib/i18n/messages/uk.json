@@ -1350,6 +1350,7 @@
   "onboarding.ws.nameLabel": "Назва воркспейсу",
   "onboarding.ws.namePlaceholder": "Моя команда",
   "onboarding.ws.title": "Створи свій воркспейс",
+  "onboarding.ws.askSuperadmin": "Спільні робочі простори створює лише суперадмін. Вийдіть і увійдіть знову, щоб повернути свій особистий простір, або попросіть суперадміна додати вас до потрібного.",
   "projects.availableReposTitle": "Доступні репозиторії для Q&A",
   "projects.chats.detail.backToProject": "Назад до проєкту",
   "projects.chats.detail.blockedReposPrefix": "Частина функціоналу знаходиться у репозиторіях ",

@@ -250,7 +250,13 @@ Who may grant what:
   from, removing. A workspace admin cannot demote the owner or another admin.
 - **member, viewer** — the superadmin, or that workspace's owner/admin
   (directly or by invite; an invite carries only a role its creator could
-  grant, re-checked when it is accepted).
+  grant, re-checked when it is accepted). An existing account is added
+  directly only if you already share a workspace with it; anyone else
+  receives an invitation they have to accept.
+- **Password-reset links** a workspace admin mints are bounded by every
+  workspace the person belongs to, not just this one. In multi-tenant mode
+  everyone owns a personal workspace, so in practice only the superadmin can
+  mint one. No route mints one for the master account.
 - **Shared workspaces** are created by the superadmin. Everybody gets a
   personal workspace of their own at sign-up and is its owner.
 

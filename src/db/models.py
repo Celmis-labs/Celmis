@@ -1325,6 +1325,9 @@ class WorkspaceInvite(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=func.false())
     created_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The issuer's user id — what accept resolves the granting authority by.
+    # `created_by` (an email) stays for display and for rows that predate it.
+    created_by_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(),
     )
