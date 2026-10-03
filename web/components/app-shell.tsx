@@ -20,13 +20,14 @@ import { Label } from "@/components/ui/label";
 import { FloatingTooltip } from "@/components/ui/tooltip";
 import { LanguageSwitcher } from "@/components/language-switcher";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, WORKSPACES_CHANGED_EVENT } from "@/lib/api";
 import { forgetAgentSession } from "@/lib/agent-session";
 import { LEGACY_SIDEBAR_KEY, writeSidebarCookie } from "@/lib/sidebar";
 import { useT } from "@/lib/i18n";
 import { startMainTour, TOUR_DONE_KEY } from "@/lib/tour";
 import { cn } from "@/lib/utils";
 import { LicenseFooter } from "@/components/license-footer";
+import { AccessDecisionNotifier } from "@/components/access-request";
 
 // Flat top-level navigation — one row per section, no collapsible groups.
 // Every sub-route of a section lives in `pages` (shared with the SectionTabs
@@ -95,6 +96,11 @@ function WorkspaceSwitcher() {
   const t = useT();
   const [me, setMe] = useState<any>(null);
   const jwt = data?.celmisToken;
+  // Bumped to re-read the list: when the menu opens, and when something says
+  // the user's memberships changed (an approved access request — see
+  // WORKSPACES_CHANGED_EVENT). A workspace granted while the person was signed
+  // in then shows up on the next look, with no sign-out.
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     if (!jwt) return;
     fetch(`${API_BASE}/api/workspaces`, {
@@ -104,7 +110,12 @@ function WorkspaceSwitcher() {
       .then((r) => (r.ok ? r.json() : null))
       .then(setMe)
       .catch(() => setMe(null));
-  }, [jwt]);
+  }, [jwt, reloadKey]);
+  useEffect(() => {
+    const onChanged = () => setReloadKey((k) => k + 1);
+    window.addEventListener(WORKSPACES_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(WORKSPACES_CHANGED_EVENT, onChanged);
+  }, []);
   const active = me?.workspaces?.find((w: any) => w.id === me?.active_id);
   const list = me?.workspaces || [];
   const [open, setOpen] = useState(false);
@@ -217,7 +228,11 @@ function WorkspaceSwitcher() {
   return (
     <div className="relative" ref={boxRef}>
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          // Opening re-reads the list, so a workspace granted meanwhile is there.
+          if (!open) setReloadKey((k) => k + 1);
+          setOpen((v) => !v);
+        }}
         aria-haspopup="menu"
         aria-expanded={open}
         data-tour="workspace"
@@ -519,6 +534,8 @@ function isSectionActive(pathname: string, section: NavSection) {
  *  well would be two ways in to one thing, one of them a whole row. */
 const UNLISTED_PAGES: readonly TabDef[] = [
   { href: "/automation", labelKey: "nav.automation" },
+  // Reached from the dashboard banner and the decision toast, not the sidebar.
+  { href: "/access-request", labelKey: "nav.accessRequest" },
 ];
 
 /** Breadcrumb «Section > Page» derived from the section map — orients the
@@ -887,6 +904,9 @@ export function AppShell({
           it would be positioned against a 44px strip. A sibling of <main> is
           positioned against the viewport. */}
       <AgentWidget />
+      {/* Renders nothing: a toast when an access request was decided since
+          the last visit, and a nudge for the workspace switcher. */}
+      <AccessDecisionNotifier />
     </div>
   );
 }

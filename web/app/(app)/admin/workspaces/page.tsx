@@ -411,6 +411,9 @@ function InviteSection({ wsId, wsSlug, grantable }: {
         void copyText(url).then((ok) => {
           toast.success(t(ok ? "invite.linkCopied" : "invite.linkReady"));
         });
+        // SMTP configured: the API mailed the same link. Without it the link
+        // above is the only delivery — the inviter passes it on themselves.
+        if (r.emailed) toast.success(t("invite.emailSent", { email: r.email ?? "" }));
       }
       setEmail("");
     },

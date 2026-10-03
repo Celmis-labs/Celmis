@@ -66,7 +66,11 @@ function LoginInner({ passwordLogin, ssoName }: { passwordLogin: boolean; ssoNam
   const callback =
     rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/dashboard";
   const [pending, startTransition] = useTransition();
-  const [mode, setMode] = useState<"login" | "signup">("login");
+  // `mode=signup` opens the sign-up tab — the invite page's "Create account"
+  // button sends it, so a newcomer does not land on a sign-in form first.
+  const [mode, setMode] = useState<"login" | "signup">(
+    passwordLogin && params.get("mode") === "signup" ? "signup" : "login",
+  );
   // Live strength feedback mirrors the server-side policy exactly.
   const [signupPassword, setSignupPassword] = useState("");
   const [signupEmail, setSignupEmail] = useState("");

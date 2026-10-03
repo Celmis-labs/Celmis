@@ -36,6 +36,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -1333,6 +1334,52 @@ class WorkspaceInvite(Base):
     )
 
     __table_args__ = (Index("ix_invite_workspace", "workspace_id"),)
+
+
+class AccessRequest(Base):
+    """A signed-in person asking for access to team workspaces in general.
+
+    Not addressed to a workspace — the requester never learns which ones
+    exist. The superadmin decides: approve with one or more (workspace, role)
+    grants, applied atomically through `change_memberships`, or reject with a
+    reason. `user_id` is a string reference into the SQLite user store, like
+    every other user column here.
+
+    status: pending | approved | rejected | cancelled. At most one PENDING row
+    per user — the partial unique index enforces it against a double submit
+    racing the 409 check in the router.
+    """
+
+    __tablename__ = "access_requests"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    comment: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    decided_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: [{workspace_id, workspace_name, role}] — written on approval only, so a
+    #: pending or rejected request carries no workspace names at all.
+    grants: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        Index("ix_access_requests_user", "user_id", "created_at"),
+        Index("ix_access_requests_status", "status", "created_at"),
+        Index(
+            "uq_access_requests_one_pending", "user_id", unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+    )
 
 
 class AutomationRun(Base, TimestampMixin):

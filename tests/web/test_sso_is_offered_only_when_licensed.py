@@ -5,7 +5,8 @@ Two independent halves have to be present: the web side configured for OIDC
 endpoint the provider's callback posts to, mounted only under a licence that
 grants "sso" (src/ee/sso). Either alone is a button that dead-ends.
 
-The decision is made on the server (web/app/login/page.tsx), so it is read
+The decision is made on the server (web/app/login/page.tsx and the invite
+landing page, through web/lib/sso-offer.ts), so it is read
 from the source here — with comments stripped, because the page explains the
 rule at length in a comment and a test must not pass on the explanation.
 """
@@ -14,6 +15,8 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+
+import pytest
 
 WEB = Path(__file__).resolve().parents[2] / "web"
 
@@ -24,14 +27,25 @@ def _code(path: Path) -> str:
     return re.sub(r"^\s*//.*$", "", source, flags=re.M)
 
 
-def test_the_login_page_needs_both_the_config_and_the_capability() -> None:
-    page = _code(WEB / "app" / "login" / "page.tsx")
+@pytest.mark.parametrize("page_path", [
+    ("app", "login", "page.tsx"),
+    # The invite landing page offers the same sign-in buttons, by the same rule.
+    ("app", "invite", "[token]", "page.tsx"),
+])
+def test_the_page_needs_both_the_config_and_the_capability(page_path) -> None:
+    page = _code(WEB.joinpath(*page_path))
     assert re.search(r"oidcConfigured\(\) && \(await apiOffersSso\(\)\)", page)
-    assert "features?.sso?.available === true" in page
-    assert "/api/capabilities" in page
-    assert 'cache: "no-store"' in page
+    assert 'import { apiOffersSso } from "@/lib/sso-offer"' in page
+
+
+def test_the_capability_check_fails_closed() -> None:
+    """The check both pages share (web/lib/sso-offer.ts)."""
+    lib = _code(WEB / "lib" / "sso-offer.ts")
+    assert "features?.sso?.available === true" in lib
+    assert "/api/capabilities" in lib
+    assert 'cache: "no-store"' in lib
     # Any failure hides the button rather than throwing the login page away.
-    assert re.search(r"catch \{\s*return false;", page)
+    assert re.search(r"catch \{\s*return false;", lib)
 
 
 def test_the_form_no_longer_decides_sso_from_nextauth_alone() -> None:

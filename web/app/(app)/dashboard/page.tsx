@@ -15,6 +15,7 @@ import { PageShell, PageHeader } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import { CountUp } from "@/components/ui/count-up";
 import { QueryState } from "@/components/ui/query-state";
+import { AccessRequestBanner } from "@/components/access-request";
 
 /**
  * A metric card whose footer changes with the number above it.
@@ -124,6 +125,9 @@ export default function DashboardPage() {
         }
         tabs={<SectionTabs set="dashboard" />}
       />
+
+      {/* Only for an account whose one workspace is its personal one. */}
+      <AccessRequestBanner />
 
       {!dismissed && (connectedCount === 0 || repoCount === 0) && (
         <Card className="border-[var(--color-brand)]/40 bg-[var(--color-brand-muted)]">
