@@ -105,7 +105,25 @@ derives it from there.
   `GET /api/review-policies/{repo_slug}/branches` no longer runs `git` in an
   unregistered or traversal path, in any mode. The deprecation consumer scan
   only walks the deprecation's own workspace's repositories under
-  `multi_tenant`.
+  `multi_tenant`, and the branches route no longer accepts a user's
+  registration row from a workspace they have left.
+- **MCP project tools and `bootstrap_client`.** Under `multi_tenant`,
+  `search_symbols`, `find_consumers`, `migrate_consumers` and
+  `bootstrap_client` resolve a project's repositories only for a project in
+  the caller's workspace; another tenant's project reads like a missing one
+  instead of naming its repositories in `blocked_repos`. `bootstrap_client`
+  returns `top_owners` only for a target the caller may research (it read
+  any slug's ownership snapshot, so it handed out another tenant's top
+  committers).
+- **Raw group reads need unrestricted members.** `query_graph(group_name=…)`
+  and `cross_repo_edges` return ids and files from member repositories, which
+  cannot be filtered by path afterwards, so under `multi_tenant` they now
+  require every member to be readable without path restrictions, as
+  `query_graph(repo_slug=…)` already did.
+- **Registering a repository whose slug is not a safe path segment is refused
+  (422)** on `POST /api/repos` and the automation surface, before anything is
+  stored. A row stored earlier with such a slug no longer breaks the
+  repository listing, "index all" or the docs export.
 
 ## [0.2.0] — 2026-10-03
 

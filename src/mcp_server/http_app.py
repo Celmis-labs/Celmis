@@ -1011,14 +1011,31 @@ def _get_project_impl(project_id: str, workspace_id: str) -> dict[str, Any]:
 
 
 def _project_repo_slugs(project_id: str) -> list[str]:
+    """The repos of ``project_id`` — under multi_tenant only when the project
+    belongs to the caller's workspace.
+
+    A foreign project reads exactly like a missing one (no repos): naming its
+    repos in ``blocked_repos`` / ``access_notice`` would hand another tenant's
+    repository names to anyone holding the project's id, and "has no repos"
+    versus "blocked" would confirm the id exists.
+    """
     from sqlalchemy import select
     from sqlalchemy.orm import Session
 
-    from src.db.models import ProjectRepo
+    from src.db.models import Project, ProjectRepo
+    from src.mcp_server import tenancy
+
+    stmt = select(ProjectRepo).where(ProjectRepo.project_id == project_id)
+    if tenancy.enforced():
+        from src.mcp_server.identity import resolve_caller
+
+        caller = resolve_caller()
+        if not tenancy.caller_may_bind(caller):
+            return []
+        stmt = stmt.join(Project, Project.id == ProjectRepo.project_id).where(
+            Project.workspace_id == caller.workspace_id)
     with Session(_sync_engine()) as s:
-        rows = s.execute(
-            select(ProjectRepo).where(ProjectRepo.project_id == project_id)
-        ).scalars().all()
+        rows = s.execute(stmt).scalars().all()
         return [r.repo_slug for r in rows]
 
 
@@ -1517,10 +1534,17 @@ def _bootstrap_client_impl(
                     "line": c.get("start_line", 0),
                 })
 
-    # Ownership hint — who to ask if things go wrong.
-    from src.ownership.builder import load_snapshot
-    snap = load_snapshot(target_repo_slug) or {}
-    top_owners = (snap.get("stats") or {}).get("top_owners", [])[:3]
+    # Ownership hint — who to ask if things go wrong. Only for a target the
+    # caller may research: the snapshot is looked up by slug alone, so without
+    # this gate any slug (another tenant's included) yielded its top committers.
+    top_owners: list[Any] = []
+    _c, target_access = caller_access([target_repo_slug])
+    target_dec = target_access.get(target_repo_slug)
+    if (target_repo_slug not in api.get("blocked_repos", [])
+            and target_dec is not None and target_dec.researchable):
+        from src.ownership.builder import load_snapshot
+        snap = load_snapshot(target_repo_slug) or {}
+        top_owners = (snap.get("stats") or {}).get("top_owners", [])[:3]
 
     stub = _stub_for(language, endpoints, target_repo_slug)
 

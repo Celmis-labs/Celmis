@@ -641,16 +641,24 @@ async def list_branches(
     `repos_dir / repo_slug` for any string — another tenant's clone, or with
     `{repo_slug:path}`, any directory `../` could reach. An unregistered repo
     gets the same empty answer as an uncloned one.
+
+    Under multi_tenant the workspace row is the only authority: the
+    user-keyed fallback (`store.get(user.id, slug)`) ignores the workspace, so
+    someone removed from workspace B kept reading B's clone through the row
+    they registered there. single_tenant keeps the fallback.
     """
     from src.api.auto_review import get_auto_review_store
     from src.config import get_settings, is_valid_repo_slug
+    from src.deployment import is_multi_tenant
 
     empty = RepoBranchesOut(repo_slug=repo_slug, branches=[], default_branch=None)
     if not is_valid_repo_slug(repo_slug):
         return empty
     store = get_auto_review_store()
-    if (store.get_in_workspace(ws_id, repo_slug)
-            or store.get(user.id, repo_slug)) is None:
+    registered = store.get_in_workspace(ws_id, repo_slug)
+    if registered is None and not is_multi_tenant():
+        registered = store.get(user.id, repo_slug)
+    if registered is None:
         return empty
 
     settings = get_settings()

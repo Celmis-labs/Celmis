@@ -306,3 +306,202 @@ def test_http_errors_are_not_raised_for_an_unbound_caller(registry, multi_tenant
     except HTTPException:  # pragma: no cover
         pytest.fail("caller_access raised")
     assert not access[SLUG_A].researchable
+
+
+# ─── branches: the user-keyed fallback is not a membership ──────────
+
+
+async def test_branches_ignore_a_row_left_in_a_workspace_the_user_left(
+        registry, multi_tenant):
+    """user-b registered SLUG_B in WS_B, then was moved to WS_A (removing a
+    member deletes the membership, not their registration rows)."""
+    from src.api.routers.review_policies import list_branches
+    from src.config import get_settings
+
+    _git_clone_at(get_settings().repo_path(SLUG_B), "beta-secret-branch")
+    former = User(id=f"user-{WS_B}", email="b@x")
+
+    out = await list_branches(SLUG_B, user=former, ws_id=WS_A)
+    assert out.branches == [] and out.default_branch is None
+
+
+async def test_branches_single_tenant_keeps_the_user_fallback(registry,
+                                                              single_tenant):
+    from src.api.routers.review_policies import list_branches
+    from src.config import get_settings
+
+    _git_clone_at(get_settings().repo_path(SLUG_B), "beta-main")
+    out = await list_branches(SLUG_B, user=User(id=f"user-{WS_B}", email="b@x"),
+                              ws_id=WS_A)
+    assert "beta-main" in out.branches
+
+
+# ─── a slug that is not one path segment is never stored ────────────
+
+
+BAD_REPO_URLS = ["github:acme/foo..bar", "https://github.com/acme/foo%20bar",
+                 "gitlab:acme/a+b"]
+
+
+@pytest.mark.parametrize("url", BAD_REPO_URLS)
+def test_registering_an_unaddressable_slug_is_refused_before_storing(
+        registry, url):
+    from src.api.routers.repos import add_repo
+    from src.api.schemas import RepoAddRequest
+
+    before = {c.repo_slug for c in registry.list_for_workspace(WS_A)}
+    with pytest.raises(HTTPException) as exc:
+        add_repo(None, RepoAddRequest(url=url, index=False),
+                 user=User(id="user-a", email="a@x"), workspace_id=WS_A)
+    assert exc.value.status_code == 422
+    assert {c.repo_slug for c in registry.list_for_workspace(WS_A)} == before
+
+
+@pytest.mark.parametrize("url", BAD_REPO_URLS)
+def test_automation_refuses_an_unaddressable_slug_before_storing(registry, url):
+    from src.automation.actions import ActionError, Actor, register_repo
+
+    before = {c.repo_slug for c in registry.list_for_workspace(WS_A)}
+    with pytest.raises(ActionError):
+        register_repo(Actor("user-a", "a@x", WS_A), url, index=False)
+    assert {c.repo_slug for c in registry.list_for_workspace(WS_A)} == before
+
+
+@pytest.fixture
+def legacy_bad_row(registry):
+    """A row stored before slugs were validated."""
+    from src.api.auto_review import RepoConfig
+
+    registry.upsert(RepoConfig(
+        user_id="user-a", repo_slug="github_alpha-foo..bar", provider="github",
+        full_name="alpha/foo..bar", url="https://github.com/alpha/foo..bar",
+        workspace_id=WS_A,
+    ))
+    return "github_alpha-foo..bar"
+
+
+def test_one_bad_stored_slug_does_not_take_down_the_repo_list(legacy_bad_row):
+    from src.api.routers.repos import list_repos
+
+    out = list_repos(user=User(id="user-a", email="a@x"), workspace_id=WS_A)
+    by_slug = {r.slug: r for r in out}
+    assert SLUG_A in by_slug
+    assert by_slug[legacy_bad_row].indexed is False
+
+
+def test_one_bad_stored_slug_does_not_break_automation_listing(legacy_bad_row):
+    from src.automation.actions import Actor, list_repos
+
+    out = list_repos(Actor("user-a", "a@x", WS_A))
+    assert {r["repo"] for r in out["repos"]} >= {SLUG_A, legacy_bad_row}
+
+
+# ─── MCP project tools: a foreign project reads like a missing one ──
+
+
+@pytest.fixture
+def projects(tmp_path, monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from src.db.models import Base, Project, ProjectRepo
+    from src.mcp_server import http_app
+
+    engine = create_engine(f"sqlite:///{tmp_path/'p.db'}")
+    Base.metadata.create_all(engine, tables=[Project.__table__,
+                                             ProjectRepo.__table__])
+    ids = {}
+    with Session(engine) as s:
+        for ws, slug in ((WS_A, SLUG_A), (WS_B, SLUG_B)):
+            p = Project(workspace_id=ws, name=ws, description="")
+            s.add(p)
+            s.flush()
+            s.add(ProjectRepo(project_id=p.id, repo_slug=slug))
+            ids[ws] = str(p.id)
+        s.commit()
+    monkeypatch.setattr(http_app, "_sync_engine", lambda: engine)
+    return ids
+
+
+MISSING_PROJECT = "00000000-0000-0000-0000-000000000000"
+
+
+def test_project_tools_answer_a_foreign_project_like_a_missing_one(
+        registry, multi_tenant, mcp_caller, projects):
+    from src.mcp_server import http_app
+
+    assert http_app._project_repo_slugs(projects[WS_A]) == [SLUG_A]
+    assert http_app._project_repo_slugs(projects[WS_B]) == []
+
+    for impl, kw in ((http_app._search_symbols_impl,
+                      dict(query="x", kind=None, limit=5)),
+                     (http_app._find_consumers_impl, dict(symbol="x"))):
+        foreign = impl(projects[WS_B], **kw)
+        missing = impl(MISSING_PROJECT, **kw)
+        assert SLUG_B not in str(foreign), "another tenant's repo was named"
+        assert foreign.keys() == missing.keys()
+        assert "blocked_repos" not in foreign
+
+
+def test_project_tools_single_tenant_unchanged(registry, single_tenant,
+                                               mcp_caller, projects):
+    from src.mcp_server import http_app
+
+    assert http_app._project_repo_slugs(projects[WS_B]) == [SLUG_B]
+
+
+# ─── MCP bootstrap_client: ownership only for a researchable target ──
+
+
+@pytest.fixture
+def snapshots(monkeypatch):
+    seen: list[str] = []
+
+    def fake_load(slug):
+        seen.append(slug)
+        return {"stats": {"top_owners": [{"identity": f"dev@{slug}",
+                                          "commits": 9}]}}
+
+    monkeypatch.setattr("src.ownership.builder.load_snapshot", fake_load)
+    return seen
+
+
+def _bootstrap(project_id: str, target: str) -> dict:
+    from src.mcp_server import http_app
+
+    return http_app._bootstrap_client_impl(
+        project_id=project_id, target_repo_slug=target,
+        target_endpoint=None, language="python")
+
+
+def test_bootstrap_client_does_not_hand_out_another_tenants_owners(
+        registry, multi_tenant, mcp_caller, projects, snapshots):
+    foreign = _bootstrap(MISSING_PROJECT, SLUG_B)
+    missing = _bootstrap(MISSING_PROJECT, "github_nobody-nothing")
+
+    assert foreign["top_owners"] == [] == missing["top_owners"]
+    assert SLUG_B not in snapshots, "the foreign snapshot was read at all"
+    assert foreign.keys() == missing.keys()
+    # the caller's own target still gets its owners
+    assert _bootstrap(projects[WS_A], SLUG_A)["top_owners"] == [
+        {"identity": f"dev@{SLUG_A}", "commits": 9}]
+
+
+def test_bootstrap_client_respects_a_research_denial(registry, multi_tenant,
+                                                     mcp_caller, projects,
+                                                     snapshots, monkeypatch):
+    from src.access import RepoAccessDecision
+
+    monkeypatch.setattr(
+        "src.access.resolve_access",
+        lambda *, user_id, is_admin, workspace_id, repos:  # noqa: ARG005
+            {r: RepoAccessDecision.denied(r) for r in repos},
+    )
+    assert _bootstrap(projects[WS_A], SLUG_A)["top_owners"] == []
+    assert snapshots == []
+
+
+def test_bootstrap_client_single_tenant_unchanged(registry, single_tenant,
+                                                  mcp_caller, projects,
+                                                  snapshots):
+    assert _bootstrap(projects[WS_B], SLUG_B)["top_owners"] != []

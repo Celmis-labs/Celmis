@@ -39,7 +39,7 @@ from src.api.schemas import (
     RepoOut,
     RepoOwnerItem,
 )
-from src.config import get_settings
+from src.config import get_settings, is_valid_repo_slug
 from src.credentials import resolve_git_credential
 from src.db.session import get_async_session
 from src.http import build_client
@@ -55,6 +55,16 @@ router = APIRouter(prefix="/api/repos", tags=["repos"])
 # ─── List + add + remove ─────────────────────────────────────────────
 
 
+def _graph_exists(slug: str) -> bool:
+    """Is there a graph for ``slug``? False — never a raise — for a stored
+    slug that is not one safe path segment (a row registered before slugs
+    were validated): one such row must not take down a whole listing."""
+    if not is_valid_repo_slug(slug):
+        logger.warning("repo_slug_invalid_in_registry slug=%r", slug)
+        return False
+    return get_settings().repo_graph_path(slug).exists()
+
+
 @router.get("", response_model=list[RepoOut])
 def list_repos(
     user: User = Depends(get_current_user),
@@ -64,7 +74,6 @@ def list_repos(
     same list regardless of who registered each repo."""
     from src.repos.index_state import read_index_states
 
-    settings = get_settings()
     store = get_auto_review_store()
     cfg_by_slug = {c.repo_slug: c for c in store.list_for_workspace(workspace_id)}
 
@@ -82,14 +91,13 @@ def list_repos(
     out: list[RepoOut] = []
     # Primary source: auto_review_config (user-registered repos)
     for slug, cfg in cfg_by_slug.items():
-        graph_path = settings.repo_graph_path(slug)
         st = states.get(slug)
         out.append(RepoOut(
             slug=slug,
             provider=cfg.provider,
             full_name=cfg.full_name,
             url=cfg.url,
-            indexed=graph_path.exists(),
+            indexed=_graph_exists(slug),
             # Not counted here: opening every repo's graph to list N
             # repositories is the wrong trade. None says "not counted"; the
             # literal 0 it used to send said "counted, and empty".
@@ -170,6 +178,17 @@ def add_repo(
     # stored value left alone, two derivations disagreeing.
     qualified = _qualify_with_connected_provider(req.url, workspace_id, user.id)
     parsed = parse_repo_url(qualified)
+    # Before anything is stored: the slug names the clone, graph and vault
+    # directories, and a stored slug that is not one safe path segment would
+    # make every later per-repo path lookup raise — the workspace's whole
+    # repository list included.
+    if not is_valid_repo_slug(parsed.slug):
+        raise HTTPException(
+            status_code=422,
+            detail=(f"Unsupported repository name {parsed.slug!r}: only "
+                    "letters, digits, '.', '_' and '-' (and no '..') are "
+                    "supported."),
+        )
     full_name = f"{parsed.owner}/{parsed.name}"
     store = get_auto_review_store()
     # Enforce a 1:1 repo->workspace binding so the unauthenticated webhook can
@@ -210,7 +229,6 @@ def add_repo(
         mode=_default_mode(parsed.provider.value, req.auto_review),
     )
     store.upsert(cfg)
-    settings = get_settings()
 
     # Registering now queues the clone+graph index. It did not until this
     # line, and the gap was invisible: a script registered 50 forks here, no
@@ -248,7 +266,7 @@ def add_repo(
         provider=parsed.provider.value,
         full_name=cfg.full_name,
         url=cfg.url,
-        indexed=settings.repo_graph_path(parsed.slug).exists(),
+        indexed=_graph_exists(parsed.slug),
         auto_review_enabled=cfg.enabled,
         auto_review_mode=cfg.mode,
         branch=cfg.branch,
@@ -452,6 +470,10 @@ def index_all(
     queued, skipped, already = 0, 0, []
     skipped_repos: list[str] = []
     for cfg in configs:
+        if not is_valid_repo_slug(cfg.repo_slug):
+            skipped += 1
+            skipped_repos.append(cfg.repo_slug)
+            continue
         if not force and settings.repo_graph_path(cfg.repo_slug).exists():
             already.append(cfg.repo_slug)
             continue
@@ -640,13 +662,12 @@ def toggle_auto_review(
     cfg.enabled = req.enabled
     cfg.mode = _default_mode(cfg.provider, req.enabled, requested_mode=req.mode)
     store.upsert(cfg)
-    settings = get_settings()
     return RepoOut(
         slug=cfg.repo_slug,
         provider=cfg.provider,
         full_name=cfg.full_name,
         url=cfg.url,
-        indexed=settings.repo_graph_path(cfg.repo_slug).exists(),
+        indexed=_graph_exists(cfg.repo_slug),
         auto_review_enabled=cfg.enabled,
         auto_review_mode=cfg.mode,
         branch=cfg.branch,
@@ -682,13 +703,12 @@ def set_repo_branch(
         new_branch or "<default>", user.id,
     )
 
-    settings = get_settings()
     return RepoOut(
         slug=cfg.repo_slug,
         provider=cfg.provider,
         full_name=cfg.full_name,
         url=cfg.url,
-        indexed=settings.repo_graph_path(cfg.repo_slug).exists(),
+        indexed=_graph_exists(cfg.repo_slug),
         auto_review_enabled=cfg.enabled,
         auto_review_mode=cfg.mode,
         branch=cfg.branch,

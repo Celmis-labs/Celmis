@@ -163,6 +163,7 @@ def export_all_docs(
     import zipfile
 
     from src.api.auto_review import get_auto_review_store
+    from src.config import is_valid_repo_slug
     from src.vault.provenance import as_footer
 
     store = get_auto_review_store()
@@ -178,6 +179,11 @@ def export_all_docs(
     empty: list[str] = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for cfg in sorted(repos, key=lambda r: r.repo_slug):
+            if not is_valid_repo_slug(cfg.repo_slug):
+                # A row stored before slugs were validated has no vault we
+                # could address; it must not fail the whole archive.
+                empty.append(cfg.repo_slug)
+                continue
             directory = _vault_dir(cfg.repo_slug, workspace_id)
             notes = sorted(directory.rglob("*.md")) if directory.exists() else []
             if not notes:

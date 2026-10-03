@@ -253,7 +253,7 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
     )
     @require_scopes("read:groups")
     def _cross_repo_edges(group_name: str) -> dict[str, Any]:
-        edges = ([] if tenancy.authorize_group(group_name) is None
+        edges = ([] if tenancy.authorize_group(group_name, unfiltered=True) is None
                  else tools.cross_repo_edges(
                      group_name=group_name, workspace_id=_listing_workspace()))
         return {
@@ -362,7 +362,7 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
             dec = tenancy.authorize_repo(repo_slug)
             if dec is None or not tenancy.unrestricted(dec):
                 return dict(tools.GRAPH_NOT_FOUND)
-        elif group_name and tenancy.authorize_group(group_name) is None:
+        elif group_name and tenancy.authorize_group(group_name, unfiltered=True) is None:
             return dict(tools.GRAPH_NOT_FOUND)
         return tools.query_graph(
             cypher=cypher, repo_slug=repo_slug, group_name=group_name,

@@ -131,7 +131,7 @@ def visible_rows(rows: list[dict[str, Any]], dec, key: str = "file") -> list[dic
     return [r for r in rows if not r.get(key) or dec.path_visible(str(r.get(key)))]
 
 
-def authorize_group(group_name: str):  # noqa: ANN201 — RepoGroup | str | None
+def authorize_group(group_name: str, *, unfiltered: bool = False):  # noqa: ANN201 — RepoGroup | str | None
     """Non-None when the caller may address the group named ``group_name``.
 
     single_tenant: always (the name itself is returned) — the tools resolve
@@ -139,6 +139,12 @@ def authorize_group(group_name: str):  # noqa: ANN201 — RepoGroup | str | None
     multi_tenant: the caller's group, and only a group stamped with the
     caller's workspace whose every repository the caller may research — a
     cross-repo graph is made of them. None reads as "not found".
+
+    ``unfiltered``: the caller will read the group graph raw (``query_graph``
+    Cypher, ``cross_repo_edges`` ids). Group symbol ids and ``file`` carry
+    member-repo paths, which cannot be filtered by a member's deny/allow
+    globs afterwards — so, as for a repo-scoped ``query_graph``, every member
+    must then be :func:`unrestricted`.
     """
     from src.groups import GroupNotFoundError, get_group_manager
 
@@ -164,7 +170,8 @@ def authorize_group(group_name: str):  # noqa: ANN201 — RepoGroup | str | None
     from src.mcp_server.tools import _repo_id_to_slug
 
     for repo_id in group.repos:
-        if authorize_repo(_repo_id_to_slug(repo_id)) is None:
+        dec = authorize_repo(_repo_id_to_slug(repo_id))
+        if dec is None or (unfiltered and not unrestricted(dec)):
             return None
     return group
 

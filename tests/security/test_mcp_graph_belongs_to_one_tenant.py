@@ -350,3 +350,25 @@ def test_group_tools_are_one_tenants(groups, mcp_tools):
     assert names == {"alpha-g"}
     assert mcp_tools["list_repos"](group_name="beta-g")["repos"] == []
     assert mcp_tools["cross_repo_edges"](group_name="beta-g")["edges"] == []
+
+
+def test_raw_group_reads_refuse_a_member_with_path_restrictions(groups, mcp_tools, env):
+    """Group graph ids and `file` carry member-repo paths that cannot be
+    filtered by a member's deny globs, so raw Cypher and the raw edge list
+    need every member unrestricted — as repo-scoped query_graph does."""
+    from src.access.resolver import RepoAccessDecision, _RuleView
+
+    q = "MATCH (s:Symbol) RETURN s.id AS id, s.file AS f"
+    assert mcp_tools["query_graph"](cypher=q, group_name="alpha-g")["ok"] is True
+
+    env["decide"] = lambda slug: RepoAccessDecision(
+        repo_slug=slug, visibility="code", open_default=False,
+        rules=(_RuleView("code", (), ("secrets/**",), ()),),
+        deny_globs=("secrets/**",),
+    )
+    out = mcp_tools["query_graph"](cypher=q, group_name="alpha-g")
+    missing = mcp_tools["query_graph"](cypher=q, group_name="nobody-g")
+    assert out == missing and out["ok"] is False and not out["rows"]
+    assert mcp_tools["cross_repo_edges"](group_name="alpha-g")["edges"] == []
+    # The group itself is still the caller's: it stays listed.
+    assert {g["name"] for g in mcp_tools["list_groups"]()["groups"]} == {"alpha-g"}
