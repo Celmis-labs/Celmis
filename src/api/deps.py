@@ -514,6 +514,40 @@ async def require_prompt_editor(
     )
 
 
+def _require_repo_in_workspace(slug: str, workspace_id: str | None) -> None:
+    """404 unless ``slug`` is a repository registered to ``workspace_id``.
+
+    multi_tenant only. Team grants are looked up by slug across every
+    workspace, and a global admin skips them entirely — neither says whose
+    repository it is. Ownership snapshots, architecture summaries and the
+    vault reverse index are all keyed by slug alone, so without this a
+    `/api/intel/*/{repo_slug}` call answered for any tenant's repository the
+    caller could spell. Unknown and foreign read the same: 404.
+
+    Accepts either spelling a grant may be stored under (indexed slug or
+    owner/name, see :func:`repo_grant_candidates`).
+    """
+    from src.deployment import is_multi_tenant
+
+    if not is_multi_tenant():
+        return
+    owned = False
+    if workspace_id:
+        try:
+            from src.api.auto_review import get_auto_review_store
+
+            owned = any(
+                slug in (cfg.repo_slug, cfg.full_name)
+                for cfg in get_auto_review_store().list_for_workspace(workspace_id)
+            )
+        except Exception as exc:  # noqa: BLE001 — unreadable registry: refuse
+            logger.warning("repo_workspace_binding_unreadable repo=%r err=%s",
+                           slug, exc)
+    if not owned:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Repo not registered")
+
+
 def require_repo_permission(min_perm: str = "read"):
     """FastAPI dependency factory. Reads path parameter `repo_slug` (or
     `slug`) from the request and enforces the caller has at least
@@ -535,6 +569,7 @@ def require_repo_permission(min_perm: str = "read"):
         if not slug:
             # No slug in path — nothing to guard, just require auth.
             return user
+        _require_repo_in_workspace(slug, workspace_id)
         perm, any_grants = await _effective_repo_permission(
             slug, user, workspace_id)
         if not any_grants:

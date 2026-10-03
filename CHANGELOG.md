@@ -157,6 +157,59 @@ derives it from there.
   so the grant leaves a `workspace.member_role_changed` audit row like every
   other grant.
 
+### Security
+
+- **MCP graph tools are confined to the caller's workspace under
+  `multi_tenant`.** `find_symbol`, `get_symbol`, `find_callers`,
+  `find_callees`, `query_graph`, `cross_repo_edges`, `list_repos` and
+  `list_groups` on the `analyzer mcp serve` server checked the `read:graph`
+  scope and nothing else, and graph files live flat at
+  `<data_dir>/<repo_slug>/graph.fdblite`. Any token with `read:graph` could
+  read another tenant's symbol graph and run read-only Cypher against it by
+  naming its slug. Each tool now requires the repository (or group) to be
+  registered to the caller's workspace and researchable under the access
+  rules; deny-globbed files are filtered from results, and raw Cypher is
+  refused on a repository with path restrictions. Unknown, foreign and refused
+  targets answer exactly like a missing graph. `single_tenant` behaviour is
+  unchanged apart from the slug check below.
+- **Repo slugs are validated before they become paths.** `repo_path`,
+  `repo_data_path`, `repo_graph_path` and `repo_vault_path` refuse anything
+  outside `[A-Za-z0-9._-]`, `..`, `.` and empty strings, and check that the
+  result is a direct child of its base directory. `../` in a slug reached any
+  graph file on the box. The API answers 404 for a refused slug.
+- **The `/mcp` mount's research-access check now includes the tenant binding
+  under `multi_tenant`**, for global admins too, so `get_api_surface`,
+  `get_owner`, `get_architecture`, `route_incident`, `get_review_policy`,
+  `get_my_access` and the project tools refuse a repository registered to
+  another workspace. `list_deprecations` and `get_review` read only the
+  caller's workspace.
+- **REST:** under `multi_tenant`, routes guarded by `require_repo_permission`
+  (`/api/intel/ownership|architecture|reverse-index/{repo_slug}` and their
+  rebuilds, policy writes, repo delete) return 404 for a repository outside
+  the active workspace, global admins included.
+  `GET /api/review-policies/{repo_slug}/branches` no longer runs `git` in an
+  unregistered or traversal path, in any mode. The deprecation consumer scan
+  only walks the deprecation's own workspace's repositories under
+  `multi_tenant`, and the branches route no longer accepts a user's
+  registration row from a workspace they have left.
+- **MCP project tools and `bootstrap_client`.** Under `multi_tenant`,
+  `search_symbols`, `find_consumers`, `migrate_consumers` and
+  `bootstrap_client` resolve a project's repositories only for a project in
+  the caller's workspace; another tenant's project reads like a missing one
+  instead of naming its repositories in `blocked_repos`. `bootstrap_client`
+  returns `top_owners` only for a target the caller may research (it read
+  any slug's ownership snapshot, so it handed out another tenant's top
+  committers).
+- **Raw group reads need unrestricted members.** `query_graph(group_name=…)`
+  and `cross_repo_edges` return ids and files from member repositories, which
+  cannot be filtered by path afterwards, so under `multi_tenant` they now
+  require every member to be readable without path restrictions, as
+  `query_graph(repo_slug=…)` already did.
+- **Registering a repository whose slug is not a safe path segment is refused
+  (422)** on `POST /api/repos` and the automation surface, before anything is
+  stored. A row stored earlier with such a slug no longer breaks the
+  repository listing, "index all" or the docs export.
+
 ## [0.2.0] — 2026-10-03
 
 ### Added

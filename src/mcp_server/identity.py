@@ -229,7 +229,9 @@ def caller_access(repos: list[str]):
     caller. Returns ``(caller, {repo: RepoAccessDecision})``.
 
     Unauthenticated (dev/stdio) callers get full access to every repo under
-    single_tenant, and none at all under multi_tenant."""
+    single_tenant, and none at all under multi_tenant. Under multi_tenant a
+    repo not registered to the caller's workspace (alone) is denied for
+    everyone, admins included — see :mod:`src.mcp_server.tenancy`."""
     from src.access import RepoAccessDecision, resolve_access
     from src.deployment import fall_open_allowed
 
@@ -239,6 +241,34 @@ def caller_access(repos: list[str]):
                              detail=f"repos={len(repos)}"):
             return caller, {r: RepoAccessDecision.full(r) for r in repos}
         return caller, {r: RepoAccessDecision.denied(r) for r in repos}
+
+    # Tenant binding (multi_tenant only). The rules below are looked up in the
+    # caller's workspace, and a global admin bypasses them — neither says
+    # anything about whether the repository is this tenant's. Graphs, vaults
+    # and clones live flat on disk, keyed by slug alone, so the registry
+    # binding is the only thing that does. Applies to admins too: an operator
+    # reaches another tenant by switching workspace, not through a token
+    # resolved to their own.
+    from src.mcp_server import tenancy
+
+    if tenancy.enforced():
+        if not tenancy.caller_may_bind(caller):
+            return caller, {r: RepoAccessDecision.denied(r) for r in repos}
+        foreign = [r for r in repos
+                   if not tenancy.workspace_owns_slug(caller.workspace_id, r)]
+        own = [r for r in repos if r not in foreign]
+        decided = {r: RepoAccessDecision.denied(r) for r in foreign}
+        if caller.is_admin:
+            decided.update({r: RepoAccessDecision.full(r) for r in own})
+        elif own:
+            decided.update(resolve_access(
+                user_id=caller.user_id,
+                is_admin=caller.is_admin,
+                workspace_id=caller.workspace_id,
+                repos=own,
+            ))
+        return caller, decided
+
     if caller.is_admin:
         return caller, {r: RepoAccessDecision.full(r) for r in repos}
     access = resolve_access(

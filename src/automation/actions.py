@@ -77,6 +77,16 @@ def register_repo(
     except Exception as exc:  # noqa: BLE001
         raise ActionError(f"Could not read a repository out of {url!r}: {exc}") from None
 
+    from src.config import is_valid_repo_slug
+
+    # Refused before anything is stored: the slug names the clone, graph and
+    # vault directories, and a stored slug that is not one safe path segment
+    # makes every later per-repo path lookup raise.
+    if not is_valid_repo_slug(parsed.slug):
+        raise ActionError(
+            f"Unsupported repository name {parsed.slug!r}: only letters, "
+            "digits, '.', '_' and '-' (and no '..') are supported.")
+
     full_name = f"{parsed.owner}/{parsed.name}"
     store = get_auto_review_store()
 
@@ -559,13 +569,24 @@ def list_repos(actor: Actor) -> dict[str, Any]:
     build over twenty repositories and could not say which twenty.
     """
     from src.api.auto_review import get_auto_review_store
-    from src.config import get_settings
+    from src.config import get_settings, is_valid_repo_slug
 
     settings = get_settings()
     store = get_auto_review_store()
     repos = []
     for cfg in sorted(store.list_for_workspace(actor.workspace_id),
                       key=lambda c: c.full_name):
+        if not is_valid_repo_slug(cfg.repo_slug):
+            # A row stored before slugs were validated: report it, never
+            # let it break the whole listing.
+            repos.append({
+                "repo": cfg.repo_slug, "full_name": cfg.full_name,
+                "provider": cfg.provider, "branch": cfg.branch,
+                "indexed": False, "documented": False,
+                "auto_review": cfg.enabled,
+                "auto_review_mode": cfg.mode if cfg.enabled else None,
+            })
+            continue
         vault = settings.repo_vault_path(cfg.repo_slug)
         repos.append({
             "repo": cfg.repo_slug,

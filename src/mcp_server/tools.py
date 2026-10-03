@@ -13,10 +13,11 @@ Security:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from src.config import Settings, get_settings
+from src.config import InvalidRepoSlug, Settings, get_settings
 from src.groups import GroupNotFoundError, get_group_manager
 from src.indexing.graph.extractor import SymbolInfo
 from src.indexing.graph.graph_store import (
@@ -70,7 +71,6 @@ def _is_read_only_cypher(cypher: str) -> bool:
     upper = cypher.upper()
     # Strip string literals so that keywords inside names do not turn into
     # false positives (for simplicity: replace 'X' with spaces)
-    import re
     stripped = re.sub(r"'[^']*'", "''", upper)
     stripped = re.sub(r'"[^"]*"', '""', stripped)
     # Strip backtick-quoted identifiers
@@ -134,14 +134,20 @@ def list_groups(
 def list_repos(
     group_name: str | None = None,
     settings: Settings | None = None,
+    workspace_id: str | None = None,
 ) -> list[RepoSummary]:
-    """List of repos: either in a specific group, or every one indexed on disk."""
+    """List of repos: either in a specific group, or every one indexed on disk.
+
+    `workspace_id` resolves `group_name` in that tenant first. It does NOT
+    filter the on-disk listing — the MCP wrapper does that against the
+    registry, since a directory does not know whose it is.
+    """
     settings = settings or get_settings()
 
     if group_name:
         mgr = get_group_manager()
         try:
-            g = mgr.load(group_name)
+            g = mgr.load(group_name, workspace_id)
         except GroupNotFoundError:
             return []
         return [_repo_to_summary(repo_id, settings) for repo_id in g.repos]
@@ -173,8 +179,8 @@ def find_symbol(
     Returns: list of dict, each with repo_slug + symbol fields.
     """
     settings = settings or get_settings()
-    db_path = settings.repo_graph_path(repo_slug)
-    if not db_path.exists():
+    db_path = _repo_graph(repo_slug, settings)
+    if db_path is None or not db_path.exists():
         return []
 
     store = make_graph_store(db_path)
@@ -196,8 +202,8 @@ def get_symbol(
 ) -> dict[str, Any] | None:
     """Pull the full information about a symbol by id."""
     settings = settings or get_settings()
-    db_path = settings.repo_graph_path(repo_slug)
-    if not db_path.exists():
+    db_path = _repo_graph(repo_slug, settings)
+    if db_path is None or not db_path.exists():
         return None
 
     store = make_graph_store(db_path)
@@ -221,8 +227,8 @@ def find_callers(
     BFS expansion over CALLS edges. depth=1 — direct callers; >1 — transitive.
     """
     settings = settings or get_settings()
-    db_path = settings.repo_graph_path(repo_slug)
-    if not db_path.exists():
+    db_path = _repo_graph(repo_slug, settings)
+    if db_path is None or not db_path.exists():
         return _empty_expansion(repo_slug)
 
     store = make_graph_store(db_path)
@@ -273,8 +279,8 @@ def find_callees(
 ) -> dict[str, Any]:
     """Find symbols that are called by the target (outgoing CALLS edges)."""
     settings = settings or get_settings()
-    db_path = settings.repo_graph_path(repo_slug)
-    if not db_path.exists():
+    db_path = _repo_graph(repo_slug, settings)
+    if db_path is None or not db_path.exists():
         return _empty_expansion(repo_slug)
 
     store = make_graph_store(db_path)
@@ -324,17 +330,26 @@ def _group_graph_path(group_name: str, settings: Settings,
     try:
         return mgr.graph_path(mgr.load(group_name, workspace_id))
     except (GroupNotFoundError, Exception):  # noqa: BLE001
+        # The legacy flat layout — but only for a name that is a filename.
+        # `../../data/x/graph` was one, and this fallback joined it as given.
+        if not _GROUP_FILE_NAME.fullmatch(group_name or ""):
+            return None
         return settings.workspace_dir / "groups" / f"{group_name}.fdblite"
 
 
 def cross_repo_edges(
     group_name: str,
     settings: Settings | None = None,
+    workspace_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Pull every cross-repo edge for the group."""
+    """Pull every cross-repo edge for the group.
+
+    `workspace_id` picks that tenant's group of this name over the legacy
+    flat one; the MCP wrapper passes it under multi_tenant.
+    """
     settings = settings or get_settings()
-    db_path = _group_graph_path(group_name, settings)
-    if not db_path.exists():
+    db_path = _group_graph_path(group_name, settings, workspace_id)
+    if db_path is None or not db_path.exists():
         return []
 
     store = make_graph_store(db_path)
@@ -369,6 +384,7 @@ def query_graph(
     group_name: str | None = None,
     params: dict[str, Any] | None = None,
     settings: Settings | None = None,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
     """Read-only Cypher escape hatch.
 
@@ -390,9 +406,9 @@ def query_graph(
         }
 
     if repo_slug:
-        db_path = settings.repo_graph_path(repo_slug)
+        db_path = _repo_graph(repo_slug, settings)
     elif group_name:
-        db_path = _group_graph_path(group_name, settings)
+        db_path = _group_graph_path(group_name, settings, workspace_id)
     else:
         return {
             "ok": False,
@@ -400,12 +416,11 @@ def query_graph(
             "rows": [],
         }
 
-    if not db_path.exists():
-        return {
-            "ok": False,
-            "error": f"Graph not found at {db_path}",
-            "rows": [],
-        }
+    if db_path is None or not db_path.exists():
+        # No filesystem path in the message: it named the data directory
+        # layout to every caller, and an unknown slug and a refused one must
+        # read the same (see src/mcp_server/tenancy.py).
+        return dict(GRAPH_NOT_FOUND)
 
     store = make_graph_store(db_path)
     try:
@@ -419,6 +434,23 @@ def query_graph(
 
 
 # ─── helpers ────────────────────────────────────────────────────────
+
+#: What query_graph answers for a graph that is missing, unknown, invalid or
+#: not the caller's — deliberately one shape for all four.
+GRAPH_NOT_FOUND: dict[str, Any] = {
+    "ok": False, "error": "Graph not found.", "rows": [],
+}
+
+_GROUP_FILE_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _repo_graph(repo_slug: str, settings: Settings):
+    """The repo's graph path, or None when the slug is not a safe segment."""
+    try:
+        return settings.repo_graph_path(repo_slug)
+    except InvalidRepoSlug:
+        logger.warning("graph_slug_refused slug=%r", repo_slug)
+        return None
 
 
 def _symbol_to_dict(sym: SymbolInfo, repo_slug: str) -> dict[str, Any]:
@@ -496,7 +528,8 @@ def _repo_id_to_slug(repo_id: str) -> str:
 
 
 def _repo_graph_exists(slug: str, settings: Settings) -> bool:
-    return settings.repo_graph_path(slug).exists()
+    path = _repo_graph(slug, settings)
+    return path is not None and path.exists()
 
 
 def _repo_to_summary(repo_id: str, settings: Settings) -> RepoSummary:
@@ -515,8 +548,8 @@ def _repo_to_summary(repo_id: str, settings: Settings) -> RepoSummary:
 def _slug_to_summary(
     slug: str, settings: Settings, full_path: str | None = None,
 ) -> RepoSummary:
-    db_path = settings.repo_graph_path(slug)
-    indexed = db_path.exists()
+    db_path = _repo_graph(slug, settings)
+    indexed = db_path is not None and db_path.exists()
     symbol_count = 0
     if indexed:
         try:

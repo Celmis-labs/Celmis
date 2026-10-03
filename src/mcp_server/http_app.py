@@ -519,11 +519,25 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
         from sqlalchemy.orm import Session
 
         from src.db.models import DeprecatedSymbol
+        from src.mcp_server import tenancy
+        from src.mcp_server.identity import caller_access, resolve_caller
         with Session(_sync_engine()) as s:
             stmt = select(DeprecatedSymbol)
             if repo_slug:
                 stmt = stmt.where(DeprecatedSymbol.repo_slug == repo_slug)
+            if tenancy.enforced():
+                # Rows carry their workspace (the REST twin filters on it);
+                # this listing did not, so every tenant's deprecations — and
+                # the consumer files recorded on them — were one call away.
+                caller = resolve_caller()
+                ws = caller.workspace_id if tenancy.caller_may_bind(caller) else ""
+                stmt = stmt.where(DeprecatedSymbol.workspace_id == ws)
             rows = s.execute(stmt).scalars().all()
+            if tenancy.enforced() and rows:
+                _c, access = caller_access(sorted({r.repo_slug for r in rows}))
+                rows = [r for r in rows
+                        if access.get(r.repo_slug) is not None
+                        and access[r.repo_slug].researchable]
             return {"deprecations": [
                 {
                     "id": r.id, "repo_slug": r.repo_slug, "symbol": r.symbol,
@@ -997,14 +1011,31 @@ def _get_project_impl(project_id: str, workspace_id: str) -> dict[str, Any]:
 
 
 def _project_repo_slugs(project_id: str) -> list[str]:
+    """The repos of ``project_id`` — under multi_tenant only when the project
+    belongs to the caller's workspace.
+
+    A foreign project reads exactly like a missing one (no repos): naming its
+    repos in ``blocked_repos`` / ``access_notice`` would hand another tenant's
+    repository names to anyone holding the project's id, and "has no repos"
+    versus "blocked" would confirm the id exists.
+    """
     from sqlalchemy import select
     from sqlalchemy.orm import Session
 
-    from src.db.models import ProjectRepo
+    from src.db.models import Project, ProjectRepo
+    from src.mcp_server import tenancy
+
+    stmt = select(ProjectRepo).where(ProjectRepo.project_id == project_id)
+    if tenancy.enforced():
+        from src.mcp_server.identity import resolve_caller
+
+        caller = resolve_caller()
+        if not tenancy.caller_may_bind(caller):
+            return []
+        stmt = stmt.join(Project, Project.id == ProjectRepo.project_id).where(
+            Project.workspace_id == caller.workspace_id)
     with Session(_sync_engine()) as s:
-        rows = s.execute(
-            select(ProjectRepo).where(ProjectRepo.project_id == project_id)
-        ).scalars().all()
+        rows = s.execute(stmt).scalars().all()
         return [r.repo_slug for r in rows]
 
 
@@ -1252,13 +1283,23 @@ def _get_review_impl(pr_ref: str) -> dict[str, Any]:
     import sqlite3
 
     from src.api.review_runs import get_review_run_store
+    from src.mcp_server import tenancy
     store = get_review_run_store()
+    sql = "SELECT * FROM review_runs WHERE pr_ref LIKE ? "
+    params: tuple = (f"%{pr_ref}%",)
+    if tenancy.enforced():
+        # The LIKE spans every tenant's runs; the newest match could be
+        # anybody's. Search only the caller's own.
+        from src.mcp_server.identity import resolve_caller
+        caller = resolve_caller()
+        if not tenancy.caller_may_bind(caller):
+            return {"error": f"no review found for {pr_ref!r}"}
+        sql += "AND workspace_id = ? "
+        params = (*params, caller.workspace_id)
     with sqlite3.connect(store.db_path) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM review_runs WHERE pr_ref LIKE ? "
-            "ORDER BY started_at DESC LIMIT 1",
-            (f"%{pr_ref}%",),
+            sql + "ORDER BY started_at DESC LIMIT 1", params,
         ).fetchone()
     if row is None:
         return {"error": f"no review found for {pr_ref!r}"}
@@ -1275,6 +1316,10 @@ def _get_review_impl(pr_ref: str) -> dict[str, Any]:
     # and let every run through. Normalise before asking about access.
     repo_slug = _to_indexed_slug(raw_slug)
     dec = None
+    if tenancy.enforced() and not repo_slug:
+        # A run whose repository cannot be named cannot be checked against
+        # the access rules — and unchecked used to mean "shown".
+        return {"error": f"no review found for {pr_ref!r}"}
     if repo_slug:
         from src.mcp_server.identity import caller_access
         _caller, access = caller_access([repo_slug])
@@ -1489,10 +1534,17 @@ def _bootstrap_client_impl(
                     "line": c.get("start_line", 0),
                 })
 
-    # Ownership hint — who to ask if things go wrong.
-    from src.ownership.builder import load_snapshot
-    snap = load_snapshot(target_repo_slug) or {}
-    top_owners = (snap.get("stats") or {}).get("top_owners", [])[:3]
+    # Ownership hint — who to ask if things go wrong. Only for a target the
+    # caller may research: the snapshot is looked up by slug alone, so without
+    # this gate any slug (another tenant's included) yielded its top committers.
+    top_owners: list[Any] = []
+    _c, target_access = caller_access([target_repo_slug])
+    target_dec = target_access.get(target_repo_slug)
+    if (target_repo_slug not in api.get("blocked_repos", [])
+            and target_dec is not None and target_dec.researchable):
+        from src.ownership.builder import load_snapshot
+        snap = load_snapshot(target_repo_slug) or {}
+        top_owners = (snap.get("stats") or {}).get("top_owners", [])[:3]
 
     stub = _stub_for(language, endpoints, target_repo_slug)
 
@@ -1578,6 +1630,11 @@ def _get_review_policy_impl(repo_slug: str) -> dict[str, Any]:
     from src.db.models import RepoReviewPolicy
     with Session(_sync_engine()) as s:
         row = s.get(RepoReviewPolicy, repo_slug)
+        from src.mcp_server import tenancy
+        if row is not None and tenancy.enforced():
+            from src.mcp_server.identity import resolve_caller
+            if row.workspace_id != resolve_caller().workspace_id:
+                row = None  # another tenant's policy — the REST twin hides it too
         if row is None:
             return {
                 "repo_slug": repo_slug,

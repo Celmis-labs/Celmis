@@ -2,11 +2,67 @@
 
 from __future__ import annotations
 
+import os
+import re
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# ─── repo slugs as path segments ─────────────────────────────────────
+#
+# A slug is the directory name of a clone, of its graph and of its vault —
+# `data_dir / slug` with nothing in between. Every caller that took a slug
+# from a request (an MCP tool argument, a `{repo_slug:path}` route) therefore
+# handed the filesystem a path, and `../other/graph.fdblite` was one.
+#
+# The alphabet is what `ParsedRepo.slug` can produce: provider prefix and
+# owner/name joined by `_` and `-`, where owner and name are hosting-provider
+# identifiers (letters, digits, `.`, `_`, `-`). Anything else is refused here,
+# once, rather than at each of the seventy call sites.
+
+_REPO_SLUG_RE = re.compile(r"[A-Za-z0-9._-]{1,200}")
+
+
+class InvalidRepoSlug(ValueError):
+    """A repo slug that is not a single safe path segment."""
+
+
+def validate_repo_slug(repo_slug: str) -> str:
+    """Return ``repo_slug`` unchanged, or raise :class:`InvalidRepoSlug`.
+
+    Refused: empty, non-str, anything outside ``[A-Za-z0-9._-]`` (so `/`,
+    `\\`, `%`, NUL, whitespace), `.` and anything containing `..`.
+    """
+    if not isinstance(repo_slug, str) or not _REPO_SLUG_RE.fullmatch(repo_slug):
+        raise InvalidRepoSlug(f"invalid repo slug {repo_slug!r}")
+    if repo_slug == "." or ".." in repo_slug:
+        raise InvalidRepoSlug(f"invalid repo slug {repo_slug!r}")
+    return repo_slug
+
+
+def is_valid_repo_slug(repo_slug: object) -> bool:
+    try:
+        validate_repo_slug(repo_slug)  # type: ignore[arg-type]
+    except InvalidRepoSlug:
+        return False
+    return True
+
+
+def repo_slug_dir(base: Path, repo_slug: str) -> Path:
+    """``base / repo_slug``, proven to be a direct child of ``base``.
+
+    The alphabet check already excludes every separator; the containment
+    check is the second lock, so that a future loosening of the alphabet
+    cannot reopen the traversal on its own.
+    """
+    validate_repo_slug(repo_slug)
+    path = base / repo_slug
+    root = Path(os.path.abspath(base))
+    if Path(os.path.abspath(path)).parent != root:
+        raise InvalidRepoSlug(f"invalid repo slug {repo_slug!r}")
+    return path
 
 # Project root — where .env lives (src/config.py → ../)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -397,12 +453,18 @@ class Settings(BaseSettings):
         return self.workspace_dir / "chats.db"
 
     def repo_path(self, repo_slug: str) -> Path:
-        """Local path to the cloned repo. `repo_slug` — e.g. 'acme-frontend'."""
-        return self.repos_dir / repo_slug
+        """Local path to the cloned repo. `repo_slug` — e.g. 'acme-frontend'.
+
+        Raises :class:`InvalidRepoSlug` for anything that is not one path
+        segment of the slug alphabet (see :func:`repo_slug_dir`)."""
+        return repo_slug_dir(self.repos_dir, repo_slug)
 
     def repo_data_path(self, repo_slug: str) -> Path:
-        """Local path to derived data (graph, sarif)."""
-        return self.data_dir / repo_slug
+        """Local path to derived data (graph, sarif).
+
+        Raises :class:`InvalidRepoSlug` for anything that is not one path
+        segment of the slug alphabet (see :func:`repo_slug_dir`)."""
+        return repo_slug_dir(self.data_dir, repo_slug)
 
     def repo_graph_path(self, repo_slug: str) -> Path:
         """Path to the FalkorDBLite graph file for a particular repo."""
@@ -410,7 +472,7 @@ class Settings(BaseSettings):
 
     def repo_vault_path(self, repo_slug: str) -> Path:
         """Path inside the vault for a particular repo."""
-        return self.vault_dir / "projects" / repo_slug
+        return repo_slug_dir(self.vault_dir / "projects", repo_slug)
 
     @field_validator("workspace_dir", "vault_dir", mode="before")
     @classmethod

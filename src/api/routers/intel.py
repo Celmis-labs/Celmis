@@ -322,7 +322,7 @@ async def scan_deprecation(
     row = await session.get(DeprecatedSymbol, dep_id)
     if row is None:
         raise HTTPException(status_code=404, detail="not found")
-    consumers = _scan_consumers(row.symbol)
+    consumers = _scan_consumers(row.symbol, workspace_id=row.workspace_id)
     row.consumers = consumers
     row.last_scan_at = datetime.now(UTC)
     await session.commit()
@@ -330,9 +330,16 @@ async def scan_deprecation(
     return _dep_to_out(row)
 
 
-def _scan_consumers(symbol: str) -> list[dict[str, Any]]:
+def _scan_consumers(
+    symbol: str, workspace_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Best-effort scan across every indexed repo using the mcp_server
-    legacy tools (which read the tree-sitter graph)."""
+    legacy tools (which read the tree-sitter graph).
+
+    Under multi_tenant only the deprecation's own workspace's repositories
+    are scanned: the consumers land on a workspace-scoped row that its
+    members read, and "every indexed repo" is every tenant's code.
+    """
     try:
         from src.mcp_server import tools as legacy
     except Exception:  # noqa: BLE001
@@ -342,6 +349,11 @@ def _scan_consumers(symbol: str) -> list[dict[str, Any]]:
         repos = legacy.list_repos()
     except Exception:  # noqa: BLE001
         return []
+    from src.deployment import is_multi_tenant
+    if is_multi_tenant():
+        from src.mcp_server.tenancy import workspace_slugs
+        own = workspace_slugs(workspace_id or "")
+        repos = [r for r in repos if r.slug in own]
     for r in repos:
         try:
             res = legacy.find_callers(symbol_id=symbol, repo_slug=r.slug)
