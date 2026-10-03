@@ -123,8 +123,16 @@ reports `enterprise` on the next request, and the Analytics tab and the SSO
 button appear without a reload. **Remove licence** (`DELETE /api/license`)
 takes them away just as fast: their routes are unmounted, and every
 enterprise route re-checks the licence in force per request, so a request
-already in flight is refused with 403. Replacing a licence with one that drops
-a feature does the same for that feature. Each save, replacement and removal
+already in flight is refused with 403. A *new* request to an unmounted route
+gets **404**, not 403 — deliberately: it is what a restart without the licence
+gives, and it keeps `/api/capabilities` (which reads the route table) telling
+the truth. Replacing a licence with one that drops
+a feature does the same for that feature. Saves and removals are serialised,
+so two admins acting at once cannot leave one licence in force while another,
+or none, is stored. If the stored licence cannot be read at start-up (a
+changed master key, a locked store), the card says so
+(`stored licence unreadable`) instead of looking like an installation that
+never had one; restart once the store is readable, or paste the key again. Each save, replacement and removal
 is an audit row (`license.saved` / `license.replaced` / `license.removed`)
 naming the admin, the customer, the features and the expiry — never the key.
 

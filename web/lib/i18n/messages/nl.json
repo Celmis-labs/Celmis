@@ -2457,6 +2457,7 @@
   "edition.feature.sso": "Single sign-on",
   "edition.feature.analytics": "Analyses",
   "edition.communityHint": "Single sign-on en analyses vereisen een enterprise-licentie: stel CELMIS_LICENSE_KEY of CELMIS_LICENSE_FILE in voor de API en herstart die.",
+  "edition.communityHintEnv": "Single sign-on en analyses vereisen een enterprise-licentie: stel CELMIS_LICENSE_KEY of CELMIS_LICENSE_FILE in voor de API en herstart die.",
   "edition.unknown": "Onbekend — de API gaf geen antwoord.",
   "ee.license.issued": "Uitgegeven",
   "ee.license.sourceLabel": "Bron",

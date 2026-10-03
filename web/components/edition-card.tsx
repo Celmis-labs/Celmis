@@ -123,8 +123,14 @@ function AdminLicence({ canManage }: { canManage: boolean }) {
     void qc.invalidateQueries({ queryKey: ["capabilities"] });
     void qc.invalidateQueries({ queryKey: ["workspaces-me"] });
   };
-  const failed = (e: unknown) =>
-    setError(e instanceof ApiError ? e.message : t("ee.license.errorGeneric"));
+  // The API's 409/422 `detail` is a sentence meant for the admin; anything
+  // else (a list of validation errors, a proxy's HTML page) is not.
+  const failed = (e: unknown) => {
+    const body = e instanceof ApiError ? e.body : null;
+    const detail =
+      body && typeof body === "object" ? (body as { detail?: unknown }).detail : undefined;
+    setError(typeof detail === "string" && detail ? detail : t("ee.license.errorGeneric"));
+  };
 
   const activate = useMutation({
     mutationFn: () =>
@@ -150,6 +156,8 @@ function AdminLicence({ canManage }: { canManage: boolean }) {
 
   const s = state.data;
   const lic = s?.license ?? null;
+  // "Paste the key below" only while there is a form below to paste into.
+  const formShown = canManage && !!s && !s.managed_by_env;
 
   return (
     <div className="space-y-3">
@@ -178,7 +186,9 @@ function AdminLicence({ canManage }: { canManage: boolean }) {
           )}
         </dl>
       ) : (
-        <p className="text-xs text-[var(--color-muted-foreground)]">{t("edition.communityHint")}</p>
+        <p className="text-xs text-[var(--color-muted-foreground)]">
+          {t(formShown ? "edition.communityHint" : "edition.communityHintEnv")}
+        </p>
       )}
 
       {s?.problem && (
@@ -189,7 +199,7 @@ function AdminLicence({ canManage }: { canManage: boolean }) {
         <Callout tone="info">
           {t("ee.license.managedByEnv", { variable: s.env_variable ?? "CELMIS_LICENSE_KEY" })}
         </Callout>
-      ) : s ? (
+      ) : formShown ? (
         <div className="space-y-2">
           <label htmlFor="licence-key" className="block text-xs font-medium">
             {lic ? t("ee.license.replaceLabel") : t("ee.license.pasteLabel")}
@@ -213,7 +223,7 @@ function AdminLicence({ canManage }: { canManage: boolean }) {
             >
               {activate.isPending ? t("ee.license.activating") : t("ee.license.activate")}
             </Button>
-            {s.source === "ui" && (
+            {s?.source === "ui" && (
               <Button
                 size="sm"
                 variant="outline"

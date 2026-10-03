@@ -176,6 +176,10 @@ def test_get_reports_what_is_in_force(store):
     pytest.param(lambda: "garbage", "not a licence key", id="garbage"),
     pytest.param(lambda: "", "Paste a licence key", id="empty"),
     pytest.param(lambda: "x" * 20_000, "too large", id="oversized"),
+    # Above the handler's own limit too: still one readable sentence, not
+    # pydantic's list of error objects (which the UI showed as
+    # "[object Object]").
+    pytest.param(lambda: "x" * 70_000, "too large", id="oversized-body"),
     pytest.param(lambda: _raw_unknown_feature(), "no feature", id="unknown-only"),
 ])
 def test_a_licence_that_does_not_verify_is_refused_and_nothing_is_stored(
@@ -429,3 +433,114 @@ def test_the_token_is_in_no_response_no_log_and_no_audit_row(store, audit, caplo
     stored = store.load(license_store.PROVIDER, user_id=license_store.SLOT,
                         update_last_used=False)
     assert signature not in repr(stored.metadata)
+
+
+# ─── a store that cannot be read ─────────────────────────────────────
+
+
+def test_an_unreadable_store_at_start_up_says_so_instead_of_looking_unlicensed(
+        store, monkeypatch):
+    class Broken:
+        def load(self, *a, **kw):
+            raise OSError("database is locked")
+
+    monkeypatch.setattr(license_store, "get_store", lambda: Broken())
+    with pytest.raises(license_store.StoreUnreadable):
+        license_store.read_token()
+
+    app = _app()
+    body = TestClient(app).get("/api/license").json()
+    assert body["edition"] == "community"
+    assert body["source"] == "ui"
+    assert body["problem"] == lic.STORED_UNREADABLE
+    assert _analytics_status(app) == 404
+
+
+def test_nothing_stored_is_still_plain_community_with_no_problem(store):
+    body = TestClient(_app()).get("/api/license").json()
+    assert (body["edition"], body["source"], body["problem"]) == ("community", None, None)
+
+
+# ─── two admins at once ──────────────────────────────────────────────
+
+
+def _held_save(monkeypatch):
+    """`save_token` that writes, then stalls before returning — the thread
+    being preempted after the write. Returns (written, release) events."""
+    import threading
+
+    written, release = threading.Event(), threading.Event()
+    real = license_store.save_token
+
+    def save(token, *, metadata):
+        real(token, metadata=metadata)
+        written.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr(license_store, "save_token", save)
+    return written, release
+
+
+def _run_together(app, first, second, written, release):
+    """Start `first`; once its store write has happened (and it is stalled),
+    start `second` and give it every chance to finish; then let `first` go."""
+    import asyncio
+
+    import httpx
+
+    async def go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            a = asyncio.create_task(first(c))
+            assert await asyncio.to_thread(written.wait, 5)
+            b = asyncio.create_task(second(c))
+            await asyncio.sleep(0.2)
+            release.set()
+            return await asyncio.gather(a, b)
+
+    return asyncio.run(go())
+
+
+def test_a_put_and_a_delete_at_once_leave_the_store_and_the_process_agreeing(
+        store, audit, monkeypatch):
+    app = _app()
+    written, release = _held_save(monkeypatch)
+    token = mint_test_license(["analytics"])
+
+    put, delete = _run_together(
+        app,
+        lambda c: c.put("/api/license", json={"token": token}),
+        lambda c: c.delete("/api/license"),
+        written, release,
+    )
+
+    assert put.status_code == 200, put.text
+    # Serialised: the DELETE ran after the PUT and removed what it stored.
+    assert delete.status_code == 200, delete.text
+    assert license_store.read_token() is None
+    assert runtime(app).license is None
+    assert _capabilities(app).edition == "community"
+    # Restart state = running state.
+    assert lic.load({}, stored=license_store.read_token).license is None
+
+
+def test_two_puts_at_once_leave_in_force_what_is_stored(store, audit, monkeypatch):
+    app = _app()
+    written, release = _held_save(monkeypatch)
+    first = mint_test_license(["analytics"])
+    second = mint_test_license(["sso"])
+
+    a, b = _run_together(
+        app,
+        lambda c: c.put("/api/license", json={"token": first}),
+        lambda c: c.put("/api/license", json={"token": second}),
+        written, release,
+    )
+
+    assert (a.status_code, b.status_code) == (200, 200)
+    assert license_store.read_token() == second
+    assert runtime(app).license is not None
+    assert sorted(runtime(app).license.features) == ["sso"]
+    # The second write's audit row names the first as what it replaced.
+    assert [row["action"] for row in audit] == ["license.saved", "license.replaced"]
+    assert audit[1]["detail"]["previous_features"] == ["analytics"]

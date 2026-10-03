@@ -218,6 +218,9 @@ SOURCE_ENV_FILE = "env_file"
 SOURCE_UI = "ui"
 _SOURCE_OF = {ENV_KEY: SOURCE_ENV_KEY, ENV_FILE: SOURCE_ENV_FILE}
 
+#: `Loaded.problem` when the UI slot exists but could not be read.
+STORED_UNREADABLE = "stored licence unreadable"
+
 
 def env_source(env: dict[str, str] | None = None) -> str | None:
     """Which environment variable manages the licence, if any — set and
@@ -256,7 +259,14 @@ def load(
     token, where = configured_token(env)
     source = _SOURCE_OF.get(where)
     if source is None and stored is not None:
-        token = stored()
+        try:
+            token = stored()
+        except Exception as exc:  # noqa: BLE001 — a licence problem never stops the process
+            # A licence may be stored but could not be read. Say so, rather
+            # than look exactly like an installation that never had one.
+            logger.warning("license_stored_unreadable err=%s — running as the "
+                           "community edition", type(exc).__name__)
+            return Loaded(None, SOURCE_UI, STORED_UNREADABLE)
         source = SOURCE_UI if token else None
     if token is None:
         if source is None:
@@ -299,6 +309,7 @@ __all__ = [
     "SOURCE_ENV_FILE",
     "SOURCE_ENV_KEY",
     "SOURCE_UI",
+    "STORED_UNREADABLE",
     "License",
     "LicenseError",
     "Loaded",

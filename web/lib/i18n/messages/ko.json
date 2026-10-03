@@ -2457,6 +2457,7 @@
   "edition.feature.sso": "통합 인증(SSO)",
   "edition.feature.analytics": "분석",
   "edition.communityHint": "통합 인증과 분석에는 Enterprise 라이선스가 필요합니다. API에 CELMIS_LICENSE_KEY 또는 CELMIS_LICENSE_FILE을 설정하고 다시 시작하세요.",
+  "edition.communityHintEnv": "통합 인증과 분석에는 Enterprise 라이선스가 필요합니다. API에 CELMIS_LICENSE_KEY 또는 CELMIS_LICENSE_FILE을 설정하고 다시 시작하세요.",
   "edition.unknown": "알 수 없음 — API가 응답하지 않았습니다.",
   "ee.license.issued": "발급일",
   "ee.license.sourceLabel": "출처",

@@ -2457,6 +2457,7 @@
   "edition.feature.sso": "Login único (SSO)",
   "edition.feature.analytics": "Análises",
   "edition.communityHint": "O login único e as análises exigem uma licença enterprise: defina CELMIS_LICENSE_KEY ou CELMIS_LICENSE_FILE na API e reinicie-a.",
+  "edition.communityHintEnv": "O login único e as análises exigem uma licença enterprise: defina CELMIS_LICENSE_KEY ou CELMIS_LICENSE_FILE na API e reinicie-a.",
   "edition.unknown": "Desconhecido — a API não respondeu.",
   "ee.license.issued": "Emitida",
   "ee.license.sourceLabel": "Origem",

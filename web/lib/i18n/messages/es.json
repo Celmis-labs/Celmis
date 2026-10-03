@@ -2457,6 +2457,7 @@
   "edition.feature.sso": "Inicio de sesión único (SSO)",
   "edition.feature.analytics": "Analítica",
   "edition.communityHint": "El inicio de sesión único y la analítica requieren una licencia enterprise: define CELMIS_LICENSE_KEY o CELMIS_LICENSE_FILE en la API y reiníciala.",
+  "edition.communityHintEnv": "El inicio de sesión único y la analítica requieren una licencia enterprise: define CELMIS_LICENSE_KEY o CELMIS_LICENSE_FILE en la API y reiníciala.",
   "edition.unknown": "Desconocido — la API no respondió.",
   "ee.license.issued": "Emitida",
   "ee.license.sourceLabel": "Origen",

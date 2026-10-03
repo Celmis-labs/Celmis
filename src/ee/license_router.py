@@ -28,6 +28,11 @@ enterprise route also re-checks the licence in force per request, so nothing
 is served on a licence that is no longer there. The stored token is read at
 start-up too, so the same state survives a restart.
 
+PUT and DELETE are serialised (one write lock per event loop): the store
+write and the apply that follows it happen as one step, so two admins acting
+at the same moment cannot leave one licence in force while another — or
+none — is stored.
+
 The token is in no response and no log line, and the audit rows carry the
 customer, the features and the expiry — never the token.
 
@@ -40,11 +45,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import weakref
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from src.api.deps import client_ip, require_admin
 from src.ee import license_store
@@ -66,9 +72,25 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/license", tags=["license", "enterprise"])
 
-#: Far above any real licence (a few hundred bytes) and far below anything
-#: that costs memory to hold; `verify` refuses above 16 KiB with a reason.
+#: Far above any real licence (a few hundred bytes). Checked in the handler,
+#: not as a pydantic `max_length`: a model error would answer 422 with a list
+#: of error objects as `detail`, which the UI cannot show as a sentence.
+#: (`verify` refuses above 16 KiB with the same reason.)
 _MAX_BODY_CHARS = 64 * 1024
+
+#: One write lock per event loop. asyncio.Lock binds to the loop it is first
+#: contended on, and a test process runs several loops (one per TestClient).
+_WRITE_LOCKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _write_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _WRITE_LOCKS.get(loop)
+    if lock is None:
+        lock = _WRITE_LOCKS[loop] = asyncio.Lock()
+    return lock
 
 _ENV_NAME = {SOURCE_ENV_KEY: ENV_KEY, SOURCE_ENV_FILE: ENV_FILE}
 
@@ -90,7 +112,7 @@ _MESSAGES = {
 
 
 class LicenseIn(BaseModel):
-    token: str = Field(max_length=_MAX_BODY_CHARS)
+    token: str
 
 
 class LicenseSummaryOut(BaseModel):
@@ -184,6 +206,8 @@ async def put_license(body: LicenseIn, request: Request,
     app = request.app
     _refuse_if_env_managed(app)
     try:
+        if len(body.token) > _MAX_BODY_CHARS:
+            raise LicenseError("too large to be a licence")
         lic = verify(body.token)
     except LicenseError as exc:
         reason = str(exc)
@@ -193,11 +217,14 @@ async def put_license(body: LicenseIn, request: Request,
             detail=_MESSAGES.get(reason, f"Not a valid Celmis licence: {reason}."),
         ) from None
 
-    previous = runtime(app).license
     summary = lic.summary()
     summary.pop("edition", None)
-    await asyncio.to_thread(license_store.save_token, body.token, metadata=summary)
-    apply_license(app, Loaded(lic, SOURCE_UI))
+    async with _write_lock():
+        # Read under the lock, so the audit row's "previous" is what this
+        # write actually replaced.
+        previous = runtime(app).license
+        await asyncio.to_thread(license_store.save_token, body.token, metadata=summary)
+        apply_license(app, Loaded(lic, SOURCE_UI))
     logger.info("license_ui_saved customer=%s features=%s expires_at=%s actor=%s",
                 lic.customer, ",".join(sorted(lic.features)),
                 lic.expires_at.isoformat(), user.id)
@@ -213,12 +240,13 @@ async def delete_license(request: Request,
 
     app = request.app
     _refuse_if_env_managed(app)
-    previous = runtime(app).license
-    removed = await asyncio.to_thread(license_store.delete_token)
-    if not removed:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="No licence was entered in the UI.")
-    reload_license(app)
+    async with _write_lock():
+        previous = runtime(app).license
+        removed = await asyncio.to_thread(license_store.delete_token)
+        if not removed:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail="No licence was entered in the UI.")
+        reload_license(app)
     logger.info("license_ui_removed actor=%s", user.id)
     _audit("license.removed", request, user, lic=None, previous=previous)
     return _state(app)

@@ -2457,6 +2457,7 @@
   "edition.feature.sso": "Authentification unique (SSO)",
   "edition.feature.analytics": "Analyses",
   "edition.communityHint": "L'authentification unique et les analyses nécessitent une licence entreprise : définissez CELMIS_LICENSE_KEY ou CELMIS_LICENSE_FILE pour l'API et redémarrez-la.",
+  "edition.communityHintEnv": "L'authentification unique et les analyses nécessitent une licence entreprise : définissez CELMIS_LICENSE_KEY ou CELMIS_LICENSE_FILE pour l'API et redémarrez-la.",
   "edition.unknown": "Inconnu — l'API n'a pas répondu.",
   "ee.license.issued": "Émise le",
   "ee.license.sourceLabel": "Source",

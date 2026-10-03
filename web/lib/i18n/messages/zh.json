@@ -2457,6 +2457,7 @@
   "edition.feature.sso": "单点登录",
   "edition.feature.analytics": "分析",
   "edition.communityHint": "单点登录和分析需要企业版许可证：为 API 设置 CELMIS_LICENSE_KEY 或 CELMIS_LICENSE_FILE 并重启。",
+  "edition.communityHintEnv": "单点登录和分析需要企业版许可证：为 API 设置 CELMIS_LICENSE_KEY 或 CELMIS_LICENSE_FILE 并重启。",
   "edition.unknown": "未知 — API 没有响应。",
   "ee.license.issued": "签发日期",
   "ee.license.sourceLabel": "来源",

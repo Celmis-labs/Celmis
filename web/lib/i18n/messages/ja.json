@@ -2457,6 +2457,7 @@
   "edition.feature.sso": "シングルサインオン",
   "edition.feature.analytics": "分析",
   "edition.communityHint": "シングルサインオンと分析には Enterprise ライセンスが必要です。API に CELMIS_LICENSE_KEY または CELMIS_LICENSE_FILE を設定し、再起動してください。",
+  "edition.communityHintEnv": "シングルサインオンと分析には Enterprise ライセンスが必要です。API に CELMIS_LICENSE_KEY または CELMIS_LICENSE_FILE を設定し、再起動してください。",
   "edition.unknown": "不明 — API から応答がありません。",
   "ee.license.issued": "発行日",
   "ee.license.sourceLabel": "ソース",

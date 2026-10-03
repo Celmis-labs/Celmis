@@ -2457,6 +2457,7 @@
   "edition.feature.sso": "Tek oturum açma (SSO)",
   "edition.feature.analytics": "Analitik",
   "edition.communityHint": "Tek oturum açma ve analitik bir enterprise lisansı gerektirir: API için CELMIS_LICENSE_KEY veya CELMIS_LICENSE_FILE ayarlayın ve yeniden başlatın.",
+  "edition.communityHintEnv": "Tek oturum açma ve analitik bir enterprise lisansı gerektirir: API için CELMIS_LICENSE_KEY veya CELMIS_LICENSE_FILE ayarlayın ve yeniden başlatın.",
   "edition.unknown": "Bilinmiyor — API yanıt vermedi.",
   "ee.license.issued": "Düzenlenme",
   "ee.license.sourceLabel": "Kaynak",

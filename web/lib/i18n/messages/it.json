@@ -2457,6 +2457,7 @@
   "edition.feature.sso": "Single sign-on",
   "edition.feature.analytics": "Analisi",
   "edition.communityHint": "Single sign-on e analisi richiedono una licenza enterprise: imposta CELMIS_LICENSE_KEY o CELMIS_LICENSE_FILE sull'API e riavviala.",
+  "edition.communityHintEnv": "Single sign-on e analisi richiedono una licenza enterprise: imposta CELMIS_LICENSE_KEY o CELMIS_LICENSE_FILE sull'API e riavviala.",
   "edition.unknown": "Sconosciuto — l'API non ha risposto.",
   "ee.license.issued": "Emessa",
   "ee.license.sourceLabel": "Origine",

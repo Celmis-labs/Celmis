@@ -2457,6 +2457,7 @@
   "edition.feature.sso": "Jednotné prihlásenie (SSO)",
   "edition.feature.analytics": "Analytika",
   "edition.communityHint": "Jednotné prihlásenie a analytika vyžadujú enterprise licenciu: nastavte CELMIS_LICENSE_KEY alebo CELMIS_LICENSE_FILE pre API a reštartujte ho.",
+  "edition.communityHintEnv": "Jednotné prihlásenie a analytika vyžadujú enterprise licenciu: nastavte CELMIS_LICENSE_KEY alebo CELMIS_LICENSE_FILE pre API a reštartujte ho.",
   "edition.unknown": "Neznáme — API neodpovedalo.",
   "ee.license.issued": "Vydané",
   "ee.license.sourceLabel": "Zdroj",

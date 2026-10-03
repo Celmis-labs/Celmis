@@ -2457,6 +2457,7 @@
   "edition.feature.sso": "Autentificare unică (SSO)",
   "edition.feature.analytics": "Analize",
   "edition.communityHint": "Autentificarea unică și analizele necesită o licență enterprise: setați CELMIS_LICENSE_KEY sau CELMIS_LICENSE_FILE pentru API și reporniți-l.",
+  "edition.communityHintEnv": "Autentificarea unică și analizele necesită o licență enterprise: setați CELMIS_LICENSE_KEY sau CELMIS_LICENSE_FILE pentru API și reporniți-l.",
   "edition.unknown": "Necunoscut — API-ul nu a răspuns.",
   "ee.license.issued": "Emisă",
   "ee.license.sourceLabel": "Sursă",

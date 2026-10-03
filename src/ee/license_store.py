@@ -16,7 +16,7 @@ did not. It is still kept out of logs and API responses, because it names a
 customer. Only :func:`read_token` ever returns it, and only to the verifier.
 
 The environment outranks this slot (``src/ee/license.py``,
-:func:`~src.ee.license.resolve_token`): an operator who sets
+:func:`~src.ee.license.load`): an operator who sets
 ``CELMIS_LICENSE_KEY`` or ``CELMIS_LICENSE_FILE`` manages the licence, and
 the UI refuses to save over it rather than store something that would be
 silently shadowed.
@@ -41,16 +41,24 @@ def get_store() -> Any:
     return get_credential_store()
 
 
+class StoreUnreadable(Exception):
+    """The store could not be read (a changed master key, a locked file, a
+    database not up yet). Carries the exception type only — never a value."""
+
+
 def read_token() -> str | None:
-    """The stored token, or None. Never raises: an unreadable store (a
-    changed master key, a locked file) is the community edition, logged."""
+    """The stored token, or None when nothing is stored.
+
+    Raises :class:`StoreUnreadable` when the store cannot be read, so the
+    caller can tell "no licence was entered" from "one may be there but could
+    not be read" — the second is reported on /admin/health, not shown as a
+    plain community installation."""
     try:
         stored = get_store().load(PROVIDER, user_id=SLOT, account_label=LABEL,
                                   update_last_used=False)
-    except Exception as exc:  # noqa: BLE001 — a licence problem never stops the process
-        logger.warning("license_store_unreadable err=%s — ignoring the stored "
-                       "licence", type(exc).__name__)
-        return None
+    except Exception as exc:  # noqa: BLE001 — any store failure means the same thing here
+        logger.warning("license_store_unreadable err=%s", type(exc).__name__)
+        raise StoreUnreadable(type(exc).__name__) from None
     if stored is None:
         return None
     return (stored.secret or "").strip() or None
@@ -67,5 +75,5 @@ def delete_token() -> bool:
     return bool(get_store().delete(PROVIDER, user_id=SLOT, account_label=LABEL))
 
 
-__all__ = ["LABEL", "PROVIDER", "SLOT", "delete_token", "get_store", "read_token",
+__all__ = ["LABEL", "PROVIDER", "SLOT", "StoreUnreadable", "delete_token", "get_store", "read_token",
            "save_token"]
