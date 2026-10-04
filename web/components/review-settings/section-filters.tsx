@@ -9,6 +9,8 @@ import { globError, globLines } from "@/lib/ignore-globs";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
+import { Slider } from "@/components/ui/slider";
+import { SEVERITY_TEXT, SeverityIcon } from "@/components/ui/status";
 import { Textarea } from "@/components/ui/textarea";
 import { useSettings } from "@/components/review-settings/context";
 import {
@@ -75,17 +77,15 @@ function SeverityRow() {
       describeInherited={(v) => label(String(v || "info"))}
       control={(
         <div className="max-w-xl space-y-2">
-          <input
+          <Slider
             id={id}
-            type="range"
             min={0}
             max={SEVERITY_STEPS.length - 1}
             step={1}
             value={index}
             disabled={!canEdit}
             aria-valuetext={label(SEVERITY_STEPS[index])}
-            onChange={(e) => setOwn("comment_min_severity", SEVERITY_STEPS[Number(e.target.value)])}
-            className="block w-full cursor-pointer accent-[var(--color-brand)] disabled:cursor-not-allowed disabled:opacity-50"
+            onValueChange={(v) => setOwn("comment_min_severity", SEVERITY_STEPS[v])}
           />
           <div className="grid grid-cols-4 text-xs" aria-hidden>
             {SEVERITY_STEPS.map((step, i) => (
@@ -105,7 +105,10 @@ function SeverityRow() {
                       : "text-[var(--color-muted-foreground)] line-through decoration-[var(--color-muted-foreground)]/50",
                 )}
               >
-                {label(step)}
+                <span className="inline-flex items-center gap-1">
+                  <SeverityIcon severity={step} className={cn(i >= index && SEVERITY_TEXT[step])} />
+                  {label(step)}
+                </span>
               </button>
             ))}
           </div>

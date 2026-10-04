@@ -128,7 +128,7 @@ function TemplateRow({
                   disabled={!canEdit}
                   onClick={() => insert(p)}
                   aria-label={t("reviewSettings.messages.insert", { name: p })}
-                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-secondary)] px-1.5 py-0.5 font-mono text-[11px] transition-colors hover:border-[var(--color-brand)] hover:text-[var(--color-brand)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] disabled:pointer-events-none disabled:opacity-50"
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-secondary)] px-1.5 py-0.5 font-mono text-[11px] transition-colors hover:border-[var(--color-primary)] hover:text-[var(--color-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] disabled:pointer-events-none disabled:opacity-50"
                 >
                   {`{${p}}`}
                 </button>

@@ -50,7 +50,7 @@ import { SectionTabs } from "@/components/section-tabs";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Skeleton, SkeletonRows } from "@/components/ui/skeleton";
 import {
   SettingsContext, type AgentLLMState, type SettingsContextValue,
 } from "@/components/review-settings/context";
@@ -455,7 +455,8 @@ export function ReviewSettings() {
               <Button
                 type="button"
                 size="sm"
-                disabled={!canSave}
+                disabled={!canSave && !save.isPending}
+                loading={save.isPending}
                 aria-keyshortcuts="Control+S Meta+S"
                 onClick={() => save.mutate()}
               >
@@ -513,16 +514,8 @@ function SectionSkeleton() {
       {[0, 1].map((g) => (
         <div key={g} className="space-y-2">
           <Skeleton className="h-4 w-32" />
-          <div className="divide-y divide-[var(--color-border)] rounded-[var(--radius)] border border-[var(--color-border)]">
-            {[0, 1, 2].map((r) => (
-              <div key={r} className="flex items-center justify-between gap-4 px-4 py-4">
-                <div className="flex-1 space-y-2">
-                  <Skeleton className="h-4 w-40" />
-                  <Skeleton className="h-3 w-72 max-w-full" />
-                </div>
-                <Skeleton className="h-5 w-9 rounded-full" />
-              </div>
-            ))}
+          <div className="rounded-[var(--radius)] border border-[var(--color-border)] px-4">
+            <SkeletonRows rows={3} />
           </div>
         </div>
       ))}

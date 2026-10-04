@@ -79,7 +79,7 @@ export function RulesSection() {
             <button
               type="button"
               onClick={() => goTo("filters")}
-              className="font-medium text-[var(--color-brand)] underline-offset-4 hover:underline"
+              className="font-medium text-[var(--color-primary)] underline-offset-4 hover:underline"
             >
               {t("reviewSettings.filters.applyToRules")}
             </button>

@@ -26,6 +26,7 @@ import {
 } from "@/lib/review-settings-routes";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { Scope } from "@/components/review-settings/model";
@@ -92,7 +93,7 @@ export function ScopeNav({
               className={cn(
                 "group flex min-h-9 items-center gap-2 rounded-md px-2 py-1.5 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] lg:min-h-8",
                 current
-                  ? "bg-[var(--color-brand-muted)] font-medium text-[var(--color-brand)]"
+                  ? "bg-[var(--color-selected)] font-medium text-[var(--color-selected-foreground)]"
                   : "text-[var(--color-muted-foreground)] hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)]",
               )}
             >
@@ -100,7 +101,7 @@ export function ScopeNav({
               <span className="min-w-0 flex-1 truncate">{t(`reviewSettings.section.${s}`)}</span>
               {dirty > 0 && (
                 <span
-                  className="size-1.5 shrink-0 rounded-full bg-[var(--color-brand)]"
+                  className="size-1.5 shrink-0 rounded-full bg-[var(--color-primary)]"
                   title={t("reviewSettings.save.unsavedShort")}
                 >
                   <span className="sr-only">{t("reviewSettings.save.unsavedShort")}</span>
@@ -111,8 +112,8 @@ export function ScopeNav({
                   className={cn(
                     "min-w-5 rounded-full px-1.5 text-center text-[10px] font-semibold tabular-nums",
                     repo
-                      ? "bg-[var(--color-warning)]/20 text-[var(--color-warning)]"
-                      : "bg-[var(--color-brand-muted)] text-[var(--color-brand)]",
+                      ? "bg-[var(--color-attention-soft)] text-[var(--color-attention)]"
+                      : "bg-[var(--color-primary-soft)] text-[var(--color-primary-soft-foreground)]",
                   )}
                 >
                   <span aria-hidden>{count}</span>
@@ -139,10 +140,10 @@ export function ScopeNav({
           onClick={(e) => onNavigate(e, settingsHref({ section: REPO_ONLY_SECTIONS.includes(section) ? null : section }), isGlobal)}
           className={cn(
             "flex items-center gap-2 rounded-md px-2 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]",
-            isGlobal ? "bg-[var(--color-accent)] text-[var(--color-foreground)]" : "hover:bg-[var(--color-accent)]",
+            isGlobal ? "bg-[var(--color-selected)] text-[var(--color-selected-foreground)]" : "hover:bg-[var(--color-accent)]",
           )}
         >
-          <GlobeIcon className="h-4 w-4 shrink-0 text-[var(--color-brand)]" aria-hidden />
+          <GlobeIcon className="h-4 w-4 shrink-0 text-[var(--color-primary)]" aria-hidden />
           <span className="min-w-0 flex-1">
             <span className="block font-medium">{t("reviewSettings.scope.global")}</span>
             <span className="block text-xs text-[var(--color-muted-foreground)]">
@@ -150,7 +151,7 @@ export function ScopeNav({
             </span>
           </span>
           {(overview?.workspace.set_count ?? 0) > 0 && (
-            <span className="rounded-full bg-[var(--color-brand-muted)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--color-brand)]">
+            <span className="rounded-full bg-[var(--color-primary-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--color-primary)]">
               <span aria-hidden>{overview?.workspace.set_count}</span>
               <span className="sr-only">
                 {t("reviewSettings.nav.setCount", { count: overview?.workspace.set_count ?? 0 })}
@@ -182,11 +183,9 @@ export function ScopeNav({
         )}
         {withOverrides > 0 && total >= SEARCH_FROM && (
           <label className="flex cursor-pointer items-center gap-2 px-2 text-xs text-[var(--color-muted-foreground)]">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={onlyOverridden}
               onChange={(e) => setOnlyOverridden(e.target.checked)}
-              className="accent-[var(--color-brand)]"
             />
             {t("reviewSettings.nav.onlyOverridden", { count: withOverrides })}
           </label>
@@ -199,7 +198,7 @@ export function ScopeNav({
         {!loading && total === 0 && (
           <p className="px-2 text-xs text-[var(--color-muted-foreground)]">
             {t("reviewSettings.nav.noRepos")}{" "}
-            <Link href="/repositories" className="font-medium text-[var(--color-brand)] underline-offset-4 hover:underline">
+            <Link href="/repositories" className="font-medium text-[var(--color-primary)] underline-offset-4 hover:underline">
               {t("nav.repositories")}
             </Link>
           </p>
@@ -221,7 +220,7 @@ export function ScopeNav({
                 <div
                   className={cn(
                     "flex items-center gap-1 rounded-md pr-1 transition-colors",
-                    active ? "bg-[var(--color-accent)]" : "hover:bg-[var(--color-accent)]",
+                    active ? "bg-[var(--color-selected)] text-[var(--color-selected-foreground)]" : "hover:bg-[var(--color-accent)]",
                   )}
                 >
                   <button
@@ -259,7 +258,7 @@ export function ScopeNav({
                       </span>
                     )}
                     {count > 0 && (
-                      <span className="shrink-0 rounded-full bg-[var(--color-warning)]/20 px-1.5 text-[10px] font-semibold tabular-nums text-[var(--color-warning)]">
+                      <span className="shrink-0 rounded-full bg-[var(--color-attention-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--color-attention)]">
                         <span aria-hidden>{count}</span>
                         <span className="sr-only">{t("reviewSettings.nav.overriddenCount", { count })}</span>
                       </span>

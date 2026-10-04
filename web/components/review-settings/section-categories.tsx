@@ -25,6 +25,7 @@ import {
   AgentLLMRow, DEFAULT_AGENT_MAX_OUTPUT, agentDraftFrom, agentMaxOutLimit,
 } from "@/components/agent-llm-controls";
 import { Badge } from "@/components/ui/badge";
+import { OverriddenPill } from "@/components/ui/status";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { Switch } from "@/components/ui/switch";
@@ -128,7 +129,7 @@ export function CategoriesSection() {
             on
             withModel={llm.names.includes(agent)}
             extra={agent === "compliance" ? (
-              <Link href="/admin/compliance" className="text-xs font-medium text-[var(--color-brand)] underline-offset-4 hover:underline">
+              <Link href="/admin/compliance" className="text-xs font-medium text-[var(--color-primary)] underline-offset-4 hover:underline">
                 {t("reviewSettings.categories.complianceLink")}
               </Link>
             ) : undefined}
@@ -204,11 +205,11 @@ function AgentCard({
             )}
             {field && <OriginBadge field="verifier_enabled" />}
             {!field && !fixed && overridden && (
-              <Badge variant={scope.kind === "repo" ? "warning" : "brand"} className="text-[10px]">
-                {scope.kind === "repo"
+              <OverriddenPill
+                label={scope.kind === "repo"
                   ? t("reviewSettings.origin.overridden")
                   : t("reviewSettings.origin.workspaceSet")}
-              </Badge>
+              />
             )}
             {(field ? undefined : overridden) && onReset && canEdit && <ResetButton onClick={onReset} />}
             {field && <VerifierReset onReset={onReset} />}
@@ -292,7 +293,7 @@ function AgentModelSummary({ agent }: { agent: string }) {
       <span>{t("reviewSettings.agents.modelAndLimits")}</span>
       {model && <span className="font-mono text-[11px]">{model}</span>}
       {own && (
-        <Badge variant="warning" className="text-[9px]">{t("reviewSettings.agents.modelSet")}</Badge>
+        <OverriddenPill label={t("reviewSettings.agents.modelSet")} className="px-1.5 text-[10px]" />
       )}
       {changed && <span className="sr-only">{t("reviewSettings.save.unsavedShort")}</span>}
     </span>

@@ -16,6 +16,9 @@ import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
+import { OptionCard, OptionCardGroup } from "@/components/ui/option-card";
+import { SegmentedControl } from "@/components/ui/segmented-control";
+import { OverriddenPill } from "@/components/ui/status";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useSettings } from "@/components/review-settings/context";
@@ -91,7 +94,7 @@ export function OriginBadge({ field, set: forced }: { field?: InheritableKey; se
   const set = forced ?? (field ? isSet(draft, field, scope.kind) : false);
   if (scope.kind === "workspace") {
     return set ? (
-      <Badge variant="brand" className="text-[10px]">{t("reviewSettings.origin.workspaceSet")}</Badge>
+      <OverriddenPill label={t("reviewSettings.origin.workspaceSet")} />
     ) : (
       <Badge variant="outline" className="text-[10px] font-normal text-[var(--color-muted-foreground)]">
         {t("reviewSettings.origin.builtin")}
@@ -99,7 +102,7 @@ export function OriginBadge({ field, set: forced }: { field?: InheritableKey; se
     );
   }
   if (set) {
-    return <Badge variant="warning" className="text-[10px]">{t("reviewSettings.origin.overridden")}</Badge>;
+    return <OverriddenPill label={t("reviewSettings.origin.overridden")} />;
   }
   const from = field ? inh.sources[field] : "workspace";
   return (
@@ -244,7 +247,7 @@ export function BooleanRow({
  * arrow keys move between them and a screen reader says "3 of 3".
  */
 export function ChoiceCards({
-  name, value, options, onChange, disabled, columns = 3, labelledBy,
+  name, value, options, onChange, disabled, columns = 3, label,
 }: {
   name: string;
   value: string;
@@ -252,60 +255,29 @@ export function ChoiceCards({
   onChange: (v: string) => void;
   disabled?: boolean;
   columns?: 2 | 3;
-  labelledBy?: string;
+  label: string;
 }) {
   return (
-    <div
-      role="radiogroup"
-      aria-labelledby={labelledBy}
-      className={cn(
-        "grid gap-2",
-        columns === 3 ? "@lg:grid-cols-3" : "@md:grid-cols-2",
-      )}
-    >
-      {options.map((o) => {
-        const checked = o.value === value;
-        return (
-          <label
-            key={o.value}
-            className={cn(
-              "relative flex cursor-pointer flex-col gap-1 rounded-[var(--radius)] border p-3 text-left transition-[border-color,background-color,box-shadow] duration-150",
-              "has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--color-ring)]",
-              checked
-                ? "border-[var(--color-brand)] bg-[var(--color-brand-muted)]/60 shadow-[var(--shadow-xs)]"
-                : "border-[var(--color-border)] hover:border-[var(--color-muted-foreground)]/40 hover:bg-[var(--color-accent)]/50",
-              disabled && "cursor-not-allowed opacity-60",
-            )}
-          >
-            <input
-              type="radio"
-              name={name}
-              value={o.value}
-              checked={checked}
-              disabled={disabled}
-              onChange={() => onChange(o.value)}
-              className="sr-only"
-            />
-            <span className="flex items-center justify-between gap-2">
-              <span className="text-sm font-medium">{o.title}</span>
-              <span
-                aria-hidden
-                className={cn(
-                  "grid size-4 shrink-0 place-items-center rounded-full border",
-                  checked ? "border-[var(--color-brand)]" : "border-[var(--color-input)]",
-                )}
-              >
-                {checked && <span className="size-2 rounded-full bg-[var(--color-brand)]" />}
-              </span>
-            </span>
-            <span className="text-xs text-[var(--color-muted-foreground)]">{o.body}</span>
-            {o.badge && (
-              <span className="text-[10px] font-medium text-[var(--color-muted-foreground)]">{o.badge}</span>
-            )}
-          </label>
-        );
-      })}
-    </div>
+    <OptionCardGroup label={label} columns={columns}>
+      {options.map((o) => (
+        <OptionCard
+          key={o.value}
+          type="radio"
+          name={name}
+          value={o.value}
+          checked={o.value === value}
+          disabled={disabled}
+          onCheckedChange={() => onChange(o.value)}
+          title={o.title}
+          description={o.body}
+          meta={o.badge ? (
+            <Badge variant="outline" className="text-[10px] font-normal text-[var(--color-muted-foreground)]">
+              {o.badge}
+            </Badge>
+          ) : undefined}
+        />
+      ))}
+    </OptionCardGroup>
   );
 }
 
@@ -336,7 +308,7 @@ export function ChoiceRow({
           <ChoiceCards
             name={`${field}-${id}`}
             value={current}
-            labelledBy={id}
+            label={label}
             columns={columns}
             disabled={!canEdit || disabled}
             onChange={(v) => setOwn(field, v)}
@@ -395,32 +367,22 @@ export function MarkdownEditor({
   return (
     <div className="rounded-md border border-[var(--color-input)] focus-within:ring-2 focus-within:ring-[var(--color-ring)]">
       <div className="flex items-center justify-between gap-2 border-b border-[var(--color-border)] px-2 py-1">
-        <div role="tablist" aria-label={t("reviewSettings.editor.mode")} className="flex gap-1">
-          {(["write", "preview"] as const).map((m) => (
-            <button
-              key={m}
-              type="button"
-              role="tab"
-              aria-selected={mode === m}
-              aria-controls={`${id}-${m}`}
-              onClick={() => setMode(m)}
-              className={cn(
-                "rounded px-2 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]",
-                mode === m
-                  ? "bg-[var(--color-accent)] font-medium text-[var(--color-foreground)]"
-                  : "text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]",
-              )}
-            >
-              {t(`reviewSettings.editor.${m}`)}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          label={t("reviewSettings.editor.mode")}
+          semantics="tabs"
+          size="sm"
+          value={mode}
+          onValueChange={setMode}
+          segments={[
+            { value: "write", label: t("reviewSettings.editor.write") },
+            { value: "preview", label: t("reviewSettings.editor.preview") },
+          ]}
+        />
         <CharCount count={value.length} max={max} />
       </div>
       {mode === "write" ? (
         <Textarea
           id={id}
-          role="tabpanel"
           aria-describedby={describedBy}
           rows={rows}
           value={value}
@@ -431,7 +393,7 @@ export function MarkdownEditor({
           className="rounded-none border-0 font-mono text-xs leading-relaxed focus-visible:ring-0 focus-visible:ring-offset-0"
         />
       ) : (
-        <div id={`${id}-preview`} role="tabpanel" className="min-h-32 px-3 py-2">
+        <div id={`${id}-preview`} className="min-h-32 px-3 py-2">
           {value.trim() ? (
             <Markdown text={value} />
           ) : (

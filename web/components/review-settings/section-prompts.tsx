@@ -23,6 +23,7 @@ import { useT } from "@/lib/i18n";
 import { useToken } from "@/lib/use-token";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
+import { OverriddenPill } from "@/components/ui/status";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import {
@@ -133,7 +134,7 @@ function RepoAgentPrompt({ agent, ws }: { agent: string; ws?: AgentInfo }) {
         <div className="flex min-h-8 flex-wrap items-center gap-2">
           <label htmlFor={id} className="text-sm font-medium">{agentLabel(agent)}</label>
           {own ? (
-            <Badge variant="warning" className="text-[10px]">{t("reviewSettings.prompts.custom")}</Badge>
+            <OverriddenPill label={t("reviewSettings.prompts.custom")} />
           ) : (
             <Badge variant="outline" className="text-[10px] font-normal text-[var(--color-muted-foreground)]">
               {ws?.has_override
@@ -293,7 +294,7 @@ function WorkspaceAgentPrompt({ agent, repos }: { agent: AgentInfo; repos: Array
           {d.reset ? (
             <Badge variant="outline" className="text-[10px]">{t("reviewSettings.prompts.resetPending")}</Badge>
           ) : custom || changed ? (
-            <Badge variant="brand" className="text-[10px]">{t("reviewSettings.prompts.custom")}</Badge>
+            <OverriddenPill label={t("reviewSettings.prompts.custom")} />
           ) : (
             <Badge variant="outline" className="text-[10px] font-normal text-[var(--color-muted-foreground)]">
               {t("reviewSettings.prompts.default")}
@@ -357,7 +358,7 @@ function WorkspaceAgentPrompt({ agent, repos }: { agent: AgentInfo; repos: Array
           {repos.map((r) => (
             <li key={r.repo_slug}>
               <Link
-                className="font-mono text-[var(--color-brand)] underline-offset-4 hover:underline"
+                className="font-mono text-[var(--color-primary)] underline-offset-4 hover:underline"
                 href={settingsHref({ repo: r.repo_slug, section: "prompts", agent: agent.name })}
               >
                 {r.repo_slug}
