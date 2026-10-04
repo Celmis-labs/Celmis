@@ -627,21 +627,24 @@ def record_review_run(
     workspace_id: str,
     status: str,
     engine=None,
-) -> None:
+) -> bool | None:
     """After a run finished: upsert the PR row and this PR's issues.
 
     `status` is the run row's final status (complete | partial | skipped |
-    failed). Never raises.
+    failed). Never raises. True when written, False when the write failed,
+    None when there was nothing to write (no batch or no PR).
     """
     try:
         batch = getattr(result, "batch", None)
         pr = getattr(batch, "pull_request", None)
         if batch is None or pr is None or not getattr(pr, "number", None):
-            return
+            return None
         _record(batch, pr, run_id=run_id, workspace_id=workspace_id or "default",
                 status=status, engine=engine or _engine())
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("review_issues_sync_failed run=%s err=%s", run_id, exc)
+        return False
 
 
 def _reviewed_files(pr) -> set[str]:
@@ -818,20 +821,43 @@ def record_failed_review(
 ) -> None:
     """A run that raised before it had a batch still counts as a review of
     the PR, and as a failed one. Never raises."""
+    record_unreviewed_run(workspace_id=workspace_id, provider=provider, repo=repo,
+                          number=number, run_id=run_id, status="failed",
+                          engine=engine)
+
+
+def record_unreviewed_run(
+    *, workspace_id: str, provider: str, repo: str, number: int, run_id: str,
+    status: str, title: str | None = None, author: str | None = None,
+    url: str | None = None, head_ref: str | None = None,
+    base_ref: str | None = None, engine=None,
+) -> bool:
+    """A run that ended without a batch — failed, or skipped before the
+    pipeline started (auto-review off, a draft at the webhook) — still counts
+    as a review of the PR, so the pull-requests page can show it with its
+    reason. Moves no baseline and no issue. Never raises."""
     try:
         from sqlalchemy.orm import Session
-
 
         now = _now()
         with Session(engine or _engine()) as s:
             row = _pr_row(s, workspace_id, provider, repo, int(number))
+            if title:
+                row.title = str(title)[:500]
+            row.author = author or row.author
+            row.url = url or row.url
+            row.head_ref = head_ref or row.head_ref
+            row.base_ref = base_ref or row.base_ref
             row.reviews_count = int(row.reviews_count or 0) + 1
-            row.last_review_status = "failed"
+            row.last_review_status = status
             row.last_run_id = run_id
             row.updated_at = now
             s.commit()
+        return True
     except Exception as exc:  # noqa: BLE001
-        logger.warning("review_pr_failure_record_failed run=%s err=%s", run_id, exc)
+        logger.warning("review_pr_unreviewed_record_failed run=%s status=%s err=%s",
+                       run_id, status, exc)
+        return False
 
 
 def record_pr_state(

@@ -17,100 +17,22 @@ logger = logging.getLogger(__name__)
 
 
 # ─── review ──────────────────────────────────────────────────────────
-# payload: {provider, repo, pr_number, post_comments (bool), user_id?, workspace_id?}
+# payload: {provider, repo, pr_number, post_comments (bool), user_id?, workspace_id?,
+#           run_id?, source?, enqueued_at?}
 
 
 async def handle_review(job: dict[str, Any]) -> None:
-    p = job["payload"]
-    from src.review.orchestrator import ReviewOrchestrator
-    from src.review.providers import get_provider_for
-    # Resolve BOTH halves (git provider + LLM orchestrator) under the SAME
-    # tenant — otherwise comments post with one workspace's PAT while another
-    # workspace's LLM key is billed (the split-brain the critique flagged; note
-    # get_provider_for previously received no identity at all).
-    user_id = p.get("user_id", "default")
-    workspace_id = p.get("workspace_id", "default")
-    orch = ReviewOrchestrator()
+    """Run one queued review and record it, stages and all.
 
-    # A review that leaves no row is a review nobody can look at afterwards.
-    # This path — webhook and poller — posted its comments to the pull request
-    # and recorded nothing, so /api/reviews/history was empty on an install
-    # where auto review was configured, the findings were unreachable once the
-    # comments were read, and the cost appeared in no report.
-    import uuid as _uuid
+    The body is `src.review.dispatch.execute_review`, shared with the webhook
+    and poller inline fallbacks so the run row, the stages and the PR record
+    cannot drift between the queue and its fallbacks. Sync work, so it runs
+    in a thread and the event loop stays free.
+    """
+    from src.review.dispatch import execute_review
 
-    from src.api.review_runs import (
-        ReviewRun,
-        get_review_run_store,
-        record_completed_review,
-    )
-
-    run_id = str(_uuid.uuid4())
-    pr_ref = f"{p['provider']}:{p['repo']}#{p['pr_number']}"
-    store = get_review_run_store()
-    await asyncio.to_thread(store.insert, ReviewRun(
-        id=run_id, user_id=user_id, pr_ref=pr_ref, workspace_id=workspace_id,
-        # So the history can tell an automatic review from one somebody asked
-        # for — they answer different questions when something goes wrong.
-        status="running",
-    ))
-
-    provider = await asyncio.to_thread(
-        get_provider_for, p["provider"], user_id=user_id, workspace_id=workspace_id,
-    )
-    try:
-        result = await asyncio.to_thread(
-            orch.review, p["provider"], p["repo"], int(p["pr_number"]),
-            dry_run=not p.get("post_comments", True),
-            post_comments=p.get("post_comments", True),
-            provider=provider,
-            user_id=user_id,
-            workspace_id=workspace_id,
-        )
-    except Exception as exc:
-        # Recorded as failed rather than left "running" forever — a row stuck
-        # in that state is indistinguishable from a worker that died.
-        # "failed", the `ReviewRunStatus` word: this wrote "error", which no
-        # status bucket, badge or metric knows, so these runs vanished from
-        # every count of failures.
-        await asyncio.to_thread(
-            store.update, run_id, status="failed", finished=True,
-            summary=str(exc)[:500])
-        from src.review.issues import record_failed_review
-        await asyncio.to_thread(
-            record_failed_review, workspace_id=workspace_id,
-            provider=p["provider"], repo=p["repo"],
-            number=int(p["pr_number"]), run_id=run_id,
-        )
-        raise
-    finally:
-        await asyncio.to_thread(provider.close)
-
-    # Outside the try above on purpose: the review ran and (maybe) posted, so
-    # a failure to WRITE it down must not turn the run into a failed review —
-    # that overwrote the row to "failed", counted the PR's review twice and
-    # re-raised into a queue that may retry, i.e. post the comments again.
-    try:
-        await asyncio.to_thread(
-            record_completed_review, result, run_id=run_id, store=store,
-            # The deterministic drift facts, which only the UI writer stored.
-            drift_facts=getattr(orch, "_last_drift_facts", None),
-            workspace_id=workspace_id,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("review_run_record_failed run=%s", run_id)
-        try:
-            from src.api.review_runs import completion_status, post_failure
-
-            batch = getattr(result, "batch", None)
-            status = (completion_status(batch, post_failure(result))
-                      if batch is not None else "partial")
-            await asyncio.to_thread(
-                store.update, run_id, status=status, finished=True,
-                summary=f"Review finished; its record could not be written: {exc}"[:500],
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("review_run_record_fallback_failed run=%s", run_id)
+    await asyncio.to_thread(execute_review, job["payload"],
+                            attempt=job.get("attempts"))
 
 
 # ─── index_repo (incremental) ────────────────────────────────────────

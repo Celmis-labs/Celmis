@@ -1,6 +1,8 @@
 """Reviewed pull requests — what Celmis reviewed, and what became of them.
 
     GET /api/pull-requests — list for the active workspace
+    GET /api/pull-requests/{id}/runs — one PR's review runs, each with its
+        ordered stages (the Kodus-style timeline)
 
 Rows come from `review_pull_requests`, upserted after every review run and on
 the provider's close/merge webhook (src/review/issues.py). Finding counts are
@@ -9,18 +11,23 @@ the PR's tracked issues, by severity.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import current_workspace_id, get_current_user
+from src.api.schemas import ReviewRunOut
 from src.db.models import ReviewIssue, ReviewPullRequest
 from src.db.session import get_async_session
 from src.users import User
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/pull-requests", tags=["pull-requests"])
 
@@ -40,6 +47,11 @@ class PullRequestOut(BaseModel):
     head_sha: str | None
     #: complete | partial | skipped | failed — the last review's outcome
     last_review_status: str | None
+    #: Why the last review ended the way it did — "Skipped — Branch mismatch:
+    #: target branch 'master' does not match configured patterns ['main']".
+    #: Read from the run store; null when the run predates stages and its
+    #: outcome needs no explanation, or the run row is gone.
+    last_review_reason: str | None = None
     last_run_id: str | None
     reviews_count: int
     issues_total: int = 0
@@ -133,6 +145,17 @@ async def list_pull_requests(
         )).all() if r
     })
 
+    reasons: dict[str, str | None] = {}
+    run_ids = [r.last_run_id for r in rows if r.last_run_id]
+    if run_ids:
+        try:
+            from src.api.review_runs import get_review_run_store
+
+            runs = await asyncio.to_thread(get_review_run_store().get_many, run_ids)
+            reasons = {rid: run.status_reason for rid, run in runs.items()}
+        except Exception as exc:  # noqa: BLE001 — the list outranks the reason
+            logger.warning("pr_list_reasons_unreadable err=%s", type(exc).__name__)
+
     items = []
     for r in rows:
         key = (r.provider, r.repo, r.number)
@@ -142,6 +165,7 @@ async def list_pull_requests(
             number=r.number, title=r.title, author=r.author, url=r.url,
             head_ref=r.head_ref, base_ref=r.base_ref, state=r.state,
             head_sha=r.head_sha, last_review_status=r.last_review_status,
+            last_review_reason=reasons.get(r.last_run_id or ""),
             last_run_id=r.last_run_id, reviews_count=r.reviews_count,
             issues_total=sum(sev.values()), issues_open=open_counts.get(key, 0),
             by_severity={s: sev.get(s, 0)
@@ -150,3 +174,41 @@ async def list_pull_requests(
         ))
     return PullRequestList(items=items, total=total, limit=limit, offset=offset,
                            repos=repos)
+
+
+class PullRequestRuns(BaseModel):
+    pr_id: str
+    #: Newest first, each with `stages`.
+    items: list[ReviewRunOut]
+
+
+@router.get("/{pr_id}/runs", response_model=PullRequestRuns)
+async def pull_request_runs(
+    pr_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(get_current_user),
+    ws: str = Depends(current_workspace_id),
+) -> PullRequestRuns:
+    """Every recorded review of one PR, newest first, with its stages.
+
+    Scoped like the list: a PR of another workspace is a 404, never a 403,
+    so an id cannot be probed for existence.
+    """
+    row = (await session.execute(
+        select(ReviewPullRequest).where(
+            ReviewPullRequest.id == pr_id, ReviewPullRequest.workspace_id == ws)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Pull request not found")
+    from src.api.review_runs import get_review_run_store
+    from src.api.routers.reviews import _run_to_out
+
+    runs = await asyncio.to_thread(
+        get_review_run_store().list_for_pr, ws, row.provider, row.repo,
+        int(row.number), user_id=user.id, limit=limit,
+    )
+    return PullRequestRuns(
+        pr_id=pr_id,
+        items=[_run_to_out(r, with_adjustments=False, with_stages=True) for r in runs],
+    )

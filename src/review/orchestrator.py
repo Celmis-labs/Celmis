@@ -41,8 +41,107 @@ from src.review.settings import (
     ReviewSettings,
     get_review_settings,
 )
+from src.review.stages import StageRecorder
 
 logger = logging.getLogger(__name__)
+
+
+# ─── Stage sentences ──────────────────────────────────────────────────
+#
+# Every reason on a stage is written here, from fields Celmis owns — never
+# from an exception's message or a provider's response body, which can quote
+# URLs and credentials. `src.review.stages.scrub` is the second line.
+
+
+def _quoted_list(items) -> str:
+    """['main', 'develop'] — the exact configured values, bounded."""
+    vals = [str(x) for x in list(items or [])[:20]]
+    more = len(list(items or [])) - len(vals)
+    body = ", ".join(f"'{v}'" for v in vals)
+    return f"[{body}{', …' if more > 0 else ''}]"
+
+
+def _provider_label(name: str) -> str:
+    return {"github": "GitHub", "gitlab": "GitLab",
+            "bitbucket": "Bitbucket"}.get(str(name or "").lower(), str(name or "provider"))
+
+
+def _fetched_sentence(pr) -> str:
+    files = len(getattr(pr, "changed_files", None) or [])
+    base = getattr(pr, "base_ref", "") or "?"
+    head = getattr(pr, "head_ref", "") or "?"
+    return (f"#{getattr(pr, 'number', '?')} fetched: {base} ← {head}, "
+            f"{files} changed file{'s' if files != 1 else ''}.")
+
+
+def _settings_sentence(policy) -> str:
+    if policy is None:
+        return "No repository policy or workspace defaults; built-in settings apply."
+    parts = []
+    if isinstance(policy, dict) and policy.get("workspace_id"):
+        parts.append("repository policy merged over workspace defaults")
+    else:
+        parts.append("workspace review defaults")
+    disabled = list((policy or {}).get("disabled_agents") or [])
+    if disabled:
+        parts.append(f"agents off: {', '.join(str(a) for a in disabled[:10])}")
+    rules = list((policy or {}).get("folder_rules") or [])
+    if rules:
+        parts.append(f"{len(rules)} custom rule{'s' if len(rules) != 1 else ''}")
+    return "Settings resolved: " + "; ".join(parts) + "."
+
+
+def _context_sentence(context) -> str:
+    callers = int(getattr(context, "cross_repo_callers_count", 0) or 0)
+    note = getattr(context, "graph_note", None)
+    if note is not None:
+        why = getattr(note, "reason", "") or "the code graph is unavailable"
+        return f"Reviewed without full graph context: {why}"
+    return (f"Code graph context built; {callers} cross-repo "
+            f"caller{'s' if callers != 1 else ''} of the changed code.")
+
+
+def _record_agent_stage(stages: StageRecorder, r, *, dispatched_at: float,
+                        finished_at: float | None) -> None:
+    """One agent's stage: model, tokens, findings, how long it took."""
+    from datetime import UTC, datetime
+
+    elapsed = float(getattr(r, "elapsed_seconds", 0.0) or 0.0)
+    end = finished_at or time.time()
+    start = max(dispatched_at, end - elapsed) if elapsed else dispatched_at
+    duration_ms = int(max(0.0, (elapsed if elapsed else end - start)) * 1000)
+    model = getattr(r, "model_used", None) or None
+    tin = int(getattr(r, "tokens_in", 0) or 0)
+    tout = int(getattr(r, "tokens_out", 0) or 0)
+    n = len(getattr(r, "findings", None) or [])
+    meta = {"model": model, "tokens_in": tin, "tokens_out": tout, "findings": n}
+    if getattr(r, "error", None):
+        from src.llm.errors import curated_reason
+
+        why = curated_reason(getattr(r, "error_code", None)) or (
+            "the agent did not produce an answer")
+        reason = f"Failed: {why}" + (f" (model {model})" if model else "")
+        status = "failed"
+    else:
+        reason = (f"{n} finding{'s' if n != 1 else ''}"
+                  + (f" · model {model}" if model else " · no model call")
+                  + (f" · {tin:,} tokens in / {tout:,} out" if (tin or tout) else ""))
+        status = "success"
+    stages.add(f"agent:{r.agent}", f"Agent: {r.agent}", status, reason,
+               started_at=datetime.fromtimestamp(start, UTC).isoformat(),
+               duration_ms=duration_ms, meta=meta)
+
+
+def _publish_sentence(provider_name: str, batch, response, *, dry_run: bool) -> str:
+    label = _provider_label(provider_name)
+    if dry_run:
+        return f"Dry run: nothing was posted to {label}."
+    n = len(getattr(batch, "findings", None) or [])
+    tail = ""
+    if isinstance(response, dict) and response.get("summary_error"):
+        tail = " The summary comment was not delivered."
+    return (f"Review posted to {label}: summary and up to {n} inline "
+            f"comment{'s' if n != 1 else ''}.{tail}")
 
 
 @dataclass
@@ -253,7 +352,9 @@ class _PRSummaryJob:
                            type(exc).__name__, str(exc)[:200])
             return None
 
-    def apply_to(self, batch: ReviewBatch) -> None:
+    def apply_to(self, batch: ReviewBatch) -> tuple[bool, str]:
+        """Join the summary call. Returns (ok, a sentence for the run's
+        "Generate summary" stage)."""
         from src.review.pr_summary import SUMMARY_TIMEOUT_SECONDS
 
         try:
@@ -261,7 +362,8 @@ class _PRSummaryJob:
         except Exception as exc:  # noqa: BLE001 — includes the join's own timeout
             logger.warning("review_summary_unavailable pr=%s err_type=%s",
                            batch.pull_request.number, type(exc).__name__)
-            return
+            return False, (f"The overview call did not answer ({type(exc).__name__}); "
+                           "the summary was posted without it.")
         finally:
             self._executor.shutdown(wait=False)
         batch.pr_overview = res.overview
@@ -276,6 +378,10 @@ class _PRSummaryJob:
         if res.error:
             logger.info("review_summary_degraded pr=%s reason=%s",
                         batch.pull_request.number, res.error)
+            return False, ("The overview was degraded; the summary was posted "
+                           "without the parts that failed.")
+        return True, (f"Overview and walkthrough of {len(batch.walkthrough)} "
+                      f"file{'s' if len(batch.walkthrough) != 1 else ''} generated.")
 
 
 class ReviewOrchestrator:
@@ -301,6 +407,8 @@ class ReviewOrchestrator:
         #: user only through a model's summary is the one thing this product
         #: should never do with it.
         self._last_drift_facts: dict | None = None
+        self._agent_finished_at: dict[str, float] = {}
+        self.last_stages: StageRecorder | None = None
 
     @staticmethod
     def _default_agents() -> list[ReviewAgent]:
@@ -332,6 +440,7 @@ class ReviewOrchestrator:
         provider: PullRequestProvider | None = None,
         user_id: str = "default",
         workspace_id: str = "default",
+        stages: StageRecorder | None = None,
     ) -> ReviewRunResult:
         """Run full review pipeline.
 
@@ -342,8 +451,16 @@ class ReviewOrchestrator:
             dry_run: simulate without actual comment posting (still computes findings)
             post_comments: whether to post comments (false → just return batch)
             provider: optional pre-built provider (for tests)
+            stages: the run's stage recorder (src/review/stages.py); the
+                caller owns it and adds "record" and "finished" after this
+                returns. None records into a private one (`last_stages`).
         """
         t0 = time.time()
+        if stages is None:
+            stages = StageRecorder()
+        #: The stages of the last review, for a caller that did not pass a
+        #: recorder in.
+        self.last_stages = stages
         # Parallelism gauge for the resource sampler — how many reviews run
         # at this moment is exactly what capacity docs need.
         from src.ops.telemetry import review_finished, review_started
@@ -359,10 +476,15 @@ class ReviewOrchestrator:
                 provider_name, repo, pr_number, dry_run=dry_run,
                 post_comments=post_comments, provider=provider,
                 user_id=user_id, workspace_id=workspace_id, t0=t0,
-                lifecycle=lifecycle,
+                lifecycle=lifecycle, stages=stages,
             )
         except Exception as exc:
-            lifecycle.failed(_safe_failure_reason(exc))
+            reason = _safe_failure_reason(exc)
+            # The stage that was under way when it raised is the one that
+            # failed — with the same curated sentence the PR gets, never the
+            # exception's own text.
+            stages.fail_running(reason[:1].upper() + reason[1:])
+            lifecycle.failed(reason)
             raise
         finally:
             review_finished()
@@ -372,27 +494,37 @@ class ReviewOrchestrator:
         dry_run: bool, post_comments: bool, provider,
         user_id: str, workspace_id: str, t0: float,
         lifecycle: _ReviewLifecycle | None = None,
+        stages: StageRecorder | None = None,
     ) -> ReviewRunResult:
         if lifecycle is None:
             lifecycle = _ReviewLifecycle(active=False)
+        if stages is None:
+            stages = StageRecorder()
         if provider is None:
             provider = get_provider_for(
                 provider_name, user_id=user_id, workspace_id=workspace_id,
             )
 
+        stages.begin("fetch_pr", "Fetch pull request")
         try:
             pr = provider.fetch_pull_request(repo, pr_number)
         except PullRequestProviderError:
             raise
         finally:
             pass  # provider closed by caller
+        stages.end("fetch_pr", "success", _fetched_sentence(pr), meta={
+            "files": len(getattr(pr, "changed_files", None) or []),
+            "head_sha": (getattr(pr, "head_sha", "") or "")[:12] or None,
+        })
 
         lifecycle.bind(provider, pr)
 
         # ── Load per-repo policy (Stage 10), with the workspace review
         # defaults filled in wherever the repository says nothing:
         # repo (non-null) > workspace > install > built-in.
+        stages.begin("settings", "Resolve settings")
         policy = self._resolved_policy(pr.local_slug, workspace_id)
+        stages.end("settings", "success", _settings_sentence(policy))
 
         batch = ReviewBatch(pull_request=pr)
         batch.comment_min_severity = (policy or {}).get("comment_min_severity")
@@ -413,13 +545,26 @@ class ReviewOrchestrator:
         # left whole because the run row stores it for the diff view.
         ignore_globs = list((policy or {}).get("ignore_globs") or [])
         review_diff = pr.raw_diff or ""
+        stages.begin("ignore_globs", "Apply ignore globs")
+        skipped_before = len(pr.skipped_files or [])
         if ignore_globs:
             review_diff = self._apply_ignore_globs(pr, ignore_globs)
         # Copied for every run, not only a filtered one: the summary's
         # "Skipped: N files" line reads the batch, and nothing filled it.
         batch.skipped_files = list(pr.skipped_files)
+        if ignore_globs:
+            dropped = len(pr.skipped_files or []) - skipped_before
+            stages.end("ignore_globs", "success",
+                       f"{dropped} file{'s' if dropped != 1 else ''} excluded by "
+                       f"{len(ignore_globs)} ignore glob"
+                       f"{'s' if len(ignore_globs) != 1 else ''}: "
+                       f"{_quoted_list(ignore_globs)}.")
+        else:
+            stages.end("ignore_globs", "skipped",
+                       "No ignore globs configured — every changed file is in scope.")
 
         # Hard skip — policy disabled for this repo
+        stages.begin("gate_enabled", "Check review is enabled")
         if policy is not None and not policy["enabled"]:
             logger.info("review_skipped reason=policy_disabled pr=%d repo=%s",
                         pr.number, pr.repo_slug)
@@ -429,9 +574,16 @@ class ReviewOrchestrator:
             )
             batch.verdict = ReviewVerdict.SKIPPED
             batch.mark_complete()
+            stages.end("gate_enabled", "skipped",
+                       "Review disabled: the AI reviewer is switched off for this "
+                       "repository's review policy.", ends_run=True)
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
+        stages.end("gate_enabled", "success",
+                   "The AI reviewer is enabled for this repository.")
 
         # Hard skip — base branch not in target list
+        stages.begin("gate_target_branch", "Validate target branch")
+        targets = list((policy or {}).get("target_branches") or [])
         if (policy is not None
                 and policy["target_branches"]
                 and pr.base_ref
@@ -446,7 +598,19 @@ class ReviewOrchestrator:
             )
             batch.verdict = ReviewVerdict.SKIPPED
             batch.mark_complete()
+            stages.end("gate_target_branch", "skipped",
+                       f"Branch mismatch: target branch '{pr.base_ref}' does not "
+                       f"match configured patterns {_quoted_list(targets)}.",
+                       ends_run=True, meta={"target_branch": pr.base_ref})
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
+        if targets:
+            stages.end("gate_target_branch", "success",
+                       f"Target branch '{pr.base_ref or '?'}' matches configured "
+                       f"patterns {_quoted_list(targets)}.")
+        else:
+            stages.end("gate_target_branch", "success",
+                       f"No target-branch restriction configured; target branch "
+                       f"'{pr.base_ref or '?'}' is reviewed.")
 
         # ── Build agent context (passes custom_rules from policy + matching folder_rules) ──
         # The agents get the PR with the FILTERED diff text. Compliance and
@@ -460,9 +624,11 @@ class ReviewOrchestrator:
         if ignore_globs:
             import dataclasses
             agent_pr = dataclasses.replace(pr, raw_diff=review_diff)
+        stages.begin("context", "Repository context")
         context = self._build_context(
             agent_pr, policy=policy, user_id=user_id, workspace_id=workspace_id,
         )
+        stages.end("context", "success", _context_sentence(context))
 
         batch.cross_repo_callers = context.cross_repo_callers_count
         # What the graph could not say rides the same list as a dropped
@@ -474,13 +640,18 @@ class ReviewOrchestrator:
             batch.parameter_adjustments.append(context.graph_note)
 
         # ── Skip empty/draft/binary PRs ──
+        stages.begin("gate_draft", "Check draft status")
         if pr.is_draft:
             logger.info("review_skipped reason=draft pr=%d", pr.number)
             batch.summary = "PR is draft — review skipped."
             batch.verdict = ReviewVerdict.SKIPPED
             batch.mark_complete()
+            stages.end("gate_draft", "skipped",
+                       "Draft: the pull request is a draft; it is reviewed once "
+                       "it is marked ready.", ends_run=True)
             lifecycle.skipped("the pull request is a draft")
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
+        stages.end("gate_draft", "success", "The pull request is not a draft.")
 
         # A diff too large to review, refused as a refusal rather than
         # silently truncated. `max_diff_size_bytes` said "skip review if
@@ -496,7 +667,12 @@ class ReviewOrchestrator:
         # under its real size and slip past a cap set for the transport that
         # actually carries it.
         raw_len = len(review_diff.encode("utf-8"))
+        stages.begin("gate_size", "Check diff size")
         if cap and raw_len > cap:
+            stages.end("gate_size", "skipped",
+                       f"Diff too large: {raw_len:,} bytes, over the {cap:,}-byte "
+                       f"limit (REVIEW_MAX_DIFF_SIZE_BYTES).", ends_run=True,
+                       meta={"bytes": raw_len, "limit": cap})
             reason = (
                 f"Diff is {raw_len:,} bytes, over the {cap:,}-byte limit for a "
                 f"single review (REVIEW_MAX_DIFF_SIZE_BYTES). This pull request "
@@ -513,7 +689,12 @@ class ReviewOrchestrator:
                 f"REVIEW_MAX_DIFF_SIZE_BYTES"
             )
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
+        stages.end("gate_size", "success",
+                   f"Diff is {raw_len:,} bytes"
+                   + (f" (limit {cap:,})." if cap else " (no size limit)."),
+                   meta={"bytes": raw_len})
 
+        stages.begin("gate_hunks", "Check reviewable changes")
         if not pr.hunks:
             if not pr.raw_diff or not pr.raw_diff.strip():
                 reason = "PR has no diff content (empty change-set)."
@@ -550,8 +731,16 @@ class ReviewOrchestrator:
                 )
             else:
                 short = "the diff could not be parsed"
+            stages.end("gate_hunks", "skipped",
+                       "No reviewable changes: " + short + ".", ends_run=True)
             lifecycle.skipped(short)
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
+        hunk_files = len({h.file_path for h in pr.hunks})
+        stages.end("gate_hunks", "success",
+                   f"{len(pr.hunks)} hunk{'s' if len(pr.hunks) != 1 else ''} in "
+                   f"{hunk_files} file{'s' if hunk_files != 1 else ''} to review"
+                   + (f"; {len(pr.skipped_files)} skipped."
+                      if pr.skipped_files else "."))
 
         # ── Engine selection (workspace setting): the platform around the
         # review (policy gates, posting, persistence, verdict) is identical;
@@ -589,11 +778,23 @@ class ReviewOrchestrator:
         # comment will actually be posted — a dry run has no reader for it.
         summary_job = None
         if batch.rich_summary and post_comments and not dry_run:
+            stages.begin("summary", "Generate summary")
             summary_job = _PRSummaryJob.start(
                 agent_pr, context,
                 language=_policy_value(policy, "review_language", None),
                 instructions=_policy_value(policy, "summary_instructions", None),
             )
+            if summary_job is None:
+                stages.end("summary", "skipped",
+                           "No model client is configured for the overview call.")
+        elif not batch.rich_summary:
+            stages.add("summary", "Generate summary", "skipped",
+                       "The repository uses the compact summary; no overview call.",
+                       duration_ms=0)
+        else:
+            stages.add("summary", "Generate summary", "skipped",
+                       "Nothing will be posted on this run (dry run or posting "
+                       "off), so no overview was generated.", duration_ms=0)
 
         if engine == "claude_code":
             # DRIFT REACHES THIS ENGINE TOO, and it did not.
@@ -617,6 +818,7 @@ class ReviewOrchestrator:
             if ignore_globs:
                 import dataclasses
                 engine_pr = dataclasses.replace(pr, raw_diff=review_diff)
+            stages.begin("agent:claude_code", "Agent: claude_code")
             cr = run_claude_review(
                 engine_pr, user_id=user_id, workspace_id=workspace_id,
                 # One reviewer plays every agent, so it gets the rules
@@ -640,6 +842,9 @@ class ReviewOrchestrator:
                 # would replace with less.
                 batch.agents_failed.append("claude_code")
                 batch.summary = f"⚠ Claude Code review failed: {cr.error}"
+                stages.end("agent:claude_code", "failed",
+                           "The Claude Code review did not complete "
+                           f"(after {int(getattr(cr, 'turns', 0) or 0)} turns).")
             else:
                 # Sorted worst-first like the agent path's prefilter output,
                 # so the providers' inline cap never cuts a critical for a nit.
@@ -647,6 +852,12 @@ class ReviewOrchestrator:
                     _sort_by_severity(list(cr.findings)), ignore_globs)
                 batch.summary = cr.summary
                 batch.agents_run.append("claude_code")
+                stages.end("agent:claude_code", "success",
+                           f"{len(batch.findings)} finding"
+                           f"{'s' if len(batch.findings) != 1 else ''} in "
+                           f"{int(getattr(cr, 'turns', 0) or 0)} turns.",
+                           meta={"findings": len(batch.findings),
+                                 "turns": int(getattr(cr, "turns", 0) or 0)})
             # Outside the branch on purpose: `run_claude_review` reports the
             # turns it had already paid for when it gives up mid-session, and
             # assigning the cost only in the success arm threw exactly that
@@ -672,7 +883,7 @@ class ReviewOrchestrator:
                 batch, pr, provider, provider_name,
                 dry_run=dry_run, post_comments=post_comments,
                 user_id=user_id, workspace_id=workspace_id, t0=t0,
-                lifecycle=lifecycle, summary_job=summary_job,
+                lifecycle=lifecycle, summary_job=summary_job, stages=stages,
             )
 
         # ── Run agents in parallel (minus the ones the policy switched off;
@@ -693,9 +904,19 @@ class ReviewOrchestrator:
                 "restructure (architect→contract, quality/tests→defect) and "
                 "old names are not mapped onto their successors on purpose",
                 sorted(unknown), sorted(roster))
+        dispatched_at = time.time()
         agent_results = self._run_agents_parallel(
             context, disabled_agents=disabled_agents,
         )
+        for a in self.agents:
+            if a.name in disabled_agents:
+                stages.add(f"agent:{a.name}", f"Agent: {a.name}", "skipped",
+                           "Switched off by the repository policy.", duration_ms=0)
+        for r in agent_results:
+            _record_agent_stage(
+                stages, r, dispatched_at=dispatched_at,
+                finished_at=getattr(self, "_agent_finished_at", {}).get(r.agent),
+            )
 
         # Aggregate findings + Stage 11 cost accounting.
         # NB: previously silently `continue`d on error, causing critical-agent
@@ -817,6 +1038,7 @@ class ReviewOrchestrator:
         # the check has to live here. When it is off the run reports
         # "verifier" among the skipped names, so a review with no veto is
         # never mistaken for one that was vetted and found everything clean.
+        stages.begin("verifier", "Verifier")
         pre = self.verifier.prefilter(
             all_findings,
             suppressed_rules=self._suppressed_rules(policy, self.settings),
@@ -836,6 +1058,11 @@ class ReviewOrchestrator:
                 pre.dropped_dedup, pre.dropped_near_duplicate,
                 pre.dropped_low_confidence,
             )
+            stages.end("verifier", "skipped",
+                       f"LLM veto off ({veto_reason.replace('_', ' ')}); the "
+                       f"deterministic prefilter kept {len(pre.kept)} of "
+                       f"{len(all_findings)} findings.",
+                       meta={"kept": len(pre.kept), "candidates": len(all_findings)})
         else:
             v_result = self.verifier.llm_pass(pre.kept, context)
             batch.findings = v_result.kept
@@ -858,6 +1085,20 @@ class ReviewOrchestrator:
                 logger.warning("verifier_failed reason=%s findings=%d unfiltered",
                                v_result.error, len(v_result.kept))
                 batch.agents_failed.append("verifier")
+                stages.end("verifier", "failed",
+                           f"The LLM veto did not answer; {len(v_result.kept)} "
+                           f"findings were kept unfiltered.",
+                           meta={"kept": len(v_result.kept),
+                                 "tokens_in": v_result.tokens_in,
+                                 "tokens_out": v_result.tokens_out})
+            else:
+                stages.end("verifier", "success",
+                           f"Kept {len(v_result.kept)} of {len(all_findings)} "
+                           f"findings ({v_result.dropped_llm_filter} vetoed).",
+                           meta={"kept": len(v_result.kept),
+                                 "vetoed": v_result.dropped_llm_filter,
+                                 "tokens_in": v_result.tokens_in,
+                                 "tokens_out": v_result.tokens_out})
 
         # ── The wall-clock budget, checked HERE and not enforced by killing
         # anything mid-flight.
@@ -898,6 +1139,7 @@ class ReviewOrchestrator:
         # calls. Runs BEFORE compliance so its findings can be part of
         # the "one call per matching rule" evaluation if the user writes
         # a compliance rule that references breaking-change severity.
+        stages.begin("breaking_change", "Breaking-change check")
         try:
             if over_budget:
                 raise _BudgetExhausted
@@ -908,14 +1150,23 @@ class ReviewOrchestrator:
                 batch.tokens_in += bc_result.tokens_in
                 batch.tokens_out += bc_result.tokens_out
                 batch.agents_run.append("breaking_change")
+            n_bc = len(bc_result.findings or [])
+            stages.end("breaking_change", "success",
+                       f"{n_bc} breaking change{'s' if n_bc != 1 else ''} found.",
+                       meta={"findings": n_bc})
         except _BudgetExhausted:
-            pass  # already named in agents_skipped and in the banner
+            # already named in agents_skipped and in the banner
+            stages.end("breaking_change", "skipped",
+                       f"Skipped: the review passed its {budget}s time budget.")
         except Exception as exc:  # noqa: BLE001
             logger.warning("breaking_change_failed err=%s", exc)
+            stages.end("breaking_change", "failed",
+                       f"The breaking-change check raised {type(exc).__name__}.")
 
         # ── Compliance agent (Stage 14) — one LLM call per matching rule.
         # Findings tagged agent="compliance" flow through the verdict
         # layer; any blocking failure downgrades APPROVE to REJECT.
+        stages.begin("compliance", "Compliance rules")
         try:
             if over_budget:
                 raise _BudgetExhausted
@@ -926,11 +1177,20 @@ class ReviewOrchestrator:
             batch.tokens_out += c_result.tokens_out
             if c_result.findings:
                 batch.agents_run.append("compliance")
+            n_c = len(c_result.findings or [])
+            stages.end("compliance", "success",
+                       f"{n_c} compliance finding{'s' if n_c != 1 else ''}.",
+                       meta={"findings": n_c, "tokens_in": c_result.tokens_in,
+                             "tokens_out": c_result.tokens_out})
         except _BudgetExhausted:
-            pass  # skipped, not failed — the two are different rows
+            # skipped, not failed — the two are different rows
+            stages.end("compliance", "skipped",
+                       f"Skipped: the review passed its {budget}s time budget.")
         except Exception as exc:  # noqa: BLE001
             logger.warning("compliance_agent_failed err=%s", exc)
             batch.agents_failed.append("compliance")
+            stages.end("compliance", "failed",
+                       f"The compliance check raised {type(exc).__name__}.")
 
         # ── Worst first, again. Breaking-change and compliance findings were
         # appended AFTER the prefilter's severity sort, so on a review with
@@ -974,7 +1234,7 @@ class ReviewOrchestrator:
             batch, pr, provider, provider_name,
             dry_run=dry_run, post_comments=post_comments,
             user_id=user_id, workspace_id=workspace_id, t0=t0,
-            lifecycle=lifecycle, summary_job=summary_job,
+            lifecycle=lifecycle, summary_job=summary_job, stages=stages,
         )
 
     def _finish_review(
@@ -983,14 +1243,19 @@ class ReviewOrchestrator:
         t0: float,
         lifecycle: _ReviewLifecycle | None = None,
         summary_job: _PRSummaryJob | None = None,
+        stages: StageRecorder | None = None,
     ) -> ReviewRunResult:
         """Shared tail for every engine: reviewer assignment, notifications,
         comment posting. The brain differs; the plumbing doesn't."""
+        if stages is None:
+            stages = StageRecorder()
         # ── The overview + walkthrough the summary comment renders. Joined
         # here, after the engine, with its own short deadline; whatever went
         # wrong, the comment is rendered without the two sections.
         if summary_job is not None:
-            summary_job.apply_to(batch)
+            outcome = summary_job.apply_to(batch)
+            ok, why = outcome if isinstance(outcome, tuple) else (True, "")
+            stages.end("summary", "success" if ok else "failed", why)
         # ── Auto-reviewer assignment (Stage 16) — via ownership snapshot.
         # Only fires for real posted reviews (not dry-run) so we don't
         # spam @-mentions during test runs.
@@ -1032,13 +1297,24 @@ class ReviewOrchestrator:
         # ── Post comments ──
         posted = False
         provider_response: dict = {}
+        if not post_comments:
+            stages.add("publish", "Publish to provider", "skipped",
+                       "Posting was not requested for this run; the review is "
+                       "kept here only.", duration_ms=0)
         if post_comments:
+            stages.begin("publish", "Publish to provider")
             try:
                 provider_response = provider.post_review(batch, dry_run=dry_run)
                 posted = not dry_run
+                stages.end("publish", "success" if posted else "skipped",
+                           _publish_sentence(provider_name, batch, provider_response,
+                                             dry_run=dry_run))
             except PullRequestProviderError as exc:
                 logger.error("review_post_failed err=%s", exc)
                 provider_response = {"error": str(exc)}
+                stages.end("publish", "failed",
+                           f"The {_provider_label(provider_name)} API refused the "
+                           f"review; the findings are kept on this run.")
                 # The placeholder this run posted would otherwise go on
                 # saying "reviewing…" over a review that never arrived. The
                 # provider's own words stay in the run record (above); the
@@ -1540,6 +1816,7 @@ class ReviewOrchestrator:
         degrade the verdict the way a crashed agent does.
         """
         skip = disabled_agents or set()
+        self._agent_finished_at: dict[str, float] = {}
         active = [a for a in self.agents if a.name not in skip]
         for a in self.agents:
             if a.name in skip:
@@ -1580,6 +1857,10 @@ class ReviewOrchestrator:
                         agent.name, exc,
                     )
                     res = AgentRunResult(agent=agent.name, error=str(exc))
+                # When each agent came back — its stage starts at this time
+                # minus its own elapsed seconds, which is when it actually
+                # began, not when it was queued for a pool slot.
+                self._agent_finished_at[agent.name] = time.time()
                 results.append(res)
         return results
 

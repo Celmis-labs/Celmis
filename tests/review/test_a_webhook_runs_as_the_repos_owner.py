@@ -110,12 +110,16 @@ def test_the_workspace_answer_is_unchanged(store):
 
 
 @pytest.fixture()
-def dispatch(monkeypatch, store):
+def dispatch(monkeypatch, store, tmp_path):
     """`_dispatch_review` with the store swapped and the queue captured."""
     import src.api.auto_review as ar
+    import src.api.review_runs as runs
     import src.sync.queue as q
 
     monkeypatch.setattr(ar, "get_auto_review_store", lambda: store)
+    # A skip is now recorded as a run; keep it out of the real store.
+    monkeypatch.setattr(runs, "_default_store",
+                        runs.ReviewRunStore(tmp_path / "runs.db"))
     queued: list[dict] = []
     monkeypatch.setattr(
         q, "enqueue",

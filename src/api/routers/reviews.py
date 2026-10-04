@@ -22,10 +22,13 @@ from src.api.review_runs import (
     ReviewRun,
     adjustments_payload,
     completion_status,
+    finish_stages,
     get_review_run_store,
     hidden_payload,
     post_failure,
     pr_snapshot,
+    record_issues_stage,
+    run_stage_sink,
 )
 from src.api.schemas import ReviewRunOut, ReviewTriggerRequest
 from src.users import User
@@ -35,13 +38,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/reviews", tags=["reviews"])
 
 
-def _run_to_out(run: ReviewRun, *, with_adjustments: bool = True) -> ReviewRunOut:
+def _run_to_out(run: ReviewRun, *, with_adjustments: bool = True,
+                with_stages: bool | None = None) -> ReviewRunOut:
     """The wire row for a run.
 
     `with_adjustments=False` is the history list's shape: the count travels,
     the list does not — fifty rows times every agent's adjustments is weight
     the list view has no use for, it badges and links to the detail view.
+    The stages follow the same rule unless `with_stages` says otherwise (a
+    pull request's run list ships them: that is the page's timeline).
     """
+    if with_stages is None:
+        with_stages = with_adjustments
     return ReviewRunOut(
         id=run.id,
         pr_ref=run.pr_ref,
@@ -82,6 +90,12 @@ def _run_to_out(run: ReviewRun, *, with_adjustments: bool = True) -> ReviewRunOu
         ),
         adjustments_count=run.adjustments_count,
         hidden=run.hidden,
+        finished_at=run.finished_at,
+        status_reason=run.status_reason,
+        pr_provider=getattr(run, "pr_provider", None),
+        pr_repo=getattr(run, "pr_repo", None),
+        pr_number=getattr(run, "pr_number", None),
+        stages=(getattr(run, "stages", None) if with_stages else None),
     )
 
 
@@ -103,10 +117,8 @@ async def trigger_review(
         await enforce_repo_permission(
             slug, user, min_perm="review", workspace_id=workspace_id)
 
-    run_id = str(uuid.uuid4())
-    run = ReviewRun(id=run_id, user_id=user.id, pr_ref=req.pr_ref,
-                    workspace_id=workspace_id)
-    get_review_run_store().insert(run)
+    run = _new_manual_run(req.pr_ref, user_id=user.id, workspace_id=workspace_id)
+    run_id = run.id
 
     background.add_task(
         _run_review_task,
@@ -114,6 +126,27 @@ async def trigger_review(
         run_id=run_id, user_id=user.id, workspace_id=workspace_id,
     )
     return _run_to_out(run)
+
+
+def _new_manual_run(pr_ref: str, *, user_id: str, workspace_id: str) -> ReviewRun:
+    """The row of a manually triggered review, with its "Review started"
+    stage and — when the reference parses — the PR it is about, so a run
+    that fails before fetching the PR still belongs to it."""
+    try:
+        from src.cli import _parse_pr_ref
+
+        provider, repo, number = _parse_pr_ref(pr_ref)
+    except ValueError:
+        run = ReviewRun(id=str(uuid.uuid4()), user_id=user_id, pr_ref=pr_ref,
+                        workspace_id=workspace_id)
+        get_review_run_store().insert(run)
+        return run
+    from src.review.dispatch import new_run
+
+    # The row keeps the reference as it was typed, not the normalised one.
+    run, _ = new_run(provider, repo, number, user_id=user_id,
+                     workspace_id=workspace_id, source="manual", pr_ref=pr_ref)
+    return run
 
 
 def _can_see(run, user: User, workspace_id: str) -> bool:
@@ -253,8 +286,13 @@ def _run_review_task(
     workspace_id: str = "default",
 ) -> None:
     """Background task — runs orchestrator + updates run row at every step."""
+    from src.review.stages import StageRecorder
+
     store = get_review_run_store()
     store.update(run_id, status="running")
+    existing = store.get(run_id) if hasattr(store, "get") else None
+    stages = StageRecorder(sink=run_stage_sink(run_id, store),
+                           stages=getattr(existing, "stages", None) or None)
     t0 = datetime.now(UTC)
     try:
         from src.cli import _parse_pr_ref
@@ -272,6 +310,7 @@ def _run_review_task(
                 provider=pr_provider,
                 user_id=user_id,     # Stage 11 — routes BYOK keys + policy overrides
                 workspace_id=workspace_id,  # multi-tenant — ws:{id} keys/config
+                stages=stages,
             )
         finally:
             pr_provider.close()
@@ -369,9 +408,9 @@ def _run_review_task(
         )
         # The issue ledger and the PR record — the same call the queue writer
         # makes. Best-effort: never fails the run it describes.
-        from src.review.issues import record_review_run
-        record_review_run(result, run_id=run_id, workspace_id=workspace_id,
-                          status=final_status)
+        record_issues_stage(stages, result, run_id=run_id,
+                            workspace_id=workspace_id, status=final_status)
+        finish_stages(stages, final_status, batch=batch)
         logger.info(
             "review_run_complete id=%s user=%s pr_ref=%s verdict=%s findings=%d",
             run_id, user_id, pr_ref, batch.verdict.value, len(batch.findings),
@@ -379,6 +418,15 @@ def _run_review_task(
     except Exception as exc:  # noqa: BLE001
         elapsed = (datetime.now(UTC) - t0).total_seconds()
         msg = str(exc)[:500] or exc.__class__.__name__
+        from src.review.orchestrator import _safe_failure_reason
+
+        if isinstance(exc, ValueError) and "Expected:" in str(exc):
+            reason = "The pull request reference could not be parsed."
+        else:
+            reason = _safe_failure_reason(exc)
+            reason = reason[:1].upper() + reason[1:]
+        stages.fail_running(reason)
+        finish_stages(stages, "failed", error=reason)
         store.update(
             run_id, status="failed",
             error_message=msg, elapsed_seconds=elapsed,

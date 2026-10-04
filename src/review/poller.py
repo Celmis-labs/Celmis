@@ -23,7 +23,6 @@ Concurrency:
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import threading
@@ -34,8 +33,6 @@ import httpx
 from src.api.auto_review import RepoConfig, get_auto_review_store
 from src.credentials import get_credential_store, resolve_git_credential
 from src.http import build_client
-from src.review.orchestrator import ReviewOrchestrator
-from src.review.providers import get_provider_for
 from src.review.providers.base import PullRequestProviderError
 
 logger = logging.getLogger(__name__)
@@ -269,21 +266,28 @@ def _trigger_review(provider: str, repo: str, pr_number: int, *, user_id: str,
     poller AND webhook produces exactly one queued review.
 
     Falls back to inline execution when the queue is unreachable, so a
-    broken Postgres doesn't silently stop all reviews.
+    broken Postgres doesn't silently stop all reviews — through the worker's
+    own body (`execute_review`), so the fallback records the run and its
+    stages exactly as the queue would.
     """
     logger.info(
         "poller_review_enqueue user=%s provider=%s repo=%s pr=%d",
         user_id, provider, repo, pr_number,
     )
+    from src.review.stages import now_iso
+
+    payload = {
+        "provider": provider, "repo": repo, "pr_number": pr_number,
+        "post_comments": True, "user_id": user_id,
+        "workspace_id": workspace_id,
+        # The run's "Review started" / "Queued" stages are written from these.
+        "source": "poller", "enqueued_at": now_iso(),
+    }
     try:
         from src.sync.queue import KIND_REVIEW, enqueue
         enqueue(
             kind=KIND_REVIEW,
-            payload={
-                "provider": provider, "repo": repo, "pr_number": pr_number,
-                "post_comments": True, "user_id": user_id,
-                "workspace_id": workspace_id,
-            },
+            payload=payload,
             dedup_key=f"review:{provider}:{repo}#{pr_number}",
             enqueued_by=f"poller:{provider}",
         )
@@ -294,24 +298,13 @@ def _trigger_review(provider: str, repo: str, pr_number: int, *, user_id: str,
             provider, pr_number, exc,
         )
 
-    # Inline fallback — legacy path.
-    pr_provider = None
+    # Inline fallback — legacy path, now the worker's body.
+    from src.review.dispatch import execute_review
+
     try:
-        pr_provider = get_provider_for(provider, user_id=user_id, workspace_id=workspace_id)
-        orch = ReviewOrchestrator()
-        result = orch.review(
-            provider, repo, pr_number,
-            dry_run=False,
-            post_comments=True,
-            provider=pr_provider,
-            user_id=user_id,
-            workspace_id=workspace_id,
-        )
-        logger.info(
-            "poller_review_done provider=%s repo=%s pr=%d verdict=%s findings=%d",
-            provider, repo, pr_number,
-            result.batch.verdict.value, len(result.batch.findings),
-        )
+        execute_review(payload)
+        logger.info("poller_review_done provider=%s repo=%s pr=%d",
+                    provider, repo, pr_number)
     except PullRequestProviderError as exc:
         logger.warning(
             "poller_review_provider_failed provider=%s repo=%s pr=%d err=%s",
@@ -322,7 +315,3 @@ def _trigger_review(provider: str, repo: str, pr_number: int, *, user_id: str,
             "poller_review_failed provider=%s repo=%s pr=%d err=%s",
             provider, repo, pr_number, exc,
         )
-    finally:
-        if pr_provider is not None:
-            with contextlib.suppress(Exception):
-                pr_provider.close()

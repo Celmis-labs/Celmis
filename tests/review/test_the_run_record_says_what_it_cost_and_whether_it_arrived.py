@@ -472,8 +472,11 @@ def test_the_status_helper_leaves_a_skipped_run_alone():
 #: a webhook-triggered run can now be apply-fixed and followed across pushes.
 KNOWN_OUTSTANDING: set[str] = set()
 
-#: Genuinely per-row, not drift.
-_PER_ROW = {"id", "started_at", "finished_at"}
+#: Genuinely per-row, not drift. `stages_json` is a timeline — every entry
+#: carries its own start time and duration — and the queue writer's stages
+#: are written by the recorder the worker owns, not by
+#: `record_completed_review` called bare as it is here.
+_PER_ROW = {"id", "started_at", "finished_at", "stages_json"}
 
 #: TEXT columns holding JSON. Compared as the values they encode: the two
 #: writers call `json.dumps` with different `ensure_ascii`, which changes the

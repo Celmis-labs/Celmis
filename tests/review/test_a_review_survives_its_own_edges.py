@@ -145,8 +145,12 @@ def test_a_queued_review_is_recorded():
     nothing behind — which is why /api/reviews/history showed zero runs on an
     installation where auto review had been configured."""
     handlers = (SRC / "sync" / "handlers.py").read_text(encoding="utf-8")
-    assert "record_completed_review" in handlers
-    assert "store.insert" in handlers
+    # The worker's body moved to src/review/dispatch.py so the webhook and
+    # poller inline fallbacks run (and record) exactly what the queue does.
+    assert "execute_review" in handlers
+    body = (SRC / "review" / "dispatch.py").read_text(encoding="utf-8")
+    assert "record_completed_review" in body
+    assert "store.insert" in body
 
 
 def test_a_failed_queued_review_is_not_left_running():
@@ -156,9 +160,9 @@ def test_a_failed_queued_review_is_not_left_running():
     "error" is in no status bucket, badge or metric, so those runs fell out
     of every count of failures.
     """
-    handlers = (SRC / "sync" / "handlers.py").read_text(encoding="utf-8")
-    assert 'status="failed"' in handlers
-    assert 'status="error"' not in handlers
+    body = (SRC / "review" / "dispatch.py").read_text(encoding="utf-8")
+    assert 'status="failed"' in body
+    assert 'status="error"' not in body
 
 
 def test_the_row_shape_is_written_once():
