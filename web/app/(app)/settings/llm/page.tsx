@@ -520,7 +520,7 @@ function LiteLLMProxyRow({ config, isAdmin, onSaved }: { config: LLMConfig; isAd
 // ─── One profile (chat / review / embeddings) ────────────────────────
 
 function ProfileCard({
-  surface, icon, title, description, config, embeddings, isAdmin,
+  surface, icon, title, description, config, embeddings, isAdmin: workspaceAdmin,
 }: {
   surface: LLMSurface;
   icon: React.ReactNode; title: string; description: string;
@@ -529,6 +529,13 @@ function ProfileCard({
   const token = useToken();
   const qc = useQueryClient();
   const t = useT();
+  // Embeddings are ONE installation-wide setting (one shared vector
+  // collection), stored on the default workspace whichever workspace is
+  // active — so who may edit them is the backend's answer
+  // (`embeddings_editable` = global admin), not this workspace's role. A
+  // workspace owner used to get an enabled card whose save landed in a blob
+  // nothing reads; now they get it read-only, with the reason.
+  const isAdmin = embeddings ? Boolean(config.embeddings_editable) : workspaceAdmin;
   const prof: LLMProfile = config.profiles[surface];
   const [provider, setProvider] = useState(prof.provider);
   const [model, setModel] = useState(prof.model);
@@ -557,12 +564,13 @@ function ProfileCard({
   // a model served from a machine you run. Only what picking it leads to
   // differs — a form on three cards, instructions on the fourth.
   const selfHostedLabel = t("settings.llm.selfHostedOption");
-  // The workspace LiteLLM proxy. Offered on embeddings only where that
-  // profile is the shared one that runs (the backend refuses it elsewhere);
-  // kept in the list whenever a surface already uses it.
+  // The LiteLLM proxy. On embeddings it means the INSTALLATION embeddings
+  // proxy (the default workspace's row), offered to whoever may edit the
+  // shared profile, from any workspace; kept in the list whenever the shared
+  // profile already uses it so a read-only viewer still sees what runs.
   const litellmOption = { value: LITELLM, label: t("llm.litellm.option") };
   const litellmOffered = embeddings
-    ? Boolean(config.litellm_embeddings_allowed) || prof.provider === LITELLM
+    ? Boolean(config.embeddings_editable) || prof.provider === LITELLM
     : true;
   const isLitellm = provider === LITELLM;
   const providerOptions = embeddings
@@ -578,17 +586,27 @@ function ProfileCard({
   const eff = embeddings ? config.effective_embeddings ?? null : null;
   const envManaged = Boolean(eff);
 
-  const keyConnected = config.provider_keys.find((k) => k.provider === provider)?.connected;
+  // Shared embeddings on LiteLLM run on the installation proxy, never this
+  // workspace's own — so "connected" and the model list come from that row.
+  const embProxy = config.embeddings_proxy;
+  const sharedLitellm = Boolean(embeddings) && provider === LITELLM;
+  const keyConnected = sharedLitellm
+    ? Boolean(embProxy?.connected)
+    : config.provider_keys.find((k) => k.provider === provider)?.connected;
   const models = useQuery({
     // keyConnected is part of the key so saving a provider key automatically
     // refetches the model list (a keyless fetch caches an empty 200 otherwise).
     // For the LiteLLM proxy the saved key's fingerprint is part of the
     // identity too: re-saving keeps `connected` true and would otherwise show
     // the old proxy's aliases.
-    queryKey: provider === LITELLM
-      ? ["provider-models", provider, keyConnected, config.litellm?.fingerprint ?? ""]
-      : ["provider-models", provider, keyConnected],
-    queryFn: () => llmApi.providerModels(token!, provider),
+    queryKey: sharedLitellm
+      ? ["provider-models", provider, "embeddings", keyConnected, embProxy?.fingerprint ?? ""]
+      : provider === LITELLM
+        ? ["provider-models", provider, keyConnected, config.litellm?.fingerprint ?? ""]
+        : ["provider-models", provider, keyConnected],
+    queryFn: () => sharedLitellm
+      ? llmApi.providerModels(token!, provider, "embeddings")
+      : llmApi.providerModels(token!, provider),
     // Local model names are not in any catalog — a vendor /models call would
     // return nothing and its emptiness must not block this provider. The
     // embeddings info entry is not a vendor at all.
@@ -598,7 +616,13 @@ function ProfileCard({
   const options = embeddings ? (models.data?.embedding ?? []) : (models.data?.generation ?? []);
 
   const save = useMutation({
-    mutationFn: () => llmApi.saveConfig(token!, {
+    // Embeddings go to their own endpoint: it writes the default workspace's
+    // blob (the one that is read) from any workspace.
+    mutationFn: () => embeddings
+      ? llmApi.saveEmbeddings(token!, {
+          provider, model, ...(Number(dims) > 0 ? { dimensions: Number(dims) } : {}),
+        })
+      : llmApi.saveConfig(token!, {
       profiles: { [surface]: {
         provider, model,
         ...(embeddings ? { dimensions: Number(dims) } : {}),
@@ -651,6 +675,24 @@ function ProfileCard({
     }),
     onSuccess: (r) => setProxyEmbTest({ result: r }),
     onError: (e) => setProxyEmbTest({ error: (e as Error).message }),
+  });
+  // Inline connect for the installation embeddings proxy, shown only while
+  // none exists: the same validate-then-save as the LiteLLM proxy row (https,
+  // public address, model list), stored for the default workspace.
+  const [embProxyUrl, setEmbProxyUrl] = useState("");
+  const [embProxyKey, setEmbProxyKey] = useState("");
+  const [embProxyError, setEmbProxyError] = useState<string | null>(null);
+  const connectEmbProxy = useMutation({
+    mutationFn: () => llmApi.saveEmbeddingsLiteLLM(token!, {
+      base_url: embProxyUrl.trim(), api_key: embProxyKey.trim(),
+    }),
+    onSuccess: () => {
+      toast.success(t("llm.litellm.embeddingsConnected"));
+      setEmbProxyUrl(""); setEmbProxyKey(""); setEmbProxyError(null);
+      void qc.invalidateQueries({ queryKey: ["provider-models", LITELLM] });
+      void qc.invalidateQueries({ queryKey: ["llm-config"] });
+    },
+    onError: (e) => setEmbProxyError((e as Error).message),
   });
   const [effTest, setEffTest] = useState<TestOutcome | null>(null);
   const effKeyConnected = config.provider_keys.find((k) => k.provider === eff?.provider)?.connected;
@@ -773,6 +815,18 @@ function ProfileCard({
             </div>
           </div>
         )}
+        {embeddings && !eff && (
+          <div className="space-y-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-muted)]/30 px-3 py-2 text-xs text-[var(--color-muted-foreground)]">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline">{t("settings.llm.embeddingsScopeBadge")}</Badge>
+              <span>{t("settings.llm.embeddingsInUse", { provider: prof.provider, model: prof.model })}</span>
+              {prof.provider === LITELLM && embProxy?.host && (
+                <span>{t("settings.llm.embeddingsProxyHost", { host: embProxy.host })}</span>
+              )}
+            </div>
+            <p>{isAdmin ? t("settings.llm.embeddingsAdminHint") : t("settings.llm.embeddingsAdminOnly")}</p>
+          </div>
+        )}
         {eff && (
           <div className="space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-muted)]/30 px-3 py-3">
             <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -812,7 +866,7 @@ function ProfileCard({
           </div>
           {isEmbeddingsInfo ? <div /> : (
           <div>
-            <Label>{t("settings.llm.modelLabel")} {!isLocal && !keyConnected && <span className="text-amber-600">{isLitellm ? t("llm.litellm.notConfigured") : t("settings.llm.addKeyHint")}</span>}</Label>
+            <Label>{t("settings.llm.modelLabel")} {!isLocal && !keyConnected && <span className="text-amber-600">{sharedLitellm ? t("llm.litellm.embeddingsNotConnected") : isLitellm ? t("llm.litellm.notConfigured") : t("settings.llm.addKeyHint")}</span>}</Label>
             {isLocal ? (
               // Free text, not the catalog dropdown: the names a local server
               // serves exist nowhere but on that server, and an empty vendor
@@ -946,6 +1000,25 @@ function ProfileCard({
             <Button variant="outline" onClick={() => reindex.mutate()} disabled={!isAdmin || reindex.isPending}>
               <RefreshCwIcon className="h-3.5 w-3.5 mr-1" /> {reindex.isPending ? "…" : t("settings.llm.reindexAll")}
             </Button>
+          </div>
+        )}
+        {sharedLitellm && !envManaged && isAdmin && !embProxy?.connected && (
+          <div className="space-y-2 rounded-lg border border-[var(--color-border)] px-3 py-3">
+            <p className="text-xs text-[var(--color-muted-foreground)]">{t("llm.litellm.embeddingsConnectHint")}</p>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_auto]">
+              <Input aria-label={t("llm.litellm.baseUrlLabel")} autoComplete="off"
+                placeholder="https://litellm.example.com" value={embProxyUrl}
+                onChange={(e) => setEmbProxyUrl(e.target.value)} />
+              <Input type="password" aria-label={t("llm.litellm.keyLabel")} autoComplete="off"
+                placeholder={t("llm.litellm.keyPlaceholder")} value={embProxyKey}
+                onChange={(e) => setEmbProxyKey(e.target.value)} />
+              <Button size="sm" variant="outline"
+                disabled={!embProxyUrl.trim() || !embProxyKey.trim() || connectEmbProxy.isPending}
+                onClick={() => { setEmbProxyError(null); connectEmbProxy.mutate(); }}>
+                {connectEmbProxy.isPending ? t("llm.litellm.verifying") : t("llm.litellm.embeddingsConnect")}
+              </Button>
+            </div>
+            {embProxyError && <TestResultPanel outcome={{ error: embProxyError }} />}
           </div>
         )}
         {embeddings && isLitellm && !envManaged && (
