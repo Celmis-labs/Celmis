@@ -97,6 +97,12 @@ PROBES: list[tuple[str, str, dict | None, str]] = [
     ("GET", "/api/review-defaults", None, "no_leak"),
     ("PUT", "/api/review-defaults",
      {"summary_instructions": "pwned", "disabled_agents": ["defect"]}, "no_leak"),
+    ("PUT", "/api/review-defaults",
+     {"base_instruction": "pwned", "run_on_drafts": True}, "no_leak"),
+    ("PUT", f"/api/review-policies/{B_REPO}",
+     {"base_instruction": "pwned", "approve_when_clean": True}, "deny"),
+    # the settings overview: the active workspace's defaults and repos only
+    ("GET", "/api/review-settings/overview", None, "no_leak"),
     # reviews, issues, pull requests, analytics
     ("POST", "/api/reviews/trigger", {"pr_ref": "github:bco/b_secret#1"}, "deny"),
     ("GET", "/api/reviews/history", None, "no_leak"),
@@ -159,8 +165,10 @@ async def _b_untouched(w) -> None:
     defaults = await w.scalar(WorkspaceReviewDefaults, w.ws["ws-b"])
     assert defaults.summary_instructions == f"{B_SECRET} summary instructions"
     assert defaults.disabled_agents == ["structural"]
+    assert defaults.base_instruction is None and defaults.run_on_drafts is None
     policy = await w.scalar(RepoReviewPolicy, B_REPO)
     assert policy is not None and policy.prompt_template == f"{B_SECRET} prompt rules"
+    assert policy.base_instruction is None and policy.approve_when_clean is None
     assert (await w.scalar(ReviewIssue, "issue-b")).status == "open"
     assert (await w.scalar(IncomingAlert, "alert-b")).status == "new"
     assert await w.scalar(AutomationRun, "run-b") is not None

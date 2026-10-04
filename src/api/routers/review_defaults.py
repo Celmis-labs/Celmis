@@ -46,19 +46,17 @@ from src.api.deps import (
 from src.api.schemas import WorkspaceReviewDefaultsIn, WorkspaceReviewDefaultsOut
 from src.db.models import RepoReviewPolicy, WorkspaceReviewDefaults
 from src.db.session import get_async_session
+from src.review.review_defaults import INHERITABLE_FIELDS
 from src.users import User
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/review-defaults", tags=["review-defaults"])
 
-#: Fields stored on the defaults row (the LLM-config ones are handled apart).
-_ROW_FIELDS = (
-    "disabled_agents", "verifier_enabled", "comment_min_severity",
-    "max_inline_comments", "summary_enabled", "summary_instructions",
-    "started_comment_enabled", "ignore_globs", "target_branches",
-    "suppressed_rules",
-)
+#: Fields stored on the defaults row (the LLM-config ones are handled apart):
+#: every inheritable field — the 2.3.0 settings included — and nothing else,
+#: so a field added to the resolver is a column here in the same commit.
+_ROW_FIELDS = INHERITABLE_FIELDS
 
 
 async def _require_member(user: User, ws_id: str) -> None:
@@ -91,20 +89,35 @@ async def _repo_override_counts(session: AsyncSession, ws_id: str) -> dict[str, 
     )).all()
     counts: dict[str, int] = {name: 0 for name in (*_ROW_FIELDS, "review_language", "agents")}
     for row in rows:
-        for name in _ROW_FIELDS:
-            value = getattr(row, name, None)
-            if name == "summary_instructions" and isinstance(value, str):
-                value = value.strip() or None
-            if value is not None:
-                counts[name] += 1
-        if getattr(row, "review_language", None):
-            counts["review_language"] += 1
-        if row.agent_llm_overrides or any(
-            getattr(row, c, None) for c in (
-                "architect_model", "security_model", "quality_model", "verifier_model")
-        ):
-            counts["agents"] += 1
+        for name in overridden_fields(row):
+            counts[name] += 1
     return counts
+
+
+def overridden_fields(row: Any) -> list[str]:
+    """The workspace-defaultable settings a repo policy row overrides, in
+    `INHERITABLE_FIELDS` order, then `review_language` and `agents` (any
+    per-agent model column or LLM knob). What "Overridden N" counts — here
+    per field across repositories, on the overview per repository — so the
+    two badges can never count by different rules."""
+    from src.review.review_defaults import TEXT_FIELDS
+
+    out: list[str] = []
+    for name in _ROW_FIELDS:
+        value = getattr(row, name, None)
+        if name in TEXT_FIELDS and isinstance(value, str):
+            value = value.strip() or None
+        if value is not None:
+            out.append(name)
+    if getattr(row, "review_language", None):
+        out.append("review_language")
+    model_columns = [c.name for c in RepoReviewPolicy.__table__.columns
+                     if c.name.endswith("_model")]
+    if getattr(row, "agent_llm_overrides", None) or any(
+        getattr(row, c, None) for c in model_columns
+    ):
+        out.append("agents")
+    return out
 
 
 async def _out(
@@ -118,11 +131,14 @@ async def _out(
         _install_defaults,
         _language_codes,
         _llm_agent_names,
+        settings_vocabulary,
     )
-    from src.review.review_defaults import resolve
+    from src.review.review_defaults import agent_participation, resolve
 
     install = _install_defaults()
     effective, sources = resolve(None, defaults, install)
+    participation = agent_participation(
+        effective["disabled_agents"], effective["enabled_agents"])
     cfg = await asyncio.to_thread(_workspace_llm, ws_id)
     language = cfg.get("review_language")
     language = language.strip() if isinstance(language, str) and language.strip() else None
@@ -149,6 +165,8 @@ async def _out(
         review_languages=list(_language_codes()),
         comment_severity_levels=list(COMMENT_SEVERITY_LEVELS),
         repo_overrides=await _repo_override_counts(session, ws_id),
+        agent_participation_effective=participation,
+        **settings_vocabulary(),
         can_edit=bool(can_edit),
         updated_by=getattr(row, "updated_by", None),
         updated_at=getattr(row, "updated_at", None),
@@ -191,11 +209,14 @@ async def put_review_defaults(
         _ignore_globs_from_payload,
         _review_language_from_payload,
         _suppressed_rules_from_payload,
+        v23_updates_from_payload,
     )
     from src.review.review_defaults import defaults_from_row
 
     fields = payload.model_fields_set
-    updates: dict[str, Any] = {}
+    # The 2.3.0 settings first: validated by the function the repo policy
+    # PUT uses, so both layers refuse exactly the same values.
+    updates: dict[str, Any] = v23_updates_from_payload(payload)
 
     if "disabled_agents" in fields:
         if payload.disabled_agents is None:

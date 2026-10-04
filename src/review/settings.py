@@ -452,8 +452,15 @@ def _legacy_env_bridge(settings: ReviewSettings) -> None:
 #: The agents a person may configure. `structural` and `breaking_change` are
 #: absent on purpose: they are deterministic and never call a model, so an
 #: output ceiling for them would be a control that does nothing.
+#:
+#: `performance` and `business_logic` (2.3.0) are named before their classes
+#: join the orchestrator's roster, so a per-agent model / ceiling / reasoning
+#: can be saved for them at every layer today. A name with no dispatched
+#: agent behind it is resolved and never called — `default_agent_model`
+#: falls back to the contract model for a name without its own env knob.
 REVIEW_AGENTS: tuple[str, ...] = (
-    "defect", "contract", "security", "verifier", "compliance",
+    "defect", "contract", "security", "performance", "business_logic",
+    "verifier", "compliance",
 )
 
 #: Pre-restructure agent names → who inherited the remit. Consulted where a

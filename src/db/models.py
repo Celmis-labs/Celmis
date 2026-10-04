@@ -382,6 +382,47 @@ class RepoReviewPolicy(Base, TimestampMixin):
     #: Inline-comment cap for this repo (1..100). NULL = REVIEW_MAX_INLINE_COMMENTS.
     max_inline_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # ── 2.3.0 review settings (migration f1a2b3c4d5e6) ──
+    # Every one NULLABLE with no server default, and NULL is "inherit the
+    # workspace review default, then the built-in" — the built-ins live in
+    # `src.review.review_defaults.BUILTIN_DEFAULTS`, not here, so a row that
+    # predates the columns reads exactly like one that never answered.
+    # `WorkspaceReviewDefaults` carries the same columns, one layer down.
+    #: Opt-in agents switched ON for this repo (business_logic, …). A list —
+    #: [] included — replaces the workspace's; `disabled_agents` still wins.
+    enabled_agents: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    #: Review draft PRs too (built-in: drafts are skipped).
+    run_on_drafts: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: Approve the PR when the review leaves nothing to post.
+    approve_when_clean: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: "Request changes" when a critical finding exists.
+    request_changes_on_critical: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True)
+    #: A skipped / blocked review leaves a status note (built-in: on).
+    status_feedback: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: Render fixes as the provider's committable "suggestion" blocks.
+    committable_suggestions: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: Whether the severity threshold and inline cap apply to rule findings.
+    apply_filters_to_rules: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: comment | description — `review_defaults.SETTING_CHOICES` for each.
+    summary_target: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: nothing | append | replace.
+    summary_on_new_commits: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: append | complement | replace.
+    summary_existing_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: How review comments are written; given to every agent. ≤2000 chars.
+    base_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The "review started" comment ({commit} {agents} {files} {pr_number}).
+    message_started: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The final summary's header line (same placeholders).
+    message_finished_header: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Per-repo models for the 2.3.0 finders, beside the five `<agent>_model`
+    # columns above and for their reason: the model of THIS layer is a column
+    # and never a key of `agent_llm_overrides`. `_model_field_for` in the
+    # policy router and `resolve_agent_llm` find them by name.
+    performance_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    business_logic_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     __table_args__ = (
         Index("ix_repo_review_policies_department", "department"),
     )
@@ -427,6 +468,23 @@ class WorkspaceReviewDefaults(Base, TimestampMixin):
     target_branches: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     #: Prefilter rule deny-list; NULL = ReviewSettings.suppressed_rules.
     suppressed_rules: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # ── 2.3.0 (migration f1a2b3c4d5e6) — the same settings, and the same
+    # meaning, as the `RepoReviewPolicy` columns of the same names; NULL =
+    # the built-in in `src.review.review_defaults.BUILTIN_DEFAULTS`.
+    enabled_agents: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    run_on_drafts: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    approve_when_clean: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    request_changes_on_critical: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True)
+    status_feedback: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    committable_suggestions: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    apply_filters_to_rules: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    summary_target: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary_on_new_commits: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary_existing_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    base_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_started: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_finished_header: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_by: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 

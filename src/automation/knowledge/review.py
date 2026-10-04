@@ -168,6 +168,23 @@ when the workspace default changes; an unset one is labelled "inherited from wor
 on the policy page hands a field back to the workspace default; "Reset to install default" here hands it back to the installation. Each section says how
 many repositories override it.
 
+Since 2.3 the same two layers also hold (through the API; the page gains
+controls for them in the settings redesign): reviewing drafts
+(`run_on_drafts`, off), approving a clean PR (`approve_when_clean`, off),
+requesting changes on a critical finding (`request_changes_on_critical`,
+off), a status note when a review is skipped (`status_feedback`, on),
+committable suggestions (`committable_suggestions`, off), whether the
+comment level and cap apply to rule findings (`apply_filters_to_rules`, on),
+where the summary goes (`summary_target`: comment or description) and what
+a new push does to it (`summary_on_new_commits`: replace, append, nothing;
+`summary_existing_description`: append, complement, replace), a base
+instruction for every agent, the texts of the review-started comment and of
+the summary header (placeholders {commit} {agents} {files} {pr_number}),
+and opt-in agents
+(`enabled_agents`: business_logic is off until named there; performance is
+on). Overview of every repository's overrides:
+GET /api/review-settings/overview.
+
 The per-agent model and limits here are the same workspace settings as the
 review agents card on [LLM Setup](/settings/llm); a repository overrides them
 on its policy, tab "Models & limits". Agent prompts stay on
@@ -215,7 +232,8 @@ Severities: critical, error, warning, info. Verdict: a failed blocking
 compliance check, ≥1 critical or ≥3 errors → REQUEST_CHANGES; any warning or
 error → COMMENT; otherwise APPROVE; nothing reviewed → SKIPPED. Skipped when
 review is off for the repository, the base branch is not a target branch,
-the PR is a draft, the diff is over 500 KB, or every file is ignored.
+the PR is a draft (unless the repository or workspace reviews drafts —
+`run_on_drafts`), the diff is over 500 KB, or every file is ignored.
 
 On the PR: one status comment that says the review started and becomes the
 summary when it ends (see the PR comments section), plus inline comments for
