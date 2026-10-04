@@ -27,7 +27,14 @@ import logging
 import re
 from dataclasses import dataclass
 
-from src.review.models import Finding, FindingSeverity, HunkSide, PullRequest
+from src.review.models import (
+    Finding,
+    FindingSeverity,
+    HunkSide,
+    PullRequest,
+    parse_suggested_code,
+    parse_suggested_end_line,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +99,9 @@ When done, output ONLY a JSON object in a ```json code block:
       "severity": "info|warning|error|critical",
       "title": "one-line issue",
       "body": "explanation with reasoning (markdown)",
-      "suggestion": "optional replacement code or null"
+      "suggestion": "optional fix hint or null",
+      "suggested_code": "exact replacement for lines line..suggested_end_line (whole lines, indentation kept) or null",
+      "suggested_end_line": null
     }}
   ]
 }}
@@ -431,6 +440,8 @@ async def _run(
                 title=str(f.get("title", ""))[:200],
                 body=str(f.get("body", ""))[:4000],
                 suggestion=(str(f["suggestion"]) if f.get("suggestion") else None),
+                suggested_code=parse_suggested_code(f),
+                suggested_end_line=parse_suggested_end_line(f, max(1, int(f.get("line", 1)))),
                 agent="claude_code",
                 rule_id="claude_code.finding",
                 confidence=0.8,

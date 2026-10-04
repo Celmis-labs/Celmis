@@ -10,6 +10,14 @@ API specifics:
     POST .../merge_requests/{iid}/notes                  — top-level summary note
     PUT .../merge_requests/{iid}/notes/{id}              — update existing summary
     DELETE .../merge_requests/{iid}/notes/{id}           — remove a previous run's note
+    GET .../merge_requests/{iid}/approvals               — who approved (is it us?)
+    POST .../merge_requests/{iid}/approve                — approve_when_clean
+    POST .../merge_requests/{iid}/unapprove              — take our approval back
+    PUT .../merge_requests/{iid}                         — the summary in the description
+
+GitLab has no "request changes" action an API token can take, so
+`request_changes_on_critical` falls back to withdrawing our approval and saying
+in the summary note that changes are requested.
 
 Inline position (`position[*]`): base_sha/head_sha/start_sha from the versions
 API are required.
@@ -37,12 +45,18 @@ from src.review.models import (
     PullRequest,
     ReviewBatch,
 )
+from src.review.pr_actions import APPROVE, REQUEST_CHANGES, review_decision
 from src.review.providers.base import (
+    SUGGESTION_GITLAB,
     PullRequestProvider,
     PullRequestProviderError,
     _anchorable_ranges,
+    _committable_enabled,
+    _committable_span,
     _format_finding_body,
     _format_summary,
+    _new_side_text,
+    _original_lines,
     _snap_to_span,
     _with_marker,
 )
@@ -266,6 +280,8 @@ class GitLabPRProvider(PullRequestProvider):
         # still a finding thrown away, recorded as nothing but a `failed`
         # counter.
         ranges = _anchorable_ranges(pr)
+        committable = _committable_enabled(batch)
+        new_side = _new_side_text(pr)
         posted = 0
         failed = 0
         snapped = 0
@@ -280,8 +296,15 @@ class GitLabPRProvider(PullRequestProvider):
                     project_path, pr.number, finding.file_path,
                     finding.line, line,
                 )
+            # GitLab anchors a suggestion at ONE line and counts the rest:
+            # ```suggestion:-0+N replaces the anchored line and the N below.
+            span = _committable_span(finding, line, ranges) if committable else None
             payload = {
-                "body": _format_finding_body(finding, settings.comment_marker),
+                "body": _format_finding_body(
+                    finding, settings.comment_marker,
+                    committable=SUGGESTION_GITLAB if span else None,
+                    original=_original_lines(new_side, finding),
+                ),
                 "position[position_type]": "text",
                 "position[base_sha]": base_sha,
                 "position[head_sha]": head_sha,
@@ -313,12 +336,26 @@ class GitLabPRProvider(PullRequestProvider):
         )
 
         # 5. Top-level summary note
+        decision = review_decision(batch)
+        summary_body = _format_summary(batch, marker=settings.comment_marker)
+        if decision == REQUEST_CHANGES:
+            summary_body += (
+                "\n\n> ❌ **Changes requested** — critical findings above. GitLab "
+                "has no request-changes action for this token, so Celmis has "
+                "withdrawn its approval instead; treat this note as the block."
+            )
         summary_id = self._upsert_summary(
-            project_path, pr.number,
-            _format_summary(batch, marker=settings.comment_marker),
-            keep_summary_id,
+            project_path, pr.number, summary_body, keep_summary_id,
         )
         self._status_comment_id = None
+
+        # 6. Approval — given for a clean review, taken back otherwise, only
+        #    for a repository that lets reviews approve or block at all.
+        review_state: dict = {}
+        if batch.pr_actions.manages_review_state:
+            review_state = self._apply_approval(
+                project_path, pr, approve=decision == APPROVE,
+            )
 
         response = {
             "summary_note_id": summary_id,
@@ -328,6 +365,7 @@ class GitLabPRProvider(PullRequestProvider):
             # caller reporting "review posted" can say so rather than let a
             # half-done cleanup look like a finished one.
             "cleanup": cleanup,
+            "review_state": review_state,
         }
         if summary_id is None:
             # The summary note is the only place the verdict lives on GitLab,
@@ -375,6 +413,95 @@ class GitLabPRProvider(PullRequestProvider):
         if nid is not None:
             self._status_comment_id = nid
         return nid
+
+    def _comment_marker(self) -> str:
+        return get_review_settings().comment_marker
+
+    def _write_top_level_comment(
+        self, pr: PullRequest, body: str, existing_id: int | None,
+    ) -> int | None:
+        return self._upsert_summary(
+            self._project_path(pr.repo), pr.number, body, existing_id,
+        )
+
+    # ─── Approval ────────────────────────────────────────────────
+
+    def _approved_by_us(self, project_path: str, mr_iid: int) -> bool | None:
+        """Whether this token's user is among the MR's approvers; None = unknown."""
+        viewer = self._viewer_username()
+        if not viewer:
+            return None
+        try:
+            resp = self._http.get(
+                f"{self.api_base}/projects/{project_path}/merge_requests/{mr_iid}/approvals"
+            )
+            if resp.status_code >= 400:
+                return None
+            body = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        if not isinstance(body, dict):
+            return None
+        for entry in body.get("approved_by") or []:
+            user = entry.get("user") if isinstance(entry, dict) else None
+            if isinstance(user, dict) and str(user.get("username") or "") == viewer:
+                return True
+        return False
+
+    def _apply_approval(self, project_path: str, pr: PullRequest, *, approve: bool) -> dict:
+        """Approve, or take our approval back. Idempotent; never raises.
+
+        The approvals listing is read first, so a re-run does not approve
+        twice (GitLab refuses a second approval from the same user) and a run
+        with nothing to take back sends nothing. When that listing cannot be
+        read the action is sent anyway and a refusal is only logged. The
+        approval is pinned to the reviewed commit (`sha`), so a push that
+        landed while the review ran is not approved by it.
+        """
+        state = self._approved_by_us(project_path, pr.number)
+        base = f"{self.api_base}/projects/{project_path}/merge_requests/{pr.number}"
+        if approve and state is not True:
+            action, url = "approved", f"{base}/approve"
+            data = {"sha": pr.head_sha} if pr.head_sha else {}
+        elif not approve and state is not False:
+            action, url, data = "unapproved", f"{base}/unapprove", {}
+        else:
+            return {"approval": "unchanged"}
+        try:
+            resp = self._http.post(url, data=data)
+        except httpx.HTTPError as exc:
+            logger.warning("gitlab_approval_error action=%s err=%s", action, exc)
+            return {"approval": "failed", "action": action}
+        # 404 on unapprove: there was no approval of ours, the state we wanted.
+        if resp.status_code < 400 or (action == "unapproved" and resp.status_code == 404):
+            return {"approval": action}
+        logger.warning("gitlab_approval_failed action=%s status=%d body=%s",
+                       action, resp.status_code, resp.text[:200])
+        return {"approval": "failed", "action": action, "status": resp.status_code}
+
+    # ─── The summary in the merge request description ───────────
+
+    def update_description(self, pr: PullRequest, transform) -> dict:
+        """GET the MR, PUT its description with `transform(description)`."""
+        url = (f"{self.api_base}/projects/{self._project_path(pr.repo)}"
+               f"/merge_requests/{pr.number}")
+        try:
+            resp = self._http.get(url)
+            if resp.status_code >= 400:
+                return {"written": False, "error": f"GitLab refused the read (HTTP {resp.status_code})"}
+            meta = resp.json()
+            current = (str((meta or {}).get("description") or "")
+                       if isinstance(meta, dict) else "")
+            new = transform(current)
+            if new is None or new == current:
+                return {"written": False, "error": None, "unchanged": True}
+            resp = self._http.put(url, data={"description": new})
+        except (httpx.HTTPError, ValueError) as exc:
+            return {"written": False, "error": type(exc).__name__}
+        if resp.status_code >= 400:
+            logger.warning("gitlab_description_put_failed status=%d", resp.status_code)
+            return {"written": False, "error": f"GitLab refused the description (HTTP {resp.status_code})"}
+        return {"written": True, "error": None}
 
     def _our_summary_comments(
         self, pr: PullRequest, marker: str,

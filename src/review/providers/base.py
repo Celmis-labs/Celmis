@@ -104,6 +104,49 @@ class PullRequestProvider(ABC):
         """
         return []
 
+    def _write_top_level_comment(
+        self, pr: PullRequest, body: str, existing_id: int | None,
+    ) -> int | None:
+        """Update `existing_id` or post a new top-level comment. Default: nothing."""
+        return None
+
+    def _comment_marker(self) -> str:
+        """The review marker, read the way this provider's module reads it."""
+        from src.review.settings import get_review_settings
+
+        return get_review_settings().comment_marker
+
+    def upsert_feedback_comment(self, pr: PullRequest, reason: str) -> int | None:
+        """The brief "not reviewed: <reason>" note, written at most once per PR.
+
+        For a review skipped or blocked before any placeholder existed, when
+        the repository's `status_feedback` is on. It carries the review marker
+        AND `STATUS_FEEDBACK_MARK`: a later skip finds it by the second and
+        rewrites it in place (never a second note), and a later real review
+        adopts or cleans it up like any other marked comment of ours. Only a
+        note of ours that IS a feedback note is ever rewritten here — a
+        finished summary of an earlier commit is not touched.
+        """
+        marker = self._comment_marker()
+        existing = [
+            cid for cid, text in self._our_summary_comments(pr, marker)
+            if STATUS_FEEDBACK_MARK in (text or "")
+        ]
+        return self._write_top_level_comment(
+            pr, _format_feedback_comment(pr, reason=reason, marker=marker),
+            existing[-1] if existing else None,
+        )
+
+    def update_description(self, pr: PullRequest, transform) -> dict:
+        """Rewrite the pull request's description through `transform`.
+
+        `transform(current) -> str | None` gets the description as the
+        provider holds it NOW (re-read, so an edit made while the review ran
+        is not overwritten) and returns the new text, or None to leave it.
+        Returns {"written": bool, "error": str | None}. Default: unsupported.
+        """
+        return {"written": False, "error": "not supported by this provider"}
+
     def _status_target(
         self, pr: PullRequest, marker: str, *, replace: bool, create: bool,
         only_if_in_progress: bool,
@@ -188,7 +231,139 @@ def _severity_emoji(severity: str) -> str:
     return _SEVERITY_EMOJI.get(severity.lower(), "•")
 
 
-def _format_finding_body(finding: Finding, marker: str = "") -> str:
+#: How a provider renders `Finding.suggested_code` when it may be committed.
+SUGGESTION_GITHUB = "github"
+SUGGESTION_GITLAB = "gitlab"
+
+
+def _fence_for(*texts: str) -> str:
+    """A backtick fence longer than any run of backticks inside `texts`."""
+    import re
+
+    longest = max((len(m) for t in texts for m in re.findall(r"`+", t or "")), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def _suggestion_parts(
+    finding: Finding, *, committable: str | None = None,
+    original: list[str] | None = None,
+) -> list[str]:
+    """The fix part of an inline comment.
+
+    `committable` is set by the provider only when the repository switched
+    `committable_suggestions` on AND the anchor is exact (see
+    `_committable_span`): GitHub then gets a ```suggestion block, GitLab a
+    ```suggestion:-0+N block whose N is the number of lines BELOW the anchored
+    one that the replacement also covers. Anything else — a hint, code on a
+    provider or anchor that cannot take a one-click commit, Bitbucket — is a
+    plain block a human reads: a ```diff when the replaced lines are known,
+    plain code otherwise. A hint is never rendered as a committable block:
+    structural rules ship prose like "=== / !==", and committing that is a
+    broken file.
+    """
+    parts: list[str] = []
+    code = finding.suggested_code
+    hint = finding.suggestion
+    if code is not None:
+        start = finding.line
+        end = max(start, int(finding.suggested_end_line or start))
+        fence = _fence_for(code, *(original or []))
+        parts.append("")
+        if committable == SUGGESTION_GITHUB:
+            parts += [f"{fence}suggestion", code, fence]
+        elif committable == SUGGESTION_GITLAB:
+            parts += [f"{fence}suggestion:-0+{end - start}", code, fence]
+        elif original:
+            parts.append("**Suggested change:**")
+            parts.append("")
+            parts.append(f"{fence}diff")
+            parts += [f"-{ln}" for ln in original]
+            parts += [f"+{ln}" for ln in code.split("\n")]
+            parts.append(fence)
+        else:
+            parts.append("**Suggested change:**")
+            parts.append("")
+            parts += [fence, code, fence]
+    if hint and hint.strip() != (code or "").strip():
+        fence = _fence_for(hint)
+        parts.append("")
+        parts.append("**Suggestion:**")
+        parts.append("")
+        parts += [fence, hint, fence]
+    return parts
+
+
+def _new_side_text(pr: PullRequest) -> dict[tuple[str, int], str]:
+    """(path, new-file line) → that line's text, for every line a hunk shows.
+
+    Read off the hunk bodies: context and added lines exist in the new file,
+    removed lines do not. Used to show what a suggested change replaces.
+    """
+    out: dict[tuple[str, int], str] = {}
+    for hunk in pr.hunks:
+        if not hunk.file_path or hunk.is_binary:
+            continue
+        n = hunk.new_start
+        rows = (hunk.content or "").split("\n")
+        if rows and rows[-1] == "":
+            rows.pop()
+        for raw in rows:
+            if raw.startswith("@@") or raw.startswith("\\") or raw.startswith("-"):
+                continue
+            # "" is a blank context line whose leading space was trimmed.
+            out[(hunk.file_path, n)] = raw[1:]
+            n += 1
+    return out
+
+
+def _original_lines(
+    pr_lines: dict[tuple[str, int], str], finding: Finding,
+) -> list[str] | None:
+    """The new-file lines a suggested replacement covers, or None if unseen."""
+    if finding.suggested_code is None:
+        return None
+    end = max(finding.line, int(finding.suggested_end_line or finding.line))
+    found = [pr_lines.get((finding.file_path, n)) for n in range(finding.line, end + 1)]
+    if any(t is None for t in found):
+        return None
+    return [t for t in found if t is not None]
+
+
+def _committable_span(
+    finding: Finding, anchored_line: int,
+    ranges: dict[tuple[str, str], list[tuple[int, int]]],
+) -> tuple[int, int] | None:
+    """(start, end) when a suggestion can be a one-click commit, else None.
+
+    Three conditions, all about not committing over the wrong lines: the
+    finding carries `suggested_code`; the anchor was NOT moved by
+    `_snap_to_span` (a moved anchor would apply the replacement to the line
+    it was moved to); and the whole range sits on the new side inside ONE
+    span the diff carries, which is where GitHub and GitLab accept it.
+    """
+    if finding.suggested_code is None:
+        return None
+    if getattr(finding, "side", HunkSide.RIGHT) != HunkSide.RIGHT:
+        return None
+    start = finding.line
+    end = max(start, int(finding.suggested_end_line or start))
+    if anchored_line != start:
+        return None
+    for lo, hi in ranges.get((finding.file_path, "RIGHT"), []):
+        if lo <= start and end <= hi:
+            return start, end
+    return None
+
+
+def _committable_enabled(batch: ReviewBatch) -> bool:
+    actions = getattr(batch, "pr_actions", None)
+    return bool(getattr(actions, "committable_suggestions", False))
+
+
+def _format_finding_body(
+    finding: Finding, marker: str = "", *, committable: str | None = None,
+    original: list[str] | None = None,
+) -> str:
     """Markdown body for an inline comment — universal cross-provider.
 
     `marker` is the same idempotency token the summary comment carries. Only
@@ -216,11 +391,7 @@ def _format_finding_body(finding: Finding, marker: str = "") -> str:
     parts.append("")
     parts.append(finding.body or "(no details)")
 
-    if finding.suggestion:
-        parts.append("")
-        parts.append("```suggestion")
-        parts.append(finding.suggestion)
-        parts.append("```")
+    parts.extend(_suggestion_parts(finding, committable=committable, original=original))
 
     # The footer always renders: confidence is the agent's own number and
     # belongs where telemetry belongs — visible, last, and never the thing
@@ -374,10 +545,9 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
     """
     if getattr(batch, "rich_summary", False):
         return _format_rich_summary(batch, marker)
-    pr = batch.pull_request
     lines: list[str] = []
     lines.append(marker)
-    lines.append(f"## 🤖 Code Review for PR #{pr.number}")
+    lines.append(_summary_header(batch))
     lines.append("")
 
     # The gap notice, before anything else can be read on its own. This
@@ -433,6 +603,25 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
     lines.append("---")
     lines.append(f"<sub>Powered by Code Analyzer · {_provenance(batch)}</sub>")
     return "\n".join(lines)
+
+
+def _summary_header(batch: ReviewBatch) -> str:
+    """The summary's first visible line: the repository's own
+    `message_finished_header` when it set one, else the built-in heading."""
+    from src.review.pr_actions import (
+        HEADER_TEMPLATE_MAX_CHARS,
+        render_template,
+        template_values,
+    )
+
+    pr = batch.pull_request
+    actions = getattr(batch, "pr_actions", None)
+    custom = render_template(
+        getattr(actions, "message_finished_header", None),
+        template_values(pr, list(batch.agents_run)),
+        limit=HEADER_TEMPLATE_MAX_CHARS,
+    )
+    return custom or f"## 🤖 Code Review for PR #{pr.number}"
 
 
 def _severity_count_lines(batch: ReviewBatch) -> list[str]:
@@ -675,8 +864,7 @@ def _failure_headline(batch: ReviewBatch) -> str:
 def _format_rich_summary(batch: ReviewBatch, marker: str) -> str:
     from src.review.models import ReviewRunStatus
 
-    pr = batch.pull_request
-    lines: list[str] = [marker, f"## 🤖 Code Review for PR #{pr.number}", ""]
+    lines: list[str] = [marker, _summary_header(batch), ""]
 
     if batch.run_status == ReviewRunStatus.FAILED:
         lines.append(_failure_headline(batch))
@@ -688,14 +876,19 @@ def _format_rich_summary(batch: ReviewBatch, marker: str) -> str:
     lines.append(_verdict_line(batch))
     lines.append("")
 
-    overview = (getattr(batch, "pr_overview", "") or "").strip()
-    if overview:
-        lines.append("### Summary")
+    if getattr(batch, "summary_in_description", False):
+        # The overview and the walkthrough are in the pull request's
+        # description; this comment keeps the verdict and the findings.
+        lines.append("_The change summary is in the pull request description._")
         lines.append("")
-        lines.append(overview)
-        lines.append("")
-
-    lines.extend(_walkthrough_lines(batch))
+    else:
+        overview = (getattr(batch, "pr_overview", "") or "").strip()
+        if overview:
+            lines.append("### Summary")
+            lines.append("")
+            lines.append(overview)
+            lines.append("")
+        lines.extend(_walkthrough_lines(batch))
     lines.extend(_rich_findings_lines(batch))
 
     details = ["**Scope**", "", *_scope_lines(batch)]
@@ -724,12 +917,29 @@ STATUS_IN_PROGRESS_MARK = "<!-- celmis:review-status:in-progress -->"
 
 def _format_started_comment(
     pr: PullRequest, *, agents: list[str], started_at: str, marker: str = "",
+    template: str | None = None,
 ) -> str:
-    """The "🔄 reviewing…" placeholder posted as soon as a review begins."""
+    """The "🔄 reviewing…" placeholder posted as soon as a review begins.
+
+    `template` is the repository's `message_started`; when it renders to
+    anything it replaces the built-in text. The in-progress mark stays either
+    way — it is how a later skip or crash recognises the placeholder.
+    """
+    from src.review.pr_actions import (
+        STARTED_TEMPLATE_MAX_CHARS,
+        render_template,
+        template_values,
+    )
+
+    lines = [marker] if marker else []
+    custom = render_template(
+        template, template_values(pr, agents), limit=STARTED_TEMPLATE_MAX_CHARS,
+    )
+    if custom:
+        return "\n".join([*lines, STATUS_IN_PROGRESS_MARK, custom])
     sha = (pr.head_sha or "")[:7] or "unknown"
     files = len(pr.changed_files)
     roster = ", ".join(f"`{a}`" for a in agents) if agents else "_none_"
-    lines = [marker] if marker else []
     lines += [
         STATUS_IN_PROGRESS_MARK,
         "## 🔄 Celmis is reviewing this PR…",
@@ -765,6 +975,24 @@ def _format_status_comment(
         f"- Commit: `{sha}`",
         "",
         tail,
+    ]
+    return "\n".join(lines)
+
+
+#: Carried (beside the review marker) by the short note a skipped or blocked
+#: review leaves when `status_feedback` is on — the key a re-run finds the
+#: note by, so a second skip rewrites it instead of adding another.
+STATUS_FEEDBACK_MARK = "<!-- celmis:review-status:feedback -->"
+
+
+def _format_feedback_comment(pr: PullRequest, *, reason: str, marker: str = "") -> str:
+    """The brief note for a review that never started: why, and for which commit."""
+    sha = (pr.head_sha or "")[:7] or "unknown"
+    lines = [marker] if marker else []
+    lines += [
+        STATUS_FEEDBACK_MARK,
+        f"⏭️ **Celmis did not review this pull request** (commit `{sha}`): "
+        f"{_md_cell(reason, 400)}.",
     ]
     return "\n".join(lines)
 

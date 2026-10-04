@@ -38,7 +38,16 @@ from src.review.agents.base import (
     clamp_base_instruction,
 )
 from src.review.graph_context import build_graph_context
-from src.review.models import Finding, PullRequest, ReviewBatch, ReviewVerdict
+from src.review.models import (
+    SUMMARY_EXISTING_DESCRIPTION,
+    SUMMARY_ON_NEW_COMMITS,
+    SUMMARY_TARGETS,
+    Finding,
+    PRActions,
+    PullRequest,
+    ReviewBatch,
+    ReviewVerdict,
+)
 from src.review.providers import get_provider_for
 from src.review.providers.base import (
     PullRequestProvider,
@@ -128,6 +137,38 @@ def _policy_setting(policy, name: str):
     return builtin_default(name) if value is None else value
 
 
+def _pr_actions(policy) -> PRActions:
+    """The repository's PR-action settings, each read with its built-in default.
+
+    A word outside a setting's vocabulary falls back to the default rather
+    than switching the behaviour off or on by accident; a template that is
+    not a string is no template.
+    """
+    def _word(name: str, allowed: tuple[str, ...], default: str) -> str:
+        value = str(_policy_value(policy, name, default) or "").strip().lower()
+        return value if value in allowed else default
+
+    def _text(name: str) -> str | None:
+        value = _policy_value(policy, name, None)
+        return value if isinstance(value, str) and value.strip() else None
+
+    return PRActions(
+        approve_when_clean=bool(_policy_value(policy, "approve_when_clean", False)),
+        request_changes_on_critical=bool(
+            _policy_value(policy, "request_changes_on_critical", False)),
+        status_feedback=bool(_policy_value(policy, "status_feedback", True)),
+        committable_suggestions=bool(
+            _policy_value(policy, "committable_suggestions", False)),
+        summary_target=_word("summary_target", SUMMARY_TARGETS, "comment"),
+        summary_on_new_commits=_word(
+            "summary_on_new_commits", SUMMARY_ON_NEW_COMMITS, "replace"),
+        summary_existing_description=_word(
+            "summary_existing_description", SUMMARY_EXISTING_DESCRIPTION, "append"),
+        message_started=_text("message_started"),
+        message_finished_header=_text("message_finished_header"),
+    )
+
+
 def _display_time(iso: str) -> str:
     """'2026-10-04T12:03:11.5+00:00' -> '2026-10-04 12:03 UTC'."""
     from datetime import UTC, datetime
@@ -213,25 +254,49 @@ class _ReviewLifecycle:
                     what, self.pr.number, cid)
         return cid
 
-    def started(self, agents: list[str], *, started_at: str) -> None:
+    def started(self, agents: list[str], *, started_at: str,
+                template: str | None = None) -> None:
         from src.review.providers.base import _format_started_comment
 
         if self.pr is None:
             return
         self.started_id = self._write(
-            _format_started_comment(self.pr, agents=agents, started_at=started_at),
+            _format_started_comment(self.pr, agents=agents, started_at=started_at,
+                                    template=template),
             create=True, what="started",
         )
 
-    def skipped(self, reason: str) -> None:
+    def skipped(self, reason: str, *, feedback: bool = False) -> None:
+        """Rewrite a placeholder as "⏭️ Skipped"; with `feedback` (the
+        repository's `status_feedback`) and no placeholder to rewrite, leave a
+        brief marked note instead — upserted, so a re-run never adds a second.
+        Off, a skip with no placeholder stays silent, as it always was."""
         from src.review.providers.base import _format_status_comment
 
         if self.pr is None:
             return
-        self._write(
+        cid = self._write(
             _format_status_comment(self.pr, outcome="skipped", reason=reason),
             create=False, what="skipped", only_if_in_progress=True,
         )
+        if cid is None and feedback:
+            self._feedback(reason)
+
+    def _feedback(self, reason: str) -> None:
+        if not self.active or self.provider is None or self.pr is None:
+            return
+        upsert = getattr(self.provider, "upsert_feedback_comment", None)
+        if not callable(upsert):
+            return
+        try:
+            cid = upsert(self.pr, reason)
+        except Exception as exc:  # noqa: BLE001 — a status note never fails a review
+            logger.warning(
+                "review_status_feedback_failed pr=%s err_type=%s err=%s",
+                self.pr.number, type(exc).__name__, str(exc)[:200],
+            )
+            return
+        logger.info("review_status_feedback pr=%s id=%s", self.pr.number, cid)
 
     def failed(self, reason: str) -> None:
         from src.review.providers.base import _format_status_comment
@@ -466,6 +531,9 @@ class ReviewOrchestrator:
         # compact one. Read with defaults because the columns are newer than
         # most policy rows (and than the code that may have loaded them).
         batch.rich_summary = bool(_policy_value(policy, "summary_enabled", True))
+        # Approve / request changes / suggestions / where the summary goes /
+        # message templates — what the providers may do beyond commenting.
+        actions = batch.pr_actions = _pr_actions(policy)
 
         # ── Per-repo ignore globs. The diff was parsed inside the provider,
         # before any policy existed, so the repository's own exclusions can
@@ -509,6 +577,10 @@ class ReviewOrchestrator:
             )
             batch.verdict = ReviewVerdict.SKIPPED
             batch.mark_complete()
+            lifecycle.skipped(
+                f"the base branch `{pr.base_ref}` is not one this repository "
+                f"reviews", feedback=actions.status_feedback,
+            )
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
 
         # ── Build agent context (passes custom_rules from policy + matching folder_rules) ──
@@ -547,7 +619,8 @@ class ReviewOrchestrator:
             batch.summary = "PR is draft — review skipped."
             batch.verdict = ReviewVerdict.SKIPPED
             batch.mark_complete()
-            lifecycle.skipped("the pull request is a draft")
+            lifecycle.skipped("the pull request is a draft",
+                              feedback=actions.status_feedback)
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
 
         # A diff too large to review, refused as a refusal rather than
@@ -578,7 +651,7 @@ class ReviewOrchestrator:
             lifecycle.skipped(
                 f"the diff is {raw_len:,} bytes, over the {cap:,}-byte limit "
                 f"for a single review — split the pull request or raise "
-                f"REVIEW_MAX_DIFF_SIZE_BYTES"
+                f"REVIEW_MAX_DIFF_SIZE_BYTES", feedback=actions.status_feedback,
             )
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
 
@@ -618,7 +691,7 @@ class ReviewOrchestrator:
                 )
             else:
                 short = "the diff could not be parsed"
-            lifecycle.skipped(short)
+            lifecycle.skipped(short, feedback=actions.status_feedback)
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
 
         # ── Engine selection (workspace setting): the platform around the
@@ -667,13 +740,15 @@ class ReviewOrchestrator:
                           and a.name not in dormant_agents]
                 if self._verifier_enabled(policy, disabled_agents)[0]:
                     roster.append("verifier")
-            lifecycle.started(roster, started_at=_display_time(batch.started_at))
+            lifecycle.started(roster, started_at=_display_time(batch.started_at),
+                              template=actions.message_started)
 
         # ── The PR overview + walkthrough: one cheap LLM call, started now so
         # it runs alongside the engine instead of after it. Only when the
         # comment will actually be posted — a dry run has no reader for it.
         summary_job = None
-        if batch.rich_summary and post_comments and not dry_run:
+        wants_summary = batch.rich_summary or actions.summary_target == "description"
+        if wants_summary and post_comments and not dry_run:
             summary_job = _PRSummaryJob.start(
                 agent_pr, context,
                 language=_policy_value(policy, "review_language", None),
@@ -761,6 +836,7 @@ class ReviewOrchestrator:
                 dry_run=dry_run, post_comments=post_comments,
                 user_id=user_id, workspace_id=workspace_id, t0=t0,
                 lifecycle=lifecycle, summary_job=summary_job,
+                context=context, policy=policy,
             )
 
         # ── Run agents in parallel (minus the ones the policy switched off;
@@ -1081,6 +1157,7 @@ class ReviewOrchestrator:
             dry_run=dry_run, post_comments=post_comments,
             user_id=user_id, workspace_id=workspace_id, t0=t0,
             lifecycle=lifecycle, summary_job=summary_job,
+            context=context, policy=policy,
         )
 
     def _finish_review(
@@ -1089,6 +1166,8 @@ class ReviewOrchestrator:
         t0: float,
         lifecycle: _ReviewLifecycle | None = None,
         summary_job: _PRSummaryJob | None = None,
+        context=None,
+        policy=None,
     ) -> ReviewRunResult:
         """Shared tail for every engine: reviewer assignment, notifications,
         comment posting. The brain differs; the plumbing doesn't."""
@@ -1135,6 +1214,16 @@ class ReviewOrchestrator:
         except Exception as exc:  # noqa: BLE001
             logger.warning("review_notify_failed err=%s", exc)
 
+        # ── The summary in the PR description (summary_target="description").
+        # Written BEFORE the review is posted, so the comment can leave the
+        # walkthrough out exactly when the description really holds it.
+        description_result: dict | None = None
+        if (post_comments and not dry_run
+                and batch.pr_actions.summary_target == "description"):
+            description_result = self._write_description(
+                provider, batch, context=context, policy=policy,
+            )
+
         # ── Post comments ──
         posted = False
         provider_response: dict = {}
@@ -1167,7 +1256,87 @@ class ReviewOrchestrator:
                     provider_name, pr.number, summary_error,
                 )
 
+        if description_result is not None and isinstance(provider_response, dict):
+            provider_response["description"] = description_result
         return ReviewRunResult(batch=batch, posted=posted, provider_response=provider_response)
+
+    def _write_description(self, provider, batch: ReviewBatch, *, context, policy) -> dict:
+        """Put our overview + walkthrough into the PR description. Never raises.
+
+        `summary_existing_description` decides what happens to the author's
+        text on the first write, `summary_on_new_commits` what a later run
+        does to our block (see `pr_actions.compose_description`). "complement"
+        spends ONE short LLM call, booked as `review_summary` like the
+        overview; any failure there falls back to "append".
+        """
+        from src.review.pr_actions import compose_description, description_insights
+
+        pr = batch.pull_request
+        actions = batch.pr_actions
+        insights = description_insights(batch)
+        if not insights:
+            logger.info("review_description_skipped reason=no_summary pr=%s", pr.number)
+            return {"written": False, "error": "no summary to write"}
+        update = getattr(provider, "update_description", None)
+        if not callable(update):
+            return {"written": False, "error": "not supported by this provider"}
+
+        def complement(author: str, ours: str) -> str | None:
+            return self._complement_description(batch, author, ours,
+                                                context=context, policy=policy)
+
+        def transform(current: str) -> str | None:
+            return compose_description(
+                current, insights=insights, commit=pr.head_sha or "",
+                existing_mode=actions.summary_existing_description,
+                new_commits_mode=actions.summary_on_new_commits,
+                complement=complement,
+            )
+
+        try:
+            result = update(pr, transform)
+        except Exception as exc:  # noqa: BLE001 — the description never fails a review
+            logger.warning("review_description_failed pr=%s err_type=%s err=%s",
+                           pr.number, type(exc).__name__, str(exc)[:200])
+            return {"written": False, "error": type(exc).__name__}
+        if not isinstance(result, dict):
+            result = {"written": False, "error": "unreadable provider answer"}
+        # The comment drops its walkthrough only when the description holds
+        # one: written now, or left as it was because our block is already
+        # there ("nothing" on new commits, or an identical rewrite).
+        if result.get("written") or result.get("unchanged"):
+            batch.summary_in_description = True
+        else:
+            logger.warning("review_description_not_written pr=%s err=%s",
+                           pr.number, result.get("error"))
+        return result
+
+    @staticmethod
+    def _complement_description(batch: ReviewBatch, author: str, ours: str,
+                                *, context, policy) -> str | None:
+        from src.review.pr_summary import complement_description
+
+        client = getattr(context, "llm_client", None)
+        if client is None:
+            return None
+        try:
+            from src.review.agents.base import agent_llm_settings
+
+            agent_llm = agent_llm_settings(context, "verifier")
+        except Exception:  # noqa: BLE001
+            agent_llm = None
+        res = complement_description(
+            batch.pull_request, author, ours, llm_client=client, agent_llm=agent_llm,
+            language=_policy_value(policy, "review_language", None),
+        )
+        batch.tokens_in += res.tokens_in
+        batch.tokens_out += res.tokens_out
+        if res.cost_usd is not None and batch.cost_usd is not None:
+            batch.cost_usd = round(batch.cost_usd + res.cost_usd, 6)
+        if res.error:
+            logger.info("review_description_complement_fallback pr=%s reason=%s",
+                        batch.pull_request.number, res.error)
+        return res.text
 
     # ─── Agent context build ───────────────────────────────────
 

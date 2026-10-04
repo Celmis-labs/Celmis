@@ -827,6 +827,10 @@ def record_completed_review(
             "title": f.title,
             "body": f.body,
             "suggestion": f.suggestion,
+            # The exact replacement, when an agent offered one (2.3.0). Keys
+            # in the stored JSON, not columns.
+            "suggested_code": getattr(f, "suggested_code", None),
+            "suggested_end_line": getattr(f, "suggested_end_line", None),
             "rule_id": f.rule_id,
             "confidence": f.confidence,
             # The sentence the evidence gate exists to force, and the one

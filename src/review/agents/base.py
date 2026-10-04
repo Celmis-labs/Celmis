@@ -36,7 +36,14 @@ from src.llm.errors import (
 # documentation is a dropdown that means something different depending on
 # which page you opened.
 from src.llm.prompts.language import LANGUAGE_NAMES as _REVIEW_LANG_NAMES
-from src.review.models import Finding, FindingSeverity, HunkSide, PullRequest
+from src.review.models import (
+    Finding,
+    FindingSeverity,
+    HunkSide,
+    PullRequest,
+    parse_suggested_code,
+    parse_suggested_end_line,
+)
 from src.review.settings import AgentLLMSettings, resolve_agent_llm
 
 logger = logging.getLogger(__name__)
@@ -716,7 +723,9 @@ FINDING_OUTPUT_FORMAT = """Output: a JSON array of findings and nothing around i
     "title": "<one line>",
     "body": "<markdown — the full explanation>",
     "rule_id": "<agent>.<rule>",
-    "suggestion": "<optional replacement code>",
+    "suggestion": "<optional fix hint — prose or a snippet>",
+    "suggested_code": "<optional: ONLY when certain — the exact text that replaces lines line..suggested_end_line of the new file, whole lines with their indentation; omit otherwise>",
+    "suggested_end_line": <optional integer, the last line suggested_code replaces; omit for one line>,
     "confidence": <0.0-1.0, your own estimate, written LAST>
 }
 
@@ -1936,6 +1945,8 @@ class LLMReviewAgent(ReviewAgent):
             body=str(data.get("body") or data.get("message") or ""),
             reasoning=reasoning,
             suggestion=data.get("suggestion") if isinstance(data.get("suggestion"), str) else None,
+            suggested_code=parse_suggested_code(data),
+            suggested_end_line=parse_suggested_end_line(data, line_int),
             agent=self.name,
             rule_id=str(data.get("rule_id") or data.get("rule") or f"{self.name}.unknown"),
             confidence=confidence,

@@ -368,7 +368,12 @@ def test_a_skip_leaves_a_finished_summary_alone(env, monkeypatch, pr_kw):
     fake = _FakeGitHub()
     finished = f"{MARKER}\n## 🤖 Code Review for PR #1\n\n✅ **APPROVED**"
     previous = fake.add_issue(finished)
-    orch = _orch(monkeypatch, agents=[_Agent()], client=_Client(GOOD_REPLY))
+    # `status_feedback` off: the skip is silent, as it was before 2.3.0. With
+    # it on the finished summary is still left alone and a separate note is
+    # added — see test_the_pr_says_what_it_does.py.
+    orch = _orch(monkeypatch, agents=[_Agent()], client=_Client(GOOD_REPLY),
+                 policy={"enabled": True, "target_branches": [],
+                         "status_feedback": False})
 
     result = _run(orch, _Provider(fake, _pr(**pr_kw)))
 
@@ -404,8 +409,12 @@ def test_a_lost_github_summary_makes_the_run_partial(env, monkeypatch):
 
 
 def test_a_skip_on_a_quiet_pr_starts_no_thread(env, monkeypatch):
+    """With `status_feedback` off. On (the 2.3.0 default) a quiet PR gets one
+    brief note — test_the_pr_says_what_it_does.py."""
     fake = _FakeGitHub()
-    orch = _orch(monkeypatch, agents=[_Agent()])
+    orch = _orch(monkeypatch, agents=[_Agent()],
+                 policy={"enabled": True, "target_branches": [],
+                         "status_feedback": False})
     _run(orch, _Provider(fake, _pr(hunks=[])))
     assert fake.issue == []
 

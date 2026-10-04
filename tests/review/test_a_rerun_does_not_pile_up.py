@@ -41,9 +41,14 @@ def test_an_inline_comment_carries_the_marker():
 
 
 def test_every_provider_stamps_its_inline_comments():
+    import re
+
+    # The marker is the second positional argument; keyword arguments after
+    # it (the suggestion rendering, 2.3.0) do not change what is stamped.
+    call = re.compile(r"_format_finding_body\(\s*finding,\s*settings\.comment_marker\s*[,)]")
     for name in ("github.py", "gitlab.py", "bitbucket.py"):
         source = (SRC / "review" / "providers" / name).read_text(encoding="utf-8")
-        assert "_format_finding_body(finding, settings.comment_marker)" in source, (
+        assert call.search(source), (
             f"{name} posts unmarked inline comments, which the next review "
             "cannot find to delete"
         )
