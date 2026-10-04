@@ -899,7 +899,7 @@ function FindingRow({
 
 /** How many findings a run hid before posting — 0 for a run that predates
  *  the record, which gets no count rather than a false "nothing hidden". */
-export function hiddenTotal(run: Pick<ReviewRunOut, "hidden"> | null | undefined): number {
+function hiddenTotal(run: Pick<ReviewRunOut, "hidden"> | null | undefined): number {
   const h = run?.hidden;
   if (!h || typeof h !== "object") return 0;
   const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
@@ -911,7 +911,7 @@ export function hiddenTotal(run: Pick<ReviewRunOut, "hidden"> | null | undefined
 /** The tooltip: what was hidden and why, rule by rule. The count alone is
  *  the claim this surface exists to stop making — "dropped 7" with no
  *  WHAT is how a filter eats true positives unnoticed. */
-export function hiddenHint(
+function hiddenHint(
   run: Pick<ReviewRunOut, "hidden">,
   t: (key: string, params?: Record<string, string | number>) => string,
 ): string {
