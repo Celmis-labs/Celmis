@@ -28,9 +28,14 @@ SECTIONS = (
                 "не прац", "не работ", "401", "403", "troubleshoot"),
         body="""
 - No issues / pull requests shown: nothing has been reviewed yet. Issues and
-  [Pull requests](/pull-requests) fill only after a review. Switch on the
-  repository in "Auto-review PRs" on [Review history](/reviews) and set up the
-  webhook, or run one with "Run a review".
+  [Pull requests](/pull-requests) fill only after a review. Press "Install webhook" on the repository's row on [Repositories](/repositories) (owner or
+  admin), or switch it on in "Auto-review PRs" on [Review history](/reviews)
+  and set up the webhook by hand, or run one with "Run a review".
+- "webhook failed" on a repository: the token may not manage webhooks
+  (GitHub `admin:repo_hook` or fine-grained Webhooks Read and write; GitLab
+  Maintainer; Bitbucket `write:webhook:bitbucket`; the account must administer
+  the repository), or the server's `PUBLIC_BASE_URL` is unset or points at
+  localhost. Fix it, then "Repair webhook"; or use "manual setup".
 - Auto-review does nothing: the repository's switch is off; the webhook is
   missing or has the wrong secret (check the provider's delivery log: 401/403
   = secret, 500 = no secret generated); the workspace id in the URL is
@@ -63,7 +68,7 @@ SECTIONS = (
   from its list.
 - Embeddings profile is X but the vector collection was built with Y (width
   N) / dimension mismatch: the embeddings model or "Dimensions" changed after
-  indexing. A global admin presses "Reindex everything" on
+  indexing (embeddings are installation-wide). A global admin presses "Reindex everything" on
   [LLM Setup](/settings/llm) (the error calls it Re-index embeddings), or
   switches the profile back. Self-hosted: set `EMBEDDING_DIMENSIONS` to what
   the model returns (768 for nomic-embed-text, 1024 for bge-m3) and reindex.

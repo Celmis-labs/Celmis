@@ -64,6 +64,12 @@ bitbucket.org/<workspace>/; "Atlassian email" is the address you log in to
 Bitbucket with. Errors: 401 = wrong email or token; 403 = the token cannot
 read that workspace (`workspace:read` missing); 404 = wrong slug. Bitbucket
 is never polled: review it by webhook or by hand.
+
+For the one-press "Install webhook" on Repositories the token must also be
+allowed to manage webhooks: GitHub classic `admin:repo_hook` (or `repo` with
+admin rights), fine-grained Webhooks Read and write; GitLab Maintainer on the
+project; Bitbucket `read:webhook:bitbucket` + `write:webhook:bitbucket`
+(see the webhook-install section).
 """,
     ),
     Section(
@@ -80,11 +86,15 @@ is never polled: review it by webhook or by hand.
         strong=("webhook", "вебхук", "веб-хук", "polling", "auto-review",
                 "автоматичн", "автоматическ"),
         body="""
-Automatic review is switched on per repository on [Review history](/reviews)
-(Code review → "Review history"), NOT on the Repositories page: the
-"Auto-review PRs" panel has one switch per registered repository ("Automatic review for {repo}"). Under it is the "Connect auto-review" card that shows the
-webhook URL and secret. The chat agent can also switch it on for a set of
-repositories (and pin their branch) — ask it.
+Quickest route: "Install webhook" on the repository's row on
+[Repositories](/repositories) creates the webhook on the provider AND
+switches auto-review on (owner or admin; see the webhook-install section).
+What follows is the manual route and the switches themselves.
+
+The per-repository switches are on [Review history](/reviews) (Code review →
+"Review history"): the "Auto-review PRs" panel has one switch per registered
+repository ("Automatic review for {repo}"). Under it is the "Connect auto-review" card with the webhook URL and secret. The chat agent can also
+switch review on for a set of repositories (and pin their branch) — ask it.
 
 Two ways a new pull request reaches Celmis once the switch is on:
 - Polling (GitHub and GitLab, every ~60 s). GitHub polling reads the token's
@@ -121,6 +131,57 @@ in that workspace, auto-review is off for it, or the workspace id in the URL
 is another workspace's. Without a secret the endpoint answers 500 Webhook
 secret not configured. Drafts are skipped until ready for review; a new push
 to an open pull request is reviewed again.
+""",
+    ),
+    Section(
+        id="webhook-install",
+        title="Install webhook: automatic webhook setup per repository",
+        keywords=(
+            "webhook", "install", "repair", "hook", "public_base_url",
+            "public url", "webhook failed", "no webhook", "auto-review",
+            "вебхук", "веб-хук", "встанов", "інсталю", "полагод", "відремонт",
+            "установ", "почин",
+        ),
+        strong=("install webhook", "repair webhook", "webhook", "вебхук",
+                "веб-хук", "встанов", "установ"),
+        body="""
+Celmis can create the review webhook on the provider itself — no copying of
+URLs and secrets:
+
+1. Open [Repositories](/repositories). Each row shows a webhook badge
+   ("webhook installed", "webhook failed" or "no webhook") and a button
+   "Install webhook" ("Repair webhook" once installed).
+2. Press "Install webhook". With the workspace's git token Celmis creates the
+   hook (the workspace's webhook secret and the right events: GitHub
+   `pull_request` and `push`; GitLab merge request events; Bitbucket
+   `pullrequest:created`, `pullrequest:updated`, `pullrequest:fulfilled`,
+   `pullrequest:rejected`) and switches auto-review on for that repository.
+3. Success says "Webhook installed — new pull requests will be reviewed automatically". "Repair webhook" re-applies URL, events and secret and
+   never creates a duplicate — use it after replacing a token or rotating
+   the secret.
+
+Requirements:
+- Owner or admin of the workspace (anyone else gets the manual dialog).
+- The server's `PUBLIC_BASE_URL` set to the address this Celmis is reachable
+  at from the internet (not localhost); otherwise the button explains that it
+  is not set — the operator sets it and restarts the API.
+- A git token allowed to manage webhooks — the usual cause of "webhook failed":
+  - GitHub: classic token with `admin:repo_hook` (or `repo` with admin rights
+    on the repository); fine-grained token with Repository permissions →
+    Webhooks: Read and write. The account must be an admin of the repository.
+  - GitLab: the `api` scope, and Maintainer (or Owner) on the project.
+  - Bitbucket: Atlassian API token scopes `read:webhook:bitbucket` and
+    `write:webhook:bitbucket` (or Webhooks: Read and write on a repository or
+    workspace access token); the account must be an admin of the repository.
+  Fix the token on [Git connections](/connections) ("Replace token"), then
+  press "Repair webhook".
+
+Manual fallback: "manual setup" next to the button opens "Webhook for {repo}" with where to add it at the provider, the "Payload URL:", the events
+and the secret — this workspace's webhook secret, generated or rotated on
+[Review history](/reviews) in "Connect auto-review" (see the polling/webhook
+section). Until a webhook delivers, nothing is reviewed automatically; the
+empty [Issues](/issues) and [Pull requests](/pull-requests) pages offer
+"Install the webhook" and "Run a review".
 """,
     ),
     Section(
@@ -163,6 +224,9 @@ button queues every repository that is not indexed.
 Branch: click the branch chip on the row ("default branch" when none is
 pinned) and pick another; then press "index now" again — the clone still holds
 the old branch until re-indexed.
+
+Webhook: the row's badge and "Install webhook" button set up automatic
+review in one press (owner or admin; see the webhook-install section).
 
 Other row buttons: the ⚡ icon lists the open pull requests with a "Review"
 button each; the people icon rebuilds ownership (git blame + CODEOWNERS);
