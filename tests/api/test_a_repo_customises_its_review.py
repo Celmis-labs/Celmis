@@ -130,10 +130,13 @@ def _finders() -> tuple[str, ...]:
 async def test_an_unconfigured_repo_reports_the_defaults():
     async with policy_api(workspace={"review_language": "de"}) as client:
         p = await _get(client)
-    assert p["summary_enabled"] is True
-    assert p["started_comment_enabled"] is True
+    # Nothing said here: every switch inherits, and resolves to on.
+    assert p["summary_enabled"] is None and p["summary_enabled_effective"] is True
+    assert p["started_comment_enabled"] is None
+    assert p["started_comment_enabled_effective"] is True
     assert p["summary_instructions"] is None
     assert p["review_language"] is None
+    assert p["sources"]["review_language"] == "workspace"
     assert p["review_language_effective"] == "de"
     assert p["max_inline_comments"] is None
     assert p["max_inline_comments_effective"] == policies_router._max_inline_default()
@@ -169,7 +172,9 @@ async def test_the_output_fields_round_trip_and_absent_keeps_them():
                        max_inline_comments=None, summary_instructions=None)
         assert r.status_code == 200, r.text
         p = await _get(client)
-        assert p["summary_enabled"] is True
+        assert p["summary_enabled"] is None
+        assert p["summary_enabled_effective"] is True
+        assert p["sources"]["summary_enabled"] == "install"
         assert p["review_language"] is None
         assert p["max_inline_comments"] is None
         assert p["summary_instructions"] is None

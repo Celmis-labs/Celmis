@@ -2,7 +2,8 @@
 
 Both follow the three-state rule `suppressed_rules` set: the key ABSENT keeps
 what is stored (a client that cannot render the control must not wipe it),
-null clears, a value replaces. Bad values are refused with a 422 that names
+null inherits (the workspace review defaults, then the install), a value —
+for the globs [] included — replaces. Bad values are refused with a 422 that names
 them, never stored to match nothing.
 """
 
@@ -20,7 +21,8 @@ from tests.api.test_the_policy_page_carries_the_ceiling import (
 async def test_defaults_say_what_is_inherited():
     async with policy_api(_workspace(REASONING_MODEL, "google")) as client:
         policy = await _get(client)
-        assert policy["ignore_globs"] == []
+        assert policy["ignore_globs"] is None          # inherits
+        assert policy["ignore_globs_effective"] == []
         assert policy["comment_min_severity"] is None
         assert policy["comment_min_severity_effective"] == "info"
 
@@ -41,11 +43,18 @@ async def test_saved_values_come_back_cleaned():
         assert policy["ignore_globs"] == ["docs/**", "*.snap"]
         assert policy["comment_min_severity"] == "warning"
 
-        # null clears.
+        # null goes back to inheriting.
         await _put(client, ignore_globs=None, comment_min_severity=None)
         policy = await _get(client)
-        assert policy["ignore_globs"] == []
+        assert policy["ignore_globs"] is None
+        assert policy["ignore_globs_effective"] == []
         assert policy["comment_min_severity"] is None
+
+        # [] is this repo's own "nothing extra", kept apart from inherit.
+        await _put(client, ignore_globs=[])
+        policy = await _get(client)
+        assert policy["ignore_globs"] == []
+        assert policy["sources"]["ignore_globs"] == "repo"
 
 
 async def test_bad_values_are_refused():

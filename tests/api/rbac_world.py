@@ -121,6 +121,7 @@ def _routers():
         llm,
         pull_requests,
         repos,
+        review_defaults,
         review_policies,
         reviews,
         teams,
@@ -129,7 +130,8 @@ def _routers():
     from src.ee.analytics import router as analytics
 
     return [workspaces.router, invites.router, teams.router, admin_users.router,
-            agents.router, review_policies.router, repos.router, reviews.router,
+            agents.router, review_policies.router, review_defaults.router,
+            repos.router, reviews.router,
             issues.router, pull_requests.router, alerts.router, automation.router,
             llm.router, connections.router, analytics.router, access_requests.router]
 
@@ -240,6 +242,7 @@ async def _seed(factory, users, ws_ids) -> dict[str, str]:
         Workspace,
         WorkspaceInvite,
         WorkspaceMember,
+        WorkspaceReviewDefaults,
     )
 
     a, b = ws_ids["ws-a"], ws_ids["ws-b"]
@@ -276,6 +279,10 @@ async def _seed(factory, users, ws_ids) -> dict[str, str]:
                                    "security": f"{B_SECRET} repo security prompt",
                                    "verifier": f"{B_SECRET} repo verifier prompt",
                                }))
+        s.add(WorkspaceReviewDefaults(
+            workspace_id=b, disabled_agents=["structural"],
+            summary_instructions=f"{B_SECRET} summary instructions",
+            target_branches=[f"{B_SECRET.lower()}-main"]))
         s.add(ReviewIssue(
             id=ids["issue_b"], workspace_id=b, repo_slug=B_REPO, fingerprint="fpb",
             file_path=f"{B_SECRET}.py", line=1, agent="defect", rule_id="defect.x",

@@ -59,6 +59,7 @@ from src.api.routers import pull_requests as pull_requests_router
 from src.api.routers import push as push_router
 from src.api.routers import qa as qa_router
 from src.api.routers import repos as repos_router
+from src.api.routers import review_defaults as review_defaults_router
 from src.api.routers import review_policies as review_policies_router
 from src.api.routers import reviews as reviews_router
 from src.api.routers import search as search_router_mod
@@ -489,6 +490,7 @@ def build_app() -> FastAPI:
     app.include_router(reviews_router.router)
     app.include_router(webhooks_router.router)
     app.include_router(review_policies_router.router)
+    app.include_router(review_defaults_router.router)
     # Review issues and reviewed pull requests. Review analytics, which reads
     # them, is an enterprise feature and is mounted below with the rest.
     app.include_router(issues_router.router)

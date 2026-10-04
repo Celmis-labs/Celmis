@@ -93,6 +93,10 @@ PROBES: list[tuple[str, str, dict | None, str]] = [
     ("GET", f"/api/review-policies/{B_REPO}/branches", None, "deny"),
     ("PUT", f"/api/review-policies/{B_REPO}", {"prompt_template": "pwned"}, "deny"),
     ("DELETE", f"/api/review-policies/{B_REPO}", None, "deny"),
+    # workspace review defaults: always the ACTIVE workspace's, never B's
+    ("GET", "/api/review-defaults", None, "no_leak"),
+    ("PUT", "/api/review-defaults",
+     {"summary_instructions": "pwned", "disabled_agents": ["defect"]}, "no_leak"),
     # reviews, issues, pull requests, analytics
     ("POST", "/api/reviews/trigger", {"pr_ref": "github:bco/b_secret#1"}, "deny"),
     ("GET", "/api/reviews/history", None, "no_leak"),
@@ -138,6 +142,7 @@ async def _b_untouched(w) -> None:
         TeamMember,
         Workspace,
         WorkspaceInvite,
+        WorkspaceReviewDefaults,
     )
 
     assert await w.scalar(Workspace, w.ws["ws-b"]) is not None
@@ -151,6 +156,9 @@ async def _b_untouched(w) -> None:
     for who in ("admin_a", "editor_a", "member_a", "both"):
         assert await w.scalar(TeamMember, ("team-b", w.uid(who))) is None
     assert (await w.scalar(RepoTeamAccess, (B_REPO, "team-b"))).permission == "admin"
+    defaults = await w.scalar(WorkspaceReviewDefaults, w.ws["ws-b"])
+    assert defaults.summary_instructions == f"{B_SECRET} summary instructions"
+    assert defaults.disabled_agents == ["structural"]
     policy = await w.scalar(RepoReviewPolicy, B_REPO)
     assert policy is not None and policy.prompt_template == f"{B_SECRET} prompt rules"
     assert (await w.scalar(ReviewIssue, "issue-b")).status == "open"
