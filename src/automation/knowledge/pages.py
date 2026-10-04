@@ -25,7 +25,7 @@ row of tabs at the top of the page.
   docs](/docs), "Repo intel" = [repository intelligence](/admin/intel).
 - "Code review": "Review history" = [reviews](/reviews), [Issues](/issues)
   (findings followed across pushes), [Pull requests](/pull-requests),
-  [Analytics](/analytics) (owner/admin/editor, enterprise licence), "Review policies" = [per-repository review settings](/admin/review-policies), "AI Agents" = [workspace agent prompts](/admin/agents),
+  [Analytics](/analytics) (owner/admin/editor, enterprise licence), "Review policies" = [per-repository review settings](/admin/review-policies), "Review defaults" = [workspace review defaults for every repository](/admin/review-defaults), "AI Agents" = [workspace agent prompts](/admin/agents),
   [Compliance](/admin/compliance), [Deprecations](/admin/deprecations).
 - "Ask the code": [Projects](/projects) (ask questions over a group of
   repositories), [Chats](/chats), [Search](/search) (code search).
@@ -83,7 +83,8 @@ The [setup wizard](/onboarding) ("Get started") walks through the same order:
    on in the "Auto-review PRs" panel on [Review history](/reviews) and set up
    the webhook by hand; or review one pull request with the "Run a review"
    card there.
-5. Tune: per-repository settings live in
+5. Tune: settings for every repository live in
+   [Review defaults](/admin/review-defaults), per-repository overrides in
    [Review policies](/admin/review-policies), workspace-wide reviewer prompts
    in [AI Agents](/admin/agents).
 6. Ask: group indexed repositories into a project on [Projects](/projects)

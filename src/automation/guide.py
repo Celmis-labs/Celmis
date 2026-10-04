@@ -28,7 +28,7 @@ GUIDE = """\
 
 - [Dashboard](/dashboard): overview; [Setup wizard](/onboarding) walks through the first repository; [What you can do](/capabilities).
 - [Repositories](/repositories): add a repository (paste a URL or pick one from a connected provider), start indexing, see index state. Also [Dependencies](/dependencies) (audits), [Docs](/docs) (generated documentation), [Repo intelligence](/admin/intel).
-- [Code review](/reviews): past and running PR reviews; trigger a review by PR URL. [Issues](/issues): findings followed across a PR's pushes (open, fixed, dismissed). [Pull requests](/pull-requests): the reviewed PRs and their state. [Analytics](/analytics): review trends for owners, admins and editors (enterprise licence). [Review policies](/admin/review-policies), [Review agents](/admin/agents), [Compliance](/admin/compliance), [Deprecations](/admin/deprecations).
+- [Code review](/reviews): past and running PR reviews; trigger a review by PR URL. [Issues](/issues): findings followed across a PR's pushes (open, fixed, dismissed). [Pull requests](/pull-requests): the reviewed PRs and their state. [Analytics](/analytics): review trends for owners, admins and editors (enterprise licence). [Review policies](/admin/review-policies), [Review defaults](/admin/review-defaults), [Review agents](/admin/agents), [Compliance](/admin/compliance), [Deprecations](/admin/deprecations).
 - [Ask the code](/projects): a project groups indexed repositories so one question searches all of them. [All chats](/chats), [Code search](/search).
 - [Claude agent](/claude): connect a Claude subscription token, then run coding sessions against a repository.
 - [Celmis agent](/automation): this conversation as a full page, with the list of past chats. Also opened from the round button at the bottom right of every page.
@@ -76,6 +76,10 @@ card below it. Or ask this agent to switch review on for a set.
   "Post a PR summary", "Post a “review started” comment"), "Ignore paths",
   "Models & limits", "MCP sources". A link may open a tab directly with
   `?tab=agents`, `?tab=rules`, `?tab=comments` and so on.
+- Settings for every repository: [Review defaults](/admin/review-defaults)
+  — which agents take part, their models and limits, comments, summary,
+  ignore paths and target branches. A repository's policy overrides any of
+  them; an unset field follows these defaults.
 - Workspace-wide agent prompts: [Review agents](/admin/agents) lists the
   specialised reviewers; "Edit prompt" opens one, saves a workspace override,
   and "Reset to default" restores the built-in text. A repository's own

@@ -66,6 +66,9 @@ export const SECTION_TABS = {
     { href: "/pull-requests", labelKey: "prs.navLabel" },
     { href: "/analytics", labelKey: "analytics.navLabel", analyticsOnly: true },
     { href: "/admin/review-policies", labelKey: "nav.reviewPolicies" },
+    // The workspace layer under every repo policy: which agents take part,
+    // their models and limits, comment and summary settings, ignore paths.
+    { href: "/admin/review-defaults", labelKey: "nav.reviewDefaults" },
     { href: "/admin/agents", labelKey: "nav.agents" },
     { href: "/admin/compliance", labelKey: "nav.compliance" },
     { href: "/admin/deprecations", labelKey: "nav.deprecations" },

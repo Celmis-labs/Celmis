@@ -21,11 +21,12 @@ from pathlib import Path
 import pytest
 
 from tests.web.test_a_configured_reasoning_setting_survives_the_save import (
-    POLICY,
     TSC,
     WEB,
     _lift,
 )
+
+GLOBS_TS = WEB / "lib" / "ignore-globs.ts"
 
 
 def _compile_and_run(tmp: Path, sources: dict[str, str], main: str,
@@ -155,8 +156,9 @@ GLOBS = [
 def test_the_editor_refuses_what_the_server_refuses(tmp_path):
     from src.review.ignore_globs import validate_ignore_globs
 
-    src = POLICY.read_text(encoding="utf-8")
-    lifted = "\n\n".join(_lift(n, src, POLICY) for n in ("globBadClass", "globError"))
+    # Shared by the repo policy page and the workspace review defaults page.
+    src = GLOBS_TS.read_text(encoding="utf-8")
+    lifted = "\n\n".join(_lift(n, src, GLOBS_TS) for n in ("globBadClass", "globError"))
     got = _compile_and_run(
         tmp_path, {},
         lifted + "\n\n"

@@ -3,7 +3,8 @@
 Written from src/review (orchestrator, agents, models, issues, compliance),
 src/api/routers/{agents,review_policies,issues,pull_requests,compliance}.py,
 src/ee/analytics and the pages under web/app/(app)/{reviews,issues,
-pull-requests,analytics,admin/review-policies,admin/agents}.
+pull-requests,analytics,admin/review-policies,admin/review-defaults,
+admin/agents}.
 """
 
 from __future__ import annotations
@@ -107,7 +108,9 @@ the bottom ("Reset to default" deletes the whole policy):
    branch; names match exactly, no globs — `release/*` does not match
    `release/1.2`; add one with "Add a branch by name (if it is not in the list above)").
 2. "Agents & prompts" — "Agents in the review" switches (defect, contract,
-   security, structural; a disabled agent is never run and costs nothing;
+   security, structural; untouched, they follow the workspace
+   [Review defaults](/admin/review-defaults); each row links to the agent's
+   model and limits; a disabled agent is never run and costs nothing;
    with all off the review is skipped), the verifier's own switch (off by
    default: a second model pass that drops low-confidence findings and merges
    duplicates, one extra call per review), and "Agent system prompts (this repo)" for every agent, the verifier included.
@@ -131,6 +134,47 @@ the bottom ("Reset to default" deletes the whole policy):
 
 Who: editor, admin or owner of the workspace (or a global admin); everyone
 can read.
+""",
+    ),
+    Section(
+        id="review-defaults",
+        title="Workspace review defaults: one setting for every repository",
+        keywords=(
+            "review defaults", "workspace default", "default for all",
+            "all repositories", "all repos", "every repository", "every repo",
+            "whole workspace", "workspace-wide", "globally", "global",
+            "inherit", "inherited",
+            "типов", "для всіх", "усіх репозитор", "всіх репозитор",
+            "глобальн", "успадк",
+            "по умолчанию", "для всех", "всех репозитор", "наслед",
+        ),
+        strong=("review defaults", "workspace default", "типові налаштування",
+                "for all repositories", "для всіх репозиторіїв",
+                "для всех репозиториев"),
+        body="""
+[Review defaults](/admin/review-defaults) (Code review → "Review defaults")
+holds the settings every repository of the workspace uses unless its own
+policy sets them: which agents take part ("Agents in the review", the
+verifier switch), each agent's model, output ceiling and reasoning,
+"Post comments for", "Max inline comments per review", "Review language",
+"Post a PR summary" with "Summary instructions", "Post a “review started” comment", ignore paths, target branches and suppressed rule ids. Tabs:
+"Agents & models", "Comments & summary", "Ignore paths & branches" (a link can
+open one with `?tab=agents`, `?tab=comments` or `?tab=ignore`).
+
+Precedence, for every one of these fields: the repository's own policy → the
+workspace review defaults → the install default. A field a repository set
+itself is labelled "overridden here" on its policy page and keeps its value
+when the workspace default changes; an unset one is labelled "inherited from workspace" (or "install default") and follows this page. "Reset to inherited"
+on the policy page hands a field back to the workspace default; "Reset to install default" here hands it back to the installation. Each section says how
+many repositories override it.
+
+The per-agent model and limits here are the same workspace settings as the
+review agents card on [LLM Setup](/settings/llm); a repository overrides them
+on its policy, tab "Models & limits". Agent prompts stay on
+[AI Agents](/admin/agents).
+
+Who: everyone in the workspace can read the page; only an owner or admin
+(or a global admin) can change it — others see "Read-only: changing the workspace review defaults needs the owner or admin role in this workspace."
 """,
     ),
     Section(
