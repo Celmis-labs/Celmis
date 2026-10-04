@@ -94,8 +94,11 @@ surfaces, owners, reviews, audits) to editors over MCP at `/mcp/`.
 
 [MCP](/settings/mcp) (Settings → "MCP"), any signed-in user:
 1. "Generate a token" — read-only scopes (`read:graph`, `read:groups`,
-   `read:reviews`), valid 30 days, bound to you and the active workspace,
-   shown once. Generating another does not revoke the first.
+   `read:reviews`), valid 30 days, issued as you — your research rules on
+   Code access apply to every call — and shown once. Generating another
+   does not revoke the first; a token cannot be revoked, it expires. The
+   server answers from the workspace where you hold your highest role
+   (usually your personal one), not the one active in the browser.
 2. Claude Code: `claude mcp add --transport http celmis
    https://<host>/backend/mcp/ --header 'Authorization: Bearer <token>'`
    (the page shows the exact URL; with a separate API domain there is no

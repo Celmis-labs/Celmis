@@ -97,11 +97,68 @@ keeps past chats. It answers how-to questions and does work across a SET of
 repositories: list repositories and their state, the last dependency audit and
 its findings, explain the product; and — shown as a plan you approve with
 "Run it" — generate documentation, start a dependency audit, or switch
-automatic review on or off (and pin a branch) for many repositories at once.
-Nothing runs until you press the second button. Single-repository work stays
-on the pages' own buttons. Its model is "Celmis agent" on
+automatic review on or off (and pin a branch) for many repositories at once,
+add or draft review rules, and change a review setting (see the review
+rules section). Nothing runs until you press the second button.
+
+It remembers the conversation: the last few turns of the current chat (your
+sentences and what it answered or planned) go with each new message, so
+«а для цього репо?» or «do it» refer to what was just discussed. Only your
+own turns of this chat in this workspace; "New chat" (+), signing out and
+switching workspace start from nothing. Its model is "Celmis agent" on
 [LLM Setup](/settings/llm); its spend appears as Celmis agent on
 [Usage & cost](/admin/usage).
+""",
+    ),
+    Section(
+        id="agent-review-config",
+        title="Review rules and review settings from the agent chat",
+        keywords=(
+            "review rule", "review rules", "rule", "rules", "check", "checks",
+            "add rule", "generate rules", "suggest rules", "approve",
+            "auto-approve", "request changes", "drafts", "setting", "agent",
+            "chat", "this repo",
+            "правил", "перевірк", "згенеру", "додай", "увімкн", "схвал",
+            "налаштуван", "чат", "агент", "цього репо",
+            "проверк", "сгенериру", "добавь", "включ", "одобр", "настройк",
+        ),
+        strong=("review rule", "review rules", "add rule", "правила рев",
+                "правил", "перевірк", "проверк", "approve", "згенеру",
+                "сгенериру"),
+        body="""
+The Celmis agent (round button, or [Celmis agent](/automation)) changes
+review configuration from a sentence. Each change is shown first as a plan
+card with the exact change — every rule as it will be stored (title,
+severity, paths, agents, instruction), or the setting and its new value —
+and nothing is written until you press "Run it" ("Cancel" leaves it).
+
+- Add rules: «add review rules for this repo: no raw SQL in handlers;
+  every endpoint checks the tenant», «додай до перевірок цього репо
+  правила …». One rule per item, optional path glob (`src/api/**`),
+  severity (info, warning, error, critical) and agents. Where the
+  installation has the review-rules list they are saved as PENDING
+  proposals an editor approves (proposing needs `member` or higher and the
+  `review` grant on the repository where teams grant access); otherwise they
+  are appended to the repository's review policy, "Rules" tab, and used from
+  the next review — that needs `editor` or higher, like editing the policy
+  on [Review policies](/admin/review-policies). At most 10 rules at a time,
+  20 per policy.
+- Draft rules: «згенеруй правила для репо X» — drafts from the code, for
+  approval, where the installation can generate them; otherwise the agent
+  says so and offers to take the rules from you.
+- Change a setting: «увімкни approve для репо X», «set the comment
+  threshold to error for the workspace». Settings it can change:
+  `approve_when_clean`, `request_changes_on_critical`, `run_on_drafts`,
+  `committable_suggestions`, `comment_min_severity`,
+  `max_inline_comments`, `summary_enabled`, `review_language`,
+  `disabled_agents` — the ones this installation does not have yet are
+  refused by name. For the workspace it writes
+  [Review defaults](/admin/review-defaults) (owner or admin); for one
+  repository its review policy (editor or higher, plus `review` on the
+  repository) — the same checks as saving those pages, so the agent can
+  never do what you could not do there.
+Follow-ups work: after «add rules for billing-api: …», «і для payments
+теж» proposes the same rules for payments.
 """,
     ),
 )

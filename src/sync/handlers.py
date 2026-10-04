@@ -546,8 +546,13 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
             # Absent on a job queued before the field existed; the planner
             # then says which role a task needs instead of whether they hold it.
             caller=p.get("caller"),
+            # The conversation so far, read from this session's own rows
+            # when the sentence was posted (src.automation.memory). Absent on
+            # an older job, which is then read on its own, as it always was.
+            history=p.get("history"),
         )
-        plan = resolve_scope(plan, workspace_id=workspace_id)
+        plan = resolve_scope(plan, workspace_id=workspace_id,
+                             caller=p.get("caller"))
     except Exception as exc:  # noqa: BLE001
         # A model that cannot be reached is a failed reading, not a failed
         # job: retrying it would charge for the same sentence again, and the

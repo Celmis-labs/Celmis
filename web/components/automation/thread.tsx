@@ -46,7 +46,26 @@ type Step = {
   note: string;
   resolved_repos: string[];
   blocked: string | null;
+  /** For a review-configuration step, the exact change it will make, as the
+   *  server computed it from the validators the action runs. Absent on every
+   *  other step and on rows written before it existed. */
+  preview?: ChangePreviewData;
 };
+
+/** One rule as the server will store it. */
+type PreviewRule = {
+  title: string | null;
+  instructions: string;
+  path_glob: string | null;
+  severity: string | null;
+  agents: string[] | null;
+};
+
+type ChangePreviewData =
+  | { kind: "rules"; repo: string | null; status: "pending" | "active"; rules: PreviewRule[] }
+  | { kind: "generate"; repo: string }
+  | { kind: "setting"; scope: "workspace" | "repo"; repo: string | null; key: string; value: unknown }
+  | Record<string, never>;
 
 type RunResult = {
   queued?: { repo: string; job_id: string }[];
@@ -158,7 +177,22 @@ function switchSession(sid: string): void {
 const READS = [
   "list_repos", "explain", "help", "audit_status", "list_findings",
 ] as const;
-const WRITES = ["generate_docs", "start_dep_audit", "set_auto_review"] as const;
+const WRITES = [
+  "generate_docs", "start_dep_audit", "set_auto_review",
+  "propose_review_rules", "generate_review_rules", "update_review_setting",
+] as const;
+
+/** The writes that change review configuration rather than queue work over a
+ *  set — the server's `CONFIG_VERBS`. Their card shows the change itself
+ *  (the rules, the setting and its new value) instead of a repository count,
+ *  and their outcome is a saved change with links, not "started on N". */
+const CONFIG_VERBS = [
+  "propose_review_rules", "generate_review_rules", "update_review_setting",
+];
+
+function isConfigOnly(steps: { action: string | null }[] | undefined): boolean {
+  return !!steps?.length && steps.every((s) => CONFIG_VERBS.includes(s.action ?? ""));
+}
 const EXAMPLES = [
   "automation.exRead", "automation.ex1", "automation.ex2", "automation.ex3",
 ] as const;
@@ -375,7 +409,9 @@ export function useAutomationThread() {
         method: "POST", token, json: { plan_id: runId },
       }),
     onSuccess: (r) => {
-      toast.success(t("automation.started", { count: String(howMany(r)) }));
+      toast.success(isConfigOnly(r.steps)
+        ? t("automation.config.saved")
+        : t("automation.started", { count: String(howMany(r)) }));
       qc.invalidateQueries({ queryKey: ["automation-history", sessionId] });
       qc.invalidateQueries({ queryKey: ["automation-sessions"] });
     },
@@ -643,10 +679,12 @@ export function Reply({
              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-background)]/60 p-3">
           <div className="mb-1 flex flex-wrap items-center gap-2 text-sm font-medium">
             {said(`automation.action.${s.action}`)}
-            <Badge variant="brand" className="text-[10px]">
-              {said("automation.repoCount", { count: String(s.resolved_repos.length) })}
-            </Badge>
-            {Object.entries(s.arguments)
+            {!CONFIG_VERBS.includes(s.action ?? "") && (
+              <Badge variant="brand" className="text-[10px]">
+                {said("automation.repoCount", { count: String(s.resolved_repos.length) })}
+              </Badge>
+            )}
+            {!CONFIG_VERBS.includes(s.action ?? "") && Object.entries(s.arguments)
               .filter(([, v]) => v !== null && v !== undefined && v !== "")
               .filter(([k]) => k !== "repo_slugs" && k !== "owner")
               .map(([k, v]) => (
@@ -655,6 +693,10 @@ export function Reply({
                 </code>
               ))}
           </div>
+          {/* The change itself — what Confirm writes — rather than the verb. */}
+          {s.preview && "kind" in s.preview && (
+            <ChangePreview preview={s.preview} said={said} />
+          )}
           {s.note && (
             <p className="mb-1 text-xs text-[var(--color-muted-foreground)]">{s.note}</p>
           )}
@@ -688,7 +730,11 @@ export function Reply({
         )
       )}
 
-      {run.status === "started" && (
+      {run.status === "started" && isConfigOnly(run.steps) && (
+        <ConfigOutcome result={run.result} said={said} />
+      )}
+
+      {run.status === "started" && !isConfigOnly(run.steps) && (
         <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted-foreground)]">
           <span>{said("automation.started", { count: String(howMany(run.result)) })}</span>
           {howMany(run.result) > 0 && (
@@ -704,6 +750,137 @@ export function Reply({
           that sentence too — this is the reply to a question nobody could
           read, and answering it in a third language helps nobody. */}
       {unread && <Capabilities onPick={onPick} language={run.language} />}
+    </div>
+  );
+}
+
+/** A setting's value as a person reads it: null is "inherit", a list is its
+ *  items, anything else as written. */
+function settingValue(value: unknown, said: Translate): string {
+  if (value === null || value === undefined) return said("automation.config.inherit");
+  if (Array.isArray(value)) return value.map(String).join(", ") || "—";
+  return String(value);
+}
+
+/** What a review-configuration step will write, shown before the press.
+ *
+ *  The rules exactly as they will be stored — title, severity, the paths they
+ *  apply to, the agents they address and the instruction itself — and where
+ *  they land: as pending proposals an editor approves, or straight into the
+ *  repository's policy. The server decides which from what this build has,
+ *  and it is said here so the person knows which one Confirm means. A
+ *  setting is its key and its new value. */
+function ChangePreview({ preview, said }: { preview: ChangePreviewData; said: Translate }) {
+  if (!("kind" in preview)) return null;
+  const where = (repo: string | null) => repo ?? said("automation.config.workspace");
+  if (preview.kind === "setting") {
+    return (
+      <div className="mb-1 flex flex-wrap items-center gap-1.5 text-xs">
+        <code className="rounded bg-[var(--color-muted)]/60 px-1.5 py-0.5 text-[11px]">
+          {where(preview.repo)}
+        </code>
+        <code className="rounded bg-[var(--color-muted)]/60 px-1.5 py-0.5 text-[11px]">
+          {preview.key}
+        </code>
+        <ArrowRightIcon className="h-3 w-3 text-[var(--color-muted-foreground)]" />
+        <code className="rounded bg-[var(--color-brand)]/10 px-1.5 py-0.5 text-[11px] font-semibold text-[var(--color-brand)]">
+          {settingValue(preview.value, said)}
+        </code>
+      </div>
+    );
+  }
+  if (preview.kind === "generate") {
+    return (
+      <p className="mb-1 text-xs text-[var(--color-muted-foreground)]">
+        <code className="mr-1 rounded bg-[var(--color-muted)]/60 px-1.5 py-0.5 text-[11px]">
+          {preview.repo}
+        </code>
+        {said("automation.config.willGenerate")}
+      </p>
+    );
+  }
+  return (
+    <div className="mb-1 space-y-2">
+      <p className="text-xs text-[var(--color-muted-foreground)]">
+        <code className="mr-1 rounded bg-[var(--color-muted)]/60 px-1.5 py-0.5 text-[11px]">
+          {where(preview.repo)}
+        </code>
+        {preview.status === "pending"
+          ? said("automation.config.willPending")
+          : said("automation.config.willActive")}
+      </p>
+      <ol className="list-decimal space-y-1.5 pl-5">
+        {preview.rules.map((r, j) => (
+          <li key={j} className="text-xs">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {r.title && <span className="font-medium">{r.title}</span>}
+              {r.severity && (
+                <Badge variant="outline" className="text-[10px]">{r.severity}</Badge>
+              )}
+              <code className="rounded bg-[var(--color-muted)]/60 px-1.5 py-0.5 text-[11px]">
+                {r.path_glob ?? said("automation.config.allFiles")}
+              </code>
+              {(r.agents ?? []).map((a) => (
+                <Badge key={a} variant="outline" className="text-[10px]">{a}</Badge>
+              ))}
+            </div>
+            <p className="mt-0.5 whitespace-pre-wrap wrap-anywhere text-[var(--color-muted-foreground)]">
+              {r.instructions}
+            </p>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** Where a saved review change can be seen. The server names the pages by a
+ *  label this table translates; a label it does not know, or an href that is
+ *  not a path in this app, is not offered. */
+const CONFIG_LINK_LABELS: Record<string, string> = {
+  pending: "automation.config.linkPending",
+  policy: "automation.config.linkPolicy",
+  defaults: "automation.config.linkDefaults",
+};
+
+function ConfigOutcome({ result, said }: { result: RunResult; said: Translate }) {
+  const steps = result.steps ?? [];
+  return (
+    <div className="space-y-2">
+      {steps.map((s, i) => {
+        const r = s.result as {
+          status?: string;
+          links?: { label: string; href: string }[];
+        };
+        const links = (Array.isArray(r.links) ? r.links : [])
+          .filter((l) => isInAppHref(l.href) && CONFIG_LINK_LABELS[l.label]);
+        return (
+          <div key={i} className="space-y-1.5">
+            <p className="flex items-center gap-1.5 text-xs text-[var(--color-muted-foreground)]">
+              <CheckCircle2Icon className="h-3.5 w-3.5 text-[var(--color-brand)]" />
+              {r.status === "pending"
+                ? said("automation.config.donePending")
+                : r.status === "active"
+                  ? said("automation.config.doneActive")
+                  : said("automation.config.saved")}
+            </p>
+            {links.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {links.map((l) => (
+                  <Link
+                    key={l.href}
+                    href={l.href}
+                    className="inline-flex items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-background)] px-2.5 py-1 text-xs font-medium transition-colors hover:border-[var(--color-brand)]/40 hover:bg-[var(--color-accent)] hover:text-[var(--color-brand)]"
+                  >
+                    {said(CONFIG_LINK_LABELS[l.label])}
+                    <ArrowRightIcon className="h-3 w-3" />
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

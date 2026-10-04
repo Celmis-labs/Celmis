@@ -51,6 +51,15 @@ def test_every_verb_that_starts_work_takes_a_set():
     for name, spec in CATALOGUE.items():
         if spec.get("reads"):
             continue
+        if spec.get("config"):
+            # Review configuration is the one declared exception: the rules a
+            # person dictates ARE the sentence, and no form takes them better.
+            # It is still a write — it must not slip into the reads, where it
+            # would run without the second press.
+            assert not spec.get("reads"), f"{name} would run unconfirmed"
+            assert "repo_slug" in spec["arguments"], (
+                f"{name} does not say which repository it configures")
+            continue
         assert "repo_slugs" in spec["arguments"], (
             f"{name} cannot take a set, so it belongs on a button"
         )
@@ -69,9 +78,18 @@ def test_the_catalogue_reaches_what_actions_can_do():
               and o.__module__ == actions.__name__}
     # register_repo takes a URL rather than a set — it is the one verb that
     # belongs on the Add-repository form and nowhere else.
-    unreachable = public - {"register_repo"} - {
+    #
+    # The validators and capability probes are not verbs: the chat runs them
+    # to refuse a settings step before the press (resolve_scope), and the
+    # verbs run them again.
+    helpers = {
+        "normalise_review_rules", "review_setting_value", "review_setting_keys",
+        "resolve_repo", "rules_store_available", "rules_generation_available",
+    }
+    unreachable = public - {"register_repo"} - helpers - {
         "list_repos", "get_dep_audit", "list_dep_findings", "generate_docs",
-        "start_dep_audit", "set_auto_review",
+        "start_dep_audit", "set_auto_review", "propose_review_rules",
+        "generate_review_rules", "update_review_setting",
     }
     assert not unreachable, (
         f"actions.py can do {sorted(unreachable)} and no sentence can reach it"
