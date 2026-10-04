@@ -87,6 +87,36 @@ def _drop_ignored(findings: list[Finding], globs: list[str]) -> list[Finding]:
     return [f for f in findings if not path_ignored(f.file_path, globs)]
 
 
+def _cite_review_rules(findings: list[Finding], policy) -> list[Finding]:
+    """Keep a finding's `rule` only when it names a review rule in force for
+    this review, spelled as that rule's title, and report the finding at the
+    rule's severity — the severity is the operator's decision about the rule,
+    not the agent's about the line.
+
+    Anything else in the field is cleared: some replies put a free-form rule
+    id there, and a citation of a rule nobody wrote must not reach the bypass
+    of the comment filters (`ReviewBatch.bypasses_filters`).
+    """
+    from src.review.models import FindingSeverity
+    from src.review.policy_rules import cited_rule, rules_by_title
+
+    rules = (policy or {}).get("review_rules") if isinstance(policy, dict) else None
+    titles = rules_by_title(rules)
+    for f in findings:
+        raw = getattr(f, "rule", "")
+        if not raw:
+            continue
+        rule = cited_rule(raw, titles) if titles else None
+        if rule is None:
+            f.rule = ""
+            continue
+        f.rule = str(rule.get("title") or "")
+        severity = str(rule.get("severity") or "").lower()
+        if severity in {s.value for s in FindingSeverity}:
+            f.severity = FindingSeverity(severity)
+    return findings
+
+
 def _policy_value(policy, name: str, default):
     """A policy setting, or `default` when the policy does not decide it.
 
@@ -399,6 +429,10 @@ class ReviewOrchestrator:
         # The repo's own inline-comment cap; None leaves the providers on
         # REVIEW_MAX_INLINE_COMMENTS.
         batch.max_inline_comments = (policy or {}).get("max_inline_comments")
+        # Findings citing a review rule skip the threshold and the cap when
+        # the policy says rules are exempt from them (default: they are not).
+        batch.rules_bypass_filters = not bool(
+            _policy_value(policy, "apply_filters_to_rules", True))
         # The Kodus-style summary is the default; a repository can keep the
         # compact one. Read with defaults because the columns are newer than
         # most policy rows (and than the code that may have loaded them).
@@ -644,7 +678,8 @@ class ReviewOrchestrator:
                 # Sorted worst-first like the agent path's prefilter output,
                 # so the providers' inline cap never cuts a critical for a nit.
                 batch.findings = _drop_ignored(
-                    _sort_by_severity(list(cr.findings)), ignore_globs)
+                    _sort_by_severity(_cite_review_rules(list(cr.findings), policy)),
+                    ignore_globs)
                 batch.summary = cr.summary
                 batch.agents_run.append("claude_code")
             # Outside the branch on purpose: `run_claude_review` reports the
@@ -939,7 +974,8 @@ class ReviewOrchestrator:
         # twenty warnings posted. A stable sort keeps the prefilter's
         # confidence order inside each severity.
         batch.findings = _drop_ignored(
-            _sort_by_severity(batch.findings), ignore_globs)
+            _sort_by_severity(_cite_review_rules(batch.findings, policy)),
+            ignore_globs)
 
         # Finalise Stage 11 cost. None when any agent had an unknown model.
         batch.cost_usd = None if any_unknown_cost else round(cost_sum, 6)
@@ -1225,13 +1261,31 @@ class ReviewOrchestrator:
         there is one (the row is keyed by slug alone), else of the workspace
         the review runs for.
         """
-        from src.review.review_defaults import merge_policy
+        from src.review.review_defaults import blank_policy, merge_policy
 
         policy = self._load_policy(repo_slug)
         owner = policy.get("workspace_id") if isinstance(policy, dict) else None
-        return merge_policy(
+        merged = merge_policy(
             policy, self._load_workspace_defaults(owner or workspace_id),
         )
+        # The review rules in force (/admin/review-rules): the workspace's
+        # active rules plus this repository's, a repository rule replacing a
+        # workspace rule of the same title. They ride on the policy so the
+        # one renderer (`src.review.policy_rules`) and the citation check
+        # read them from the same place; no rules → the policy is untouched.
+        rules = self._load_review_rules(owner or workspace_id, repo_slug)
+        if rules:
+            if merged is None:
+                merged = blank_policy()
+            if isinstance(merged, dict):
+                merged = {**merged, "review_rules": rules}
+        return merged
+
+    def _load_review_rules(self, workspace_id: str, repo_slug: str) -> list[dict]:
+        """The active review rules of this review. Blocking; never raises."""
+        from src.review.rules_store import load_active_rules_sync
+
+        return load_active_rules_sync(workspace_id, repo_slug)
 
     def _load_workspace_defaults(self, workspace_id: str) -> dict | None:
         """The workspace's review defaults, or None. Blocking; never raises."""

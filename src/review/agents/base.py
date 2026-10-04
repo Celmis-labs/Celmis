@@ -1888,4 +1888,9 @@ class LLMReviewAgent(ReviewAgent):
             agent=self.name,
             rule_id=str(data.get("rule_id") or data.get("rule") or f"{self.name}.unknown"),
             confidence=confidence,
+            # The review rule cited by title (see REVIEW_RULES_PREAMBLE). Kept
+            # raw here; the orchestrator keeps it only when it names a rule
+            # in force, since some replies put a rule id in this key.
+            rule=str(data.get("rule") or "").strip()[:200]
+            if isinstance(data.get("rule"), str) else "",
         )

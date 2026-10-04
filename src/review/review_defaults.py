@@ -124,6 +124,25 @@ def inherited_value(
     return values[name], sources[name]
 
 
+def blank_policy() -> dict[str, Any]:
+    """The policy dict of a repository with no policy row: every field
+    "inherit", nothing switched off. What a review reads when something other
+    than the row (workspace defaults, workspace review rules) has to ride on
+    a policy the repository never wrote."""
+    out: dict[str, Any] = {
+        "enabled": True,
+        "prompt_template": "",
+        "folder_rules": [],
+        "agent_prompt_overrides": {},
+        "agents": {},
+        "mcp_sources": [],
+        "review_language": None,
+    }
+    for name in INHERITABLE_FIELDS:
+        out[name] = None
+    return out
+
+
 def merge_policy(policy: Any, workspace: dict[str, Any] | None) -> Any:
     """The policy dict a review reads, with the workspace defaults filled in
     wherever the repository says nothing.
@@ -136,15 +155,7 @@ def merge_policy(policy: Any, workspace: dict[str, Any] | None) -> Any:
     if not workspace or not any(workspace.get(n) is not None for n in INHERITABLE_FIELDS):
         return policy
     if policy is None:
-        merged: dict[str, Any] = {
-            "enabled": True,
-            "prompt_template": "",
-            "folder_rules": [],
-            "agent_prompt_overrides": {},
-            "agents": {},
-            "mcp_sources": [],
-            "review_language": None,
-        }
+        merged: dict[str, Any] = blank_policy()
     elif isinstance(policy, dict):
         merged = dict(policy)
     else:

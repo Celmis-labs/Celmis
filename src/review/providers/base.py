@@ -226,6 +226,8 @@ def _format_finding_body(finding: Finding, marker: str = "") -> str:
     # belongs where telemetry belongs — visible, last, and never the thing
     # the reader was asked to weigh the finding by.
     meta = []
+    if getattr(finding, "rule", ""):
+        meta.append(f"review rule: **{finding.rule}**")
     if finding.agent:
         meta.append(f"agent: `{finding.agent}`")
     if finding.rule_id:
@@ -338,7 +340,10 @@ def _posting_line(batch: ReviewBatch) -> str:
     below = batch.below_threshold_count
     postable = total - below
     cap = batch.inline_cap(int(get_review_settings().max_inline_comments))
-    shown = min(postable, max(0, cap))
+    # Counted by the method the providers post with, so findings a review
+    # rule exempts from the cap (`ReviewBatch.bypasses_filters`) are counted
+    # as shown rather than as "over the limit".
+    shown = len(batch.inline_findings(cap))
     over_cap = postable - shown
     if not below and not over_cap:
         return ""

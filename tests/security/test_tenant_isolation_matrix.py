@@ -97,6 +97,23 @@ PROBES: list[tuple[str, str, dict | None, str]] = [
     ("GET", "/api/review-defaults", None, "no_leak"),
     ("PUT", "/api/review-defaults",
      {"summary_instructions": "pwned", "disabled_agents": ["defect"]}, "no_leak"),
+    # review rules: the active workspace's only, B's ids and B's repo refused
+    ("GET", "/api/review-rules", None, "no_leak"),
+    ("GET", f"/api/review-rules?repo={B_REPO}", None, "no_leak"),
+    ("GET", "/api/review-rules/library", None, "no_leak"),
+    ("GET", "/api/review-rules/jobs", None, "no_leak"),
+    ("GET", "/api/review-rules/jobs/rjob-b", None, "deny"),
+    ("PATCH", "/api/review-rules/901", {"title": "pwned"}, "deny"),
+    ("DELETE", "/api/review-rules/902", None, "deny"),
+    ("POST", "/api/review-rules/bulk-status", {"ids": [901, 902], "status": "rejected"},
+     "deny"),
+    ("POST", "/api/review-rules/bulk-delete", {"ids": [901, 902]}, "deny"),
+    ("POST", "/api/review-rules",
+     {"repo_slug": B_REPO, "title": "pwned", "instructions": "x"}, "deny"),
+    ("POST", "/api/review-rules/library/add",
+     {"ids": ["general.no-ignored-exceptions"], "repo_slug": B_REPO}, "deny"),
+    ("POST", "/api/review-rules/generate", {"repo_slug": B_REPO}, "deny"),
+    ("POST", "/api/review-rules/import", {"repo_slug": B_REPO}, "deny"),
     # reviews, issues, pull requests, analytics
     ("POST", "/api/reviews/trigger", {"pr_ref": "github:bco/b_secret#1"}, "deny"),
     ("GET", "/api/reviews/history", None, "no_leak"),
@@ -165,6 +182,18 @@ async def _b_untouched(w) -> None:
     assert (await w.scalar(IncomingAlert, "alert-b")).status == "new"
     assert await w.scalar(AutomationRun, "run-b") is not None
     assert _load_override("defect", w.ws["ws-b"]) == f"{B_SECRET} agent system prompt"
+    from src.db.models import ReviewRule, ReviewRuleJob
+
+    b_rule = await w.scalar(ReviewRule, 901)
+    assert (b_rule.title, b_rule.status) == (f"{B_SECRET} rule", "active")
+    assert (await w.scalar(ReviewRule, 902)).status == "pending"
+    assert (await w.scalar(ReviewRuleJob, "rjob-b")).status == "completed"
+    async with w.factory() as s:
+        from sqlalchemy import func, select
+
+        n = await s.scalar(select(func.count()).select_from(ReviewRule).where(
+            ReviewRule.repo_slug == B_REPO))
+        assert n == 1, "a rule was written for B's repository"
     from src.api.auto_review import get_auto_review_store
 
     assert get_auto_review_store().get_in_workspace(w.ws["ws-b"], B_REPO) is not None

@@ -842,6 +842,8 @@ def record_completed_review(
             # How it was arrived at, which is a different question from how
             # sure we are. A float cannot carry both.
             "evidence_kind": getattr(f, "evidence_kind", "inferred"),
+            # The review rule (/admin/review-rules) the finding cites; "" none.
+            "rule": getattr(f, "rule", "") or "",
         }
         for f in batch.findings
     ]

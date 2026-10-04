@@ -303,6 +303,9 @@ def _run_review_task(
                 # How it was arrived at, which is a different question from
                 # how sure we are. A float cannot carry both.
                 "evidence_kind": getattr(f, "evidence_kind", "inferred"),
+                # The review rule the finding cites — the same field the
+                # queue writer (src/api/review_runs.py) stores.
+                "rule": getattr(f, "rule", "") or "",
             }
             for f in batch.findings
         ]

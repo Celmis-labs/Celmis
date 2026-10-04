@@ -123,6 +123,7 @@ def _routers():
         repos,
         review_defaults,
         review_policies,
+        review_rules,
         reviews,
         teams,
         workspaces,
@@ -131,7 +132,7 @@ def _routers():
 
     return [workspaces.router, invites.router, teams.router, admin_users.router,
             agents.router, review_policies.router, review_defaults.router,
-            repos.router, reviews.router,
+            review_rules.router, repos.router, reviews.router,
             issues.router, pull_requests.router, alerts.router, automation.router,
             llm.router, connections.router, analytics.router, access_requests.router]
 
@@ -237,6 +238,8 @@ async def _seed(factory, users, ws_ids) -> dict[str, str]:
         RepoTeamAccess,
         ReviewIssue,
         ReviewPullRequest,
+        ReviewRule,
+        ReviewRuleJob,
         Team,
         TeamMember,
         Workspace,
@@ -298,6 +301,16 @@ async def _seed(factory, users, ws_ids) -> dict[str, str]:
         s.add(IncomingAlert(id=ids["alert_b"], workspace_id=b, title=f"{B_SECRET} alert"))
         s.add(AutomationRun(id=ids["run_b"], workspace_id=b, user_id=users["admin_b"].id,
                             message=f"{B_SECRET} run", steps=[]))
+        # Review rules of B: one workspace-wide, one on B's repo, and a job.
+        s.add(ReviewRule(id=901, workspace_id=b, repo_slug=None,
+                         title=f"{B_SECRET} rule", instructions=f"{B_SECRET} do",
+                         status="active", origin="manual", agents=[]))
+        s.add(ReviewRule(id=902, workspace_id=b, repo_slug=B_REPO,
+                         title=f"{B_SECRET} repo rule", instructions=f"{B_SECRET} do",
+                         status="pending", origin="generated", agents=[]))
+        s.add(ReviewRuleJob(id="rjob-b", workspace_id=b, repo_slug=B_REPO,
+                            kind="generate", status="completed",
+                            progress=f"{B_SECRET} done", result={}))
         await s.commit()
 
     store = get_auto_review_store()

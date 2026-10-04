@@ -51,6 +51,9 @@ SURFACE_DEPS = "deps"            # dependency-report generation
 #: the same way and cost nothing alike, and a workspace could not see which of
 #: them it was paying for.
 SURFACE_AUTOMATION = "automation"
+#: Proposing review rules for a repository (src/review/rules_generate.py) —
+#: a review-profile call that is not a review, so not booked as one.
+SURFACE_RULES_GENERATE = "rules_generate"
 SURFACE_OTHER = "other"          # unclassified — better than mislabelling
 
 
