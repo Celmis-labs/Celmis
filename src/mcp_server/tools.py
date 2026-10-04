@@ -288,7 +288,8 @@ def find_callees(
         # Same resolution as find_callers: the outgoing query matches on id.
         seen: set[str] = set()
         callees = []
-        for target in _resolve_targets(store, symbol_id):
+        targets = _resolve_targets(store, symbol_id)
+        for target in targets:
             for row in _query_outgoing_callees(store, target, depth, max_nodes):
                 key = str(row.get("id"))
                 if key not in seen:
@@ -307,6 +308,9 @@ def find_callees(
     return {
         "repo": repo_slug,
         "source_id": symbol_id,
+        # Which ids the name resolved to, as find_callers reports — the MCP
+        # layer needs it to leave out a twin in a concealed file.
+        "resolved_ids": targets,
         "depth": depth,
         "callees": callees,
         "truncated": len(callees) >= max_nodes,

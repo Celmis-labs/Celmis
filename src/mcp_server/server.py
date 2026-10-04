@@ -73,9 +73,10 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         mcp = FastMCP(SERVER_NAME, instructions=SERVER_DESCRIPTION)
 
     # Every tool below that names a repository or a group asks `tenancy`
-    # first. Under single_tenant that is a slug-syntax check and nothing more;
-    # under multi_tenant it confines the caller to its own workspace, and an
-    # unknown, foreign or refused target reads exactly like a missing one.
+    # first. In both modes that applies the research-access rules (a repo with
+    # no rule under single_tenant stays fully readable); under multi_tenant it
+    # also confines the caller to its own workspace. An unknown, foreign or
+    # refused target reads exactly like a missing one.
     def _listing_workspace() -> str | None:
         if not tenancy.enforced():
             return None
@@ -97,8 +98,7 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
     @require_scopes("read:groups")
     def _list_groups() -> dict[str, Any]:
         items = tools.list_groups(workspace_id=_listing_workspace())
-        if tenancy.enforced():
-            items = [g for g in items if tenancy.authorize_group(g.name) is not None]
+        items = [g for g in items if tenancy.authorize_group(g.name) is not None]
         return {
             "groups": [
                 {
@@ -129,8 +129,8 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
             items = tools.list_repos(
                 group_name=group_name, workspace_id=_listing_workspace(),
             )
-        if tenancy.enforced():
-            items = [r for r in items if tenancy.authorize_repo(r.slug) is not None]
+        readable = tenancy.authorize_repos([r.slug for r in items])
+        items = [r for r in items if r.slug in readable]
         return {
             "repos": [
                 {
@@ -190,6 +190,43 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
             return None
         return sym
 
+    def _expansion(walk, key: str, symbol_id: str, repo_slug: str,
+                   depth: int, max_nodes: int) -> dict[str, Any]:
+        """A caller/callee walk, through the caller's access decision.
+
+        The rows are filtered by file, and so is the START: a name resolves to
+        every id that bears it ("secrets/keys.py::load", "src/app.py::load"),
+        and the walk merges them, so the edges of a concealed symbol would
+        arrive under a visible one's name. Concealed ids are walked from not
+        at all, and are not echoed back in `resolved_ids`.
+        """
+        dec = tenancy.authorize_repo(repo_slug)
+        if dec is None or not dec.code_visible:
+            return tools._empty_expansion(repo_slug)
+        out = walk(symbol_id=symbol_id, repo_slug=repo_slug,
+                   depth=depth, max_nodes=max_nodes)
+        if dec.open_default:
+            return out
+        ids = list(out.get("resolved_ids") or [])
+        shown = [i for i in ids if tenancy.id_visible(i, dec)]
+        if ids and shown != ids:
+            if not shown:
+                return tools._empty_expansion(repo_slug)
+            rows: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for target in shown:
+                for row in walk(symbol_id=target, repo_slug=repo_slug,
+                                depth=depth, max_nodes=max_nodes).get(key) or []:
+                    if str(row.get("id")) not in seen:
+                        seen.add(str(row.get("id")))
+                        rows.append(row)
+            out = {**out, "resolved_ids": shown, key: rows[:max_nodes],
+                   "truncated": len(rows) >= max_nodes}
+        elif not ids and not tenancy.id_visible(symbol_id, dec):
+            return tools._empty_expansion(repo_slug)
+        out[key] = tenancy.visible_rows(out.get(key) or [], dec)
+        return out
+
     @mcp.tool(
         name="find_callers",
         description=(
@@ -205,16 +242,8 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         depth: int = 2,
         max_nodes: int = 100,
     ) -> dict[str, Any]:
-        dec = tenancy.authorize_repo(repo_slug)
-        if dec is None:
-            return tools._empty_expansion(repo_slug)
-        out = tools.find_callers(
-            symbol_id=symbol_id, repo_slug=repo_slug,
-            depth=depth, max_nodes=max_nodes,
-        )
-        if "callers" in out:
-            out["callers"] = tenancy.visible_rows(out["callers"], dec)
-        return out
+        return _expansion(tools.find_callers, "callers", symbol_id, repo_slug,
+                          depth, max_nodes)
 
     @mcp.tool(
         name="find_callees",
@@ -230,16 +259,8 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         depth: int = 2,
         max_nodes: int = 100,
     ) -> dict[str, Any]:
-        dec = tenancy.authorize_repo(repo_slug)
-        if dec is None:
-            return tools._empty_expansion(repo_slug)
-        out = tools.find_callees(
-            symbol_id=symbol_id, repo_slug=repo_slug,
-            depth=depth, max_nodes=max_nodes,
-        )
-        if "callees" in out:
-            out["callees"] = tenancy.visible_rows(out["callees"], dec)
-        return out
+        return _expansion(tools.find_callees, "callees", symbol_id, repo_slug,
+                          depth, max_nodes)
 
     @mcp.tool(
         name="cross_repo_edges",
@@ -519,6 +540,11 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
             return {"ok": True, "findings": rows, "count": len(rows)}
         except ActionError as exc:
             return {"ok": False, "error": str(exc)}
+
+    # Defence in depth behind the verifier: every tool refuses a refused
+    # caller itself (see src/mcp_server/guard.py).
+    from src.mcp_server.guard import guard_every_tool
+    guard_every_tool(mcp)
 
     logger.info("mcp_server_built name=%s", SERVER_NAME)
     return mcp

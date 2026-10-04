@@ -284,6 +284,10 @@ def _build_mcp() -> FastMCP:  # noqa: F821 — quoted for typing without an impo
 
     _register_tools(mcp, legacy_tools)
     _install_scope_filter(mcp)
+    # Defence in depth behind the verifier: every tool refuses a refused
+    # caller itself (see src/mcp_server/guard.py).
+    from src.mcp_server.guard import guard_every_tool
+    guard_every_tool(mcp)
     return mcp
 
 
@@ -591,7 +595,9 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
                 ws = caller.workspace_id if tenancy.caller_may_bind(caller) else ""
                 stmt = stmt.where(DeprecatedSymbol.workspace_id == ws)
             rows = s.execute(stmt).scalars().all()
-            if tenancy.enforced() and rows:
+            # Research access in both modes: a repository the caller may not
+            # research contributes no deprecations (single_tenant included).
+            if rows:
                 _c, access = caller_access(sorted({r.repo_slug for r in rows}))
                 rows = [r for r in rows
                         if access.get(r.repo_slug) is not None
