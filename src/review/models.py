@@ -340,6 +340,10 @@ class ReviewBatch:
     #: they are counted in the summary, stored on the run row and tracked as
     #: issues — they just do not become a comment on the pull request.
     comment_min_severity: str | None = None
+    #: The repo policy's cap on inline comments (1..100). None leaves the
+    #: install default, REVIEW_MAX_INLINE_COMMENTS, which every provider
+    #: passes to `inline_findings` as `cap`.
+    max_inline_comments: int | None = None
 
     def __post_init__(self) -> None:
         if not self.started_at:
@@ -389,7 +393,12 @@ class ReviewBatch:
         different order — threshold first, so a nit never takes the place of
         an error under the cap.
         """
-        return self.postable_findings[: max(0, int(cap))]
+        return self.postable_findings[: self.inline_cap(cap)]
+
+    def inline_cap(self, default: int) -> int:
+        """The inline-comment cap in force: the repo's own, else `default`."""
+        own = self.max_inline_comments
+        return max(0, int(own if own is not None else default))
 
     # Agents whose failure invalidates an APPROVE verdict. If one of the LLM
     # finders never ran, we do not know whether the change is safe — the right

@@ -188,6 +188,9 @@ class ReviewOrchestrator:
 
         batch = ReviewBatch(pull_request=pr)
         batch.comment_min_severity = (policy or {}).get("comment_min_severity")
+        # The repo's own inline-comment cap; None leaves the providers on
+        # REVIEW_MAX_INLINE_COMMENTS.
+        batch.max_inline_comments = (policy or {}).get("max_inline_comments")
 
         # ── Per-repo ignore globs. The diff was parsed inside the provider,
         # before any policy existed, so the repository's own exclusions can
@@ -347,6 +350,7 @@ class ReviewOrchestrator:
             # Worse than not running it: the run record says a drift check
             # happened, because one did.
             from src.review.claude_engine import run_claude_review
+            from src.review.policy_rules import render_policy_rules
 
             # This engine reads the raw text, not the hunks, so the ignore
             # globs reach it as a diff with those files' sections cut out.
@@ -356,7 +360,12 @@ class ReviewOrchestrator:
                 engine_pr = dataclasses.replace(pr, raw_diff=review_diff)
             cr = run_claude_review(
                 engine_pr, user_id=user_id, workspace_id=workspace_id,
-                custom_rules=context.custom_rules,
+                # One reviewer plays every agent, so it gets the rules
+                # addressed to particular agents as well as the shared ones.
+                custom_rules="\n\n".join(p for p in (
+                    context.custom_rules,
+                    render_policy_rules(policy, engine_pr.changed_files).targeted,
+                ) if p),
                 graph_summary=context.graph_summary,
                 cross_repo_drift=context.cross_repo_drift,
             )
@@ -794,6 +803,7 @@ class ReviewOrchestrator:
         graph = build_graph_context(pr, workspace_id=workspace_id)
         drift_md = self._build_cross_repo_drift(pr, workspace_id=workspace_id)
         custom_rules = self._build_custom_rules(pr, policy)
+        agent_custom_rules = self._build_agent_custom_rules(pr, policy)
         mcp_evidence = self._build_mcp_evidence(pr, user_id=user_id)
         if mcp_evidence:
             # Prepend MCP evidence to custom_rules so every agent sees it
@@ -818,6 +828,8 @@ class ReviewOrchestrator:
             llm_client=llm_client,
             agent_llm=agent_llm,
             repo_agent_prompts=dict((policy or {}).get("agent_prompt_overrides") or {}),
+            agent_custom_rules=agent_custom_rules,
+            review_language=((policy or {}).get("review_language") or None),
         )
 
     # ─── Stage 11: BYOK LLM client + per-agent model resolution ──
@@ -1001,6 +1013,15 @@ class ReviewOrchestrator:
                         "ignore_globs": list(getattr(row, "ignore_globs", None) or []),
                         "comment_min_severity": getattr(
                             row, "comment_min_severity", None),
+                        # Kodus-style output settings. getattr for the reason
+                        # above. The two switches default ON: NULL is a row
+                        # that never answered, and silence is not "off".
+                        "summary_enabled": getattr(row, "summary_enabled", None) is not False,
+                        "summary_instructions": getattr(row, "summary_instructions", None),
+                        "started_comment_enabled": (
+                            getattr(row, "started_comment_enabled", None) is not False),
+                        "review_language": getattr(row, "review_language", None),
+                        "max_inline_comments": getattr(row, "max_inline_comments", None),
                     }
             finally:
                 engine.dispose()
@@ -1075,33 +1096,26 @@ class ReviewOrchestrator:
         pr: PullRequest,
         policy: dict | None,
     ) -> str:
-        """Render the policy's natural-language rules + matching folder rules
-        into a single block injected into the architect prompt."""
-        if not policy:
-            return ""
-        import fnmatch
+        """The policy's rules every agent sees: the repo-level prompt template
+        plus each matching rule that names no agent in particular.
 
-        parts: list[str] = []
-        base = (policy.get("prompt_template") or "").strip()
-        if base:
-            parts.append("**Repo-level rules (from admin panel):**\n" + base)
+        Rules addressed to particular agents are `_build_agent_custom_rules`,
+        so they reach only those agents' prompts. Both come from
+        `src.review.policy_rules`, the renderer the prompt preview uses too.
+        """
+        from src.review.policy_rules import render_policy_rules
 
-        # Match folder rules against changed file paths.
-        changed = pr.changed_files or []
-        for fr in policy.get("folder_rules", []):
-            pat = fr.get("pattern", "")
-            prompt = (fr.get("prompt") or "").strip()
-            if not pat or not prompt:
-                continue
-            matched = [f for f in changed if fnmatch.fnmatch(f, pat)]
-            if matched:
-                preview = ", ".join(matched[:3])
-                if len(matched) > 3:
-                    preview += f", …(+{len(matched) - 3})"
-                parts.append(
-                    f"**Folder rule — `{pat}` (matches: {preview}):**\n{prompt}"
-                )
-        return "\n\n".join(parts)
+        return render_policy_rules(policy, pr.changed_files).shared
+
+    def _build_agent_custom_rules(
+        self,
+        pr: PullRequest,
+        policy: dict | None,
+    ) -> dict[str, str]:
+        """agent → the matching rules addressed to it by name."""
+        from src.review.policy_rules import render_policy_rules
+
+        return render_policy_rules(policy, pr.changed_files).per_agent
 
     def _build_mcp_evidence(
         self, pr: PullRequest, *, user_id: str,

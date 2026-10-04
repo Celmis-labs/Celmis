@@ -543,10 +543,22 @@ class AskRequest(BaseModel):
 
 
 class FolderRule(BaseModel):
-    """Glob pattern → extra prompt fragment applied when files match."""
+    """Glob pattern → extra prompt fragment applied when files match.
+
+    The three optional fields make it a structured custom rule. A row stored
+    before they existed is `{pattern, prompt}` and still reads — and renders —
+    exactly as it always did: no title, no severity hint, every agent.
+    """
 
     pattern: str = Field(min_length=1, max_length=200, description="Glob like 'src/api/**/*.py'")
     prompt: str = Field(min_length=1, max_length=4000)
+    #: Short name, printed as the rule's heading in the prompt.
+    title: str | None = Field(default=None, max_length=200)
+    #: The severity an agent should report a violation at.
+    severity_hint: Literal["info", "warning", "error", "critical"] | None = None
+    #: The agents the rule is for (a subset of the LLM finders); [] = all.
+    #: Checked against the roster by the router.
+    agents: list[str] = Field(default_factory=list, max_length=10)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -610,6 +622,18 @@ class ReviewPolicyIn(BaseModel):
     # Lowest severity posted as an inline comment: critical | error | warning
     # | info. Absent keeps what is stored; null inherits (= post everything).
     comment_min_severity: str | None = None
+    # Review output (Kodus-style). Every one: key ABSENT keeps what is stored,
+    # so a client that does not render the control cannot reset it.
+    #   summary_enabled / started_comment_enabled — null goes back to on.
+    #   summary_instructions — null or "" clears.
+    #   review_language — a code from src.llm.prompts.language; null or ""
+    #                     inherits the workspace language.
+    #   max_inline_comments — 1..100; null inherits REVIEW_MAX_INLINE_COMMENTS.
+    summary_enabled: bool | None = None
+    summary_instructions: str | None = Field(default=None, max_length=4000)
+    started_comment_enabled: bool | None = None
+    review_language: str | None = Field(default=None, max_length=16)
+    max_inline_comments: int | None = Field(default=None, ge=1, le=100)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -674,8 +698,40 @@ class ReviewPolicyOut(BaseModel):
     # What THIS policy says (None = inherit) and what a review would apply.
     comment_min_severity: str | None = None
     comment_min_severity_effective: str = "info"
+    # Review output. The switches are always a decision (NULL reads as on).
+    summary_enabled: bool = True
+    summary_instructions: str | None = None
+    started_comment_enabled: bool = True
+    # What THIS policy says (None = inherit) and what a review would use.
+    review_language: str | None = None
+    review_language_effective: str = "en"
+    max_inline_comments: int | None = None
+    max_inline_comments_effective: int = 20
+    # The agents a per-repo system prompt may be set for (the LLM finders
+    # plus the verifier) and the agents a custom rule may target (the
+    # finders), in roster order — so the page renders a box per agent the
+    # server accepts instead of a list of its own that goes stale.
+    overridable_agents: list[str] = Field(default_factory=list)
+    rule_target_agents: list[str] = Field(default_factory=list)
+    # The output-language codes `review_language` accepts.
+    review_languages: list[str] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AgentPromptOverrideRepo(BaseModel):
+    """One repository that overrides an agent's system prompt."""
+
+    repo_slug: str
+    updated_at: datetime | None = None
+
+
+class AgentOverridesSummary(BaseModel):
+    """GET /api/review-policies/overrides-summary — who overrides what, in
+    the caller's active workspace and among the repos the caller may read."""
+
+    #: agent → the repositories overriding its system prompt.
+    prompt_overrides: dict[str, list[AgentPromptOverrideRepo]] = Field(default_factory=dict)
 
 
 class ReviewPolicyListItem(BaseModel):

@@ -6,6 +6,8 @@ Endpoints:
     PUT    /api/review-policies/{slug}          — upsert
     DELETE /api/review-policies/{slug}          — reset to default (delete row)
     GET    /api/review-policies/{slug}/branches — discover branches from local clone
+    GET    /api/review-policies/{slug}/prompt-preview — effective prompt of one agent
+    GET    /api/review-policies/overrides-summary — agent → repos overriding its prompt
 
 Per-agent LLM knobs live here too, and this is the layer that WINS: a repo
 policy beats the workspace `agents` entry, which beats the review profile,
@@ -38,6 +40,8 @@ from src.api.deps import (
     require_repo_permission,
 )
 from src.api.schemas import (
+    AgentOverridesSummary,
+    AgentPromptOverrideRepo,
     FolderRule,
     RepoBranchesOut,
     ReviewPolicyIn,
@@ -77,11 +81,15 @@ def _llm_agent_names() -> tuple[str, ...]:
 #: `^(defect|contract|security)$` — computed at import so FastAPI can compile
 #: it into the route's schema, which is where a hand-written alternation could
 #: never keep up with a rename.
-_PREVIEWABLE_PATTERN = "^(" + "|".join(_llm_agent_names()) + ")$"
+#: The verifier is previewable too: it takes a per-repo system prompt like the
+#: finders, so the box on the policy page needs the same "show me" button.
+_PREVIEWABLE_PATTERN = "^(" + "|".join((*_llm_agent_names(), "verifier")) + ")$"
 
-#: Agents a per-repo prompt override may name. The finders, plus the verifier:
-#: it takes a system prompt like the rest even though it finds nothing itself.
-_OVERRIDABLE_AGENTS = frozenset({*_llm_agent_names(), "verifier"})
+#: Agents a per-repo prompt override may name, in roster order. The finders,
+#: plus the verifier: it takes a system prompt like the rest even though it
+#: finds nothing itself.
+_OVERRIDABLE_AGENT_ORDER: tuple[str, ...] = (*_llm_agent_names(), "verifier")
+_OVERRIDABLE_AGENTS = frozenset(_OVERRIDABLE_AGENT_ORDER)
 
 
 TOGGLEABLE_AGENTS = (
@@ -139,6 +147,84 @@ def _verifier_default() -> bool:
     from src.review.settings import get_review_settings
 
     return bool(get_review_settings().verifier_enabled)
+
+
+def _rule_target_agents() -> tuple[str, ...]:
+    """The agents a custom rule may be addressed to: the LLM finders, the
+    agents whose prompts carry the policy's rules."""
+    return _llm_agent_names()
+
+
+def _folder_rules_from_payload(incoming: list[FolderRule]) -> list[dict]:
+    """Shape a PUT's `folder_rules` into what the row stores.
+
+    Stored minimally: `{pattern, prompt}` plus only the optional fields that
+    say something. A rule using none of them is stored exactly as every rule
+    was before they existed, so older readers keep reading it unchanged.
+
+    An agent the rule cannot reach is refused, not dropped: a rule addressed
+    only to a misspelt agent would otherwise reach nobody while the page
+    showed it as active.
+    """
+    known = _rule_target_agents()
+    out: list[dict] = []
+    for idx, fr in enumerate(incoming):
+        entry: dict[str, Any] = {"pattern": fr.pattern, "prompt": fr.prompt}
+        title = (fr.title or "").strip()
+        if title:
+            entry["title"] = title
+        if fr.severity_hint:
+            entry["severity_hint"] = fr.severity_hint
+        agents = [str(a).strip() for a in (fr.agents or []) if str(a).strip()]
+        unknown = [a for a in agents if a not in known]
+        if unknown:
+            raise HTTPException(status_code=422, detail=(
+                f"folder_rules[{idx}].agents: unknown agent(s) "
+                f"{', '.join(unknown)} — a rule can target: {', '.join(known)}"
+            ))
+        agents = list(dict.fromkeys(agents))
+        if agents and set(agents) != set(known):
+            # Naming every agent is the same as naming none; store it as none
+            # so a newly added agent is not silently left out of the rule.
+            entry["agents"] = agents
+        out.append(entry)
+    return out
+
+
+def _language_codes() -> tuple[str, ...]:
+    from src.llm.prompts.language import LANGUAGE_NAMES
+    return tuple(LANGUAGE_NAMES)
+
+
+def _review_language_from_payload(incoming: str | None) -> str | None:
+    if incoming is None:
+        return None
+    value = str(incoming).strip()
+    if not value:
+        return None
+    codes = _language_codes()
+    # Codes are case-sensitive in storage ("zh-CN"); accept any casing in.
+    match = next((c for c in codes if c.lower() == value.lower()), None)
+    if match is None:
+        raise HTTPException(status_code=422, detail=(
+            f"review_language: {incoming!r} — expected one of "
+            f"{', '.join(codes)}, or null to inherit the workspace language"
+        ))
+    return match
+
+
+def _workspace_review_language(workspace_id: str) -> str:
+    """The language an unconfigured repository reviews in. Blocking."""
+    try:
+        from src.api.routers.llm import _load_workspace_config
+        return str(_load_workspace_config(workspace_id).get("review_language") or "en")
+    except Exception:  # noqa: BLE001
+        return "en"
+
+
+def _max_inline_default() -> int:
+    from src.review.settings import get_review_settings
+    return int(get_review_settings().max_inline_comments)
 
 
 #: The comment thresholds a policy may name, most to least strict, and what an
@@ -408,15 +494,48 @@ def _validate_agent_llm_overrides(
 
 
 
+def _catalog_fields(workspace_language: str) -> dict[str, Any]:
+    """What every policy response carries about the roster and the defaults,
+    stored row or not."""
+    return {
+        "overridable_agents": list(_OVERRIDABLE_AGENT_ORDER),
+        "rule_target_agents": list(_rule_target_agents()),
+        "review_languages": list(_language_codes()),
+        "max_inline_comments_effective": _max_inline_default(),
+        "review_language_effective": workspace_language,
+    }
+
+
+def _stored_folder_rules(raw: list | None) -> list[FolderRule]:
+    """The stored rules as the API shape; a malformed row is skipped rather
+    than turning the whole page into a 500."""
+    out: list[FolderRule] = []
+    for fr in raw or []:
+        if not isinstance(fr, dict):
+            continue
+        try:
+            out.append(FolderRule(**{
+                k: v for k, v in fr.items()
+                if k in ("pattern", "prompt", "title", "severity_hint", "agents")
+            }))
+        except Exception:  # noqa: BLE001
+            logger.warning("folder_rule_unreadable rule=%r", fr)
+    return out
+
+
 def _row_to_out(
     row: RepoReviewPolicy, agents_effective: dict[str, dict] | None = None,
+    workspace_language: str = "en",
 ) -> ReviewPolicyOut:
+    review_language = getattr(row, "review_language", None)
+    max_inline = getattr(row, "max_inline_comments", None)
+    catalog = _catalog_fields(workspace_language)
     return ReviewPolicyOut(
         repo_slug=row.repo_slug,
         enabled=row.enabled,
         prompt_template=row.prompt_template,
         target_branches=list(row.target_branches or []),
-        folder_rules=[FolderRule(**fr) for fr in (row.folder_rules or [])],
+        folder_rules=_stored_folder_rules(row.folder_rules),
         department=row.department,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -455,6 +574,18 @@ def _row_to_out(
         comment_min_severity=row.comment_min_severity,
         comment_min_severity_effective=(
             row.comment_min_severity or COMMENT_SEVERITY_DEFAULT),
+        summary_enabled=getattr(row, "summary_enabled", None) is not False,
+        summary_instructions=getattr(row, "summary_instructions", None),
+        started_comment_enabled=getattr(row, "started_comment_enabled", None) is not False,
+        review_language=review_language,
+        max_inline_comments=max_inline,
+        **{
+            **catalog,
+            "review_language_effective": review_language or workspace_language,
+            "max_inline_comments_effective": (
+                max_inline if max_inline is not None
+                else catalog["max_inline_comments_effective"]),
+        },
     )
 
 
@@ -473,6 +604,7 @@ def _row_to_list_item(row: RepoReviewPolicy) -> ReviewPolicyListItem:
 
 def _default_out(
     repo_slug: str, agents_effective: dict[str, dict] | None = None,
+    workspace_language: str = "en",
 ) -> ReviewPolicyOut:
     """Synthetic 'default' policy when no row exists yet."""
     now = datetime.now(UTC)
@@ -503,6 +635,12 @@ def _default_out(
         ignore_globs=[],
         comment_min_severity=None,
         comment_min_severity_effective=COMMENT_SEVERITY_DEFAULT,
+        summary_enabled=True,
+        summary_instructions=None,
+        started_comment_enabled=True,
+        review_language=None,
+        max_inline_comments=None,
+        **_catalog_fields(workspace_language),
     )
 
 
@@ -561,6 +699,66 @@ async def list_policies(
 # specific-suffix routes MUST be registered above the catch-all.
 
 
+@router.get("/overrides-summary", response_model=AgentOverridesSummary)
+async def overrides_summary(
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(get_current_user),
+    ws_id: str = Depends(current_workspace_id),
+) -> AgentOverridesSummary:
+    """agent → the repositories whose policy overrides its system prompt.
+
+    What /admin/agents needs to say "overridden in N repositories": a
+    workspace-wide prompt edited there does nothing for those repositories,
+    and nothing on that page used to say so.
+
+    Scoped twice: to the caller's ACTIVE workspace (a policy row of another
+    tenant is never read), and to the repositories the caller may read — a
+    repository whose team grants exclude them is not named, the same rule the
+    per-repo routes apply. A caller who is not a member of the workspace
+    (only reachable for the shared single-tenant default) gets 403.
+    """
+    from src.api.deps import enforce_repo_permission, workspace_role
+
+    if not user.is_admin:
+        role = await asyncio.to_thread(workspace_role, user.id, ws_id)
+        if role is None:
+            from src.deployment import is_multi_tenant
+            if is_multi_tenant():
+                raise HTTPException(status_code=403, detail="Not a member of this workspace")
+
+    rows = (await session.scalars(
+        select(RepoReviewPolicy)
+        .where(RepoReviewPolicy.workspace_id == ws_id)
+        .order_by(RepoReviewPolicy.repo_slug)
+    )).all()
+
+    out: dict[str, list[AgentPromptOverrideRepo]] = {
+        agent: [] for agent in _OVERRIDABLE_AGENT_ORDER
+    }
+    readable: dict[str, bool] = {}
+    for row in rows:
+        overrides = {
+            k for k, v in (row.agent_prompt_overrides or {}).items()
+            if k in _OVERRIDABLE_AGENTS and isinstance(v, str) and v.strip()
+        }
+        if not overrides:
+            continue
+        if row.repo_slug not in readable:
+            try:
+                await enforce_repo_permission(row.repo_slug, user, "read", ws_id)
+                readable[row.repo_slug] = True
+            except HTTPException:
+                readable[row.repo_slug] = False
+        if not readable[row.repo_slug]:
+            continue
+        for agent in _OVERRIDABLE_AGENT_ORDER:
+            if agent in overrides:
+                out[agent].append(AgentPromptOverrideRepo(
+                    repo_slug=row.repo_slug, updated_at=row.updated_at,
+                ))
+    return AgentOverridesSummary(prompt_overrides=out)
+
+
 @router.get("/{repo_slug:path}/prompt-preview")
 async def prompt_preview(
     repo_slug: str,
@@ -587,8 +785,32 @@ async def prompt_preview(
         LLMReviewAgent,
         _compose_effective_system_prompt,
     )
-    from src.review.models import PullRequest
     from src.review.orchestrator import ReviewOrchestrator
+    from src.review.policy_rules import render_policy_rules
+
+    row = await session.get(RepoReviewPolicy, repo_slug)
+    if row is not None and row.workspace_id != ws_id:
+        row = None  # another tenant's policy — never disclose; preview defaults
+    agent_overrides = dict(row.agent_prompt_overrides or {}) if row else {}
+    review_language = getattr(row, "review_language", None) if row else None
+    source = await asyncio.to_thread(_prompt_source, agent, agent_overrides, ws_id)
+
+    if agent == "verifier":
+        # The verifier reads no repo rules and is handed the findings, not a
+        # diff template — its prompt is the system prompt and nothing else.
+        from src.review.agents.verifier import verifier_system_prompt
+
+        ctx = AgentContext(
+            pull_request=_preview_pr(repo_slug),
+            repo_agent_prompts=agent_overrides,
+            workspace_id=ws_id,
+        )
+        return {
+            "agent": agent,
+            "system_prompt": verifier_system_prompt(ctx),
+            "user_prompt_template": "",
+            "prompt_source": source,
+        }
 
     # ASKED OF THE ORCHESTRATOR, not restated. The previous version listed
     # four agent classes by name, so a renamed roster left this endpoint
@@ -608,33 +830,23 @@ async def prompt_preview(
             ),
         )
 
-    row = await session.get(RepoReviewPolicy, repo_slug)
-    if row is not None and row.workspace_id != ws_id:
-        row = None  # another tenant's policy — never disclose; preview defaults
-    prompt_template = (row.prompt_template if row else "") or ""
-    folder_rules = list(row.folder_rules or []) if row else []
-    agent_overrides = dict(row.agent_prompt_overrides or {}) if row else {}
-
-    custom_rules_parts: list[str] = []
-    if prompt_template.strip():
-        custom_rules_parts.append("**Repo-level rules (from admin panel):**\n" + prompt_template.strip())
-    for fr in folder_rules:
-        pat = fr.get("pattern", "")
-        prompt = (fr.get("prompt") or "").strip()
-        if pat and prompt:
-            custom_rules_parts.append(f"**Folder rule — `{pat}`:**\n{prompt}")
-    custom_rules = "\n\n".join(custom_rules_parts)
-
-    fake_pr = PullRequest(
-        provider="preview", repo=repo_slug, number=0, title="(preview)",
-        description="", author="", base_ref="main", base_sha="",
-        head_ref="preview", head_sha="", state="open", url="",
+    # The renderer a review uses, with every rule shown (there is no PR to
+    # match a pattern against) and each targeted rule only in its agents'
+    # prompts — the preview answers "what will THIS agent be told".
+    rendered = render_policy_rules(
+        {
+            "prompt_template": (row.prompt_template if row else "") or "",
+            "folder_rules": list(row.folder_rules or []) if row else [],
+        },
+        None, match_files=False,
     )
     ctx = AgentContext(
-        pull_request=fake_pr,
-        custom_rules=custom_rules,
+        pull_request=_preview_pr(repo_slug),
+        custom_rules=rendered.shared,
+        agent_custom_rules=rendered.per_agent,
         repo_agent_prompts=agent_overrides,
         workspace_id=ws_id,
+        review_language=review_language,
     )
     effective_system = _compose_effective_system_prompt(
         agent_name=agent,
@@ -645,7 +857,33 @@ async def prompt_preview(
         "agent": agent,
         "system_prompt": effective_system,
         "user_prompt_template": a.user_prompt_template,
+        "prompt_source": source,
     }
+
+
+def _preview_pr(repo_slug: str):
+    from src.review.models import PullRequest
+
+    return PullRequest(
+        provider="preview", repo=repo_slug, number=0, title="(preview)",
+        description="", author="", base_ref="main", base_sha="",
+        head_ref="preview", head_sha="", state="open", url="",
+    )
+
+
+def _prompt_source(agent: str, repo_overrides: dict, workspace_id: str) -> str:
+    """Which layer the agent's base system prompt comes from:
+    "repo" | "workspace" | "builtin" — the precedence of
+    `_compose_effective_system_prompt`, said in one word. Blocking."""
+    if str(repo_overrides.get(agent) or "").strip():
+        return "repo"
+    try:
+        from src.api.routers.agents import _load_override
+        if _load_override(agent, workspace_id) is not None:
+            return "workspace"
+    except Exception:  # noqa: BLE001
+        pass
+    return "builtin"
 
 
 @router.get("/{repo_slug:path}/branches", response_model=RepoBranchesOut)
@@ -740,11 +978,13 @@ async def get_policy(
     exists (or it belongs to another tenant) — synthesize defaults so the UI can
     render the form without disclosing another workspace's config."""
     row = await session.get(RepoReviewPolicy, repo_slug)
+    ws_language = await asyncio.to_thread(_workspace_review_language, ws_id)
     if row is None or row.workspace_id != ws_id:
         # No policy of its own — but every agent still runs with SOMETHING,
         # and this page is where an operator comes to find out what.
         return _default_out(
             repo_slug, await _effective_agents_for_display({}, ws_id),
+            workspace_language=ws_language,
         )
     return _row_to_out(
         row,
@@ -754,6 +994,7 @@ async def get_policy(
             ),
             ws_id,
         ),
+        workspace_language=ws_language,
     )
 
 
@@ -792,6 +1033,8 @@ async def upsert_policy(
     ignore_globs = _ignore_globs_from_payload(payload.ignore_globs)
     comment_min_severity = _comment_min_severity_from_payload(
         payload.comment_min_severity)
+    folder_rules = _folder_rules_from_payload(payload.folder_rules)
+    review_language = _review_language_from_payload(payload.review_language)
     if payload.agent_llm_overrides is not None and agent_llm_overrides:
         # Only what this request actually sent. Re-checking a map the payload
         # never mentioned would let a model change on this page lock an
@@ -811,9 +1054,7 @@ async def upsert_policy(
     row.enabled = payload.enabled
     row.prompt_template = payload.prompt_template
     row.target_branches = list(payload.target_branches)
-    row.folder_rules = [
-        {"pattern": fr.pattern, "prompt": fr.prompt} for fr in payload.folder_rules
-    ]
+    row.folder_rules = folder_rules
     row.department = payload.department
     row.updated_by = user.email
     row.architect_model = payload.architect_model
@@ -869,6 +1110,20 @@ async def upsert_policy(
         row.ignore_globs = ignore_globs
     if "comment_min_severity" in payload.model_fields_set:
         row.comment_min_severity = comment_min_severity
+    # Review output. Absent keeps what is stored; a new row starts on the
+    # defaults explicitly rather than trusting a server default it may not
+    # have been flushed with yet.
+    fields = payload.model_fields_set
+    if "summary_enabled" in fields or row.summary_enabled is None:
+        row.summary_enabled = payload.summary_enabled is not False
+    if "started_comment_enabled" in fields or row.started_comment_enabled is None:
+        row.started_comment_enabled = payload.started_comment_enabled is not False
+    if "summary_instructions" in fields:
+        row.summary_instructions = (payload.summary_instructions or "").strip() or None
+    if "review_language" in fields:
+        row.review_language = review_language
+    if "max_inline_comments" in fields:
+        row.max_inline_comments = payload.max_inline_comments
 
     await session.commit()
     await session.refresh(row)
@@ -891,6 +1146,7 @@ async def upsert_policy(
             ),
             ws_id,
         ),
+        workspace_language=await asyncio.to_thread(_workspace_review_language, ws_id),
     )
 
 

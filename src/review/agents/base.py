@@ -292,6 +292,22 @@ class AgentContext:
     # Per-repo per-agent full system_prompt overrides (Stage 12). Takes precedence
     # over global /admin/agents override, which in turn overrides the agent default.
     repo_agent_prompts: dict[str, str] = field(default_factory=dict)
+    # agent → the policy rules addressed to that agent by name. Appended after
+    # `custom_rules` (the rules for every agent) in that agent's prompt only.
+    agent_custom_rules: dict[str, str] = field(default_factory=dict)
+    # The repo policy's output language ("uk", "de", …). None = the
+    # workspace's `review_language`.
+    review_language: str | None = None
+
+
+def custom_rules_for(context: AgentContext, agent_name: str) -> str:
+    """The policy rules `agent_name` is told: the shared block, then the
+    rules addressed to it alone."""
+    parts = [
+        (context.custom_rules or "").strip(),
+        ((context.agent_custom_rules or {}).get(agent_name) or "").strip(),
+    ]
+    return "\n\n".join(p for p in parts if p)
 
 
 @dataclass
@@ -541,14 +557,19 @@ def _usable_fallback_model(agent_llm: AgentLLMSettings) -> str | None:
     return None
 
 
-def _review_language_instruction(workspace_id: str) -> str:
-    """Language directive appended to every review prompt when the workspace
-    picked a non-English output language."""
-    try:
-        from src.api.routers.llm import _load_workspace_config
-        code = str(_load_workspace_config(workspace_id).get("review_language") or "en")
-    except Exception:  # noqa: BLE001
-        return ""
+def _review_language_instruction(
+    workspace_id: str, override: str | None = None,
+) -> str:
+    """Language directive appended to every review prompt when the repo policy
+    (`override`) or, failing that, the workspace picked a non-English output
+    language."""
+    code = (override or "").strip()
+    if not code:
+        try:
+            from src.api.routers.llm import _load_workspace_config
+            code = str(_load_workspace_config(workspace_id).get("review_language") or "en")
+        except Exception:  # noqa: BLE001
+            return ""
     if code == "en":
         return ""
     name = _REVIEW_LANG_NAMES.get(code, code)
@@ -588,12 +609,17 @@ def _compose_effective_system_prompt(
     if extras:
         parts.append("**Workspace-wide rules:**\n" + extras)
 
-    # b) Per-repo custom rules — surfaced to every agent, not just architect.
-    rules = (context.custom_rules or "").strip()
+    # b) Per-repo custom rules — surfaced to every agent, not just architect,
+    #    plus the rules addressed to this agent alone.
+    rules = custom_rules_for(context, agent_name)
     if rules:
         parts.append(rules)
 
-    lang = _review_language_instruction(context.workspace_id)
+    repo_lang = getattr(context, "review_language", None)
+    lang = (
+        _review_language_instruction(context.workspace_id, repo_lang)
+        if repo_lang else _review_language_instruction(context.workspace_id)
+    )
 
     if lang:
 
@@ -1659,7 +1685,10 @@ class LLMReviewAgent(ReviewAgent):
             style_guide=context.style_guide or "(no style guide)",
             repo_overview=context.repo_overview or "(no overview)",
             cross_repo_drift=context.cross_repo_drift or "(no drift signal)",
-            custom_rules=context.custom_rules or "(no repo-specific rules configured)",
+            custom_rules=(
+                custom_rules_for(context, self.name)
+                or "(no repo-specific rules configured)"
+            ),
         )
 
     @staticmethod

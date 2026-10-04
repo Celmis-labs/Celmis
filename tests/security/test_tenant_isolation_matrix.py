@@ -88,6 +88,8 @@ PROBES: list[tuple[str, str, dict | None, str]] = [
     ("GET", "/api/review-policies", None, "no_leak"),
     ("GET", f"/api/review-policies/{B_REPO}", None, "no_leak"),
     ("GET", f"/api/review-policies/{B_REPO}/prompt-preview", None, "no_leak"),
+    ("GET", f"/api/review-policies/{B_REPO}/prompt-preview?agent=verifier", None, "no_leak"),
+    ("GET", "/api/review-policies/overrides-summary", None, "no_leak"),
     ("GET", f"/api/review-policies/{B_REPO}/branches", None, "deny"),
     ("PUT", f"/api/review-policies/{B_REPO}", {"prompt_template": "pwned"}, "deny"),
     ("DELETE", f"/api/review-policies/{B_REPO}", None, "deny"),

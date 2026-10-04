@@ -361,6 +361,27 @@ class RepoReviewPolicy(Base, TimestampMixin):
     # Findings under it are still counted in the summary and stored.
     comment_min_severity: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # ── Review output, per repository (Kodus-style customization) ──
+    # The two switches are nullable but default TRUE (a server default in the
+    # migration, a Python default here), so every row that predates them keeps
+    # the summary and the "review started" comment it already had. Readers
+    # treat NULL as on, never off.
+    #: Post the PR summary for this repository.
+    summary_enabled: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True, default=True,
+    )
+    #: Extra instructions for the summary writer. NULL/empty = none.
+    summary_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Post a "review started" comment when a review begins.
+    started_comment_enabled: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True, default=True,
+    )
+    #: Output language code ("en", "uk", …; src.llm.prompts.language).
+    #: NULL = the workspace's review_language.
+    review_language: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Inline-comment cap for this repo (1..100). NULL = REVIEW_MAX_INLINE_COMMENTS.
+    max_inline_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     __table_args__ = (
         Index("ix_repo_review_policies_department", "department"),
     )

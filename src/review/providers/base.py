@@ -254,7 +254,7 @@ def _posting_line(batch: ReviewBatch) -> str:
     total = len(batch.findings)
     below = batch.below_threshold_count
     postable = total - below
-    cap = int(get_review_settings().max_inline_comments)
+    cap = batch.inline_cap(int(get_review_settings().max_inline_comments))
     shown = min(postable, max(0, cap))
     over_cap = postable - shown
     if not below and not over_cap:
