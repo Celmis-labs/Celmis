@@ -102,6 +102,24 @@ def _policy_value(policy, name: str, default):
     return default if value is None else value
 
 
+def _policy_setting(policy, name: str):
+    """A review setting as it is in force: the resolved policy's value, else
+    its built-in (`review_defaults.BUILTIN_DEFAULTS`).
+
+    `_policy_value` with the default looked up rather than restated at each
+    reader — the 2.3.0 settings (run_on_drafts, approve_when_clean,
+    summary_target, …) have no env knob, so the built-in IS the install
+    default, and the page that says "inherit → X" reads X from the same map.
+    A blank text setting is an inherit, as it is in the resolver.
+    """
+    from src.review.review_defaults import TEXT_FIELDS, builtin_default
+
+    value = _policy_value(policy, name, None)
+    if name in TEXT_FIELDS and isinstance(value, str) and not value.strip():
+        value = None
+    return builtin_default(name) if value is None else value
+
+
 def _display_time(iso: str) -> str:
     """'2026-10-04T12:03:11.5+00:00' -> '2026-10-04 12:03 UTC'."""
     from datetime import UTC, datetime
@@ -474,7 +492,12 @@ class ReviewOrchestrator:
             batch.parameter_adjustments.append(context.graph_note)
 
         # ── Skip empty/draft/binary PRs ──
-        if pr.is_draft:
+        # Drafts: skipped unless `run_on_drafts` (repo > workspace > built-in
+        # False) says this repository reviews them. Read through the resolved
+        # policy like every other gate here, so the webhook's early skip
+        # (`review_defaults.run_on_drafts_for_repo`) and this one answer the
+        # same question from the same rows.
+        if pr.is_draft and not _policy_setting(policy, "run_on_drafts"):
             logger.info("review_skipped reason=draft pr=%d", pr.number)
             batch.summary = "PR is draft — review skipped."
             batch.verdict = ReviewVerdict.SKIPPED
@@ -566,10 +589,19 @@ class ReviewOrchestrator:
         except Exception:  # noqa: BLE001
             pass
 
-        disabled_agents = {
+        # The named-off agents, plus every opt-in agent (built-in off, e.g.
+        # business_logic) the effective `enabled_agents` does not switch on —
+        # `review_defaults.AGENT_PARTICIPATION_DEFAULTS`. `named_off` is kept
+        # apart for the unknown-name warning below: an opt-in agent added by
+        # its default is not something an operator wrote.
+        from src.review.review_defaults import effective_disabled_agents
+
+        named_off = {
             str(a).strip().lower()
             for a in ((policy or {}).get("disabled_agents") or [])
         }
+        disabled_agents = named_off | effective_disabled_agents(
+            None, (policy or {}).get("enabled_agents"))
 
         # ── "🔄 Celmis is reviewing this PR…" — posted now, after every skip
         # gate (a skipped PR gets no placeholder to take back) and before the
@@ -684,8 +716,13 @@ class ReviewOrchestrator:
         # deliberately NOT mapped onto the successor agents either — a policy
         # that disabled the old tests sidecar must not disable the main
         # finder that inherited its remit. The operator re-decides.
+        # Names of the participation map (performance, business_logic) are
+        # known even before this build dispatches them: switching off an
+        # agent that is not running yet is a decision, not a typo.
+        from src.review.review_defaults import AGENT_PARTICIPATION_DEFAULTS
+
         roster = {a.name for a in self.agents} | {"verifier"}
-        unknown = disabled_agents - roster
+        unknown = named_off - roster - set(AGENT_PARTICIPATION_DEFAULTS)
         if unknown:
             logger.warning(
                 "disabled_agents_unknown names=%s roster=%s — these entries "
@@ -1345,12 +1382,43 @@ class ReviewOrchestrator:
                             row, "started_comment_enabled", None),
                         "review_language": getattr(row, "review_language", None),
                         "max_inline_comments": getattr(row, "max_inline_comments", None),
+                        # The 2.3.0 finders' per-repo models — read by
+                        # `resolve_agent_llm` as `<agent>_model`, like the five
+                        # columns above.
+                        "performance_model": getattr(row, "performance_model", None),
+                        "business_logic_model": getattr(
+                            row, "business_logic_model", None),
+                        # The 2.3.0 settings (migration f1a2b3c4d5e6), every
+                        # key present and None when the row does not answer,
+                        # so `_resolved_policy` fills it from the workspace and
+                        # a reader asks `_policy_setting(policy, name)` for the
+                        # value in force (built-ins: review_defaults.
+                        # BUILTIN_DEFAULTS). Blank text is None here, as in the
+                        # resolver: a cleared box inherits.
+                        **self._v23_settings(row),
                     }
             finally:
                 engine.dispose()
         except Exception as exc:  # noqa: BLE001
             logger.warning("policy_load_failed repo=%s err=%s", repo_slug, exc)
             return None
+
+    @staticmethod
+    def _v23_settings(row) -> dict:
+        """The 2.3.0 settings of a policy row, as the policy dict carries
+        them: lists copied, blank text None, a missing attribute (a row loaded
+        by code older than the migration) None."""
+        from src.review.review_defaults import TEXT_FIELDS, V23_FIELDS
+
+        out: dict = {}
+        for name in V23_FIELDS:
+            value = getattr(row, name, None)
+            if isinstance(value, list):
+                value = list(value)
+            elif name in TEXT_FIELDS and isinstance(value, str) and not value.strip():
+                value = None
+            out[name] = value
+        return out
 
     def _verifier_enabled(
         self, policy: dict | None, disabled_agents: set[str],

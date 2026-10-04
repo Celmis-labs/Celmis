@@ -123,6 +123,7 @@ def _routers():
         repos,
         review_defaults,
         review_policies,
+        review_settings,
         reviews,
         teams,
         workspaces,
@@ -131,6 +132,7 @@ def _routers():
 
     return [workspaces.router, invites.router, teams.router, admin_users.router,
             agents.router, review_policies.router, review_defaults.router,
+            review_settings.router,
             repos.router, reviews.router,
             issues.router, pull_requests.router, alerts.router, automation.router,
             llm.router, connections.router, analytics.router, access_requests.router]

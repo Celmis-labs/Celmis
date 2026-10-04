@@ -140,7 +140,10 @@ async def test_an_unconfigured_repo_reports_the_defaults():
     assert p["review_language_effective"] == "de"
     assert p["max_inline_comments"] is None
     assert p["max_inline_comments_effective"] == policies_router._max_inline_default()
-    assert p["overridable_agents"] == [*_finders(), "verifier"]
+    # The 2.3.0 finders are accepted by name before the roster dispatches
+    # them (and only once when it does).
+    assert p["overridable_agents"] == [
+        *dict.fromkeys((*_finders(), "performance", "business_logic")), "verifier"]
     assert p["rule_target_agents"] == list(_finders())
     assert "uk" in p["review_languages"] and "en" in p["review_languages"]
 

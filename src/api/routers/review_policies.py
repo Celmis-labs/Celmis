@@ -37,11 +37,12 @@ import subprocess
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import (
+    client_ip,
     current_workspace_id,
     get_current_user,
     require_prompt_editor,
@@ -86,6 +87,16 @@ def _llm_agent_names() -> tuple[str, ...]:
     )
 
 
+def _added_llm_finders() -> tuple[str, ...]:
+    from src.review.review_defaults import ADDED_LLM_FINDERS
+    return ADDED_LLM_FINDERS
+
+
+def _participation_defaults() -> dict[str, bool]:
+    from src.review.review_defaults import AGENT_PARTICIPATION_DEFAULTS
+    return dict(AGENT_PARTICIPATION_DEFAULTS)
+
+
 #: `^(defect|contract|security)$` — computed at import so FastAPI can compile
 #: it into the route's schema, which is where a hand-written alternation could
 #: never keep up with a rename.
@@ -96,12 +107,22 @@ _PREVIEWABLE_PATTERN = "^(" + "|".join((*_llm_agent_names(), "verifier")) + ")$"
 #: Agents a per-repo prompt override may name, in roster order. The finders,
 #: plus the verifier: it takes a system prompt like the rest even though it
 #: finds nothing itself.
-_OVERRIDABLE_AGENT_ORDER: tuple[str, ...] = (*_llm_agent_names(), "verifier")
+#: Plus the 2.3.0 finders (`ADDED_LLM_FINDERS`), accepted by name before the
+#: roster dispatches them — the agent work lands separately, and a prompt
+#: saved for it in the meantime must not be dropped in silence on save (the
+#: failure this whitelist's history is about). De-duplicated, so the day they
+#: join the roster nothing changes here.
+_OVERRIDABLE_AGENT_ORDER: tuple[str, ...] = tuple(dict.fromkeys(
+    (*_llm_agent_names(), *_added_llm_finders(), "verifier")))
 _OVERRIDABLE_AGENTS = frozenset(_OVERRIDABLE_AGENT_ORDER)
 
 
+#: Every agent the participation lists may name — the keys of
+#: `review_defaults.AGENT_PARTICIPATION_DEFAULTS`, whose values say which
+#: run by default (business_logic does not: it is opt-in, switched on through
+#: `enabled_agents`) — and then the verifier.
 TOGGLEABLE_AGENTS = (
-    "defect", "contract", "security", "structural", "cve",
+    *_participation_defaults(),
     # The verifier is a stage, not an agent, but it is switchable for the same
     # reason the agents are: measured on a 50-PR benchmark it dropped 40 of
     # 187 candidates at a 1024-token ceiling and 61 of 75 once that ceiling
@@ -119,6 +140,12 @@ TOGGLEABLE_AGENTS = (
 #: the workspace layer. A payload that puts it in the blob is refused, loudly,
 #: and told where it lives instead.
 _MODEL_FIELD = "model"
+
+#: The `<agent>_model` columns a PUT leaves alone when it does not name them
+#: (the 2.3.0 finders'). The five older columns are replaced on every save,
+#: as they always were; these arrived after the policy page, and a page that
+#: cannot render a field must not clear it.
+_KEPT_MODEL_FIELDS = ("performance_model", "business_logic_model")
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────
@@ -326,6 +353,107 @@ def _suppressed_rules_from_payload(incoming: list[str] | None) -> list[str] | No
             ))
         cleaned.append(rule)
     return list(dict.fromkeys(cleaned))
+
+
+# ─── 2.3.0 settings: shaping + validation, shared by both layers ─────
+
+
+def _choice_from_payload(name: str, incoming: str | None) -> str | None:
+    """A closed-vocabulary setting (`review_defaults.SETTING_CHOICES`):
+    case and whitespace forgiven, blank = inherit, anything else a 422 that
+    names the choices."""
+    from src.review.review_defaults import SETTING_CHOICES
+
+    if incoming is None:
+        return None
+    value = str(incoming).strip().lower()
+    if not value:
+        return None
+    choices = SETTING_CHOICES[name]
+    if value not in choices:
+        raise HTTPException(status_code=422, detail=(
+            f"{name}: {incoming!r} — expected one of {', '.join(choices)}, "
+            f"or null to inherit"
+        ))
+    return value
+
+
+def _text_setting_from_payload(name: str, incoming: str | None) -> str | None:
+    """A free-text setting: stripped, blank = inherit (the built-in), at most
+    `TEXT_SETTING_MAX` characters (the schema refuses longer before this
+    runs; checked again here for a caller that bypasses it). A message
+    template must use only the documented placeholders."""
+    from src.review.review_defaults import (
+        MESSAGE_FIELDS,
+        TEXT_SETTING_MAX,
+        message_template_error,
+    )
+
+    if incoming is None:
+        return None
+    value = str(incoming).strip()
+    if not value:
+        return None
+    if len(value) > TEXT_SETTING_MAX:
+        raise HTTPException(status_code=422, detail=(
+            f"{name}: {len(value)} characters — at most {TEXT_SETTING_MAX}"
+        ))
+    if name in MESSAGE_FIELDS:
+        problem = message_template_error(value)
+        if problem:
+            raise HTTPException(status_code=422, detail=f"{name}: {problem}")
+    return value
+
+
+def _enabled_agents_from_payload(incoming: list[str] | None) -> list[str] | None:
+    """The opt-in list: names from the participation map only. Refused, not
+    dropped, when unknown — a misspelt opt-in would otherwise switch on
+    nothing while the page showed it on — and "verifier" is pointed at its
+    own switch rather than accepted here."""
+    if incoming is None:
+        return None
+    known = tuple(_participation_defaults())
+    names = [str(a).strip().lower() for a in incoming if str(a).strip()]
+    if "verifier" in names:
+        raise HTTPException(status_code=422, detail=(
+            "enabled_agents: the verifier has its own switch — set "
+            "verifier_enabled instead"
+        ))
+    unknown = [a for a in names if a not in known]
+    if unknown:
+        raise HTTPException(status_code=422, detail=(
+            f"enabled_agents: unknown agent(s) {', '.join(unknown)} — "
+            f"the agents are: {', '.join(known)}"
+        ))
+    return list(dict.fromkeys(names))
+
+
+def v23_updates_from_payload(payload: Any) -> dict[str, Any]:
+    """{field: value to store} for every 2.3.0 setting the request NAMED.
+
+    Absent keeps what is stored (not in the result), null inherits, a value
+    is validated and shaped. Everything is checked before the caller writes
+    anything, so a 422 leaves no half-saved settings. One function for both
+    layers, so a repository and its workspace can never be validated by two
+    different rules.
+    """
+    from src.review.review_defaults import SETTING_CHOICES, TEXT_FIELDS, V23_FIELDS
+
+    sent = payload.model_fields_set
+    out: dict[str, Any] = {}
+    for name in V23_FIELDS:
+        if name not in sent:
+            continue
+        value = getattr(payload, name)
+        if name == "enabled_agents":
+            out[name] = _enabled_agents_from_payload(value)
+        elif name in SETTING_CHOICES:
+            out[name] = _choice_from_payload(name, value)
+        elif name in TEXT_FIELDS:
+            out[name] = _text_setting_from_payload(name, value)
+        else:
+            out[name] = None if value is None else bool(value)
+    return out
 
 
 def _agent_llm_fields() -> tuple[str, ...]:
@@ -545,6 +673,19 @@ def _catalog_fields() -> dict[str, Any]:
         "overridable_agents": list(_OVERRIDABLE_AGENT_ORDER),
         "rule_target_agents": list(_rule_target_agents()),
         "review_languages": list(_language_codes()),
+        **settings_vocabulary(),
+    }
+
+
+def settings_vocabulary() -> dict[str, Any]:
+    """The 2.3.0 vocabularies both layers' responses carry: the closed
+    choices, the message placeholders and the participation defaults."""
+    from src.review.review_defaults import MESSAGE_PLACEHOLDERS, SETTING_CHOICES
+
+    return {
+        "setting_choices": {k: list(v) for k, v in SETTING_CHOICES.items()},
+        "message_placeholders": list(MESSAGE_PLACEHOLDERS),
+        "agent_participation_defaults": _participation_defaults(),
     }
 
 
@@ -576,7 +717,13 @@ def _layered_fields(
     inherits. One function for both shapes, so a stored row and the synthetic
     default can never disagree about what "inherit" means.
     """
-    from src.review.review_defaults import INHERITABLE_FIELDS, resolve
+    from src.review.review_defaults import (
+        INHERITABLE_FIELDS,
+        TEXT_FIELDS,
+        V23_FIELDS,
+        agent_participation,
+        resolve,
+    )
 
     install = _install_defaults()
     effective, sources = resolve(row, ws_defaults, install)
@@ -586,9 +733,19 @@ def _layered_fields(
         value = None if row is None else getattr(row, name, None)
         if isinstance(value, list):
             return list(value)
-        if name == "summary_instructions" and isinstance(value, str) and not value.strip():
+        if name in TEXT_FIELDS and isinstance(value, str) and not value.strip():
             return None
         return value
+
+    # The 2.3.0 settings, uniformly: own value, effective value. Their
+    # sources / inherited entries come with the loop over INHERITABLE_FIELDS.
+    v23: dict[str, Any] = {}
+    for name in V23_FIELDS:
+        v23[name] = own(name)
+        value = effective[name]
+        v23[f"{name}_effective"] = list(value or []) if name == "enabled_agents" else value
+    v23["agent_participation_effective"] = agent_participation(
+        effective["disabled_agents"], effective["enabled_agents"])
 
     language, language_source = workspace_language
     own_language = own("review_language")
@@ -623,6 +780,7 @@ def _layered_fields(
         "max_inline_comments_effective": int(effective["max_inline_comments"]),
         "review_language": own_language,
         "review_language_effective": own_language or language,
+        **v23,
         "sources": sources,
         "inherited": inherited,
         "inherited_sources": {
@@ -649,6 +807,8 @@ def _row_to_out(
         quality_model=row.quality_model,
         tests_model=row.tests_model,
         verifier_model=row.verifier_model,
+        performance_model=getattr(row, "performance_model", None),
+        business_logic_model=getattr(row, "business_logic_model", None),
         agent_prompt_overrides=dict(row.agent_prompt_overrides or {}),
         # NULL for every row written before the column existed, and NULL is
         # exactly "inherit" — the same thing an absent key means at every
@@ -1129,6 +1289,7 @@ async def get_policy(
 async def upsert_policy(
     repo_slug: str,
     payload: ReviewPolicyIn,
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(require_prompt_editor),
     _perm: User = Depends(require_repo_permission("review")),
@@ -1163,15 +1324,22 @@ async def upsert_policy(
         payload.comment_min_severity)
     folder_rules = _folder_rules_from_payload(payload.folder_rules)
     review_language = _review_language_from_payload(payload.review_language)
+    v23_updates = v23_updates_from_payload(payload)
     if payload.agent_llm_overrides is not None and agent_llm_overrides:
         # Only what this request actually sent. Re-checking a map the payload
         # never mentioned would let a model change on this page lock an
         # operator out of every other field on it, with no control on screen to
         # undo the combination — and /api/llm/config draws the same line.
+        # The models this save LEAVES in place: the 2.3.0 model columns keep
+        # their stored value when the request does not name them.
+        saving_models = _model_columns(payload)
+        for field in _KEPT_MODEL_FIELDS:
+            if field not in payload.model_fields_set and row is not None:
+                saving_models[field] = getattr(row, field, None)
         await asyncio.to_thread(
             _validate_agent_llm_overrides,
             agent_llm_overrides,
-            _policy_view(_model_columns(payload), agent_llm_overrides),
+            _policy_view(saving_models, agent_llm_overrides),
             ws_id,
         )
 
@@ -1198,6 +1366,10 @@ async def upsert_policy(
     row.quality_model = payload.quality_model
     row.tests_model = payload.tests_model
     row.verifier_model = payload.verifier_model
+    # Absent keeps (the page predates these two), null clears, a string pins.
+    for field in _KEPT_MODEL_FIELDS:
+        if field in fields:
+            setattr(row, field, (getattr(payload, field) or "").strip() or None)
     row.agent_prompt_overrides = {
         k: v for k, v in (payload.agent_prompt_overrides or {}).items()
         # From the roster plus the verifier — spelled out once, in
@@ -1262,9 +1434,22 @@ async def upsert_policy(
         row.review_language = review_language
     if "max_inline_comments" in fields:
         row.max_inline_comments = payload.max_inline_comments
+    # The 2.3.0 settings, validated above with the workspace layer's rules.
+    for name, value in v23_updates.items():
+        setattr(row, name, value)
 
     await session.commit()
     await session.refresh(row)
+    from src.security import audit
+
+    # The SHAPE of the change (which fields the request named), never the
+    # values: prompts and instructions are operator text, and the audit
+    # trail is exported.
+    audit.record_action(
+        action="review_policy.changed", actor=user.email, actor_id=user.id,
+        workspace_id=ws_id, target=repo_slug, ip=client_ip(request),
+        detail={"fields": sorted(fields)},
+    )
     logger.info(
         "review_policy_upserted repo=%s by=%s enabled=%s branches=%s "
         "folder_rules=%d disabled_agents=%s agent_llm_overrides=%s "
@@ -1295,6 +1480,7 @@ async def upsert_policy(
 @router.delete("/{repo_slug:path}", status_code=status.HTTP_204_NO_CONTENT)
 async def reset_policy(
     repo_slug: str,
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(require_prompt_editor),
     # `review`, the same as saving: PUT replaces the whole policy, so a reset
@@ -1310,4 +1496,10 @@ async def reset_policy(
     await session.delete(row)
     await session.commit()
     logger.info("review_policy_reset repo=%s by=%s", repo_slug, user.email)
+    from src.security import audit
+
+    audit.record_action(
+        action="review_policy.reset", actor=user.email, actor_id=user.id,
+        workspace_id=ws_id, target=repo_slug, ip=client_ip(request),
+    )
 

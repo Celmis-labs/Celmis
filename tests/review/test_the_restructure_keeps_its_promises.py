@@ -20,7 +20,10 @@ from src.review.settings import (
 
 
 def test_the_roster_is_the_measured_one():
-    assert REVIEW_AGENTS == ("defect", "contract", "security", "verifier", "compliance")
+    # performance / business_logic: the 2.3.0 finders, configurable before
+    # they are dispatched (src/review/settings.py).
+    assert REVIEW_AGENTS == ("defect", "contract", "security", "performance",
+                             "business_logic", "verifier", "compliance")
 
 
 def test_the_old_names_are_gone_from_the_roster():

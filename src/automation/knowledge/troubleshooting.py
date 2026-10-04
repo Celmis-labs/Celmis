@@ -42,7 +42,7 @@ SECTIONS = (
   another workspace's; GitHub polling with a fine-grained token (needs a
   classic token with `notifications`, or use a webhook); Bitbucket is never
   polled; the base branch is not among the policy's "Target branches"; the PR
-  is a draft; review is off in the policy.
+  is a draft (and `run_on_drafts` is off); review is off in the policy.
 - Review ran but posted no comments: "Post comments" was off for a manual
   run; findings were below the policy's "Post comments for" level (still in
   the summary and on Issues); the token cannot write (GitHub Pull requests

@@ -401,6 +401,15 @@ async def _dispatch_refresh(
         _REFRESH_INFLIGHT.discard(key)
 
 
+async def _reviews_drafts(provider_name: str, repo: str) -> bool:
+    """`run_on_drafts` for the repository a delivery names. The lookup is
+    blocking (store + database), so it runs off the event loop; it never
+    raises and answers False when it cannot tell — the old behaviour."""
+    from src.review.review_defaults import run_on_drafts_for_repo
+
+    return await asyncio.to_thread(run_on_drafts_for_repo, provider_name, repo)
+
+
 async def _dispatch_review(
     provider_name: str,
     repo: str,
@@ -731,8 +740,12 @@ def build_webhook_app(
             return JSONResponse({"status": "ignored", "reason": "non-trigger action"})
 
         # Skip drafts if action=opened (drafts trigger ready_for_review later)
+        # — unless the repository reviews drafts (`run_on_drafts`, repo >
+        # workspace > built-in False). Asked only of a draft, so every other
+        # delivery costs what it did; an unbound repo answers False.
         is_draft = (payload.get("pull_request") or {}).get("draft", False)
-        if is_draft and pr_info["action"] == "opened":
+        if (is_draft and pr_info["action"] == "opened"
+                and not await _reviews_drafts("github", pr_info["repo"])):
             return JSONResponse({"status": "skipped", "reason": "draft PR"})
 
         asyncio.create_task(_dispatch_review(
@@ -841,8 +854,12 @@ def build_webhook_app(
                 return JSONResponse({"status": "recorded", "state": state_info["state"]})
             return JSONResponse({"status": "ignored", "reason": "non-trigger"})
 
+        # A draft MR is skipped BEFORE the dedup key is claimed (see above:
+        # "mark as ready" arrives with the same sha) — unless this repository
+        # reviews drafts, in which case the draft's review is the review of
+        # that sha and the later "ready" event is rightly a duplicate.
         is_draft = bool(attrs.get("work_in_progress") or attrs.get("draft"))
-        if is_draft:
+        if is_draft and not await _reviews_drafts("gitlab", mr_info["repo"]):
             return JSONResponse({"status": "skipped", "reason": "draft MR"})
 
         delivery_key = f"gl:{proj}:{iid}:{sha}"

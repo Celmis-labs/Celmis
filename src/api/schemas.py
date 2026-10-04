@@ -667,6 +667,30 @@ class ReviewPolicyIn(BaseModel):
     started_comment_enabled: bool | None = None
     review_language: str | None = Field(default=None, max_length=16)
     max_inline_comments: int | None = Field(default=None, ge=1, le=100)
+    # The 2.3.0 finders' models — columns, like the five above, but with the
+    # three-state courtesy the newer fields extend: ABSENT keeps what is
+    # stored (the policy page predates them and must not wipe them on save),
+    # null clears, a string pins.
+    performance_model: str | None = Field(default=None, max_length=200)
+    business_logic_model: str | None = Field(default=None, max_length=200)
+    # ── 2.3.0 review settings — the same fields, limits and validation as
+    # `WorkspaceReviewDefaultsIn` (src.review.review_defaults says what each
+    # means). ABSENT keeps, null inherits, a value is this repository's own.
+    # Enums and the agent names are checked by the router, for a 422 that
+    # names the choices; blank text is stored as null (inherit).
+    enabled_agents: list[str] | None = Field(default=None, max_length=20)
+    run_on_drafts: bool | None = None
+    approve_when_clean: bool | None = None
+    request_changes_on_critical: bool | None = None
+    status_feedback: bool | None = None
+    committable_suggestions: bool | None = None
+    apply_filters_to_rules: bool | None = None
+    summary_target: str | None = Field(default=None, max_length=32)
+    summary_on_new_commits: str | None = Field(default=None, max_length=32)
+    summary_existing_description: str | None = Field(default=None, max_length=32)
+    base_instruction: str | None = Field(default=None, max_length=2000)
+    message_started: str | None = Field(default=None, max_length=2000)
+    message_finished_header: str | None = Field(default=None, max_length=2000)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -752,6 +776,46 @@ class ReviewPolicyOut(BaseModel):
     review_language_effective: str = "en"
     max_inline_comments: int | None = None
     max_inline_comments_effective: int = 20
+    performance_model: str | None = None
+    business_logic_model: str | None = None
+    # ── 2.3.0: what THIS policy says (None = inherit) and what a review
+    # starting now would apply. `sources` / `inherited` /
+    # `inherited_sources` carry every one of them too.
+    enabled_agents: list[str] | None = None
+    enabled_agents_effective: list[str] = Field(default_factory=list)
+    run_on_drafts: bool | None = None
+    run_on_drafts_effective: bool = False
+    approve_when_clean: bool | None = None
+    approve_when_clean_effective: bool = False
+    request_changes_on_critical: bool | None = None
+    request_changes_on_critical_effective: bool = False
+    status_feedback: bool | None = None
+    status_feedback_effective: bool = True
+    committable_suggestions: bool | None = None
+    committable_suggestions_effective: bool = False
+    apply_filters_to_rules: bool | None = None
+    apply_filters_to_rules_effective: bool = True
+    summary_target: str | None = None
+    summary_target_effective: str = "comment"
+    summary_on_new_commits: str | None = None
+    summary_on_new_commits_effective: str = "replace"
+    summary_existing_description: str | None = None
+    summary_existing_description_effective: str = "append"
+    base_instruction: str | None = None
+    base_instruction_effective: str | None = None
+    message_started: str | None = None
+    message_started_effective: str | None = None
+    message_finished_header: str | None = None
+    message_finished_header_effective: str | None = None
+    # agent → takes part in a review starting now (both lists and the
+    # built-in participation map folded together), and that map itself.
+    agent_participation_effective: dict[str, bool] = Field(default_factory=dict)
+    agent_participation_defaults: dict[str, bool] = Field(default_factory=dict)
+    # The closed vocabularies (field → choices, built-in first) and the
+    # placeholders a message template may use — so a page renders its
+    # controls from what the server accepts.
+    setting_choices: dict[str, list[str]] = Field(default_factory=dict)
+    message_placeholders: list[str] = Field(default_factory=list)
     # The agents a per-repo system prompt may be set for (the LLM finders
     # plus the verifier) and the agents a custom rule may target (the
     # finders), in roster order — so the page renders a box per agent the
@@ -798,6 +862,22 @@ class WorkspaceReviewDefaultsIn(BaseModel):
     # Sent WHOLE like the /settings/llm `agents` block: {} clears every
     # override, {"agent": null} clears one, absent keeps the stored map.
     agents: dict[str, dict | None] | None = None
+    # ── 2.3.0 review settings (src.review.review_defaults says what each
+    # means and its built-in). Enums and agent names are checked by the
+    # router; blank text is stored as null (= the built-in).
+    enabled_agents: list[str] | None = Field(default=None, max_length=20)
+    run_on_drafts: bool | None = None
+    approve_when_clean: bool | None = None
+    request_changes_on_critical: bool | None = None
+    status_feedback: bool | None = None
+    committable_suggestions: bool | None = None
+    apply_filters_to_rules: bool | None = None
+    summary_target: str | None = Field(default=None, max_length=32)
+    summary_on_new_commits: str | None = Field(default=None, max_length=32)
+    summary_existing_description: str | None = Field(default=None, max_length=32)
+    base_instruction: str | None = Field(default=None, max_length=2000)
+    message_started: str | None = Field(default=None, max_length=2000)
+    message_finished_header: str | None = Field(default=None, max_length=2000)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -818,6 +898,26 @@ class WorkspaceReviewDefaultsOut(BaseModel):
     target_branches: list[str] | None = None
     suppressed_rules: list[str] | None = None
     review_language: str | None = None
+    # 2.3.0 — what this workspace says; None = the built-in (`install`).
+    enabled_agents: list[str] | None = None
+    run_on_drafts: bool | None = None
+    approve_when_clean: bool | None = None
+    request_changes_on_critical: bool | None = None
+    status_feedback: bool | None = None
+    committable_suggestions: bool | None = None
+    apply_filters_to_rules: bool | None = None
+    summary_target: str | None = None
+    summary_on_new_commits: str | None = None
+    summary_existing_description: str | None = None
+    base_instruction: str | None = None
+    message_started: str | None = None
+    message_finished_header: str | None = None
+    # agent → takes part for a repository that overrides nothing, and the
+    # built-in participation map (False = opt-in, named in enabled_agents).
+    agent_participation_effective: dict[str, bool] = Field(default_factory=dict)
+    agent_participation_defaults: dict[str, bool] = Field(default_factory=dict)
+    setting_choices: dict[str, list[str]] = Field(default_factory=dict)
+    message_placeholders: list[str] = Field(default_factory=list)
     # The workspace `agents` blob from the LLM config (model included at this
     # layer) and what each agent runs with when a repo overrides nothing.
     agents: dict[str, dict] = Field(default_factory=dict)
@@ -869,6 +969,47 @@ class ReviewPolicyListItem(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ReviewSettingsWorkspaceSummary(BaseModel):
+    """The workspace layer of GET /api/review-settings/overview."""
+
+    workspace_id: str
+    #: How many settings the workspace defaults set (non-null), and which.
+    set_count: int = 0
+    set_fields: list[str] = Field(default_factory=list)
+    can_edit: bool = False
+    updated_by: str | None = None
+    updated_at: datetime | None = None
+
+
+class ReviewSettingsRepoSummary(BaseModel):
+    """One repository of GET /api/review-settings/overview — Kodus'
+    per-repository list: what it overrides, and how its last review went."""
+
+    repo_slug: str
+    full_name: str
+    provider: str
+    #: False when the repository has no policy row (it overrides nothing).
+    has_policy: bool = False
+    #: The policy's on/off switch (True without a row).
+    review_enabled: bool = True
+    #: How many workspace-defaultable settings this repo overrides — the
+    #: "Overridden N" badge — and which ones.
+    overridden_count: int = 0
+    overridden_fields: list[str] = Field(default_factory=list)
+    #: complete | partial | skipped | failed, of the most recently reviewed
+    #: PR of this repository; None when none was reviewed (or unreadable).
+    last_review_status: str | None = None
+    last_review_at: datetime | None = None
+
+
+class ReviewSettingsOverview(BaseModel):
+    """GET /api/review-settings/overview — the active workspace's defaults and
+    every repository the caller may read, in one cheap call."""
+
+    workspace: ReviewSettingsWorkspaceSummary
+    repositories: list[ReviewSettingsRepoSummary] = Field(default_factory=list)
 
 
 class RepoBranchesOut(BaseModel):

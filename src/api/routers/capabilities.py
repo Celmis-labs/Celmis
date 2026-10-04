@@ -210,7 +210,7 @@ FEATURES: tuple[Feature, ...] = (
             ("/repositories", "/connections")),
     Feature("code_review",
             ("/api/reviews", "/api/review-policies", "/api/review-defaults",
-             "/api/agents", "/api/compliance"),
+             "/api/review-settings", "/api/agents", "/api/compliance"),
             ("/reviews", "/admin/review-policies", "/admin/review-defaults",
              "/admin/agents", "/admin/compliance", "/admin/deprecations")),
     # Findings followed across a PR's runs, the PRs themselves, and the
