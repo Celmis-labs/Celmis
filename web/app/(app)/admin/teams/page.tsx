@@ -9,7 +9,7 @@
  * wins (see /api/teams/me).
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -31,6 +31,9 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
+
+/** How long typing pauses before the member list is asked again. */
+const MEMBER_SEARCH_DEBOUNCE_MS = 250;
 
 // One list for the API and the UI: TEAM_ROLES in src/users/roles.py.
 const MEMBER_ROLE_OPTIONS = TEAM_ROLES.map((r) => ({ value: r, label: r }));
@@ -156,13 +159,19 @@ function TeamCard({ team }: { team: Team }) {
     onSuccess: () => {
       setNewUserId("");
       qc.invalidateQueries({ queryKey: ["teams", team.id, "members"] });
+      qc.invalidateQueries({ queryKey: ["teams", team.id, "candidates"] });
+      qc.invalidateQueries({ queryKey: ["teams"] });
     },
     onError: (e) => toast.error(t("admin.teams.addFailed", { message: (e as Error).message })),
   });
 
   const removeMember = useMutation({
     mutationFn: (uid: string) => teamsApi.removeMember(token!, team.id, uid),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["teams", team.id, "members"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["teams", team.id, "members"] });
+      qc.invalidateQueries({ queryKey: ["teams", team.id, "candidates"] });
+      qc.invalidateQueries({ queryKey: ["teams"] });
+    },
     onError: (e) => toast.error((e as Error).message),
   });
 
@@ -221,14 +230,22 @@ function TeamCard({ team }: { team: Team }) {
             <h3 className="text-sm font-medium mb-2">{t("admin.teams.membersHeading")}</h3>
             <div className="space-y-1">
               {(members.data ?? []).map((m) => (
-                <div key={m.user_id} className="flex justify-between items-center text-sm">
-                  <span><code>{m.user_id}</code> · <Badge variant="outline">{m.role}</Badge></span>
+                <div key={m.user_id} className="flex justify-between items-center gap-2 text-sm">
+                  <span className="min-w-0 truncate" title={m.user_id}>
+                    {m.name || m.email || <code>{m.user_id}</code>}
+                    {m.name && m.email && (
+                      <span className="ml-1.5 text-xs text-[var(--color-muted-foreground)]">
+                        {m.email}
+                      </span>
+                    )}
+                    {" · "}<Badge variant="outline">{m.role}</Badge>
+                  </span>
                   <Button
                     variant="ghost" size="icon"
                     onClick={async () => {
                       const ok = await confirm({
                         title: t("admin.teams.removeMemberConfirm"),
-                        description: m.user_id,
+                        description: m.name || m.email || m.user_id,
                         confirmLabel: t("common.remove"),
                         danger: true,
                       });
@@ -245,9 +262,8 @@ function TeamCard({ team }: { team: Team }) {
                 </p>
               )}
             </div>
-            <div className="grid grid-cols-[1fr_auto_auto] gap-2 mt-2 items-end">
-              <Input value={newUserId} onChange={(e) => setNewUserId(e.target.value)}
-                     placeholder={t("admin.teams.userIdPlaceholder")} />
+            <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto_auto] gap-2 mt-2 items-start">
+              <MemberPicker teamId={team.id} value={newUserId} onChange={setNewUserId} />
               <Select
                 className="h-11 sm:h-8"
                 value={newUserRole} onChange={(v) => setNewUserRole(v)}
@@ -313,5 +329,85 @@ function TeamCard({ team }: { team: Team }) {
       )}
       {dialog}
     </Card>
+  );
+}
+
+
+/**
+ * Who to add: a member of THIS workspace, found by name or email.
+ *
+ * This was a free-text box asking for "email or internal id". Internal ids
+ * are shown nowhere in the UI, and an email was refused with "Not a member of
+ * this workspace" — so the field could only be filled by somebody who had
+ * read the database. The list comes from the same people the server accepts
+ * (GET /api/teams/{id}/candidates: the workspace's members not yet in the
+ * team), searched on the server, so a large workspace is never shown as a
+ * silent first slice.
+ */
+function MemberPicker({
+  teamId,
+  value,
+  onChange,
+}: {
+  teamId: string;
+  value: string;
+  onChange: (userId: string) => void;
+}) {
+  const t = useT();
+  const token = useToken();
+  const [term, setTerm] = useState("");
+  const [debounced, setDebounced] = useState("");
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => setDebounced(term.trim()), MEMBER_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(handle);
+  }, [term]);
+
+  const candidates = useQuery({
+    queryKey: ["teams", teamId, "candidates", debounced],
+    queryFn: () => teamsApi.candidates(token!, teamId, debounced),
+    enabled: !!token,
+    placeholderData: (prev) => prev,
+  });
+
+  const rows = candidates.data?.members ?? [];
+  const more = Math.max(0, (candidates.data?.total ?? 0) - rows.length);
+  const options = rows.map((c) => ({
+    value: c.user_id,
+    label: c.name || c.email || c.user_id,
+    hint: c.name && c.email ? c.email : undefined,
+  }));
+
+  return (
+    <>
+      <div className="space-y-1">
+        <Input
+          value={term}
+          onChange={(e) => {
+            setTerm(e.target.value);
+            // A new search is a new choice: keep no pick the list may not show.
+            onChange("");
+          }}
+          placeholder={t("admin.teams.memberSearchPlaceholder")}
+          aria-label={t("admin.teams.memberSearchLabel")}
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <div className="text-xs text-[var(--color-muted-foreground)]" aria-live="polite">
+          {candidates.data && rows.length === 0 && (debounced
+            ? <p>{t("admin.teams.noCandidateMatches", { q: debounced })}</p>
+            : <p>{t("admin.teams.noCandidates")}</p>)}
+          {more > 0 && <p>{t("admin.teams.moreCandidates", { count: more })}</p>}
+        </div>
+      </div>
+      <Select
+        className="h-11 sm:h-8"
+        value={value}
+        onChange={onChange}
+        options={options}
+        disabled={candidates.isLoading || options.length === 0}
+        placeholder={t("admin.teams.memberPickPlaceholder")}
+      />
+    </>
   );
 }

@@ -5,6 +5,14 @@
         repo graph + semantic vault-note search (Qdrant). Two result
         sections so the UI can render "Code symbols" and "Docs" blocks.
 
+        Both sections go through the caller's research access
+        (src/access/resolver.py) exactly as Q&A does: a repository at
+        visibility `none` contributes nothing; at `metadata` it contributes
+        documentation notes but no code symbols (a symbol hit is a file, a
+        line and a link into the source — that is the code level); deny
+        globs and allow-lists drop the symbols and the notes whose path they
+        conceal.
+
     GET /api/health/integrations
         Ops dashboard payload: git connections, LLM providers, MCP
         sources, Qdrant reachability, notification channels — each with
@@ -49,9 +57,20 @@ def search(
     from src.api.auto_review import get_auto_review_store
     cfgs = {c.repo_slug: c
             for c in get_auto_review_store().list_for_workspace(workspace_id)}
-    symbols, symbols_error = _search_symbols(q, repo=repo, limit=limit, cfgs=cfgs)
+    # Research access: the same resolver Q&A and MCP answer from. Search used
+    # to skip it, so a team restricted to "Metadata only" — or with deny
+    # globs over its credentials code — still read file paths, symbol names
+    # and links into the source here.
+    from src.access import resolve_access
+    access = resolve_access(user_id=user.id, is_admin=user.is_admin,
+                            workspace_id=workspace_id, repos=list(cfgs))
+    cfgs = {slug: cfg for slug, cfg in cfgs.items()
+            if slug in access and access[slug].researchable}
+    symbols, symbols_error = _search_symbols(
+        q, repo=repo, limit=limit, cfgs=cfgs, access=access)
     notes, notes_error = _search_notes(
-        q, repo=repo, limit=min(limit, 10), cfgs=cfgs, workspace_id=workspace_id)
+        q, repo=repo, limit=min(limit, 10), cfgs=cfgs, workspace_id=workspace_id,
+        access=access)
     return {
         "query": q,
         "symbols": symbols,
@@ -110,7 +129,7 @@ _BRANCH_CACHE: dict[str, str] = {}
 
 
 def _search_symbols(
-    q: str, *, repo: str | None, limit: int, cfgs: dict,
+    q: str, *, repo: str | None, limit: int, cfgs: dict, access: dict | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     try:
         from src.mcp_server import tools as legacy
@@ -120,11 +139,16 @@ def _search_symbols(
     for slug, cfg in cfgs.items():
         if repo and slug != repo:
             continue
+        dec = (access or {}).get(slug)
+        if access is not None and (dec is None or not dec.code_visible):
+            continue   # metadata-only (or hidden): no code-level results
         try:
             # Substring match (exact=False) so "models" also finds Model,
             # UserModel, models.py-level symbols.
             for sym in legacy.find_symbol(
                     name=q, repo_slug=slug, limit=limit, exact=False):
+                if dec is not None and not dec.path_visible(str(sym.get("file") or "")):
+                    continue   # deny glob / allow-list miss
                 out.append({
                     "repo_slug": sym.get("repo_slug", slug),
                     "name": sym.get("name"),
@@ -148,8 +172,17 @@ VAULT_NOT_GENERATED = "vault-not-generated"
 
 def _search_notes(
     q: str, *, repo: str | None, limit: int, cfgs: dict, workspace_id: str,
+    access: dict | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Semantic vault search — costs one embedding call per query."""
+    """Semantic vault search — costs one embedding call per query.
+
+    Notes are the metadata level, so a `metadata` repository keeps them; a
+    note whose source path a deny glob (or an allow-list miss) conceals is
+    dropped, the same rule Q&A's `_filter_hits_by_access` applies."""
+    if access is not None and ((repo and repo not in cfgs) or (access and not cfgs)):
+        # A repository the caller may not research, or none they may: no
+        # embedding call for an answer that is empty by rule.
+        return [], None
     from src.retrieval.tier1_vault import CollectionMissing
 
     try:
@@ -158,8 +191,21 @@ def _search_notes(
         retriever = VaultRetriever(get_settings(), workspace_id=workspace_id)
         hits = retriever.search(q, repo=repo, top_k=limit)
         out = []
+        # A note with no repository cannot be checked against a rule, so it is
+        # shown only where no rule restricts anything.
+        unrestricted = access is None or all(d.open_default for d in access.values())
         for h in hits:
-            if h.repo and cfgs and h.repo not in cfgs:
+            if access is not None:
+                if not h.repo:
+                    if not unrestricted:
+                        continue
+                elif h.repo not in cfgs:
+                    continue  # another workspace, or a repo the caller may not research
+                else:
+                    note_path = getattr(h, "path", None)
+                    if note_path and access[h.repo].path_denied(str(note_path)):
+                        continue  # a note about a concealed path
+            elif h.repo and cfgs and h.repo not in cfgs:
                 continue  # a different workspace — do not show it
             cfg = cfgs.get(h.repo)
             out.append({

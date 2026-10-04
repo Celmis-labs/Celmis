@@ -27,6 +27,27 @@ refactor and not two, so the fallback is also gated on the deployment mode
 identity is nobody — not an admin — and is handed no repositories at all.
 Under single_tenant (the default) the behaviour above is unchanged, because a
 one-tenant box legitimately runs the stdio transport with no token.
+
+Which workspace a token answers for
+------------------------------------
+A token is minted in a workspace — the one the person was looking at when they
+pressed "Issue token" (``/api/mcp/token``) or consented to an OAuth client
+(``/oauth/authorize/consent``) — and carries it as the ``workspace_id`` claim.
+That claim is what the caller resolves to, not the person's highest-ranked
+membership: the latter is usually their personal workspace, so a token issued
+inside a neighbouring team's workspace used to read the wrong tenant.
+
+The claim is a statement about the past. Every call re-checks it against the
+membership table: somebody removed from the workspace since the token was
+minted is refused (see :func:`token_workspace_problem`), with a sentence that
+says why, rather than silently re-homed into whichever workspace they still
+belong to. A global admin may hold a token for any existing workspace, as
+``current_workspace_id`` lets them pick one through the header.
+
+Tokens minted before the claim existed (and client_credentials tokens, which
+have no person to ask) keep the old resolution — best-ranked membership — and
+the first such token per subject is logged as ``mcp_token_without_workspace``
+so an operator can see who still needs to re-issue.
 """
 
 from __future__ import annotations
@@ -51,15 +72,38 @@ class McpCaller:
     #: WRITE must refuse, or a client-credentials token with no resolvable
     #: owner would register repositories into the wrong tenant.
     workspace_resolved: bool = True
+    #: Set when the token names a workspace the caller may no longer act in:
+    #: the sentence to show. Every repository then resolves to denied.
+    refused: str = ""
 
 
 _WS_RANK = WORKSPACE_ROLE_RANK
 
+#: The JWT claim carrying the workspace a token was minted in. ``ws`` is read
+#: as an alias so a hand-made token in the short spelling is not silently
+#: treated as a legacy one.
+WORKSPACE_CLAIMS = ("workspace_id", "ws")
+
+
+def token_workspace(payload: dict | None) -> str | None:
+    """The workspace a token was minted in, or None for a legacy token."""
+    for key in WORKSPACE_CLAIMS:
+        value = (payload or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
 
 def _decode_subject(raw_token: str) -> tuple[str | None, list[str]]:
-    """Return (sub, scopes) from an already-verified JWT. Signature is not
-    re-checked here — the token verifier already accepted it — but we still
-    pass the secret so a malformed token simply yields (None, [])."""
+    """Return (sub, scopes) from an already-verified JWT."""
+    sub, scopes, _payload = _decode_token(raw_token)
+    return sub, scopes
+
+
+def _decode_token(raw_token: str) -> tuple[str | None, list[str], dict]:
+    """Return (sub, scopes, payload) from an already-verified JWT. Signature
+    is not re-checked here — the token verifier already accepted it — but we
+    still pass the secret so a malformed token simply yields (None, [], {})."""
     try:
         import jwt
 
@@ -81,7 +125,9 @@ def _decode_subject(raw_token: str) -> tuple[str | None, list[str]]:
 
             payload = jwt.decode(raw_token, options={"verify_signature": False})
         except Exception:  # noqa: BLE001
-            return None, []
+            return None, [], {}
+    if not isinstance(payload, dict):
+        return None, [], {}
     sub = payload.get("sub")
     scope_str = payload.get("scope", "")
     if isinstance(scope_str, str):
@@ -90,7 +136,7 @@ def _decode_subject(raw_token: str) -> tuple[str | None, list[str]]:
         scopes = [str(s) for s in scope_str]
     else:
         scopes = []
-    return (str(sub) if sub else None), scopes
+    return (str(sub) if sub else None), scopes, payload
 
 
 def _resolve_workspace(session, user_id: str) -> str:
@@ -107,6 +153,67 @@ def _resolve_workspace(session, user_id: str) -> str:
         return "default"
     rows.sort(key=lambda m: -_WS_RANK.get(m.role, 0))
     return rows[0].workspace_id
+
+
+def refusal_message(workspace_id: str) -> str:
+    """What a caller refused for its token's workspace is told."""
+    return (
+        f"This MCP token was issued for workspace '{workspace_id}', and you are "
+        "no longer a member of it. Ask an owner or admin of that workspace to "
+        "add you back, or issue a new token (Settings > MCP) while the "
+        "workspace you want to use is selected."
+    )
+
+
+_UNVERIFIABLE = ("Could not confirm your membership of the workspace this MCP "
+                 "token was issued for. Try again shortly.")
+
+
+def token_workspace_problem(user_id: str, is_admin: bool,
+                            workspace_id: str) -> str | None:
+    """None when ``user_id`` may act in ``workspace_id`` now; else why not.
+
+    * a member of the workspace — yes;
+    * a global admin — yes, for a workspace that exists (the same freedom
+      ``current_workspace_id`` gives them through the X-Workspace header);
+    * anything else, including a database we cannot ask — no. The claim is
+      the access boundary here, so an unverifiable one fails closed. That
+      covers ``default`` too: it is accepted for a member of the workspace
+      literally named so, not for somebody who landed there by fallback.
+    """
+    from sqlalchemy.orm import Session
+
+    from src.access.resolver import _sync_engine
+    from src.db.models import Workspace, WorkspaceMember
+
+    try:
+        with Session(_sync_engine()) as s:
+            if s.get(WorkspaceMember, (workspace_id, user_id)) is not None:
+                return None
+            if is_admin and s.get(Workspace, workspace_id) is not None:
+                return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("mcp_token_workspace_check_failed user=%s ws=%s err=%s",
+                       user_id, workspace_id, exc)
+        return _UNVERIFIABLE
+    return refusal_message(workspace_id)
+
+
+#: Subjects already reported as holding a token without a workspace claim —
+#: one log line per subject per process, not one per call.
+_LEGACY_LOGGED: set[str] = set()
+_LEGACY_LOG_CAP = 1024
+
+
+def _log_legacy_token(sub: str) -> None:
+    if sub in _LEGACY_LOGGED or len(_LEGACY_LOGGED) >= _LEGACY_LOG_CAP:
+        return
+    _LEGACY_LOGGED.add(sub)
+    logger.warning(
+        "mcp_token_without_workspace sub=%s — the token predates the "
+        "workspace claim, so it answers for the best-ranked membership. "
+        "Re-issue it to bind it to one workspace.", sub,
+    )
 
 
 def _no_identity(reason: str) -> McpCaller:
@@ -141,7 +248,8 @@ def resolve_caller() -> McpCaller:
     if token is None or not getattr(token, "token", None):
         return _no_identity("no_bearer_token")
 
-    sub, scopes = _decode_subject(token.token)
+    sub, scopes, payload = _decode_token(token.token)
+    claimed_ws = token_workspace(payload)
     if not sub:
         # Authenticated but unidentifiable (e.g. client_credentials with only
         # client_id) → treat as a non-admin principal with no team grants, so
@@ -176,13 +284,38 @@ def resolve_caller() -> McpCaller:
             if user is not None:
                 user_id = user.id
         is_admin = bool(user and user.is_admin)
-        if user is not None:
+        if user is not None and claimed_ws is not None:
+            # The token names its workspace: answer for that one or refuse.
+            problem = token_workspace_problem(user.id, is_admin, claimed_ws)
+            if problem:
+                logger.warning("mcp_token_workspace_refused user=%s ws=%s",
+                               user.id, claimed_ws)
+                return McpCaller(
+                    user_id, False, "", tuple(scopes), authenticated=True,
+                    workspace_resolved=False, refused=problem,
+                )
+            workspace_id = claimed_ws
+            resolved = True
+        elif user is not None:
+            _log_legacy_token(sub)
             with Session(_sync_engine()) as s:
                 found = _resolve_workspace(s, user.id)
             resolved = found != "default" or _has_default_membership(user.id)
             workspace_id = found
+        elif claimed_ws is not None:
+            # A claim with nobody behind it: the account was deleted.
+            return McpCaller(
+                user_id, False, "", tuple(scopes), authenticated=True,
+                workspace_resolved=False, refused=refusal_message(claimed_ws),
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("mcp_identity_resolve_failed sub=%s err=%s", sub, exc)
+        if claimed_ws is not None:
+            # Fail closed: the claim is the boundary and it went unchecked.
+            return McpCaller(
+                user_id, False, "", tuple(scopes), authenticated=True,
+                workspace_resolved=False, refused=_UNVERIFIABLE,
+            )
 
     return McpCaller(
         user_id, is_admin, workspace_id,
@@ -236,6 +369,10 @@ def caller_access(repos: list[str]):
     from src.deployment import fall_open_allowed
 
     caller = resolve_caller()
+    if caller.refused:
+        # The token's workspace is no longer the caller's: nothing is readable,
+        # in any mode (a refused caller is never an admin either).
+        return caller, {r: RepoAccessDecision.denied(r) for r in repos}
     if not caller.authenticated:
         if fall_open_allowed("mcp.identity.unauthenticated_access",
                              detail=f"repos={len(repos)}"):

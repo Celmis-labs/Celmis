@@ -33,7 +33,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select } from "@/components/ui/select";
 import { BranchCombobox, toBranchResult } from "@/components/branch-combobox";
 import { useConfirm } from "@/components/ui/confirm-dialog";
-import { RUN_VARIANT } from "@/components/review-timeline";
+import { StatusPill, toRunStatus } from "@/components/ui/status";
+import { SkeletonRows } from "@/components/ui/skeleton";
+import { Callout } from "@/components/ui/callout";
 
 import { WorkspaceBadge } from "@/components/workspace-badge";
 import { RepoFreshness } from "@/components/repo-freshness";
@@ -722,24 +724,27 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
   return (
     <div className="mt-3 sm:pl-12">
       {dialog}
-      <div className="rounded-md border border-dashed border-[var(--color-border)] p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-          <div className="text-xs uppercase tracking-wide text-[var(--color-muted-foreground)]">
+      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-muted)]/40 p-3">
+        <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-baseline gap-x-2 text-sm font-semibold">
             {repo.provider === "gitlab" ? t("repositories.openMergeRequests") : t("repositories.openPullRequests")}
             {data && (
-              <span className="ml-2 normal-case tracking-normal">
+              <span className="text-xs font-normal tabular-nums text-[var(--color-muted-foreground)]">
                 {t("repositories.prCount", { shown: data.total, total: data.open_total })}
               </span>
             )}
           </div>
+          {/* Every row has its own Review, so the bulk action is the
+              neutral solid one and no button on this list is filled teal:
+              the list is a set of equal choices, not one obvious step. */}
           <Button
             size="sm"
-            variant="outline"
+            variant="secondary"
             disabled={!data || data.total === 0 || tooMany || bulk.isPending}
             title={tooMany ? t("repositories.reviewAllTooMany", { n: data?.total ?? 0, max: limit }) : undefined}
             onClick={onReviewAll}
           >
-            <SparklesIcon className="h-3 w-3" />
+            <SparklesIcon />
             {t("repositories.reviewAll", { n: Math.min(data?.total ?? 0, limit) })}
           </Button>
         </div>
@@ -749,7 +754,7 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
             placeholder={t("repositories.prSearch")}
             value={q}
             onChange={(e) => pick(setQ)(e.target.value)}
-            className="h-9 max-w-[18rem] text-sm sm:h-7 sm:text-xs"
+            className="h-9 max-w-[18rem] text-sm sm:h-8 sm:text-xs"
           />
           <BranchCombobox
             value={branch}
@@ -758,7 +763,7 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
             queryKey={["repo-branches", slug]}
             leadingOptions={[{ value: "", label: t("repositories.allTargetBranches") }]}
             disabled={!token}
-            className="h-9 max-w-[16rem] rounded border-[var(--color-input)] px-2 text-sm sm:h-7 sm:text-xs"
+            className="h-9 max-w-[16rem] rounded-lg border-[var(--color-input)] bg-[var(--color-card)] px-2 text-sm sm:h-8 sm:text-xs"
           />
           <Select
             value={sort}
@@ -768,7 +773,7 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
               { value: "recently_updated", label: t("repositories.sortRecentlyUpdated") },
               { value: "oldest", label: t("repositories.sortOldest") },
             ]}
-            className="h-9 rounded border-[var(--color-input)] px-2 text-sm sm:h-7 sm:text-xs"
+            className="h-9 px-2 text-sm sm:h-8 sm:text-xs"
           />
         </div>
         {tooMany && (
@@ -782,31 +787,31 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
           </p>
         )}
         {prs.isLoading ? (
-          <div className="text-sm text-[var(--color-muted-foreground)]">{t("repositories.loading")}</div>
+          <SkeletonRows rows={3} />
         ) : prs.error ? (
-          <div className="text-sm text-[var(--color-destructive)]">
-            {(prs.error as Error).message}
-          </div>
+          <Callout tone="danger">{(prs.error as Error).message}</Callout>
         ) : (data?.items.length ?? 0) === 0 ? (
-          <div className="text-sm text-[var(--color-muted-foreground)]">{t("repositories.noOpenPrs")}</div>
+          <div className="rounded-md border border-dashed border-[var(--color-border-strong)] px-3 py-6 text-center text-sm text-[var(--color-muted-foreground)]">
+            {t("repositories.noOpenPrs")}
+          </div>
         ) : (
           <>
-            <ul className="flex flex-col gap-1">
+            <ul className="divide-y divide-[var(--color-border)] overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-card)]">
               {/* Row on desktop, stacked card on a phone — the title plus two
                   actions cannot share a 390px line without overflowing. */}
               {data!.items.map((pr) => (
                 <li
                   key={`${pr.provider}-${pr.number}`}
-                  className="flex flex-col gap-2 rounded px-2 py-2 hover:bg-[var(--color-accent)] sm:flex-row sm:items-center sm:justify-between sm:py-1.5"
+                  className="flex flex-col gap-2 px-3 py-2.5 transition-colors hover:bg-[var(--color-accent)]/60 sm:flex-row sm:items-center sm:justify-between"
                 >
                   <div className="flex min-w-0 flex-col gap-0.5">
                     <div className="flex items-center gap-2 min-w-0">
                       <span className="shrink-0 font-mono text-xs text-[var(--color-muted-foreground)]">
                         #{pr.number}
                       </span>
-                      <span className="truncate text-sm">{pr.title}</span>
+                      <span className="truncate text-sm font-medium">{pr.title}</span>
                       {pr.draft && (
-                        <Badge variant="outline" className="text-[10px]">{t("repositories.draft")}</Badge>
+                        <Badge variant="outline">{t("repositories.draft")}</Badge>
                       )}
                     </div>
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[var(--color-muted-foreground)]">
@@ -818,14 +823,14 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
                       <span title={formatDateTime(pr.updated_at)}>
                         · {t("repositories.prUpdated", { time: relativeTime(pr.updated_at ?? pr.created_at, locale) })}
                       </span>
-                      <span>·</span>
                       {pr.last_review_status ? (
-                        <Badge variant={RUN_VARIANT[pr.last_review_status] ?? "default"}
-                          className="text-[10px]" title={pr.last_review_reason ?? undefined}>
-                          {t("repositories.lastReview")}: {t(`prs.review.${pr.last_review_status}`)}
-                        </Badge>
+                        <StatusPill
+                          status={toRunStatus(pr.last_review_status)}
+                          title={pr.last_review_reason ?? undefined}
+                          label={<>{t("repositories.lastReview")}: {t(`prs.review.${pr.last_review_status}`)}</>}
+                        />
                       ) : (
-                        <span>{t("repositories.notReviewed")}</span>
+                        <span className="text-[var(--color-subtle-foreground)]">· {t("repositories.notReviewed")}</span>
                       )}
                     </div>
                   </div>
@@ -840,11 +845,12 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
                     </a>
                     <Button
                       size="sm"
-                      variant="default"
+                      variant="outline"
                       disabled={trigger.isPending}
+                      loading={trigger.isPending && trigger.variables?.number === pr.number}
                       onClick={() => trigger.mutate(pr)}
                     >
-                      <SparklesIcon className="h-3 w-3" />
+                      <SparklesIcon />
                       {t("repositories.reviewButton")}
                     </Button>
                   </div>
@@ -852,7 +858,7 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
               ))}
             </ul>
             {data!.total > PR_PAGE && (
-              <div className="mt-2 flex items-center justify-between text-xs text-[var(--color-muted-foreground)]">
+              <div className="mt-2 flex items-center justify-between text-xs tabular-nums text-[var(--color-muted-foreground)]">
                 <span>
                   {t("issues.range", {
                     from: data!.offset + 1,

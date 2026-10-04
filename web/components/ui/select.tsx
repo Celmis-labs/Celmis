@@ -80,7 +80,7 @@ export function Select({
           id={id}
           disabled={disabled}
           className={cn(
-            "flex h-11 items-center justify-between gap-2 rounded-md border border-[var(--color-border)] bg-transparent px-3 text-base sm:h-9 sm:text-sm transition-colors hover:bg-[var(--color-accent)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] disabled:cursor-not-allowed disabled:opacity-50",
+            "flex h-11 items-center justify-between gap-2 rounded-lg border border-[var(--color-input)] bg-[var(--color-card)] px-3 text-base shadow-[var(--shadow-xs)] sm:h-9 sm:text-sm transition-[border-color,box-shadow] duration-150 hover:border-[var(--color-muted-foreground)] focus:outline-none focus-visible:border-[var(--color-ring)] focus-visible:ring-[3px] focus-visible:ring-[var(--color-ring)]/25 data-[state=open]:border-[var(--color-ring)] disabled:cursor-not-allowed disabled:opacity-50",
             className,
           )}
         >
@@ -94,7 +94,7 @@ export function Select({
           )}>
             {current?.label ?? placeholder}
           </span>
-          <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 opacity-60" />
+          <ChevronDownIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-muted-foreground)] transition-transform duration-200 ease-out-quint [[data-state=open]>&]:rotate-180" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -130,7 +130,7 @@ export function Select({
                   )}
                 </span>
                 {o.value === value && (
-                  <CheckIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-brand)]" />
+                  <CheckIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-primary)]" />
                 )}
               </DropdownMenuItem>
             ))}

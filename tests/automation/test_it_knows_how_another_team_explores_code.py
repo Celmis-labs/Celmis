@@ -55,8 +55,12 @@ def test_the_answer_names_both_controls_and_the_trap_between_them():
         assert page in body, page
     # The first rule on a repository hides it from every team without one.
     assert "Keep your own access" in body
-    # Code search and docs are not filtered by research rules.
-    assert "neither is filtered by research rules" in body
+    # Since 2.3.0 code search, docs and the MCP graph obey the research rules
+    # (fix/team-access-v23); the answer must not repeat the old gap as fact.
+    assert "neither is filtered by research rules" not in body
+    assert "follow\n  their research rules" in body or "follow their research rules" in body
+    # MCP answers for the workspace the token was generated in.
+    assert "generated in" in body
 
 
 def test_the_visibility_labels_are_the_ones_on_screen():

@@ -407,12 +407,19 @@ function NavLink({
           // px-2.5 inside the nav's px-1.5 puts a 16px icon's centre at 24px,
           // the middle of the 48px rail — so it does not jump on collapse.
           "group/nav relative flex min-h-11 w-full shrink-0 items-center gap-2.5 overflow-hidden rounded-md px-2.5 text-sm transition-colors sm:h-9 sm:min-h-0",
+          // Where you ARE is a neutral lift with full-strength text; the
+          // action colour is kept for the icon only, so the current page is
+          // findable at a glance without competing with the page's one
+          // primary button.
           active
-            ? "bg-[var(--color-brand-muted)] font-medium text-[var(--color-brand)]"
+            ? "bg-[var(--color-selected)] font-medium text-[var(--color-selected-foreground)]"
             : "text-[var(--color-muted-foreground)] hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)]",
         )}
       >
-        <Icon className="h-4 w-4 shrink-0 transition-transform duration-150 group-hover/nav:scale-110" />
+        <Icon className={cn(
+          "h-4 w-4 shrink-0 transition-[transform,color] duration-150 group-hover/nav:scale-110 motion-reduce:group-hover/nav:scale-100",
+          active && "text-[var(--color-primary)]",
+        )} />
         <m.span
           initial={false}
           animate={{ opacity: expanded ? 1 : 0 }}

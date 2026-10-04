@@ -13,7 +13,7 @@ export function Table({
 }: React.TableHTMLAttributes<HTMLTableElement>) {
   return (
     <div className="w-full overflow-x-auto">
-      <table className={cn("w-full border-collapse text-xs", className)} {...props} />
+      <table className={cn("w-full border-collapse text-[13px] leading-5", className)} {...props} />
     </div>
   );
 }
@@ -22,7 +22,7 @@ export function THead({
   className,
   ...props
 }: React.HTMLAttributes<HTMLTableSectionElement>) {
-  return <thead className={cn(className)} {...props} />;
+  return <thead className={cn("[&_tr]:border-[var(--color-border-strong)] [&_tr:hover]:bg-transparent", className)} {...props} />;
 }
 
 export function TBody({
@@ -39,7 +39,7 @@ export function TR({
   return (
     <tr
       className={cn(
-        "border-b border-[var(--color-border)] last:border-0 hover:bg-[var(--color-accent)]/40",
+        "border-b border-[var(--color-border)] transition-colors duration-150 last:border-0 hover:bg-[var(--color-accent)]/60",
         className,
       )}
       {...props}
@@ -54,7 +54,7 @@ export function TH({
   return (
     <th
       className={cn(
-        "px-2 py-2 text-left text-[10px] font-medium uppercase tracking-wide text-[var(--color-muted-foreground)]",
+        "h-9 px-2.5 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-[var(--color-muted-foreground)]",
         className,
       )}
       {...props}
@@ -66,5 +66,5 @@ export function TD({
   className,
   ...props
 }: React.TdHTMLAttributes<HTMLTableCellElement>) {
-  return <td className={cn("px-2 py-1.5 align-top", className)} {...props} />;
+  return <td className={cn("px-2.5 py-2 align-top", className)} {...props} />;
 }
