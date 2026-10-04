@@ -20,6 +20,42 @@ derives it from there.
 
 ## [Unreleased]
 
+### Changed
+
+- **A GitHub review no longer approves or requests changes on its own.** The
+  review event used to follow the verdict, so every clean review was an
+  APPROVE and every blocking one a REQUEST_CHANGES. It is now COMMENT unless
+  the repository turns on `approve_when_clean` or `request_changes_on_critical`
+  (both off by default). Approvals left by earlier versions are not touched.
+- **A fix hint is no longer rendered as a committable block.** `suggestion`
+  (often prose, e.g. "=== / !==") is shown as a plain block; only the new
+  exact replacement, `suggested_code`, can become a GitHub ```suggestion /
+  GitLab ```suggestion:-0+N block, and only with `committable_suggestions` on.
+- **A skipped review says so.** With `status_feedback` (on by default) a draft,
+  oversized, empty or off-target pull request with no placeholder to rewrite
+  gets one brief marked note, rewritten in place on later skips.
+
+### Added
+
+- **Pull-request actions on GitHub, GitLab and Bitbucket.**
+  `approve_when_clean` approves a complete review with nothing to post and
+  takes the approval back on a later run that is not clean (GitHub dismissal,
+  GitLab unapprove, Bitbucket DELETE approve). `request_changes_on_critical`
+  blocks on a critical finding (GitHub REQUEST_CHANGES, Bitbucket
+  request-changes; GitLab has no such action, so it withdraws its approval and
+  says so in the summary) and lifts the block when the next run has none.
+- **The summary in the PR description** (`summary_target: description`),
+  between `<!-- celmis:summary:start/end -->`, with
+  `summary_existing_description` (append / replace / complement — one short
+  LLM call that falls back to append) and `summary_on_new_commits`
+  (nothing / append / replace). The summary comment then keeps the verdict and
+  findings only.
+- **Custom messages**: `message_started` and `message_finished_header`, with
+  `{commit}`, `{agents}`, `{files}` and `{pr_number}`; anything else in braces
+  stays as typed.
+- Bitbucket Cloud renders a suggested change as a ```diff block: its "Suggest
+  code" feature is editor-only and has no documented markdown for API comments.
+
 ## [2.2.4] — 2026-10-04
 
 ### Fixed

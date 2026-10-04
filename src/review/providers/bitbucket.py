@@ -8,6 +8,15 @@ API specifics:
     POST .../pullrequests/{id}/comments                     — inline OR top-level
     PUT  .../pullrequests/{id}/comments/{cid}               — update comment
     DELETE .../pullrequests/{id}/comments/{cid}             — delete comment
+    POST/DELETE .../pullrequests/{id}/approve               — approve / take it back
+    POST/DELETE .../pullrequests/{id}/request-changes       — block / lift the block
+    PUT  .../pullrequests/{id}                              — the summary in the description
+
+Suggestions: Bitbucket Cloud's "Suggest code" (2025) is an editor feature —
+`/suggest` in the comment box, single line — and the raw markdown an API
+comment would need for an "Apply suggestion" button is not documented. So a
+suggested change is rendered as a plain ```diff block here, never as a
+committable one, whatever `committable_suggestions` says.
 
 Inline coords:
     {"inline": {"path": "src/x.py", "to": 42}}   — new file line
@@ -36,12 +45,15 @@ from src.review.models import (
     PullRequest,
     ReviewBatch,
 )
+from src.review.pr_actions import APPROVE, REQUEST_CHANGES, review_decision
 from src.review.providers.base import (
     PullRequestProvider,
     PullRequestProviderError,
     _anchorable_ranges,
     _format_finding_body,
     _format_summary,
+    _new_side_text,
+    _original_lines,
     _snap_to_span,
     _with_marker,
 )
@@ -258,6 +270,7 @@ class BitbucketPRProvider(PullRequestProvider):
         # finding, so an unanchorable line costs one comment rather than the
         # batch — quiet enough that it was never noticed here.
         ranges = _anchorable_ranges(pr)
+        new_side = _new_side_text(pr)
         posted = 0
         failed = 0
         snapped = 0
@@ -272,7 +285,10 @@ class BitbucketPRProvider(PullRequestProvider):
                     pr.repo, pr.number, finding.file_path, finding.line, line,
                 )
             payload: dict[str, Any] = {
-                "content": {"raw": _format_finding_body(finding, settings.comment_marker)},
+                "content": {"raw": _format_finding_body(
+                    finding, settings.comment_marker,
+                    original=_original_lines(new_side, finding),
+                )},
                 "inline": {
                     "path": finding.file_path,
                     "to": line,
@@ -311,6 +327,15 @@ class BitbucketPRProvider(PullRequestProvider):
         )
         self._status_comment_id = None
 
+        # 5. Approve / request changes — and take back whichever an earlier
+        #    run gave that this one does not. Only for a repository that lets
+        #    reviews approve or block at all.
+        review_state: dict[str, Any] = {}
+        if batch.pr_actions.manages_review_state:
+            review_state = self._apply_review_state(
+                ws, name, pr.number, review_decision(batch),
+            )
+
         response: dict[str, Any] = {
             "summary_comment_id": summary_id,
             "inline_posted": posted,
@@ -319,6 +344,7 @@ class BitbucketPRProvider(PullRequestProvider):
             # caller that reports "review posted" can say so rather than let a
             # half-done cleanup look like a finished one.
             "cleanup": cleanup,
+            "review_state": review_state,
         }
         # Every write above is per comment and only LOGGED on failure, so a
         # run could come back "posted" with nothing on the pull request. The
@@ -375,6 +401,128 @@ class BitbucketPRProvider(PullRequestProvider):
         if cid is not None:
             self._status_comment_id = cid
         return cid
+
+    def _comment_marker(self) -> str:
+        return get_review_settings().comment_marker
+
+    def _write_top_level_comment(
+        self, pr: PullRequest, body: str, existing_id: int | None,
+    ) -> int | None:
+        ws, name = self._split_repo(pr.repo)
+        return self._upsert_summary(ws, name, pr.number, body, existing_id)
+
+    # ─── Approve / request changes ──────────────────────────────
+
+    def _my_participant_state(self, ws: str, name: str, pr_number: int) -> str | None:
+        """'approved' | 'changes_requested' | '' (neither) | None (unknown).
+
+        Read off the PR's `participants`, matched on the immutable uuid /
+        account_id this token posts as — the same proof of identity the
+        comment cleanup uses.
+        """
+        viewer = self._viewer_ids()
+        if not viewer:
+            return None
+        try:
+            resp = self._http.get(
+                f"{BITBUCKET_API_BASE}/repositories/{ws}/{name}/pullrequests/{pr_number}"
+            )
+            if resp.status_code >= 400:
+                return None
+            meta = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        if not isinstance(meta, dict):
+            return None
+        for part in meta.get("participants") or []:
+            if not isinstance(part, dict) or not self._authored_by_viewer(part, viewer):
+                continue
+            state = str(part.get("state") or "")
+            if state in ("approved", "changes_requested"):
+                return state
+            return "approved" if part.get("approved") is True else ""
+        return ""
+
+    def _apply_review_state(
+        self, ws: str, name: str, pr_number: int, decision: str | None,
+    ) -> dict[str, Any]:
+        """Bring our participant state in line with `decision`. Never raises.
+
+        approve → POST /approve (lifting a block of ours first);
+        request_changes → POST /request-changes (withdrawing our approval
+        first); neither → DELETE whichever of the two we hold. The current
+        state is read first so a re-run sends nothing that is already true;
+        when it cannot be read every needed call is sent and a 404 on a
+        DELETE — nothing of ours to take back — counts as done.
+        """
+        state = self._my_participant_state(ws, name, pr_number)
+        base = f"{BITBUCKET_API_BASE}/repositories/{ws}/{name}/pullrequests/{pr_number}"
+        want = {APPROVE: "approved", REQUEST_CHANGES: "changes_requested"}.get(
+            decision or "", "")
+        calls: list[tuple[str, str, str]] = []
+        for held, path in (("approved", "approve"), ("changes_requested", "request-changes")):
+            if held != want and state in (held, None):
+                calls.append(("DELETE", path, f"withdrew_{path}"))
+        if want and state != want:
+            path = "approve" if want == "approved" else "request-changes"
+            calls.append(("POST", path, path))
+        done: list[str] = []
+        failed: list[str] = []
+        for method, path, label in calls:
+            try:
+                resp = self._http.request(method, f"{base}/{path}")
+            except httpx.HTTPError as exc:
+                failed.append(label)
+                logger.warning("bitbucket_review_state_error call=%s err=%s", label, exc)
+                continue
+            if resp.status_code < 400:
+                done.append(label)
+            elif method == "DELETE" and resp.status_code == 404:
+                pass  # nothing of ours to take back — the state we wanted
+            else:
+                failed.append(label)
+                logger.warning("bitbucket_review_state_failed call=%s status=%d body=%s",
+                               label, resp.status_code, resp.text[:200])
+        return {"state": want or "none", "done": done, "failed": failed}
+
+    # ─── The summary in the pull request description ────────────
+
+    def update_description(self, pr: PullRequest, transform) -> dict:
+        """GET the PR, PUT its description with `transform(description)`.
+
+        The PUT carries the title and the current reviewers back as read:
+        Bitbucket's PR update treats the body as the new state, and a PUT
+        without `reviewers` has been known to drop them.
+        """
+        ws, name = self._split_repo(pr.repo)
+        url = f"{BITBUCKET_API_BASE}/repositories/{ws}/{name}/pullrequests/{pr.number}"
+        try:
+            resp = self._http.get(url)
+            if resp.status_code >= 400:
+                return {"written": False, "error": f"Bitbucket refused the read (HTTP {resp.status_code})"}
+            meta = resp.json()
+            if not isinstance(meta, dict):
+                return {"written": False, "error": "unreadable pull request"}
+            current = str(meta.get("description") or "")
+            new = transform(current)
+            if new is None or new == current:
+                return {"written": False, "error": None, "unchanged": True}
+            payload: dict[str, Any] = {"description": new}
+            if meta.get("title"):
+                payload["title"] = meta["title"]
+            reviewers = [
+                {"uuid": r["uuid"]} for r in meta.get("reviewers") or []
+                if isinstance(r, dict) and r.get("uuid")
+            ]
+            if reviewers:
+                payload["reviewers"] = reviewers
+            resp = self._http.put(url, json=payload)
+        except (httpx.HTTPError, ValueError) as exc:
+            return {"written": False, "error": type(exc).__name__}
+        if resp.status_code >= 400:
+            logger.warning("bitbucket_description_put_failed status=%d", resp.status_code)
+            return {"written": False, "error": f"Bitbucket refused the description (HTTP {resp.status_code})"}
+        return {"written": True, "error": None}
 
     def _our_summary_comments(
         self, pr: PullRequest, marker: str,

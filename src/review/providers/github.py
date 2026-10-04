@@ -12,6 +12,14 @@ API specifics (per research May 2026):
     DELETE .../issues/comments/{cid}                     — delete a surplus summary
     GET .../pulls/{n}/reviews                            — reviews on the PR
     POST /graphql                                        — minimizeComment
+    PUT .../pulls/{n}/reviews/{id}/dismissals            — withdraw our approval / block
+    PATCH .../pulls/{n}                                  — the summary in the description
+
+The review EVENT is COMMENT unless the repository asks for more (2.3.0): APPROVE
+only with `approve_when_clean`, REQUEST_CHANGES only with
+`request_changes_on_critical` — see `pr_actions.review_decision`. Until 2.3.0
+the event followed the verdict, so every clean review approved and every
+blocking one requested changes on its own.
 
 Comment positioning (2026): line + side (RIGHT for new code, LEFT for deleted).
 `position` parameter — DEPRECATED in API version 2026-03-10.
@@ -57,15 +65,20 @@ from src.review.models import (
     HunkSide,
     PullRequest,
     ReviewBatch,
-    ReviewVerdict,
 )
+from src.review.pr_actions import APPROVE, REQUEST_CHANGES, review_decision
 from src.review.providers.base import (
+    SUGGESTION_GITHUB,
     PullRequestProvider,
     PullRequestProviderError,
     _anchorable_ranges,
+    _committable_enabled,
+    _committable_span,
     _format_finding_body,
     _format_review_pointer,
     _format_summary,
+    _new_side_text,
+    _original_lines,
     _snap_to_span,
     _with_marker,
 )
@@ -110,6 +123,15 @@ GITHUB_GRAPHQL_URL = f"{GITHUB_API_BASE}/graphql"
 #: bodies are superseded by the review being posted right now — that is the
 #: definition of OUTDATED, and it is the classifier the collapsed entry shows.
 _MINIMIZE_CLASSIFIER = "OUTDATED"
+
+
+def _json_id(resp: httpx.Response) -> object:
+    """The `id` of a JSON object response, or None for anything else."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    return body.get("id") if isinstance(body, dict) else None
 
 
 def _findings_as_body(comments: list[dict]) -> str:
@@ -246,11 +268,15 @@ class GitHubPRProvider(PullRequestProvider):
         settings = get_review_settings()
 
         # ── 1. Build review payload ──
-        event_map = {
-            ReviewVerdict.APPROVE: "APPROVE",
-            ReviewVerdict.COMMENT: "COMMENT",
-            ReviewVerdict.REQUEST_CHANGES: "REQUEST_CHANGES",
-        }
+        #
+        # The event is a decision the repository opts into, not the verdict:
+        # COMMENT unless `approve_when_clean` / `request_changes_on_critical`
+        # say otherwise (see `review_decision`).
+        decision = review_decision(batch)
+        event = {APPROVE: "APPROVE", REQUEST_CHANGES: "REQUEST_CHANGES"}.get(
+            decision or "", "COMMENT")
+        committable = _committable_enabled(batch)
+        new_side = _new_side_text(pr)
 
         # Every anchor is made postable BEFORE the POST, because GitHub
         # validates the review as one object and one refused anchor takes the
@@ -268,12 +294,24 @@ class GitHubPRProvider(PullRequestProvider):
                     pr.repo, pr.number, finding.file_path, finding.line, line,
                     finding.rule_id,
                 )
-            comments_payload.append({
+            span = _committable_span(finding, line, ranges) if committable else None
+            comment: dict[str, Any] = {
                 "path": finding.file_path,
                 "line": line,
                 "side": side,
-                "body": _format_finding_body(finding, settings.comment_marker),
-            })
+                "body": _format_finding_body(
+                    finding, settings.comment_marker,
+                    committable=SUGGESTION_GITHUB if span else None,
+                    original=_original_lines(new_side, finding),
+                ),
+            }
+            if span and span[1] > span[0]:
+                # A multi-line suggestion replaces the commented RANGE, so the
+                # comment spans it: start_line..line, both on the new side.
+                comment["start_line"] = span[0]
+                comment["start_side"] = "RIGHT"
+                comment["line"] = span[1]
+            comments_payload.append(comment)
         if snapped:
             logger.info(
                 "github_anchors_snapped repo=%s pr=%d moved=%d of=%d",
@@ -287,7 +325,7 @@ class GitHubPRProvider(PullRequestProvider):
         # id, which the listing below may know and a dry run never does.
         review_payload = {
             "commit_id": pr.head_sha,
-            "event": event_map.get(batch.verdict, "COMMENT"),
+            "event": event,
             "body": self._review_body(batch, settings.comment_marker),
             "comments": comments_payload,
         }
@@ -393,6 +431,16 @@ class GitHubPRProvider(PullRequestProvider):
         # can delete. Never raises: a long timeline beats no review.
         cleanup.update(self._minimize_reviews(stale_reviews))
 
+        # ── 4b. Withdraw an approval / a block an earlier run left, when this
+        # run is neither. Only for a repository that lets reviews approve or
+        # block at all — otherwise this review never gave either.
+        review_state: dict[str, Any] = {"event": review_payload["event"]}
+        if batch.pr_actions.manages_review_state and review_payload["event"] == "COMMENT":
+            review_state.update(self._dismiss_our_verdicts(
+                owner, name, pr.number, settings.comment_marker,
+                keep_review_id=_json_id(review_resp),
+            ))
+
         # ── 5. Top-level summary comment (separate, with an idempotency marker) ──
         summary_body = _format_summary(batch, marker=settings.comment_marker)
         if unanchored:
@@ -417,6 +465,7 @@ class GitHubPRProvider(PullRequestProvider):
             # caller that reports "review posted" can say so rather than let a
             # half-done cleanup look like a finished one.
             "cleanup": cleanup,
+            "review_state": review_state,
         }
         if summary_id is None:
             # The review itself is up (it carries the verdict), but the full
@@ -462,6 +511,91 @@ class GitHubPRProvider(PullRequestProvider):
         if cid is not None:
             self._status_comment_id = cid
         return cid
+
+    def _comment_marker(self) -> str:
+        return get_review_settings().comment_marker
+
+    def _write_top_level_comment(
+        self, pr: PullRequest, body: str, existing_id: int | None,
+    ) -> int | None:
+        owner, name = self._split_repo(pr.repo)
+        return self._upsert_summary(owner, name, pr.number, body, existing_id)
+
+    # ─── Approval / request changes: taking ours back ───────────
+
+    def _dismiss_our_verdicts(
+        self, owner: str, name: str, pr_number: int, marker: str,
+        *, keep_review_id: object = None,
+    ) -> dict[str, int]:
+        """Dismiss our APPROVED / CHANGES_REQUESTED reviews. Never raises.
+
+        Called when this run's review is a plain COMMENT: a COMMENT review
+        does not replace a reviewer's earlier approval or block on GitHub, so
+        without this an approval for a clean commit would outlive the push
+        that broke it. `PUT .../reviews/{id}/dismissals` is the only way to
+        take a submitted review's verdict back. Our reviews are found by the
+        same marker-AND-author proof the cleanup uses; a person's own review
+        on a shared token is never touched. Dismissing on a protected branch
+        can need extra rights — a refusal is counted, not raised.
+        """
+        stats = {"dismissed": 0, "dismiss_failed": 0}
+        reviews, _ = self._list_all(
+            f"{GITHUB_API_BASE}/repos/{owner}/{name}/pulls/{pr_number}"
+            "/reviews?per_page=100",
+        )
+        viewer = self._viewer_login() if reviews else ""
+        if not viewer:
+            return stats
+        for review in reviews:
+            rid = review.get("id")
+            if (not isinstance(rid, int) or rid == keep_review_id
+                    or review.get("state") not in ("APPROVED", "CHANGES_REQUESTED")
+                    or not self._is_ours(review, marker, viewer)):
+                continue
+            try:
+                resp = self._http.put(
+                    f"{GITHUB_API_BASE}/repos/{owner}/{name}/pulls/{pr_number}"
+                    f"/reviews/{rid}/dismissals",
+                    json={
+                        "message": "Superseded by a newer Celmis review of this "
+                                   "pull request.",
+                        "event": "DISMISS",
+                    },
+                )
+            except httpx.HTTPError as exc:
+                stats["dismiss_failed"] += 1
+                logger.warning("github_dismiss_review_error id=%d err=%s", rid, exc)
+                continue
+            if resp.status_code < 400:
+                stats["dismissed"] += 1
+            else:
+                stats["dismiss_failed"] += 1
+                logger.warning("github_dismiss_review_failed id=%d status=%d body=%s",
+                               rid, resp.status_code, resp.text[:200])
+        return stats
+
+    # ─── The summary in the pull request description ────────────
+
+    def update_description(self, pr: PullRequest, transform) -> dict:
+        """GET the PR body, PATCH it with `transform(body)` when that changes it."""
+        owner, name = self._split_repo(pr.repo)
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{name}/pulls/{pr.number}"
+        try:
+            resp = self._http.get(url)
+            if resp.status_code >= 400:
+                return {"written": False, "error": f"GitHub refused the read (HTTP {resp.status_code})"}
+            meta = resp.json()
+            current = str((meta or {}).get("body") or "") if isinstance(meta, dict) else ""
+            new = transform(current)
+            if new is None or new == current:
+                return {"written": False, "error": None, "unchanged": True}
+            resp = self._http.patch(url, json={"body": new})
+        except (httpx.HTTPError, ValueError) as exc:
+            return {"written": False, "error": type(exc).__name__}
+        if resp.status_code >= 400:
+            logger.warning("github_description_patch_failed status=%d", resp.status_code)
+            return {"written": False, "error": f"GitHub refused the description (HTTP {resp.status_code})"}
+        return {"written": True, "error": None}
 
     def _our_summary_comments(
         self, pr: PullRequest, marker: str,

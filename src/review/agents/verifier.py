@@ -469,6 +469,8 @@ def _merge_cluster(cluster: list[Finding]) -> Finding:
         title=first.title,
         body=body,
         suggestion=first.suggestion,
+        suggested_code=first.suggested_code,
+        suggested_end_line=first.suggested_end_line,
         agent=",".join(agents),
         rule_id=first.rule_id,
         confidence=max(f.confidence for f in cluster),
@@ -550,6 +552,8 @@ def _merge_same_line(group: list[Finding]) -> Finding:
         title=primary.title or "Multiple agents flagged this line",
         body="\n\n".join(bodies),
         suggestion=primary.suggestion,
+        suggested_code=primary.suggested_code,
+        suggested_end_line=primary.suggested_end_line,
         agent=",".join(agents),
         rule_id=primary.rule_id,
         confidence=min(1.0, avg_conf + 0.1),  # bonus for consensus

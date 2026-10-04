@@ -842,6 +842,10 @@ class CveAgent(ReviewAgent):
             title=f"{adv.package} {adv.version} carries known vulnerability {ident}",
             body="\n\n".join(body_parts),
             suggestion=suggestion,
+            # The manifest line with the fixed version in place of the bad
+            # one: an exact replacement for the anchored line, so it may be
+            # offered as a one-click commit.
+            suggested_code=suggestion,
             agent=self.name,
             rule_id=f"sec.cve-{ident}",
             confidence=1.0,

@@ -53,6 +53,7 @@ from src.review.models import (
     FindingSeverity,
     Hunk,
     HunkSide,
+    PRActions,
     PullRequest,
     ReviewBatch,
     ReviewVerdict,
@@ -457,10 +458,13 @@ class TestBoth422ArmsFire:
         fake.report_order = order
         provider = _provider(fake)
 
-        result = provider.post_review(
-            _batch(_pr([]), [_finding("src/a.py", 5, "x")],
-                   verdict=ReviewVerdict.REQUEST_CHANGES),
-        )
+        # Since 2.3.0 the event follows `request_changes_on_critical`, not the
+        # verdict, so the repository opts in and the finding is critical.
+        critical = _finding("src/a.py", 5, "x")
+        critical.severity = FindingSeverity.CRITICAL
+        batch = _batch(_pr([]), [critical], verdict=ReviewVerdict.REQUEST_CHANGES)
+        batch.pr_actions = PRActions(request_changes_on_critical=True)
+        result = provider.post_review(batch)
         provider.close()
 
         assert set(fake.rejections) == {"own_pr", "anchors"}, (

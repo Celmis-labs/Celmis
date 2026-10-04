@@ -219,7 +219,7 @@ class Finding:
     severity: FindingSeverity = FindingSeverity.WARNING
     title: str = ""          # short summary (1-line)
     body: str = ""           # markdown body — full explanation
-    suggestion: str | None = None  # optional code suggestion (for GitHub Apply)
+    suggestion: str | None = None  # optional fix hint — prose or a snippet, never applied as-is
     agent: str = ""          # 'architect' | 'security' | 'quality' | 'tests' — provenance
     rule_id: str = ""        # stable ID for dedup (e.g. 'arch.unused-import')
     confidence: float = 0.7  # 0.0-1.0 — used by verifier for FP filtering
@@ -247,6 +247,16 @@ class Finding:
     #: in their own section is what protects them from the inferred ones'
     #: reputation.
     evidence_kind: str = "inferred"
+    #: The exact replacement for lines `line`..`suggested_end_line` of the new
+    #: file — whole lines, indentation included — when the agent is certain
+    #: of one. `suggestion` is a hint a human reads; this is text a provider
+    #: may offer as a one-click commit (GitHub/GitLab suggestion blocks, when
+    #: the repository's `committable_suggestions` is on). The structural rules
+    #: ship prose hints such as "=== / !==", which is why the two are separate
+    #: fields: a hint rendered as a committable block commits the prose.
+    suggested_code: str | None = None
+    #: Last new-file line the replacement covers; None means `line` alone.
+    suggested_end_line: int | None = None
 
     @property
     def is_proven(self) -> bool:
@@ -256,6 +266,40 @@ class Finding:
     def dedup_key(self) -> tuple[str, int, str]:
         """Match similar findings across multiple agents."""
         return (self.file_path, self.line, self.rule_id)
+
+
+#: Allowed words for the PR-action settings with a fixed vocabulary.
+SUMMARY_TARGETS = ("comment", "description")
+SUMMARY_ON_NEW_COMMITS = ("nothing", "append", "replace")
+SUMMARY_EXISTING_DESCRIPTION = ("append", "complement", "replace")
+
+
+@dataclass
+class PRActions:
+    """What the review may DO on the pull request beyond commenting.
+
+    Resolved once per review from the repository policy (repo > workspace >
+    built-in, see `pr_actions.pr_actions_from_policy`) and carried on the
+    batch so the providers, which only ever see the batch, can read it. The
+    defaults are the built-in ones: comment only — no approval, no request
+    for changes, no committable suggestions, the summary in a comment.
+    """
+
+    approve_when_clean: bool = False
+    request_changes_on_critical: bool = False
+    status_feedback: bool = True
+    committable_suggestions: bool = False
+    summary_target: str = "comment"
+    summary_on_new_commits: str = "replace"
+    summary_existing_description: str = "append"
+    message_started: str | None = None
+    message_finished_header: str | None = None
+
+    @property
+    def manages_review_state(self) -> bool:
+        """True when this review may approve or block — and so must also be
+        the one to take an earlier approval or block back."""
+        return self.approve_when_clean or self.request_changes_on_critical
 
 
 @dataclass
@@ -357,6 +401,13 @@ class ReviewBatch:
     #: changed file path -> one-line description of its change, from the same
     #: call. Empty on failure, and the walkthrough table is then omitted.
     walkthrough: dict[str, str] = field(default_factory=dict)
+    #: The repository's PR-action settings for this review (approve, request
+    #: changes, suggestions, where the summary goes, message templates).
+    pr_actions: PRActions = field(default_factory=PRActions)
+    #: True once the overview + walkthrough live in the pull request's
+    #: description — the summary comment then keeps the verdict and the
+    #: findings only, so the walkthrough is not shown twice.
+    summary_in_description: bool = False
 
     def __post_init__(self) -> None:
         if not self.started_at:
@@ -853,3 +904,45 @@ class ReviewBatch:
             and not self.failed_critical_agents
         ):
             self.verdict = ReviewVerdict.APPROVE
+
+
+#: The longest replacement a finding may carry as `suggested_code`, in lines.
+#: A committable block replaces exactly the lines it covers, so a model that
+#: rewrites half a file is not offering a suggestion.
+SUGGESTED_CODE_MAX_LINES = 40
+
+
+def parse_suggested_code(data: object) -> str | None:
+    """`suggested_code` from an agent's JSON finding, or None.
+
+    A string only, with trailing newlines trimmed (the block adds its own).
+    Over SUGGESTED_CODE_MAX_LINES lines it is not a suggestion and is
+    dropped. An empty string is a valid replacement: it deletes the lines.
+    """
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("suggested_code")
+    if not isinstance(raw, str):
+        return None
+    code = raw.rstrip("\n")
+    if code.count("\n") + 1 > SUGGESTED_CODE_MAX_LINES:
+        return None
+    return code
+
+
+def parse_suggested_end_line(data: object, line: int) -> int | None:
+    """The last line `suggested_code` replaces — None for the anchored line
+    alone, or for anything that is not a line after it within the
+    SUGGESTED_CODE_MAX_LINES window."""
+    if not isinstance(data, dict) or parse_suggested_code(data) is None:
+        return None
+    raw = data.get("suggested_end_line")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        end = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if end <= line or end - line >= SUGGESTED_CODE_MAX_LINES:
+        return None
+    return end

@@ -99,7 +99,9 @@ class TestFormatting:
             rule_id="r",
         )
         body = _format_finding_body(f)
-        assert "```suggestion" in body
+        # A hint is never a committable block (2.3.0): it is shown, not applied.
+        assert "```suggestion" not in body
+        assert "**Suggestion:**" in body
         assert "cursor.execute" in body
 
     def test_summary_includes_marker(self) -> None:

@@ -288,6 +288,8 @@ def _run_review_task(
                 "title": f.title,
                 "body": f.body,
                 "suggestion": f.suggestion,
+                "suggested_code": getattr(f, "suggested_code", None),
+                "suggested_end_line": getattr(f, "suggested_end_line", None),
                 "rule_id": f.rule_id,
                 "confidence": f.confidence,
                 # The sentence the evidence gate exists to force, and the one
