@@ -36,7 +36,7 @@ DISTRIBUTIONS = ("celmis-platform", "celmis", "code-analysis-system")
 #:
 #: 0.1.0 is what the four duplicated copies said before they were collapsed
 #: into this one, and what `web/package.json` still says.
-__version__ = "2.2.1"
+__version__ = "2.2.2"
 
 
 # LiteLLM is a library here, not a proxy, and must not read a `.env` of its own.

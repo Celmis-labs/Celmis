@@ -20,6 +20,23 @@ derives it from there.
 
 ## [Unreleased]
 
+## [2.2.2] — 2026-10-04
+
+### Added
+
+- **Workspace review defaults** (Code review → **Review defaults**, `/admin/review-defaults`). A workspace now
+  sets, once for all its repositories: which agents take part (verifier included) and each agent's model and
+  output limit, the comment threshold, the inline-comment cap, the PR summary and its instructions, the
+  "review started" comment, the review language, ignore paths and target branches. Every repository inherits
+  them and can override any field on its own policy page, which shows "overridden here" / "inherited from
+  workspace" / "install default" with a reset to the inherited value. Resolution everywhere — orchestrator and
+  API — is repository → workspace → install default → built-in. `GET|PUT /api/review-defaults` (owner/admin
+  or global admin write, members read; audited). Per-agent models and the language stay where they already
+  lived, in the workspace LLM settings, so there is one copy of each. Migration `e4c8a1f7b2d9`: repository
+  fields that only held the old defaults (`[]`, `true`) become "inherit", explicit values stay — no
+  repository reviews differently right after the upgrade. The "Agents & prompts" tab of a repository now shows
+  each agent's participation switch together with its model and output limit.
+
 ### Fixed
 
 - **Branch pickers show every branch and can search them.** The branch lists
@@ -38,6 +55,11 @@ derives it from there.
 
 ### Changed
 
+- `PUT /api/review-policies/{slug}`: `target_branches` and `disabled_agents` follow the other optional fields —
+  absent keeps the stored value, `null` inherits, a list (even `[]`) is the repository's own. Policy reads may
+  return `null` for `target_branches`, `disabled_agents`, `ignore_globs`, `summary_enabled` and
+  `started_comment_enabled`, with the resolved value in the matching `*_effective` field and its origin in
+  `sources`.
 - `GET /api/repos/{slug}/branches` returns an object —
   `{repo_slug, branches, default_branch, total, truncated, source, error}` —
   instead of a bare list, and takes `q` and `limit` (default 100, max 1000).
