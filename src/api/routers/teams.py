@@ -5,8 +5,10 @@ Endpoints:
     POST   /api/teams                          — create (admin)
     DELETE /api/teams/{id}                     — delete (admin)
     GET    /api/teams/{id}/members             — list members
-    PUT    /api/teams/{id}/members/{user_id}   — add/update role (admin)
-    DELETE /api/teams/{id}/members/{user_id}   — remove (admin)
+    GET    /api/teams/{id}/candidates?q=       — workspace members to pick from (admin)
+    PUT    /api/teams/{id}/members/{user}      — add/update role (admin); `user`
+                                                 is an id or an email address
+    DELETE /api/teams/{id}/members/{user}      — remove (admin); id or email
     GET    /api/teams/{id}/repos               — repos this team can access
     PUT    /api/teams/{id}/repos/{slug}        — grant access (admin)
     DELETE /api/teams/{id}/repos/{slug}        — revoke (admin)
@@ -22,7 +24,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
@@ -71,6 +73,25 @@ class MemberIn(BaseModel):
 class MemberOut(BaseModel):
     user_id: str
     role: str
+    #: Who the id is. The page used to show the bare id, which is how the
+    #: "type an email or an internal id" box came to ask for something the
+    #: UI never displayed anywhere.
+    email: str = ""
+    name: str = ""
+
+
+class CandidateOut(BaseModel):
+    user_id: str
+    email: str = ""
+    name: str = ""
+    #: Their WORKSPACE role, so the picker can say who is who.
+    workspace_role: str = ""
+
+
+class CandidatesOut(BaseModel):
+    members: list[CandidateOut]
+    #: Every match — may exceed `len(members)`; the page says how many it hides.
+    total: int
 
 
 class RepoAccessIn(BaseModel):
@@ -165,6 +186,92 @@ async def _team_in_workspace(session: AsyncSession, team_id: str, ws_id: str) ->
 
 # ─── Members ──────────────────────────────────────────────────────────
 
+#: Rows the candidate picker returns per search. A workspace with more matching
+#: people than this is told to refine the search, not handed a silent slice.
+_CANDIDATE_LIMIT = 50
+
+
+def _person(user_id: str) -> tuple[str, str]:
+    """(email, name) for display; blanks for an id the user store lacks."""
+    from src.users.store import get_user_store
+
+    u = get_user_store().get_by_id(user_id)
+    return ((u.email or "") if u else "", (u.name or "") if u else "")
+
+
+async def _workspace_people(session: AsyncSession, ws_id: str) -> list[tuple[WorkspaceMember, str, str]]:
+    """Every member of the workspace with their (email, name)."""
+    rows = (await session.scalars(
+        select(WorkspaceMember).where(WorkspaceMember.workspace_id == ws_id)
+    )).all()
+    return [(m, *_person(m.user_id)) for m in rows]
+
+
+async def _resolve_workspace_member(session: AsyncSession, ws_id: str, ref: str) -> str:
+    """The user id ``ref`` names among THIS workspace's members.
+
+    ``ref`` is an internal id (the API's original contract) or an email
+    address, compared without case. Only members of the workspace are
+    candidates, so an address that belongs to an account elsewhere reads
+    exactly like one that belongs to nobody — this is not a way to learn who
+    has an account on the installation.
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        raise HTTPException(status_code=422, detail="Name a workspace member.")
+    if await session.get(WorkspaceMember, (ws_id, ref)) is not None:
+        return ref   # an id, exactly as before
+    if "@" not in ref:
+        raise HTTPException(status_code=404, detail="Not a member of this workspace")
+    wanted = ref.casefold()
+    matches = {m.user_id for m, email, _name in await _workspace_people(session, ws_id)
+               if email and email.strip().casefold() == wanted}
+    if not matches:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"No member of this workspace has the email {ref}. Add or "
+                    "invite them to the workspace first, then to the team."),
+        )
+    if len(matches) > 1:
+        # Two accounts whose addresses differ only in case. Picking one would
+        # be a guess about whose grants these become.
+        raise HTTPException(
+            status_code=422,
+            detail=(f"More than one member of this workspace has the email {ref}. "
+                    "Pick the person from the list instead."),
+        )
+    return matches.pop()
+
+
+@router.get("/{team_id}/candidates", response_model=CandidatesOut)
+async def list_candidates(
+    team_id: str,
+    q: str = Query(default="", max_length=200),
+    session: AsyncSession = Depends(get_async_session),
+    _admin: User = Depends(require_workspace_admin),
+    ws_id: str = Depends(current_workspace_id),
+) -> CandidatesOut:
+    """Members of this workspace who are not in the team yet, by name/email.
+
+    What the "add member" picker lists. The same people the PUT below accepts:
+    a team is a subset of the workspace, so nobody outside it is offered.
+    """
+    await _team_in_workspace(session, team_id, ws_id)
+    in_team = set((await session.scalars(
+        select(TeamMember.user_id).where(TeamMember.team_id == team_id)
+    )).all())
+    needle = q.strip().casefold()
+    found: list[CandidateOut] = []
+    for m, email, name in await _workspace_people(session, ws_id):
+        if m.user_id in in_team:
+            continue
+        if needle and needle not in email.casefold() and needle not in name.casefold():
+            continue
+        found.append(CandidateOut(user_id=m.user_id, email=email, name=name,
+                                  workspace_role=m.role))
+    found.sort(key=lambda c: ((c.name or c.email).casefold(), c.email.casefold()))
+    return CandidatesOut(members=found[:_CANDIDATE_LIMIT], total=len(found))
+
 
 @router.get("/{team_id}/members", response_model=list[MemberOut])
 async def list_members(
@@ -177,13 +284,17 @@ async def list_members(
     rows = (await session.scalars(
         select(TeamMember).where(TeamMember.team_id == team_id)
     )).all()
-    return [MemberOut(user_id=r.user_id, role=r.role) for r in rows]
+    out: list[MemberOut] = []
+    for r in rows:
+        email, name = _person(r.user_id)
+        out.append(MemberOut(user_id=r.user_id, role=r.role, email=email, name=name))
+    return out
 
 
-@router.put("/{team_id}/members/{user_id}", response_model=MemberOut)
+@router.put("/{team_id}/members/{user_ref}", response_model=MemberOut)
 async def upsert_member(
     team_id: str,
-    user_id: str,
+    user_ref: str,
     payload: MemberIn,
     session: AsyncSession = Depends(get_async_session),
     admin: User = Depends(require_workspace_admin),
@@ -196,8 +307,8 @@ async def upsert_member(
     # A team is a subset of the workspace's people. Putting somebody from
     # outside it into a team handed them the team's repo grants without ever
     # making them a member — the side door around the invite/grant rules.
-    if await session.get(WorkspaceMember, (ws_id, user_id)) is None:
-        raise HTTPException(status_code=404, detail="Not a member of this workspace")
+    # The resolver answers only from this workspace's members, by id or email.
+    user_id = await _resolve_workspace_member(session, ws_id, user_ref)
     row = await session.get(TeamMember, (team_id, user_id))
     if row is None:
         row = TeamMember(team_id=team_id, user_id=user_id, role=payload.role)
@@ -207,18 +318,36 @@ async def upsert_member(
     await session.commit()
     logger.info("team_member_upserted team=%s user=%s role=%s by=%s",
                 team_id, user_id, payload.role, admin.email)
-    return MemberOut(user_id=row.user_id, role=row.role)
+    email, name = _person(row.user_id)
+    return MemberOut(user_id=row.user_id, role=row.role, email=email, name=name)
 
 
-@router.delete("/{team_id}/members/{user_id}", status_code=204)
+@router.delete("/{team_id}/members/{user_ref}", status_code=204)
 async def remove_member(
     team_id: str,
-    user_id: str,
+    user_ref: str,
     session: AsyncSession = Depends(get_async_session),
     admin: User = Depends(require_workspace_admin),
     ws_id: str = Depends(current_workspace_id),
 ) -> None:
     await _team_in_workspace(session, team_id, ws_id)
+    user_id = user_ref.strip()
+    if "@" in user_id:
+        # By email, among the TEAM's members: somebody already removed from
+        # the workspace may still sit in the team, and must be removable.
+        wanted = user_id.casefold()
+        ids = (await session.scalars(
+            select(TeamMember.user_id).where(TeamMember.team_id == team_id)
+        )).all()
+        hits = [i for i in ids if _person(i)[0].strip().casefold() == wanted]
+        if len(hits) > 1:
+            raise HTTPException(
+                status_code=422,
+                detail=f"More than one team member has the email {user_ref}.",
+            )
+        if not hits:
+            return
+        user_id = hits[0]
     row = await session.get(TeamMember, (team_id, user_id))
     if row is None:
         return

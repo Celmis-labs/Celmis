@@ -106,8 +106,9 @@ surfaces, owners, reviews, audits) to editors over MCP at `/mcp/`.
 3. Cursor and others: the same URL and header in `.cursor/mcp.json` (or
    `.mcp.json` for a Claude Code project).
 4. Check that the tools are listed. Not connecting: missing trailing slash,
-   expired token, or 503 MCP is not configured (the operator must set
-   `MCP_JWT_SECRET`).
+   expired token, 403 because you are no longer a member of the workspace
+   the token was issued for (generate a new one), or 503 MCP is not
+   configured (the operator must set `MCP_JWT_SECRET`).
 Write tools (`add_repo`, `start_dep_audit`, `generate_docs`,
 `set_auto_review`, `migrate_consumers`) need write scopes, issued by the
 operator with `analyzer mcp issue-token --scopes ...` or through an OAuth

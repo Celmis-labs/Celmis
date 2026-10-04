@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import get_current_user, require_workspace_admin
+from src.api.deps import current_workspace_id, get_current_user, require_workspace_admin
 from src.db.models import OAuthAuthCode, OAuthClient, OAuthRefreshToken
 from src.db.session import get_async_session
 from src.users import User
@@ -49,6 +49,47 @@ _hasher = PasswordHasher()
 _CODE_TTL_SECONDS = 60
 _TOKEN_TTL_SECONDS = 3600
 _REFRESH_TTL_SECONDS = 30 * 24 * 3600   # 30 days
+
+
+# ─── Which workspace a grant was given in ───────────────────────────
+#
+# An access token answers for the workspace the person consented in (the MCP
+# server reads its `workspace_id` claim — see src/mcp_server/identity.py), so
+# that workspace has to survive two hops: consent → code, and code → refresh
+# family → every rotated access token.
+#
+# Neither table has a column for it, and a migration for one string is not
+# worth a schema change on the auth path. Both hops already carry a value
+# the SERVER generates and looks up by exact match — the auth code (primary
+# key) and the refresh family id (never shown to the client) — so the
+# workspace is appended to that value. A client cannot alter it: a changed
+# code matches no row, and the family id never leaves the database. Values
+# minted before this existed carry no suffix and yield None, which the MCP
+# server treats as a legacy token.
+
+_WS_SEP = "."   # not in the token_urlsafe / token_hex alphabets
+
+
+def _bind_workspace(opaque: str, workspace_id: str | None) -> str:
+    if not workspace_id:
+        return opaque
+    tag = base64.urlsafe_b64encode(workspace_id.encode()).rstrip(b"=").decode()
+    return f"{opaque}{_WS_SEP}{tag}"
+
+
+def _bound_workspace(opaque: str | None) -> str | None:
+    if not opaque or _WS_SEP not in opaque:
+        return None
+    tag = opaque.rsplit(_WS_SEP, 1)[1]
+    try:
+        value = base64.urlsafe_b64decode(tag + "=" * (-len(tag) % 4)).decode()
+    except Exception:  # noqa: BLE001 — a malformed tag is a legacy value
+        return None
+    return value or None
+
+
+def _workspace_claims(workspace_id: str | None) -> dict | None:
+    return {"workspace_id": workspace_id} if workspace_id else None
 
 
 # ─── Dynamic client registration (RFC 7591) ─────────────────────────
@@ -260,9 +301,13 @@ async def authorize_consent(
     state: str = Form(""),
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> RedirectResponse:
     """User consented (or the SPA auto-consented on their behalf).
-    Mint an auth code + redirect back to client's redirect_uri."""
+    Mint an auth code + redirect back to client's redirect_uri.
+
+    The code is bound to the workspace the person consented in, and so is
+    every access token it turns into."""
     client = await session.get(OAuthClient, client_id)
     if client is None or redirect_uri not in (client.redirect_uris or []):
         raise HTTPException(status_code=400, detail="invalid client/redirect")
@@ -275,7 +320,7 @@ async def authorize_consent(
         raise HTTPException(status_code=400,
                             detail=f"scopes not allowed for client: {denied}")
 
-    code = secrets.token_urlsafe(32)
+    code = _bind_workspace(secrets.token_urlsafe(32), workspace_id)
     row = OAuthAuthCode(
         code=code, client_id=client_id, user_id=user.id,
         redirect_uri=redirect_uri, code_challenge=code_challenge,
@@ -288,7 +333,8 @@ async def authorize_consent(
     url = f"{redirect_uri}{sep}code={code}"
     if state:
         url += f"&state={state}"
-    logger.info("oauth_code_issued client=%s user=%s", client_id, user.email)
+    logger.info("oauth_code_issued client=%s user=%s ws=%s",
+                client_id, user.email, workspace_id)
     return RedirectResponse(url, status_code=302)
 
 
@@ -370,16 +416,20 @@ async def token_exchange(
             status_code=500,
             detail=f"OAuth server not fully configured: {exc}",
         ) from exc
+    workspace_id = _bound_workspace(row.code)
     token = issue_token(
         cfg, subject=row.user_id,
         scopes=[s for s in (row.scope or "").split(" ") if s],
         client_id=client_id,
         expires_in=_TOKEN_TTL_SECONDS,
+        extra_claims=_workspace_claims(workspace_id),
     )
-    # Fresh refresh token — new family (rotated_from is None here).
+    # Fresh refresh token — new family (rotated_from is None here), carrying
+    # the same workspace so a refreshed token answers for the same tenant.
     refresh = await _mint_refresh(
         session=session, client_id=client_id, user_id=row.user_id,
-        scope=row.scope, family_id=secrets.token_hex(16),
+        scope=row.scope,
+        family_id=_bind_workspace(secrets.token_hex(16), workspace_id),
     )
     return {
         "access_token": token,
@@ -516,6 +566,7 @@ async def _refresh_grant(
         cfg, subject=row.user_id,
         scopes=[s for s in (row.scope or "").split(" ") if s],
         client_id=client_id, expires_in=_TOKEN_TTL_SECONDS,
+        extra_claims=_workspace_claims(_bound_workspace(row.family_id)),
     )
     new_refresh = await _mint_refresh(
         session=session, client_id=client_id, user_id=row.user_id,
