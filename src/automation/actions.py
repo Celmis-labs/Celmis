@@ -632,6 +632,28 @@ REVIEW_SETTING_KEYS: tuple[str, ...] = (
     "summary_enabled", "review_language", "disabled_agents",
 )
 
+#: The section of /review-settings that edits each of them — where a link
+#: after a change sends the person to see it (web/components/review-settings/
+#: model.ts FIELD_SECTION says the same for every field).
+REVIEW_SETTING_SECTION: dict[str, str] = {
+    "run_on_drafts": "general", "approve_when_clean": "general",
+    "request_changes_on_critical": "general", "committable_suggestions": "general",
+    "review_language": "general", "comment_min_severity": "filters",
+    "max_inline_comments": "filters", "summary_enabled": "summary",
+    "disabled_agents": "categories",
+}
+
+
+def _settings_href(repo: str | None = None, section: str | None = None) -> str:
+    """A link into /review-settings: the scope (Global, or one repository)
+    and the section, as web/lib/review-settings-routes.ts builds them."""
+    from urllib.parse import urlencode
+
+    query = {k: v for k, v in (("repo", repo), ("section", section))
+             if v and not (k == "section" and v == "general")}
+    return "/review-settings" + (f"?{urlencode(query)}" if query else "")
+
+
 #: How many rules one sentence may add. A policy holds at most 20 (the
 #: schema's own bound), and a "rule" list longer than this is a paste of a
 #: style guide, which belongs in the prompt template on the policy page.
@@ -917,14 +939,15 @@ async def _upsert_policy_fields(actor: Actor, session: Any, user: Any,
 
 def _rules_links(slug: str | None, *, pending: bool) -> list[dict[str, str]]:
     """Where the person goes to see what was just added: the queue of
-    proposals waiting for an editor, and the repository's own Rules tab."""
+    proposals waiting for an editor, and the repository's settings, where its
+    legacy folder rules are listed (section "Advanced")."""
     links = []
     if pending:
         links.append({"label": "pending",
                       "href": "/admin/review-rules?status=pending"})
     if slug:
         links.append({"label": "policy",
-                      "href": f"/admin/review-policies/{slug}?tab=rules"})
+                      "href": _settings_href(slug, "advanced")})
     return links
 
 
@@ -1103,7 +1126,8 @@ async def update_review_setting(
         return {"scope": "workspace", "repo": None, "key": key,
                 "value": _plain(parsed), "effective": _plain(effective),
                 "count": 1,
-                "links": [{"label": "defaults", "href": "/admin/review-defaults"}]}
+                "links": [{"label": "defaults",
+                           "href": _settings_href(None, REVIEW_SETTING_SECTION.get(key))}]}
 
     from src.api.deps import require_prompt_editor
 
@@ -1119,4 +1143,4 @@ async def update_review_setting(
             "value": _plain(parsed), "effective": _plain(effective),
             "count": 1,
             "links": [{"label": "policy",
-                       "href": f"/admin/review-policies/{slug}"}]}
+                       "href": _settings_href(slug, REVIEW_SETTING_SECTION.get(key))}]}

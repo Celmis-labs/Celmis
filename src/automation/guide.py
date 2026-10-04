@@ -28,7 +28,7 @@ GUIDE = """\
 
 - [Dashboard](/dashboard): overview; [Setup wizard](/onboarding) walks through the first repository; [What you can do](/capabilities).
 - [Repositories](/repositories): add a repository (paste a URL or pick one from a connected provider), start indexing, see index state. Also [Dependencies](/dependencies) (audits), [Docs](/docs) (generated documentation), [Repo intelligence](/admin/intel).
-- [Code review](/reviews): past and running PR reviews; trigger a review by PR URL. [Issues](/issues): findings followed across a PR's pushes (open, fixed, dismissed). [Pull requests](/pull-requests): the reviewed PRs and their state. [Analytics](/analytics): review trends for owners, admins and editors (enterprise licence). [Review policies](/admin/review-policies), [Review defaults](/admin/review-defaults), [Review rules](/admin/review-rules) (rules library: add, generate, import, approve pending), [Review agents](/admin/agents), [Compliance](/admin/compliance), [Deprecations](/admin/deprecations).
+- [Code review](/reviews): past and running PR reviews; trigger a review by PR URL. [Issues](/issues): findings followed across a PR's pushes (open, fixed, dismissed). [Pull requests](/pull-requests): the reviewed PRs and their state. [Review rules](/admin/review-rules) (rules library: add, generate, import, approve pending). [Settings](/review-settings): every review setting, Global and per repository. [Analytics](/analytics): review trends for owners, admins and editors (enterprise licence). Under "More": [Compliance](/admin/compliance), [Deprecations](/admin/deprecations).
 - [Ask the code](/projects): a project groups indexed repositories so one question searches all of them. [All chats](/chats), [Code search](/search).
 - [Claude agent](/claude): connect a Claude subscription token, then run coding sessions against a repository.
 - [Celmis agent](/automation): this conversation as a full page, with the list of past chats. Also opened from the round button at the bottom right of every page.
@@ -67,24 +67,26 @@ card below it. Or ask this agent to switch review on for a set.
 
 ## Review prompts and rules
 
-- Per-repository settings: open [Review policies](/admin/review-policies),
-  pick the repository. Tabs: "General" (on/off, target branches), "Agents &
-  prompts" (which agents run, and this repository's own prompt for any
-  agent, the verifier included), "Rules" (prompt template, custom rules
-  addressed to chosen agents, suppressed rule ids), "Comments & summary"
-  ("Post comments for", "Max inline comments per review", "Review language",
-  "Post a PR summary", "Post a “review started” comment"), "Ignore paths",
-  "Models & limits", "MCP sources". A link may open a tab directly with
-  `?tab=agents`, `?tab=rules`, `?tab=comments` and so on.
-- Settings for every repository: [Review defaults](/admin/review-defaults)
-  — which agents take part, their models and limits, comments, summary,
-  ignore paths and target branches. A repository's policy overrides any of
-  them; an unset field follows these defaults.
-- Workspace-wide agent prompts: [Review agents](/admin/agents) lists the
-  specialised reviewers; "Edit prompt" opens one, saves a workspace override,
-  and "Reset to default" restores the built-in text. A repository's own
-  prompt (its policy, "Agents & prompts") wins over the workspace one; the
-  agent card says how many repositories override it.
+- [Code review settings](/review-settings) (Code review → "Settings") holds
+  every review setting. Left: "Global" (the workspace defaults, for every
+  repository) and "Per repository" (search; the orange number is how many
+  settings a repository overrides). Sections: "General" (on/off, target
+  branches with globs and `!` exclusions such as `main, release/*, !legacy`,
+  drafts, approve / request changes, commit status, review language),
+  "Review categories" (which agents run, each one's "Model & limits", the
+  verifier), "Review filters" ("Minimum severity",
+  "Inline comments per review", "Ignored paths", "Suppressed rules"),
+  "Custom prompts" (the base
+  instruction and each agent's prompt: at Global the workspace prompt, per
+  repository that repository's own), "PR summary", "Rules" (counts and a
+  link to the [rules library](/admin/review-rules)), "Custom messages"
+  (started / finished texts) and "Advanced" (MCP sources, legacy folder
+  rules). Each field says "Overridden" or "Inherited from Global"; the
+  reset icon hands it back. One "Save settings" for the scope. A link opens
+  a place directly: `/review-settings?repo=<repo>&section=prompts`.
+- A repository's prompt for an agent wins over the workspace one, which
+  wins over the built-in prompt; rules and the base instruction are added
+  on top.
 
 ## LLM keys and models
 
@@ -147,11 +149,11 @@ GUIDE_ROUTES: frozenset[str] = _routes(GUIDE) | _knowledge_routes()
 
 
 #: Named routes whose children are real pages addressed by a name or an id:
-#: `/admin/review-policies/default`, `/admin/agents/security`. Listed rather
+#: `/projects/<id>`, `/claude/<id>`. Listed rather
 #: than inferred from "any child of a known route", because `/settings` is
 #: known and `/settings/github` is a 404.
 _PARENTS_OF_DETAIL_PAGES = frozenset({
-    "/admin/review-policies", "/admin/agents", "/projects", "/claude",
+    "/projects", "/claude",
 })
 
 

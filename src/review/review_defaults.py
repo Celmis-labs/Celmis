@@ -417,15 +417,33 @@ def run_on_drafts_for_repo(provider: str, full_name: str) -> bool:
     False, which is exactly the skip every draft got before the setting
     existed.
     """
+    value = _setting_for_repo(provider, full_name, "run_on_drafts")
+    return bool(builtin_default("run_on_drafts") if value is None else value)
+
+
+def target_branches_for_repo(provider: str, full_name: str) -> list[str]:
+    """The target-branch patterns in force for this repository (repo policy >
+    workspace default > built-in [] = every branch) — for the webhook's early
+    draft skip, which has to say "this branch is never reviewed" rather than
+    "reviewed once ready" when the patterns leave the base branch out.
+    Blocking; never raises — unreadable is [] (no restriction claimed)."""
+    value = _setting_for_repo(provider, full_name, "target_branches")
+    return [str(v) for v in value] if isinstance(value, list) else []
+
+
+def _setting_for_repo(provider: str, full_name: str, name: str) -> Any:
+    """One inheritable setting for the repository a delivery names, resolved
+    repo policy > workspace default; None when neither says anything (or the
+    repository is unbound, or the database unreadable)."""
     try:
         from src.api.auto_review import get_auto_review_store
 
         cfg = get_auto_review_store().config_for_repo(provider, full_name)
         if cfg is None:
-            return False
+            return None
         url = _sync_url()
         if not url:
-            return False
+            return None
         from sqlalchemy import create_engine
         from sqlalchemy.orm import Session
 
@@ -442,16 +460,17 @@ def run_on_drafts_for_repo(provider: str, full_name: str) -> bool:
         try:
             with Session(engine) as s:
                 row = s.get(RepoReviewPolicy, slug)
-                if row is not None and row.run_on_drafts is not None:
-                    return bool(row.run_on_drafts)
+                value = getattr(row, name, None) if row is not None else None
+                if value is not None:
+                    return value
                 owner = row.workspace_id if row is not None else cfg.workspace_id
                 ws = s.get(WorkspaceReviewDefaults, owner)
-                if ws is not None and ws.run_on_drafts is not None:
-                    return bool(ws.run_on_drafts)
+                value = getattr(ws, name, None) if ws is not None else None
+                if value is not None:
+                    return value
         finally:
             engine.dispose()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("run_on_drafts_lookup_failed provider=%s repo=%s err=%s",
-                       provider, full_name, exc)
-        return False
-    return bool(builtin_default("run_on_drafts"))
+        logger.warning("%s_lookup_failed provider=%s repo=%s err=%s",
+                       name, provider, full_name, exc)
+    return None

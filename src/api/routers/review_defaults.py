@@ -188,10 +188,6 @@ async def get_review_defaults(
     return await _out(session, user, ws_id, defaults_from_row(row), row)
 
 
-def _clean_branches(raw: list[str]) -> list[str]:
-    return list(dict.fromkeys(b.strip() for b in raw if b and b.strip()))
-
-
 @router.put("", response_model=WorkspaceReviewDefaultsOut)
 async def put_review_defaults(
     payload: WorkspaceReviewDefaultsIn,
@@ -209,6 +205,7 @@ async def put_review_defaults(
         _ignore_globs_from_payload,
         _review_language_from_payload,
         _suppressed_rules_from_payload,
+        target_branches_from_payload,
         v23_updates_from_payload,
     )
     from src.review.review_defaults import defaults_from_row
@@ -255,9 +252,7 @@ async def put_review_defaults(
         updates["ignore_globs"] = globs or None
     if "target_branches" in fields:
         updates["target_branches"] = (
-            None if payload.target_branches is None
-            else (_clean_branches(payload.target_branches) or None)
-        )
+            target_branches_from_payload(payload.target_branches) or None)
     if "suppressed_rules" in fields:
         updates["suppressed_rules"] = _suppressed_rules_from_payload(payload.suppressed_rules)
 

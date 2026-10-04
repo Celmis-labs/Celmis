@@ -127,19 +127,19 @@ def test_the_v022_features_are_found(question, section):
     assert section in ids[:2], (question, ids)
 
 
-def test_the_policy_tabs_named_are_the_tabs_on_screen():
-    """The knowledge names the policy page's tabs; a renamed tab fails here
-    rather than in an answer that sends somebody to a tab that is gone."""
+def test_the_settings_sections_named_are_the_sections_on_screen():
+    """The knowledge names the settings page's sections; a renamed section
+    fails here rather than in an answer that sends somebody to one that is
+    gone."""
     from src.automation.knowledge import BY_ID
 
     en = json.loads((_REPO / "web" / "lib" / "i18n" / "messages" / "en.json")
                     .read_text(encoding="utf-8"))
-    tabs = [v for k, v in en.items()
-            if k.startswith("admin.reviewPolicies.detail.tab.")]
+    sections = [v for k, v in en.items() if k.startswith("reviewSettings.section.")]
     body = BY_ID["review-policies"].body
-    assert len(tabs) == 7
-    for tab in tabs:
-        assert f'"{tab}"' in body, tab
+    assert len(sections) == 8
+    for section in sections:
+        assert f'"{section}"' in body, section
 
 
 def test_the_roles_section_reports_what_an_owner_may_grant():
@@ -196,7 +196,7 @@ def test_the_knowledge_says_agent_prompts_can_be_overridden_per_repository():
     from src.automation.knowledge import BY_ID
 
     body = BY_ID["agent-prompts"].body
-    assert "/admin/agents" in body and "/admin/review-policies" in body
+    assert "/review-settings" in body and "section=prompts" in body
     assert "per repository" in body.lower()
     # The precedence, in the order src/review/agents/base.py resolves it.
     order = [body.index(m) for m in (

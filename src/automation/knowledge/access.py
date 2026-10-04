@@ -30,11 +30,11 @@ def _roles_body() -> str:
     what = {
         "viewer": "reads everything in the workspace.",
         "member": "reads, and changes the status of review issues.",
-        "editor": ("the prompt editor: agent prompts on AI Agents, review "
-                   "policies of every repository (prompt template, folder "
-                   "rules, per-agent overrides, models, branches) and "
-                   "analytics. Not members, invites, teams, LLM keys, git "
-                   "connections or the licence."),
+        "editor": ("the prompt editor: the workspace agent prompts and every "
+                   "repository's code review settings (prompts, rules, "
+                   "agents, models, branches, filters) and analytics. Not "
+                   "the workspace defaults, members, invites, teams, LLM "
+                   "keys, git connections or the licence."),
         "admin": ("everything an editor does, plus members and invites, "
                   "teams and code access, LLM keys and models, git "
                   "connections, notification channels, the budget, the job "

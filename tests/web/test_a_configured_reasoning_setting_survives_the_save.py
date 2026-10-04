@@ -48,8 +48,9 @@ WEB = ROOT / "web"
 PAGE = WEB / "app" / "(app)" / "settings" / "llm" / "page.tsx"
 #: Where the decision functions live, and the one file both screens import.
 CONTROLS = WEB / "components" / "agent-llm-controls.tsx"
-#: The layer that outranks /settings/llm and renders the same row.
-POLICY = WEB / "app" / "(app)" / "admin" / "review-policies" / "[slug]" / "page.tsx"
+#: The layer that outranks /settings/llm and renders the same row: a
+#: repository's scope on /review-settings, whose save is built in this module.
+POLICY = WEB / "components" / "review-settings" / "model.ts"
 TSC = WEB / "node_modules" / ".bin" / "tsc"
 
 #: Everything `reasoningToSave` reaches for. Lifted whole, in this order, so

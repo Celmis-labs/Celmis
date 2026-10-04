@@ -23,8 +23,8 @@ def test_the_section_states_the_precedence_the_code_applies():
     from src.review.review_defaults import INHERITABLE_FIELDS
 
     text = BY_ID["review-defaults"].render()
-    assert "repository's own policy → the\nworkspace review defaults → the install default" in text
-    assert "/admin/review-defaults" in text
+    assert "the repository's own value → the\nGlobal (workspace) value → the install default" in text
+    assert "/review-settings" in text
     # The fields it names are the ones a workspace can default.
     assert {"disabled_agents", "summary_enabled", "ignore_globs",
             "target_branches"} <= set(INHERITABLE_FIELDS)

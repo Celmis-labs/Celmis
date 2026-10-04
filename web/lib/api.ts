@@ -658,6 +658,42 @@ export type ReviewPolicy = {
   /** 1..100; null inherits REVIEW_MAX_INLINE_COMMENTS. */
   max_inline_comments?: number | null;
   max_inline_comments_effective?: number;
+  /** The 2.3.0 finders' model columns. Absent in a PUT keeps what is stored,
+   *  null clears, a string pins — like the five above, minus the wipe. */
+  performance_model?: string | null;
+  business_logic_model?: string | null;
+  /** 2.3.0 settings — what THIS policy says (null = inherit) and, read-only,
+   *  what a review starting now would apply. Absent in a PUT keeps. */
+  enabled_agents?: string[] | null;
+  enabled_agents_effective?: string[];
+  run_on_drafts?: boolean | null;
+  run_on_drafts_effective?: boolean;
+  approve_when_clean?: boolean | null;
+  approve_when_clean_effective?: boolean;
+  request_changes_on_critical?: boolean | null;
+  request_changes_on_critical_effective?: boolean;
+  status_feedback?: boolean | null;
+  status_feedback_effective?: boolean;
+  committable_suggestions?: boolean | null;
+  committable_suggestions_effective?: boolean;
+  apply_filters_to_rules?: boolean | null;
+  apply_filters_to_rules_effective?: boolean;
+  summary_target?: "comment" | "description" | null;
+  summary_target_effective?: string;
+  summary_on_new_commits?: "nothing" | "append" | "replace" | null;
+  summary_on_new_commits_effective?: string;
+  summary_existing_description?: "append" | "complement" | "replace" | null;
+  summary_existing_description_effective?: string;
+  base_instruction?: string | null;
+  base_instruction_effective?: string | null;
+  message_started?: string | null;
+  message_started_effective?: string | null;
+  message_finished_header?: string | null;
+  message_finished_header_effective?: string | null;
+  agent_participation_effective?: Record<string, boolean>;
+  agent_participation_defaults?: Record<string, boolean>;
+  setting_choices?: Record<string, string[]>;
+  message_placeholders?: string[];
   // Read-only roster the page renders its per-agent controls from.
   overridable_agents?: string[];
   rule_target_agents?: string[];
@@ -681,7 +717,15 @@ type ReviewPolicyReadOnly =
   | "target_branches_effective" | "disabled_agents_effective"
   | "ignore_globs_effective" | "summary_enabled_effective"
   | "summary_instructions_effective" | "started_comment_enabled_effective"
-  | "sources" | "inherited" | "inherited_sources";
+  | "sources" | "inherited" | "inherited_sources"
+  | "enabled_agents_effective" | "run_on_drafts_effective"
+  | "approve_when_clean_effective" | "request_changes_on_critical_effective"
+  | "status_feedback_effective" | "committable_suggestions_effective"
+  | "apply_filters_to_rules_effective" | "summary_target_effective"
+  | "summary_on_new_commits_effective" | "summary_existing_description_effective"
+  | "base_instruction_effective" | "message_started_effective"
+  | "message_finished_header_effective" | "agent_participation_effective"
+  | "agent_participation_defaults" | "setting_choices" | "message_placeholders";
 
 /** GET /api/review-policies/overrides-summary. */
 export type AgentOverridesSummary = {
@@ -869,6 +913,37 @@ export const reviewDefaultsApi = {
     api<WorkspaceReviewDefaults>("/api/review-defaults", {
       token, method: "PUT", json: payload,
     }),
+};
+
+/** GET /api/review-settings/overview — the workspace layer and every
+ *  repository the caller may read, with "Overridden N" per repository. */
+export type ReviewSettingsRepoSummary = {
+  repo_slug: string;
+  full_name: string;
+  provider: string;
+  has_policy: boolean;
+  review_enabled: boolean;
+  overridden_count: number;
+  overridden_fields: string[];
+  last_review_status: string | null;
+  last_review_at: string | null;
+};
+
+export type ReviewSettingsOverview = {
+  workspace: {
+    workspace_id: string;
+    set_count: number;
+    set_fields: string[];
+    can_edit: boolean;
+    updated_by: string | null;
+    updated_at: string | null;
+  };
+  repositories: ReviewSettingsRepoSummary[];
+};
+
+export const reviewSettingsApi = {
+  overview: (token: string) =>
+    api<ReviewSettingsOverview>("/api/review-settings/overview", { token }),
 };
 
 

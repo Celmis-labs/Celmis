@@ -139,10 +139,10 @@ and nothing is written until you press "Run it" ("Cancel" leaves it).
   installation has the review-rules list they are saved as PENDING
   proposals an editor approves (proposing needs `member` or higher and the
   `review` grant on the repository where teams grant access); otherwise they
-  are appended to the repository's review policy, "Rules" tab, and used from
-  the next review — that needs `editor` or higher, like editing the policy
-  on [Review policies](/admin/review-policies). At most 10 rules at a time,
-  20 per policy.
+  are appended to the repository's legacy folder rules (shown under
+  "Advanced" in its [settings](/review-settings)) and used from the next
+  review — that needs `editor` or higher, like editing the repository's
+  settings. At most 10 rules at a time, 20 per repository.
 - Draft rules: «згенеруй правила для репо X» — drafts from the code, for
   approval, where the installation can generate them; otherwise the agent
   says so and offers to take the rules from you.
@@ -152,10 +152,10 @@ and nothing is written until you press "Run it" ("Cancel" leaves it).
   `committable_suggestions`, `comment_min_severity`,
   `max_inline_comments`, `summary_enabled`, `review_language`,
   `disabled_agents` — the ones this installation does not have yet are
-  refused by name. For the workspace it writes
-  [Review defaults](/admin/review-defaults) (owner or admin); for one
-  repository its review policy (editor or higher, plus `review` on the
-  repository) — the same checks as saving those pages, so the agent can
+  refused by name. For the workspace it writes the "Global" scope of
+  [Code review settings](/review-settings) (owner or admin); for one
+  repository that repository's settings (editor or higher, plus `review` on
+  the repository) — the same checks as saving that page, so the agent can
   never do what you could not do there.
 Follow-ups work: after «add rules for billing-api: …», «і для payments
 теж» proposes the same rules for payments.

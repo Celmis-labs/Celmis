@@ -30,7 +30,8 @@ COMBOBOX = WEB / "components" / "branch-combobox.tsx"
 PICKER_FILES = [
     WEB / "app" / "(app)" / "repositories" / "page.tsx",
     WEB / "app" / "(app)" / "dependencies" / "page.tsx",
-    WEB / "app" / "(app)" / "admin" / "review-policies" / "[slug]" / "page.tsx",
+    # A repository's target branches on /review-settings (General).
+    WEB / "components" / "review-settings" / "section-general.tsx",
     WEB / "components" / "repo-branch-table.tsx",
 ]
 
@@ -105,6 +106,6 @@ def test_free_text_is_offered_only_where_it_was_before() -> None:
     assert allow == {
         "repositories": False,
         "dependencies": True,
-        "[slug]": True,
+        "section-general.tsx": True,
         "repo-branch-table.tsx": False,
     }
