@@ -298,6 +298,42 @@ class AgentContext:
     # The repo policy's output language ("uk", "de", …). None = the
     # workspace's `review_language`.
     review_language: str | None = None
+    #: How every suggestion is written — the policy's `base_instruction`
+    #: (Kodus's "Base instruction"), already clamped to
+    #: `BASE_INSTRUCTION_MAX_CHARS`. Appended to every LLM agent's system
+    #: prompt right after the agent's own prompt, and to the verifier's.
+    #: Empty means the policy said nothing.
+    base_instruction: str = ""
+
+
+#: The longest base instruction any prompt carries. Kodus caps its own at the
+#: same number; a longer text is cut, not refused, because the review that
+#: reads it cannot argue with the person who wrote it.
+BASE_INSTRUCTION_MAX_CHARS = 2000
+
+
+def clamp_base_instruction(text: object) -> str:
+    """`text` as a base instruction: stripped, None-safe, at most
+    `BASE_INSTRUCTION_MAX_CHARS` characters."""
+    if not isinstance(text, str):
+        return ""
+    return text.strip()[:BASE_INSTRUCTION_MAX_CHARS].strip()
+
+
+def base_instruction_block(text: object) -> str:
+    """The block a prompt carries for a base instruction, or "" for none.
+
+    One heading for every agent and the verifier, so the operator reading a
+    composed prompt in the preview recognises the same text in each.
+    """
+    body = clamp_base_instruction(text)
+    if not body:
+        return ""
+    return (
+        "**Base instruction — how every suggestion in this review is written "
+        "(set by the team; it governs wording and form, never what counts as "
+        "a finding):**\n" + body
+    )
 
 
 def custom_rules_for(context: AgentContext, agent_name: str) -> str:
@@ -397,6 +433,12 @@ class AgentRunResult:
     #: to whoever reads the run, and on runG2 this one would have taken 8 of
     #: 69 comments, all eight of them on the judge's false-positive list.
     dropped_coverage_claim: int = 0
+    #: Why this agent decided not to look, when it decided so itself — the
+    #: business-logic agent on a pull request with nothing stated to check
+    #: against. Not an error (nothing failed) and not a finding (nothing was
+    #: found): the orchestrator files the agent under `agents_skipped` and
+    #: keeps the sentence in `ReviewBatch.skip_reasons`. None means it ran.
+    skip_reason: str | None = None
 
     def __post_init__(self) -> None:
         # `_parse_findings` hands the count back riding on the list itself
@@ -434,6 +476,7 @@ class ReviewAgent(ABC):
 #   3. Agent's built-in default (self.system_prompt)
 #
 # Appends (always applied on top of whichever base was chosen):
+#   0. The policy's base instruction (how every suggestion is written)
 #   a. Workspace-wide `system_prompt_extras` from /settings/llm
 #   b. Per-repo NL rules (custom_rules) — was architect-only, now every agent
 
@@ -599,6 +642,14 @@ def _compose_effective_system_prompt(
             base = default_system
 
     parts = [base.rstrip()]
+
+    # The team's base instruction — how every suggestion is written. Right
+    # after the agent's own prompt and before every rule block, whichever
+    # layer the prompt came from: it is a policy setting, not part of any
+    # one agent's text, so a prompt override does not drop it.
+    base_instruction = base_instruction_block(getattr(context, "base_instruction", ""))
+    if base_instruction:
+        parts.append(base_instruction)
 
     # a) Workspace-wide append.
     try:

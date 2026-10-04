@@ -220,7 +220,7 @@ class Finding:
     title: str = ""          # short summary (1-line)
     body: str = ""           # markdown body — full explanation
     suggestion: str | None = None  # optional code suggestion (for GitHub Apply)
-    agent: str = ""          # 'architect' | 'security' | 'quality' | 'tests' — provenance
+    agent: str = ""          # 'defect' | 'contract' | 'security' | 'performance' | 'business_logic' | … — provenance; `src.review.categories` maps it to a category
     rule_id: str = ""        # stable ID for dedup (e.g. 'arch.unused-import')
     confidence: float = 0.7  # 0.0-1.0 — used by verifier for FP filtering
     #: The agent's one-sentence derivation, written BEFORE the finding: the
@@ -280,6 +280,12 @@ class ReviewBatch:
     #: is not a failure, and a review with no filter must not read as one
     #: that was filtered and found everything clean.
     agents_skipped: list[str] = field(default_factory=list)
+    #: Why an agent that skipped ITSELF did — {agent: sentence}. Today the
+    #: business-logic agent on a pull request with no stated intent. Kept
+    #: apart from `agent_errors` on purpose: a reason there marks a stage
+    #: that was meant to run and could not (`_degraded_notice` reads it as a
+    #: thinner review), while this is a stage with nothing to do.
+    skip_reasons: dict[str, str] = field(default_factory=dict)
     #: Why each failed agent failed — {agent: a sentence a user can act on}.
     #:
     #: The reason existed all along. `classify` produced a curated sentence
@@ -448,8 +454,14 @@ class ReviewBatch:
     # untrue claim as the "downgraded from APPROVE to COMMENT" line that test
     # was written to kill. Their remit moved into `defect`, and `defect` is
     # critical on its own account, not by inheritance.
+    #
+    # `performance` and `business_logic` (2.3) are LLM finders like the three
+    # above, so the same rule holds: a finder that was asked to look and fell
+    # over cannot be read as "found nothing". A business-logic agent that
+    # SKIPPED itself (no stated intent) never reaches `agents_failed`, and a
+    # dormant one is never dispatched, so neither costs an approval.
     _CRITICAL_AGENTS = frozenset({
-        "defect", "contract", "security",
+        "defect", "contract", "security", "performance", "business_logic",
         "architect",  # retired; was critical, so old rows keep their meaning
     })
 

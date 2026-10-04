@@ -1,6 +1,6 @@
 """Agent catalog + workspace-level prompt override storage (Stage 11).
 
-    GET  /api/agents                        — list of 5 review agents with
+    GET  /api/agents                        — list of the review agents with
                                               description, current system
                                               prompt (default or overridden),
                                               default model, and metadata.
@@ -93,6 +93,42 @@ _AGENTS = {
         "default_severity": "critical",
         "verdict_impact": "critical — failure blocks APPROVE verdict",
         "settings_model_field": "security_model",
+    },
+    "performance": {
+        "display_name": "Performance",
+        "role": "Costs that grow with something — the Performance category",
+        "focus": [
+            "N+1: a query or HTTP call per item inside a loop",
+            "Quadratic work, loop-invariant work, the same call twice",
+            "Blocking I/O on async or per-request paths",
+            "Memory that grows with input, unbounded queries, DOM thrash",
+        ],
+        "context_used": [
+            "Diff hunks — every changed line, swept to the last one",
+            "Brief blast radius — how often the changed code is reached",
+            "Style guide + repo-specific rules from admin panel",
+        ],
+        "default_severity": "warning",
+        "verdict_impact": "critical — failure blocks APPROVE verdict",
+        "settings_model_field": "performance_model",
+    },
+    "business_logic": {
+        "display_name": "Business logic",
+        "role": "The change against the PR's stated intent — off by default",
+        "focus": [
+            "Contradictions between the diff and the PR title/description",
+            "Acceptance criteria or promised behaviour nothing implements",
+            "Edge cases the description names or plainly implies",
+            "Skips quietly when the PR has no meaningful description",
+        ],
+        "context_used": [
+            "PR title, description, acceptance criteria and issue keys",
+            "Diff hunks",
+            "Repo-specific rules from admin panel",
+        ],
+        "default_severity": "warning",
+        "verdict_impact": "critical when it runs — failure blocks APPROVE; a skip does not",
+        "settings_model_field": "business_logic_model",
     },
     "verifier": {
         "display_name": "Verifier",

@@ -20,6 +20,8 @@ SECTIONS = (
             "instruction", "global", "workspace-wide", "per repo",
             "per-repo", "each repo", "every repo", "one repo", "repository",
             "defect", "contract", "security", "verifier", "reset", "default",
+            "performance", "business logic", "business_logic",
+            "base instruction", "базова інструкц", "базовая инструкц",
             "промпт", "агент", "інструкц", "глобальн", "кожн", "окрем",
             "репозитор", "репо", "перевизнач", "скинут", "типов",
             "инструкц", "глобальн", "кажд", "отдельн", "переопредел",
@@ -29,8 +31,8 @@ SECTIONS = (
                 "system prompt"),
         body="""
 Yes — agent prompts can be changed for the whole workspace AND per
-repository, for every agent that has a prompt (defect, contract, security and
-the verifier). Two places:
+repository, for every agent that has a prompt (defect, contract, security,
+performance, business_logic and the verifier). Two places:
 
 A. Workspace-wide — [AI Agents](/admin/agents) (Code review → "AI Agents"):
 1. Open the agent with "Edit prompt".
@@ -67,6 +69,10 @@ The page says the same: "Precedence: this repository's prompt → workspace prom
 whichever base won: the workspace-wide rules from [LLM Setup](/settings/llm),
 this repository's "Prompt template" and the matching custom rules for that
 agent, and a language instruction when the review language is not English.
+The base instruction from the review settings (how every suggestion is
+written, at most 2,000 characters) goes first of these — straight after the
+agent's prompt, before any rules — and reaches every agent and the verifier;
+"Preview" shows it in place.
 So a repository override replaces the workspace prompt for that repository
 only; rules add to the prompt rather than replace it.
 
@@ -202,6 +208,8 @@ Who: everyone in the workspace can read the page; only an owner or admin
             "pull request", "merge request", "mr", "verdict", "approve",
             "request changes", "finding", "comment", "summary", "agent",
             "defect", "contract", "security", "structural", "cve", "verifier",
+            "performance", "business logic", "business_logic", "category",
+            "categories", "n+1", "acceptance criteria", "категорі",
             "skipped", "re-run", "rerun", "apply fix", "draft", "claude code",
             "рев'ю", "ревю", "ревью", "перевірк", "запуст", "вручн",
             "вердикт", "знахідк", "коментар", "пул-реквест", "пулреквест",
@@ -217,6 +225,14 @@ other repositories, when the repository is indexed):
   boundaries, cross-repo drift; quotes both sides or stays silent.
 - security — OWASP Top 10 / CWE Top 25: injection, auth bypass, hardcoded
   secrets, SSRF.
+- performance — costs that grow with something: N+1 queries and calls in
+  loops, quadratic or repeated work, blocking I/O on hot paths, memory that
+  grows with input, DOM thrash. On by default.
+- business_logic — the change against what the PR says it does (title,
+  description, acceptance criteria, issue keys named): contradictions,
+  missing parts, required edge cases. Off by default — a policy opts it in;
+  a PR with no meaningful description is skipped quietly (no findings, the
+  reason noted in the summary's scope details).
 - structural — deterministic ast-grep rules, no model, no tokens.
 - cve — the PR's own dependency changes checked against OSV.
 - verifier — a post-processor: a deterministic filter (dedup, confidence
@@ -225,8 +241,11 @@ other repositories, when the repository is indexed):
   tab.
 - compliance — after the agents, one LLM call per matching rule from
   [Compliance](/admin/compliance).
-defect, contract and security are critical: if one fails, the verdict cannot
-be APPROVE. A workspace can instead run one headless Claude Code review.
+defect, contract, security, performance and business_logic are critical:
+if one fails, the verdict cannot be APPROVE (a business_logic skip is not a
+failure). The summary counts findings by category: Bug (defect), Contract,
+Security, Performance, Business logic, Compliance, Structure, Dependencies
+(cve). A workspace can instead run one headless Claude Code review.
 
 Severities: critical, error, warning, info. Verdict: a failed blocking
 compliance check, ≥1 critical or ≥3 errors → REQUEST_CHANGES; any warning or

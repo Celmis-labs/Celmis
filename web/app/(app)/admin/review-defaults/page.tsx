@@ -33,6 +33,7 @@ import {
   type WorkspaceReviewDefaults,
   type WorkspaceReviewDefaultsUpdate,
 } from "@/lib/api";
+import { agentLabel } from "@/lib/review-categories";
 import { globError, globLines } from "@/lib/ignore-globs";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
@@ -405,7 +406,7 @@ export default function ReviewDefaultsPage() {
                 >
                   <div className="min-w-0">
                     <Label htmlFor={`ws-toggle-${agent}`} className="font-medium capitalize">
-                      {agent}
+                      {agentLabel(agent)}
                       {!on && (
                         <Badge variant="destructive" className="ml-2 text-[9px]">
                           {t("admin.reviewPolicies.detail.agentOffBadge")}

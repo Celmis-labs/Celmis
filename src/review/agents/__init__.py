@@ -23,23 +23,39 @@ The roster now follows that line:
     Structural, CVE — deterministic, no LLM, unchanged.
     Verifier  — dedup + FP filtering across all findings, unchanged.
 
+TWO MORE IN 2.3, ALONG KODUS'S CATEGORIES (Bug, Performance, Security,
+Business logic). Neither widens an existing remit — the measurement above is
+why not — each is a remit no finder had:
+
+    Performance    — costs that grow with something (N+1, quadratic work,
+                     blocking I/O, memory, DOM thrash). On by default.
+    Business logic — the change against the PR's own statement of intent;
+                     skips when the PR states none. Off by default
+                     (`ReviewOrchestrator.OFF_BY_DEFAULT`).
+
+`src.review.categories` maps every agent to the category a reader sees.
+
 Each agent — a pure function (Hunk + context) → list[Finding]. Provenance is
 tracked in the `Finding.agent` field.
 """
 
 from src.review.agents.base import AgentContext, ReviewAgent
+from src.review.agents.business_logic import BusinessLogicAgent
 from src.review.agents.contract import ContractAgent
 from src.review.agents.cve import CveAgent
 from src.review.agents.defect import DefectAgent
+from src.review.agents.performance import PerformanceAgent
 from src.review.agents.security import SecurityAgent
 from src.review.agents.verifier import VerifierAgent
 from src.review.structural import StructuralAgent
 
 __all__ = [
     "AgentContext",
+    "BusinessLogicAgent",
     "ContractAgent",
     "CveAgent",
     "DefectAgent",
+    "PerformanceAgent",
     "ReviewAgent",
     "SecurityAgent",
     "StructuralAgent",

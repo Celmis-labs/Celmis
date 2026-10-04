@@ -33,6 +33,7 @@ import {
   type ProviderRefusal,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { agentLabel } from "@/lib/review-categories";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { formatDate } from "@/lib/format";
@@ -600,7 +601,7 @@ export function AgentLLMRow({
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-muted)]/20 px-3 py-3 space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm font-medium capitalize">{agent}</span>
+        <span className="text-sm font-medium capitalize">{agentLabel(agent)}</span>
         <Badge variant={overridden ? "brand" : "outline"} className="text-[10px]">
           {overridden
             ? t("settings.llm.agents.overriddenBadge")

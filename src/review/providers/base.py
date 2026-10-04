@@ -471,6 +471,11 @@ def _scope_lines(batch: ReviewBatch) -> list[str]:
         if by_glob:
             lines.append(
                 f"- Ignored by this repository's ignore globs: {by_glob} {_files(by_glob)}")
+    # An agent that had nothing to check — said here, folded away, rather
+    # than in the banner: it is not a gap in the review, and the author who
+    # wonders why the business-logic check said nothing finds the answer.
+    for agent, why in (getattr(batch, "skip_reasons", None) or {}).items():
+        lines.append(f"- Not run: `{agent}` — {_md_cell(why, 200)}")
     return lines
 
 
@@ -560,10 +565,11 @@ def _finding_location(pr: PullRequest, finding: Finding) -> str:
 
 
 def _category_of(finding: Finding) -> str:
-    if finding.agent:
-        return finding.agent
-    rule = finding.rule_id or ""
-    return rule.split(".", 1)[0] if rule else "other"
+    """The category a reader sees — Bug, Security, Performance, Business
+    logic, … — from the one agent→category map (`src.review.categories`)."""
+    from src.review.categories import finding_category
+
+    return finding_category(finding)
 
 
 def _walkthrough_lines(batch: ReviewBatch) -> list[str]:
@@ -619,7 +625,7 @@ def _rich_findings_lines(batch: ReviewBatch) -> list[str]:
         cat = _category_of(f)
         by_cat[cat] = by_cat.get(cat, 0) + 1
     lines.append("")
-    lines.append("**By source:** " + " · ".join(
+    lines.append("**By category:** " + " · ".join(
         f"{cat}: **{n}**"
         for cat, n in sorted(by_cat.items(), key=lambda kv: (-kv[1], kv[0]))
     ))

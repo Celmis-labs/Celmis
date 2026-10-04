@@ -31,7 +31,7 @@ def test_the_old_names_are_gone_from_the_roster():
         assert name not in REVIEW_AGENTS
 
 
-def test_the_orchestrator_dispatches_exactly_the_three_finders():
+def test_the_orchestrator_dispatches_the_three_finders_and_the_category_ones():
     from src.review.orchestrator import ReviewOrchestrator
 
     llm = [a.name for a in ReviewOrchestrator._default_agents()
@@ -41,10 +41,14 @@ def test_the_orchestrator_dispatches_exactly_the_three_finders():
 
     llm = [a.name for a in ReviewOrchestrator._default_agents()
            if isinstance(a, LLMReviewAgent)]
-    assert sorted(llm) == ["contract", "defect", "security"], (
-        f"LLM finder roster is {llm} — the bench's cost and dedup arithmetic "
-        "assume exactly three model calls per review"
-    )
+    assert sorted(llm) == [
+        "business_logic", "contract", "defect", "performance", "security",
+    ], f"LLM finder roster is {llm}"
+    # The three measured finders are still the three the bench measured; the
+    # 2.3 additions sit beside them, and only performance runs by default —
+    # business_logic is opted in, so a default review makes four calls.
+    dispatched = [n for n in llm if n not in ReviewOrchestrator.OFF_BY_DEFAULT]
+    assert sorted(dispatched) == ["contract", "defect", "performance", "security"]
 
 
 # ─── the boundary is disjoint by construction ────────────────────────
@@ -86,7 +90,8 @@ def test_security_was_not_touched():
     assert "authorised code review" in SecurityAgent.system_prompt
 
     s = ReviewSettings()
-    assert s.security_model == s.defect_model == s.contract_model, (
+    assert (s.security_model == s.defect_model == s.contract_model
+            == s.performance_model == s.business_logic_model), (
         "security carries a model of its own — the restructure promised it "
         "would move with the roster or not at all"
     )

@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 
 import {
+  OFF_BY_DEFAULT_AGENTS,
   agentsApi,
   llmApi,
   reviewPoliciesApi,
@@ -30,6 +31,7 @@ import {
   type SettingSource,
 } from "@/lib/api";
 import { globError, globLines } from "@/lib/ignore-globs";
+import { agentLabel } from "@/lib/review-categories";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { useCanEditPrompts } from "@/lib/use-analytics-access";
@@ -148,11 +150,12 @@ function ResetToInherited({ onClick, disabled }: {
  *  Mirrors `TOGGLEABLE_AGENTS` in src/api/routers/review_policies.py. The
  *  verifier is absent on purpose: it post-processes the others' findings. */
 const TOGGLEABLE_AGENTS = [
-  "defect", "contract", "security", "structural",
+  "defect", "contract", "security", "performance", "structural",
 ] as const;
 
-/** Every agent involved in a review, for the help dialog. */
-const ALL_AGENTS = [...TOGGLEABLE_AGENTS, "verifier"] as const;
+/** Every agent involved in a review, for the help dialog — the off-by-default
+ *  ones too, which have no "on unless disabled" switch above. */
+const ALL_AGENTS = [...TOGGLEABLE_AGENTS, ...OFF_BY_DEFAULT_AGENTS, "verifier"] as const;
 
 /** The agents whose LLM this policy can set, and the column each one's model
  *  lives in.
@@ -1246,7 +1249,7 @@ export default function ReviewPolicyEditPage() {
                                 : "border-[var(--color-border)] hover:bg-[var(--color-accent)]"
                             }`}
                           >
-                            {agent}
+                            {agentLabel(agent)}
                           </button>
                         );
                       })}
@@ -1603,7 +1606,7 @@ export default function ReviewPolicyEditPage() {
               >
                 <div className="min-w-0">
                   <Label htmlFor={`toggle-${agent}`} className="font-medium capitalize">
-                    {agent}
+                    {agentLabel(agent)}
                     {!on && (
                       <Badge variant="destructive" className="ml-2 text-[9px]">
                         {t("admin.reviewPolicies.detail.agentOffBadge")}
@@ -1705,7 +1708,7 @@ export default function ReviewPolicyEditPage() {
               <div key={agent} className="space-y-1.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <Label htmlFor={`prompt-${agent}`} className="font-medium capitalize">
-                    {agent}
+                    {agentLabel(agent)}
                     <OriginBadge overridden={own} inheritedLabel={inheritedLabel} />
                     {(agent === "verifier" ? !verifierOn : disabledShown.includes(agent)) && (
                       <Badge variant="destructive" className="ml-2 text-[9px]">
@@ -1818,7 +1821,7 @@ export default function ReviewPolicyEditPage() {
                 {ALL_AGENTS.map((agent) => (
                   <li key={agent}>
                     <span className="font-medium capitalize text-[var(--color-foreground)]">
-                      {agent}
+                      {agentLabel(agent)}
                     </span>
                     {" — "}
                     {t(`admin.reviewPolicies.agentRole.${agent}`)}
