@@ -19,16 +19,18 @@ import Link from "next/link";
 import { useMemo, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { AnimatePresence } from "motion/react";
+import * as m from "motion/react-m";
 import {
   BookOpenIcon,
   CheckIcon,
-  ChevronDownIcon,
   ChevronRightIcon,
   FileDownIcon,
   ListChecksIcon,
   Loader2Icon,
   PlusIcon,
   SaveIcon,
+  SearchIcon,
   SparklesIcon,
   Trash2Icon,
   XIcon,
@@ -47,6 +49,7 @@ import {
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
+import { cn } from "@/lib/utils";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import {
@@ -55,6 +58,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -62,7 +66,11 @@ import {
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { OptionCard } from "@/components/ui/option-card";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Select } from "@/components/ui/select";
+import { SkeletonRows } from "@/components/ui/skeleton";
+import { OriginTag as OriginPill, SeverityBadge as SeverityPill } from "@/components/ui/status";
 import { Textarea } from "@/components/ui/textarea";
 
 type Filter = "all" | ReviewRuleStatus;
@@ -74,36 +82,24 @@ const MAX_TITLE = 200;
 const MAX_INSTRUCTIONS = 2000;
 const MAX_EXAMPLE = 2000;
 
-const SEVERITY_VARIANT: Record<ReviewRuleSeverity, "destructive" | "warning" | "outline" | "default"> = {
-  critical: "destructive",
-  error: "destructive",
-  warning: "warning",
-  info: "outline",
-};
-
 /** `?repo=` — the repository whose rules to open, or null. */
 function repoFromUrl(): string | null {
   return new URLSearchParams(window.location.search).get("repo") || null;
 }
 const noSubscribe = () => () => {};
 
+/** Critical, error, warning and info are four different badges now: the
+ *  first two used to share one red. */
 function SeverityBadge({ severity }: { severity: ReviewRuleSeverity }) {
   const t = useT();
-  return (
-    <Badge variant={SEVERITY_VARIANT[severity] ?? "outline"} className="text-[10px] uppercase">
-      {t(`admin.reviewRules.severity.${severity}`)}
-    </Badge>
-  );
+  return <SeverityPill severity={severity} label={t(`admin.reviewRules.severity.${severity}`)} />;
 }
 
+/** Where a rule came from. A hand-written rule needs no tag. */
 function OriginTag({ origin }: { origin: ReviewRule["origin"] }) {
   const t = useT();
   if (origin === "manual") return null;
-  return (
-    <Badge variant="brand" className="text-[10px]">
-      {t(`admin.reviewRules.origin.${origin}`)}
-    </Badge>
-  );
+  return <OriginPill origin={origin} label={t(`admin.reviewRules.origin.${origin}`)} />;
 }
 
 export default function ReviewRulesPage() {
@@ -301,26 +297,28 @@ export default function ReviewRulesPage() {
       {canEdit && (
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => { setCreating(true); setExpanded(null); }} disabled={creating}>
-            <PlusIcon className="h-4 w-4 mr-1" /> {t("admin.reviewRules.addRule")}
+            <PlusIcon /> {t("admin.reviewRules.addRule")}
           </Button>
           <Button variant="outline" onClick={() => setLibraryOpen(true)}>
-            <BookOpenIcon className="h-4 w-4 mr-1" /> {t("admin.reviewRules.addFromLibrary")}
+            <BookOpenIcon /> {t("admin.reviewRules.addFromLibrary")}
           </Button>
           <Button
             variant="outline"
             onClick={() => startJob.mutate("generate")}
             disabled={!repo || running || startJob.isPending}
+            loading={startJob.isPending && startJob.variables === "generate"}
             title={repo ? undefined : t("admin.reviewRules.needsRepo")}
           >
-            <SparklesIcon className="h-4 w-4 mr-1" /> {t("admin.reviewRules.generate")}
+            <SparklesIcon /> {t("admin.reviewRules.generate")}
           </Button>
           <Button
             variant="outline"
             onClick={() => startJob.mutate("import")}
             disabled={!repo || running || startJob.isPending}
+            loading={startJob.isPending && startJob.variables === "import"}
             title={repo ? undefined : t("admin.reviewRules.needsRepo")}
           >
-            <FileDownIcon className="h-4 w-4 mr-1" /> {t("admin.reviewRules.import")}
+            <FileDownIcon /> {t("admin.reviewRules.import")}
           </Button>
           {!repo && (
             <p className="w-full text-xs text-[var(--color-muted-foreground)]">
@@ -360,53 +358,66 @@ export default function ReviewRulesPage() {
       <Card>
         <CardHeader className="pb-3">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex flex-wrap gap-1" role="tablist">
-              {FILTERS.map((f) => (
-                <Button
-                  key={f}
-                  size="sm"
-                  role="tab"
-                  aria-selected={filter === f}
-                  variant={filter === f ? "secondary" : "ghost"}
-                  onClick={() => { setFilter(f); setSelected(new Set()); }}
-                >
-                  {t(`admin.reviewRules.filter.${f}`)}
-                  {counts && (f === "pending" || f === "all") && (
-                    <span className="ml-1 text-[var(--color-muted-foreground)]">
-                      ({counts[f]})
-                    </span>
-                  )}
-                </Button>
-              ))}
-            </div>
-            <Input
-              className="sm:w-64"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={t("admin.reviewRules.searchPlaceholder")}
+            <SegmentedControl
+              semantics="tabs"
+              size="sm"
+              label={t("admin.reviewRules.title")}
+              value={filter}
+              onValueChange={(f) => { setFilter(f); setSelected(new Set()); }}
+              segments={FILTERS.map((f) => ({
+                value: f,
+                label: t(`admin.reviewRules.filter.${f}`),
+                count: counts && (f === "pending" || f === "all") ? counts[f] : undefined,
+              }))}
             />
+            <div className="relative sm:w-64">
+              <SearchIcon aria-hidden className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-subtle-foreground)]" />
+              <Input
+                className="pl-9"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder={t("admin.reviewRules.searchPlaceholder")}
+                aria-label={t("admin.reviewRules.searchPlaceholder")}
+              />
+            </div>
           </div>
         </CardHeader>
-        <CardContent className="space-y-2">
-          {canEdit && selected.size > 0 && (
-            <div className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-muted)]/40 p-2 text-sm">
-              <span className="mr-2">{t("admin.reviewRules.selected", { count: selected.size })}</span>
-              <Button size="sm" onClick={() => bulk.mutate("active")} disabled={bulk.isPending}>
-                <CheckIcon className="h-4 w-4 mr-1" /> {t("admin.reviewRules.approve")}
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => bulk.mutate("rejected")}
-                      disabled={bulk.isPending}>
-                <XIcon className="h-4 w-4 mr-1" /> {t("admin.reviewRules.reject")}
-              </Button>
-              <Button size="sm" variant="ghost" onClick={removeSelected} disabled={bulk.isPending}>
-                <Trash2Icon className="h-4 w-4 mr-1 text-red-600" /> {t("common.delete")}
-              </Button>
-            </div>
-          )}
+        <CardContent className="flex flex-col gap-2">
+          {/* The bulk bar floats at the bottom of the viewport while the
+              list scrolls under it, so the selection and what to do with it
+              stay in view. It slides in when the first rule is ticked. */}
+          <AnimatePresence>
+            {canEdit && selected.size > 0 && (
+              <m.div
+                key="bulk"
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 8, transition: { duration: 0.14 } }}
+                transition={{ duration: 0.22, ease: [0.23, 1, 0.32, 1] }}
+                className="sticky bottom-4 z-20 order-last"
+              >
+                <div className="clear-agent-launcher flex flex-wrap items-center gap-2 rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-popover)] p-2 pl-3 text-sm shadow-[var(--shadow-lg)] sm:pr-2">
+                  <span className="mr-auto font-medium tabular-nums">
+                    {t("admin.reviewRules.selected", { count: selected.size })}
+                  </span>
+                  <Button size="sm" variant="secondary" onClick={() => bulk.mutate("active")}
+                          disabled={bulk.isPending} loading={bulk.isPending && bulk.variables === "active"}>
+                    <CheckIcon /> {t("admin.reviewRules.approve")}
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => bulk.mutate("rejected")}
+                          disabled={bulk.isPending} loading={bulk.isPending && bulk.variables === "rejected"}>
+                    <XIcon /> {t("admin.reviewRules.reject")}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={removeSelected} disabled={bulk.isPending}
+                          className="text-[var(--color-destructive)] hover:bg-[var(--color-destructive-soft)] hover:text-[var(--color-destructive)]">
+                    <Trash2Icon /> {t("common.delete")}
+                  </Button>
+                </div>
+              </m.div>
+            )}
+          </AnimatePresence>
 
-          {list.isLoading && (
-            <p className="text-sm text-[var(--color-muted-foreground)]">{t("common.loading")}</p>
-          )}
+          {list.isLoading && <SkeletonRows rows={4} />}
           {list.error && (
             <Callout tone="danger">{(list.error as Error).message}</Callout>
           )}
@@ -419,9 +430,9 @@ export default function ReviewRulesPage() {
           )}
 
           {visible.length > 0 && canEdit && (
-            <label className="flex items-center gap-2 px-1 text-xs text-[var(--color-muted-foreground)]">
-              <input type="checkbox" checked={allSelected} onChange={toggleAll}
-                     aria-label={t("admin.reviewRules.selectAll")} />
+            <label className="flex w-fit cursor-pointer items-center gap-2.5 px-3 py-1 text-xs text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]">
+              <Checkbox checked={allSelected} onChange={toggleAll}
+                        aria-label={t("admin.reviewRules.selectAll")} />
               {t("admin.reviewRules.selectAll")}
             </label>
           )}
@@ -458,7 +469,7 @@ export default function ReviewRulesPage() {
               <div key={i} className="rounded-md border border-[var(--color-border)] p-2 text-sm">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-medium">{fr.title || fr.pattern}</span>
-                  <Badge variant="outline" className="font-mono text-[10px]">{fr.pattern}</Badge>
+                  <Badge variant="outline" className="font-mono">{fr.pattern}</Badge>
                 </div>
                 <p className="mt-1 whitespace-pre-wrap text-[var(--color-muted-foreground)]">{fr.prompt}</p>
               </div>
@@ -542,28 +553,37 @@ function RuleRow({
   });
 
   return (
-    <div className="rounded-md border border-[var(--color-border)]">
-      <div className="flex items-start gap-2 p-2">
+    <div className={cn(
+      "rounded-lg border bg-[var(--color-card)] transition-[border-color,background-color,box-shadow] duration-150",
+      checked
+        ? "border-[var(--color-primary)]/60 bg-[var(--color-primary-soft)]/30"
+        : open
+          ? "border-[var(--color-border-strong)] shadow-[var(--shadow-sm)]"
+          : "border-[var(--color-border)] hover:border-[var(--color-border-strong)]",
+    )}>
+      <div className="flex items-start gap-3 p-3">
         {canEdit && (
-          <input type="checkbox" className="mt-1.5" checked={checked} onChange={onCheck}
-                 aria-label={t("admin.reviewRules.selectRule", { title: rule.title })} />
+          <Checkbox className="mt-0.5" checked={checked} onChange={onCheck}
+                    aria-label={t("admin.reviewRules.selectRule", { title: rule.title })} />
         )}
-        <button type="button" onClick={onToggle}
-                className="flex min-w-0 flex-1 items-start gap-2 text-left">
-          {open ? <ChevronDownIcon className="mt-1 h-4 w-4 shrink-0" />
-                : <ChevronRightIcon className="mt-1 h-4 w-4 shrink-0" />}
+        <button type="button" onClick={onToggle} aria-expanded={open}
+                className="flex min-w-0 flex-1 items-start gap-2 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]">
+          <ChevronRightIcon aria-hidden className={cn(
+            "mt-0.5 h-4 w-4 shrink-0 text-[var(--color-muted-foreground)] transition-transform duration-200 ease-out-quint",
+            open && "rotate-90",
+          )} />
           <span className="min-w-0 flex-1">
             <span className="flex flex-wrap items-center gap-2">
               <SeverityBadge severity={rule.severity} />
               <span className="font-medium">{rule.title}</span>
               <OriginTag origin={rule.origin} />
               {rule.status !== "active" && (
-                <Badge variant={rule.status === "pending" ? "warning" : "outline"} className="text-[10px]">
+                <Badge variant={rule.status === "pending" ? "warning" : "default"}>
                   {t(`admin.reviewRules.status.${rule.status}`)}
                 </Badge>
               )}
               {rule.path_glob && (
-                <Badge variant="outline" className="font-mono text-[10px]">{rule.path_glob}</Badge>
+                <Badge variant="outline" className="font-mono">{rule.path_glob}</Badge>
               )}
               {rule.agents.length > 0 && (
                 <span className="text-xs text-[var(--color-muted-foreground)]">
@@ -572,7 +592,7 @@ function RuleRow({
               )}
             </span>
             {!open && (
-              <span className="mt-0.5 line-clamp-1 block text-xs text-[var(--color-muted-foreground)]">
+              <span className="mt-1 line-clamp-1 block text-xs text-[var(--color-muted-foreground)]">
                 {rule.instructions}
               </span>
             )}
@@ -580,19 +600,30 @@ function RuleRow({
         </button>
         {canEdit && rule.status === "pending" && (
           <div className="flex shrink-0 gap-1">
-            <Button size="sm" variant="outline" onClick={() => setStatus.mutate("active")}
-                    disabled={setStatus.isPending}>
-              <CheckIcon className="h-4 w-4 mr-1" /> {t("admin.reviewRules.approve")}
+            <Button size="xs" variant="outline" onClick={() => setStatus.mutate("active")}
+                    disabled={setStatus.isPending}
+                    loading={setStatus.isPending && setStatus.variables === "active"}>
+              <CheckIcon className="size-3.5" /> {t("admin.reviewRules.approve")}
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setStatus.mutate("rejected")}
-                    disabled={setStatus.isPending}>
-              <XIcon className="h-4 w-4 mr-1" /> {t("admin.reviewRules.reject")}
+            <Button size="xs" variant="ghost" onClick={() => setStatus.mutate("rejected")}
+                    disabled={setStatus.isPending}
+                    loading={setStatus.isPending && setStatus.variables === "rejected"}>
+              <XIcon className="size-3.5" /> {t("admin.reviewRules.reject")}
             </Button>
           </div>
         )}
       </div>
+      <AnimatePresence initial={false}>
       {open && (
-        <div className="space-y-3 border-t border-[var(--color-border)] p-3">
+        <m.div
+          key="editor"
+          initial={{ height: 0, opacity: 0 }}
+          animate={{ height: "auto", opacity: 1 }}
+          exit={{ height: 0, opacity: 0 }}
+          transition={{ duration: 0.26, ease: [0.23, 1, 0.32, 1] }}
+          className="overflow-hidden"
+        >
+        <div className="space-y-3 border-t border-[var(--color-border)] p-3 sm:pl-10">
           {(rule.rationale || rule.source_ref) && (
             <div className="space-y-1 text-xs text-[var(--color-muted-foreground)]">
               {rule.rationale && <p>{t("admin.reviewRules.rationale", { text: rule.rationale })}</p>}
@@ -615,7 +646,9 @@ function RuleRow({
             <p className="whitespace-pre-wrap text-sm">{rule.instructions}</p>
           )}
         </div>
+        </m.div>
       )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -682,9 +715,8 @@ function RuleEditor({
           <Label>{t("admin.reviewRules.labelAgents")}</Label>
           <div className="mt-1 flex flex-wrap gap-3 text-sm">
             {agents.map((a) => (
-              <label key={a} className="flex items-center gap-1.5">
-                <input
-                  type="checkbox"
+              <label key={a} className="flex cursor-pointer items-center gap-2">
+                <Checkbox
                   checked={targets.includes(a)}
                   onChange={() => setTargets((prev) =>
                     prev.includes(a) ? prev.filter((x) => x !== a) : [...prev, a])}
@@ -711,8 +743,9 @@ function RuleEditor({
       <div className="flex justify-end gap-2">
         {onCancel && <Button variant="ghost" onClick={onCancel}>{t("common.cancel")}</Button>}
         <Button onClick={() => save.mutate()}
-                disabled={save.isPending || !title.trim() || !instructions.trim()}>
-          <SaveIcon className="h-4 w-4 mr-1" />
+                disabled={!title.trim() || !instructions.trim()}
+                loading={save.isPending}>
+          <SaveIcon />
           {save.isPending ? t("common.saving") : t("common.save")}
         </Button>
       </div>
@@ -785,32 +818,33 @@ function LibraryDialog({
           />
         </div>
         <div className="space-y-2">
-          {library.isLoading && (
-            <p className="text-sm text-[var(--color-muted-foreground)]">{t("common.loading")}</p>
-          )}
+          {library.isLoading && <SkeletonRows rows={4} />}
+          {/* Selectable cards: the whole card is the checkbox, and a picked
+              rule shows it three ways — border, tint and the corner check. */}
           {(library.data?.rules ?? []).map((entry) => (
-            <label key={entry.id}
-                   className="flex cursor-pointer items-start gap-2 rounded-md border border-[var(--color-border)] p-2 text-sm">
-              <input type="checkbox" className="mt-1" disabled={entry.added}
-                     checked={entry.added || picked.has(entry.id)} onChange={() => flip(entry)} />
-              <span className="min-w-0 flex-1">
-                <span className="flex flex-wrap items-center gap-2">
-                  <SeverityBadge severity={entry.severity} />
-                  <span className="font-medium">{entry.title}</span>
-                  {entry.added && (
-                    <Badge variant="success" className="text-[10px]">{t("admin.reviewRules.libraryAlready")}</Badge>
-                  )}
-                </span>
-                <span className="mt-0.5 block text-xs text-[var(--color-muted-foreground)]">
-                  {entry.instructions}
-                </span>
-                <span className="mt-1 flex flex-wrap gap-1">
+            <OptionCard
+              key={entry.id}
+              type="checkbox"
+              disabled={entry.added}
+              checked={entry.added || picked.has(entry.id)}
+              onCheckedChange={() => flip(entry)}
+              title={entry.title}
+              meta={<>
+                <SeverityBadge severity={entry.severity} />
+                {entry.added && (
+                  <Badge variant="success"><CheckIcon />{t("admin.reviewRules.libraryAlready")}</Badge>
+                )}
+              </>}
+              description={entry.instructions}
+            >
+              {entry.languages.length > 0 && (
+                <span className="mt-2 flex flex-wrap gap-1">
                   {entry.languages.map((l) => (
-                    <Badge key={l} variant="outline" className="text-[10px]">{l}</Badge>
+                    <Badge key={l} variant="outline" className="font-mono">{l}</Badge>
                   ))}
                 </span>
-              </span>
-            </label>
+              )}
+            </OptionCard>
           ))}
           {library.data && library.data.rules.length === 0 && (
             <p className="text-sm text-[var(--color-muted-foreground)]">{t("admin.reviewRules.libraryEmpty")}</p>
@@ -826,8 +860,8 @@ function LibraryDialog({
               { value: "pending", label: t("admin.reviewRules.libraryAsPending") },
             ]}
           />
-          <Button onClick={() => add.mutate()} disabled={picked.size === 0 || add.isPending}>
-            <PlusIcon className="h-4 w-4 mr-1" />
+          <Button onClick={() => add.mutate()} disabled={picked.size === 0} loading={add.isPending}>
+            <PlusIcon />
             {t("admin.reviewRules.libraryAdd", { count: picked.size })}
           </Button>
         </DialogFooter>

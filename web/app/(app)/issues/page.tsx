@@ -12,7 +12,9 @@
 import { useState } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ExternalLinkIcon, ListChecksIcon } from "lucide-react";
+import { AnimatePresence } from "motion/react";
+import * as m from "motion/react-m";
+import { ChevronRightIcon, ExternalLinkIcon, ListChecksIcon, SearchIcon } from "lucide-react";
 
 import {
   issuesApi,
@@ -25,6 +27,7 @@ import { useToken } from "@/lib/use-token";
 import { useCanEditIssues } from "@/lib/use-analytics-access";
 import { useT } from "@/lib/i18n";
 import { formatDateTime } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import { WorkspaceBadge } from "@/components/workspace-badge";
@@ -32,9 +35,12 @@ import { NoReviewsYetHint } from "@/components/repo-webhook";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { QueryState } from "@/components/ui/query-state";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Select } from "@/components/ui/select";
+import { SeverityBadge, toSeverity } from "@/components/ui/status";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 
 const STATUSES: IssueStatus[] = ["open", "fixed", "dismissed", "resolved"];
@@ -43,13 +49,6 @@ const CATEGORIES = [
   "bug", "security", "performance", "maintainability", "style", "other",
 ] as const;
 const PAGE = 50;
-
-const SEVERITY_CLASS: Record<string, string> = {
-  critical: "text-red-700 dark:text-red-400 font-semibold",
-  error: "text-orange-600 dark:text-orange-400 font-semibold",
-  warning: "text-amber-600 dark:text-amber-400",
-  info: "text-[var(--color-muted-foreground)]",
-};
 
 const STATUS_VARIANT: Record<IssueStatus, "default" | "success" | "warning" | "outline"> = {
   open: "warning",
@@ -130,40 +129,33 @@ export default function IssuesPage() {
         tabs={<SectionTabs set="review" />}
       />
 
-      {/* Status tabs with counts under the other filters, like a mailbox. */}
-      <div role="tablist" aria-label={t("issues.col.status")} className="flex flex-wrap gap-1">
-        {["", ...STATUSES].map((s) => {
-          const active = status === s;
-          const n = s ? counts?.[s as IssueStatus] : counts
+      {/* Status tabs with counts over the other filters, like a mailbox. */}
+      <SegmentedControl
+        semantics="tabs"
+        label={t("issues.col.status")}
+        value={status}
+        onValueChange={(v) => resetPage(setStatus)(v)}
+        segments={["", ...STATUSES].map((s) => ({
+          value: s,
+          label: s ? t(`issues.status.${s}`) : t("issues.all"),
+          count: s ? counts?.[s as IssueStatus] : counts
             ? Object.values(counts).reduce((a, b) => a + b, 0)
-            : undefined;
-          return (
-            <button
-              key={s || "all"}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              onClick={() => resetPage(setStatus)(s)}
-              className={`rounded-md px-3 py-1.5 text-xs transition-colors ${
-                active
-                  ? "bg-[var(--color-brand-muted)] font-medium text-[var(--color-brand)]"
-                  : "text-[var(--color-muted-foreground)] hover:bg-[var(--color-accent)] hover:text-[var(--color-foreground)]"
-              }`}
-            >
-              {s ? t(`issues.status.${s}`) : t("issues.all")}
-              {n !== undefined && <span className="ml-1.5 tabular-nums opacity-70">{n}</span>}
-            </button>
-          );
-        })}
-      </div>
+            : undefined,
+        }))}
+        className="self-start"
+      />
 
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
-        <Input
-          aria-label={t("issues.search")}
-          placeholder={t("issues.search")}
-          value={q}
-          onChange={(e) => resetPage(setQ)(e.target.value)}
-        />
+        <div className="relative">
+          <SearchIcon aria-hidden className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-subtle-foreground)]" />
+          <Input
+            aria-label={t("issues.search")}
+            placeholder={t("issues.search")}
+            value={q}
+            onChange={(e) => resetPage(setQ)(e.target.value)}
+            className="pl-9"
+          />
+        </div>
         <Select
           value={severity}
           onChange={resetPage(setSeverity)}
@@ -192,21 +184,20 @@ export default function IssuesPage() {
       </div>
 
       <Card>
-        <CardContent className="pt-4">
+        <CardContent className="px-2 pt-2 sm:px-3 sm:pt-3">
           <QueryState
             query={list}
             skeleton={6}
           >
             {(data: ReviewIssueList) =>
               data.items.length === 0 ? (
-                <div className="py-10 text-center">
-                  <ListChecksIcon className="mx-auto h-8 w-8 text-[var(--color-muted-foreground)]" />
-                  <div className="mt-2 text-sm font-medium">{t("issues.emptyTitle")}</div>
-                  <p className="mx-auto mt-1 max-w-md text-xs text-[var(--color-muted-foreground)]">
-                    {t("issues.emptyDesc")}
-                  </p>
+                <EmptyState
+                  icon={ListChecksIcon}
+                  title={t("issues.emptyTitle")}
+                  description={t("issues.emptyDesc")}
+                >
                   <NoReviewsYetHint />
-                </div>
+                </EmptyState>
               ) : (
                 <>
                   <Table>
@@ -234,7 +225,7 @@ export default function IssuesPage() {
                       ))}
                     </TBody>
                   </Table>
-                  <div className="mt-3 flex items-center justify-between text-xs text-[var(--color-muted-foreground)]">
+                  <div className="mt-2 flex items-center justify-between gap-3 border-t border-[var(--color-border)] px-2.5 py-3 text-xs tabular-nums text-[var(--color-muted-foreground)]">
                     <span>
                       {t("issues.range", {
                         from: data.total ? data.offset + 1 : 0,
@@ -284,45 +275,49 @@ function IssueRow({
     : null;
   return (
     <>
-      <TR>
+      <TR className={cn(open && "bg-[var(--color-accent)]/50")}>
         <TD className="whitespace-nowrap">
           <div className="flex flex-col gap-1">
             <Select
-              className="h-7 w-32 text-xs"
+              className="h-9 w-32 text-xs sm:h-8"
               disabled={busy || readOnly}
               value={i.status}
               onChange={(v) => onStatus(v as IssueStatus)}
               options={STATUSES.map((s) => ({ value: s, label: t(`issues.status.${s}`) }))}
             />
             {fixedNote && (
-              <Badge variant={STATUS_VARIANT.fixed} className="w-fit text-[10px]">{fixedNote}</Badge>
+              <Badge variant={STATUS_VARIANT.fixed} className="w-fit">{fixedNote}</Badge>
             )}
           </div>
         </TD>
-        <TD className={`whitespace-nowrap ${SEVERITY_CLASS[i.severity] ?? ""}`}>
-          {t(`issues.severity.${i.severity}`)}
+        <TD className="whitespace-nowrap">
+          <SeverityBadge severity={toSeverity(i.severity)} label={t(`issues.severity.${i.severity}`)} />
         </TD>
-        <TD className="whitespace-nowrap">{t(`issues.category.${i.category}`)}</TD>
+        <TD className="whitespace-nowrap text-[var(--color-muted-foreground)]">{t(`issues.category.${i.category}`)}</TD>
         <TD className="min-w-[16rem]">
           <button
             type="button"
-            className="text-left font-medium hover:underline"
+            className="group/title inline-flex items-start gap-1.5 rounded text-left font-medium hover:text-[var(--color-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
             aria-expanded={open}
             onClick={() => setOpen(!open)}
           >
-            {i.title}
+            <ChevronRightIcon aria-hidden className={cn(
+              "mt-0.5 h-4 w-4 shrink-0 text-[var(--color-muted-foreground)] transition-transform duration-200 ease-out-quint",
+              open && "rotate-90",
+            )} />
+            <span className="group-hover/title:underline">{i.title}</span>
           </button>
           {i.occurrences > 1 && (
-            <span className="ml-2 text-[10px] text-[var(--color-muted-foreground)]">
+            <span className="ml-1.5 whitespace-nowrap text-xs text-[var(--color-muted-foreground)]">
               {t("issues.seenTimes", { n: i.occurrences })}
             </span>
           )}
         </TD>
-        <TD className="whitespace-nowrap">{i.pr_repo || i.repo_slug}</TD>
-        <TD className="max-w-[18rem] truncate font-mono" title={i.file_path}>
+        <TD className="whitespace-nowrap text-[var(--color-muted-foreground)]">{i.pr_repo || i.repo_slug}</TD>
+        <TD className="max-w-[18rem] truncate font-mono text-xs text-[var(--color-muted-foreground)]" title={i.file_path}>
           {i.file_path}{i.line ? `:${i.line}` : ""}
         </TD>
-        <TD className="whitespace-nowrap tabular-nums" title={formatDateTime(i.first_seen_at)}>
+        <TD className="whitespace-nowrap tabular-nums text-[var(--color-muted-foreground)]" title={formatDateTime(i.first_seen_at)}>
           {age(i.first_seen_at)}
         </TD>
         <TD className="whitespace-nowrap">
@@ -339,33 +334,43 @@ function IssueRow({
             <>#{i.pr_number}</>
           )}
           {i.pr_state && i.pr_state !== "open" && (
-            <span className="ml-1 text-[10px] text-[var(--color-muted-foreground)]">
+            <span className="ml-1.5 text-xs text-[var(--color-muted-foreground)]">
               {t(`prs.state.${i.pr_state}`)}
             </span>
           )}
         </TD>
       </TR>
-      {open && (
-        <TR>
-          <TD colSpan={8} className="bg-[var(--color-muted)]/30">
-            <div className="space-y-2 py-1 text-xs">
-              {i.body && <p className="whitespace-pre-wrap">{i.body}</p>}
-              {i.suggestion && (
-                <pre className="overflow-x-auto rounded bg-[var(--color-muted)] p-2 font-mono">
-                  {i.suggestion}
-                </pre>
-              )}
-              <p className="text-[var(--color-muted-foreground)]">
-                {t("issues.meta", {
-                  agent: i.agent ?? "—",
-                  first: formatDateTime(i.first_seen_at),
-                  last: formatDateTime(i.last_seen_at),
-                })}
-              </p>
-            </div>
-          </TD>
-        </TR>
-      )}
+      <AnimatePresence initial={false}>
+        {open && (
+          <TR key="detail" className="hover:bg-transparent">
+            <TD colSpan={8} className="p-0">
+              <m.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.26, ease: [0.23, 1, 0.32, 1] }}
+                className="overflow-hidden"
+              >
+                <div className="space-y-2.5 bg-[var(--color-muted)]/40 px-4 py-3 text-sm">
+                  {i.body && <p className="max-w-[75ch] whitespace-pre-wrap leading-relaxed">{i.body}</p>}
+                  {i.suggestion && (
+                    <pre className="max-w-[100ch] overflow-x-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] p-3 font-mono text-xs leading-5">
+                      {i.suggestion}
+                    </pre>
+                  )}
+                  <p className="text-xs text-[var(--color-muted-foreground)]">
+                    {t("issues.meta", {
+                      agent: i.agent ?? "—",
+                      first: formatDateTime(i.first_seen_at),
+                      last: formatDateTime(i.last_seen_at),
+                    })}
+                  </p>
+                </div>
+              </m.div>
+            </TD>
+          </TR>
+        )}
+      </AnimatePresence>
     </>
   );
 }

@@ -29,80 +29,214 @@
   padding-right: 4.5rem;
 }
 
+/* ── Colour system ────────────────────────────────────────────────────────
+ *
+ * OKLCH, so lightness steps are even and a hue keeps its character between
+ * the two themes. Every pair a person reads was measured (WCAG 2.x) when it
+ * was set; the numbers are next to the roles that carry text.
+ *
+ * ROLES, NOT SWATCHES
+ *   primary    the ONE action a view exists for (Save, Run review, Add).
+ *              Celmis teal: the brand's green family moved toward cyan, so
+ *              it can no longer be mistaken for `success`. In a review tool
+ *              green means "passed / merged / fixed"; a Save button in that
+ *              same green read as a status, and a Success pill read as a
+ *              button. Teal (h 186) and success (h 152) are now 34° and a
+ *              clear chroma step apart, and the warm hues stay free for
+ *              severity.
+ *   brand      alias of primary, kept because ~100 call sites say "brand".
+ *   selected   where you ARE (active nav row, chosen segment): a neutral
+ *              lift, not the action colour, so "current" and "do this"
+ *              stop competing.
+ *   attention  warm copper for "changed from the default" (Overridden) and
+ *              other things that want a second look without being an error.
+ *   info / success / warning / destructive
+ *              text-capable on the card AND on their own -soft tint (≥4.5:1
+ *              both themes). `destructive` is the danger TEXT colour;
+ *              buttons fill with `danger-solid`, which carries white text.
+ *
+ * SCALES (use these, never raw Tailwind palette classes)
+ *   severity   critical → error → warning → info   (red, orange, amber, blue)
+ *   status     queued, running, success, partial, skipped, failed
+ *   Each has a -soft background for pills.
+ */
 @theme {
-  /* Neutrals carry a faint green undertone so they sit with the brand. */
-  --color-background: hsl(160 20% 98%);
-  --color-foreground: hsl(172 16% 10%);
-  --color-card: hsl(0 0% 100%);
-  --color-card-foreground: hsl(172 16% 10%);
-  --color-popover: hsl(0 0% 100%);
-  --color-popover-foreground: hsl(172 16% 10%);
-  --color-primary: hsl(170 14% 12%);
-  --color-primary-foreground: hsl(0 0% 100%);
-  --color-secondary: hsl(160 14% 96%);
-  --color-secondary-foreground: hsl(170 14% 12%);
-  --color-muted: hsl(160 14% 96%);
-  --color-muted-foreground: hsl(170 8% 42%);
-  --color-accent: hsl(165 36% 95%);
-  --color-accent-foreground: hsl(168 44% 20%);
-  --color-destructive: hsl(0 68% 48%);
-  --color-destructive-foreground: hsl(0 0% 98%);
-  --color-success: hsl(150 62% 34%);
-  --color-warning: hsl(35 92% 46%);
-  --color-border: hsl(160 12% 89%);
-  /* A field's edge is one step darker than a card's: the two were the same
-   * colour, so an empty input on a white card read as a gap in the layout
-   * rather than as somewhere to type (the provider-key rows on LLM settings). */
-  --color-input: hsl(160 10% 82%);
-  --color-ring: hsl(168 44% 32%);
+  /* Neutrals: a faint cool-teal undertone so they sit with the brand. */
+  --color-background: oklch(0.982 0.004 195);        /* #f6fafa */
+  --color-foreground: oklch(0.21 0.016 210);         /* 16.8:1 on background */
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: var(--color-foreground);
+  --color-popover: oklch(1 0 0);
+  --color-popover-foreground: var(--color-foreground);
+  --color-secondary: oklch(0.955 0.006 200);
+  --color-secondary-foreground: var(--color-foreground);
+  --color-muted: oklch(0.962 0.006 195);
+  --color-muted-foreground: oklch(0.47 0.018 210);   /* 6.8:1 card, 6.1:1 muted */
+  --color-subtle-foreground: oklch(0.54 0.016 210);  /* 5.0:1 card: tertiary meta */
+  /* Hover surface for rows and quiet controls. Neutral on purpose: a green
+   * wash on every hovered row was part of "green means everything". */
+  --color-accent: oklch(0.955 0.007 200);
+  --color-accent-foreground: var(--color-foreground);
+  --color-border: oklch(0.912 0.007 200);            /* hairline, decorative */
+  --color-border-strong: oklch(0.85 0.009 205);
+  /* A field's edge must identify it (WCAG 1.4.11): 3.0:1 on the card. */
+  --color-input: oklch(0.665 0.012 205);
+  --color-ring: oklch(0.56 0.10 186);                /* 4.2:1 on background */
 
-  /* Brand — deep forest green. */
-  --color-brand: hsl(168 44% 25%);
-  --color-brand-foreground: hsl(0 0% 100%);
-  --color-brand-muted: hsl(165 38% 94%);
+  --color-primary: oklch(0.49 0.092 186);            /* #007168 */
+  --color-primary-hover: oklch(0.44 0.088 186);
+  --color-primary-foreground: oklch(0.99 0.004 190); /* 5.8:1 on primary */
+  --color-primary-soft: oklch(0.955 0.03 185);
+  --color-primary-soft-foreground: oklch(0.40 0.08 186); /* 7.7:1 on soft */
+
+  --color-brand: var(--color-primary);
+  --color-brand-foreground: var(--color-primary-foreground);
+  --color-brand-muted: var(--color-primary-soft);
+
+  --color-selected: oklch(0.935 0.008 200);
+  --color-selected-foreground: var(--color-foreground);
+
+  --color-success: oklch(0.50 0.13 152);             /* 5.6:1 card, 5.0:1 soft */
+  --color-success-soft: oklch(0.955 0.035 152);
+  --color-warning: oklch(0.53 0.115 68);             /* 5.4:1 card, 4.8:1 soft */
+  --color-warning-soft: oklch(0.96 0.05 88);
+  --color-destructive: oklch(0.52 0.19 27);          /* 6.1:1 card, 5.3:1 soft */
+  --color-destructive-soft: oklch(0.955 0.025 22);
+  --color-destructive-foreground: oklch(0.99 0 0);
+  --color-danger-solid: oklch(0.55 0.20 27);         /* white text 5.4:1 */
+  --color-danger-solid-hover: oklch(0.50 0.19 27);
+  --color-info: oklch(0.50 0.15 258);                /* 6.1:1 card, 5.3:1 soft */
+  --color-info-soft: oklch(0.955 0.025 258);
+  --color-attention: oklch(0.535 0.15 47);           /* 5.5:1 card, 4.7:1 soft */
+  --color-attention-soft: oklch(0.955 0.035 55);
+  --color-neutral-soft: oklch(0.94 0.006 210);       /* muted-fg on it: 5.7:1 */
+
+  /* Severity — the order of alarm, one hue step per level. */
+  --color-sev-critical: var(--color-destructive);
+  --color-sev-critical-soft: var(--color-destructive-soft);
+  --color-sev-error: var(--color-attention);
+  --color-sev-error-soft: var(--color-attention-soft);
+  --color-sev-warning: var(--color-warning);
+  --color-sev-warning-soft: var(--color-warning-soft);
+  --color-sev-info: var(--color-info);
+  --color-sev-info-soft: var(--color-info-soft);
+
+  /* Run / stage lifecycle. Running is blue, not brand: it is a state, and
+   * the action colour on a state is how "Running" and "Save" looked alike. */
+  --color-status-queued: var(--color-muted-foreground);
+  --color-status-queued-soft: var(--color-neutral-soft);
+  --color-status-running: var(--color-info);
+  --color-status-running-soft: var(--color-info-soft);
+  --color-status-success: var(--color-success);
+  --color-status-success-soft: var(--color-success-soft);
+  --color-status-partial: var(--color-warning);
+  --color-status-partial-soft: var(--color-warning-soft);
+  --color-status-skipped: var(--color-muted-foreground);
+  --color-status-skipped-soft: var(--color-neutral-soft);
+  --color-status-failed: var(--color-destructive);
+  --color-status-failed-soft: var(--color-destructive-soft);
 
   --radius: 0.625rem;
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 
-  /* Elevation scale — soft, layered shadows for depth. */
-  --shadow-xs: 0 1px 2px 0 hsl(170 14% 10% / 0.04);
-  --shadow-sm: 0 1px 3px 0 hsl(170 14% 10% / 0.06), 0 1px 2px -1px hsl(170 14% 10% / 0.06);
-  --shadow-md: 0 4px 12px -2px hsl(170 14% 10% / 0.08), 0 2px 6px -2px hsl(170 14% 10% / 0.05);
-  --shadow-lg: 0 12px 28px -6px hsl(170 16% 10% / 0.12), 0 6px 12px -6px hsl(170 16% 10% / 0.08);
+  /* Motion. Arrivals decelerate; routine state changes stay under 250ms. */
+  --ease-out-quint: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out-cubic: cubic-bezier(0.645, 0.045, 0.355, 1);
+  --animate-shimmer: celmis-shimmer 1.6s linear infinite;
+  --animate-pulse-dot: celmis-pulse-dot 1.4s ease-in-out infinite;
+
+  /* Elevation — soft and tinted to the canvas hue, never pure black. */
+  --shadow-xs: 0 1px 2px 0 oklch(0.25 0.02 210 / 0.05);
+  --shadow-sm: 0 1px 3px 0 oklch(0.25 0.02 210 / 0.07), 0 1px 2px -1px oklch(0.25 0.02 210 / 0.06);
+  --shadow-md: 0 4px 12px -2px oklch(0.25 0.02 210 / 0.09), 0 2px 6px -2px oklch(0.25 0.02 210 / 0.05);
+  --shadow-lg: 0 12px 28px -6px oklch(0.25 0.02 210 / 0.14), 0 6px 12px -6px oklch(0.25 0.02 210 / 0.08);
 }
 
 .dark {
-  --color-background: hsl(172 14% 6%);
-  --color-foreground: hsl(160 10% 97%);
-  --color-card: hsl(172 12% 9%);
-  --color-card-foreground: hsl(160 10% 97%);
-  --color-popover: hsl(172 12% 9%);
-  --color-popover-foreground: hsl(160 10% 97%);
-  --color-primary: hsl(160 10% 97%);
-  --color-primary-foreground: hsl(170 14% 12%);
-  --color-secondary: hsl(172 8% 15%);
-  --color-secondary-foreground: hsl(160 10% 97%);
-  --color-muted: hsl(172 8% 15%);
-  --color-muted-foreground: hsl(165 8% 62%);
-  --color-accent: hsl(168 22% 15%);
-  --color-accent-foreground: hsl(160 45% 82%);
-  --color-destructive: hsl(0 62% 52%);
-  --color-success: hsl(150 55% 48%);
-  --color-warning: hsl(35 85% 55%);
-  --color-border: hsl(172 8% 17%);
-  --color-input: hsl(172 8% 24%);
-  --color-ring: hsl(160 45% 52%);
+  --color-background: oklch(0.165 0.007 210);        /* #0b0f10 */
+  --color-foreground: oklch(0.955 0.006 200);        /* 16.9:1 */
+  --color-card: oklch(0.198 0.008 210);              /* #121718 */
+  --color-popover: oklch(0.225 0.009 210);
+  --color-secondary: oklch(0.265 0.009 210);
+  --color-muted: oklch(0.245 0.009 210);
+  --color-muted-foreground: oklch(0.76 0.014 205);   /* 8.5:1 card, 7.6:1 muted */
+  --color-subtle-foreground: oklch(0.66 0.014 205);  /* 5.9:1 card */
+  --color-accent: oklch(0.255 0.01 210);
+  --color-border: oklch(0.285 0.009 210);
+  --color-border-strong: oklch(0.36 0.01 210);
+  --color-input: oklch(0.50 0.012 210);              /* 3.0:1 on card */
+  --color-ring: oklch(0.78 0.11 182);
 
-  /* Brand lifts in dark mode so it stays legible on the near-black canvas. */
-  --color-brand: hsl(160 45% 55%);
-  --color-brand-foreground: hsl(172 30% 8%);
-  --color-brand-muted: hsl(168 28% 15%);
+  --color-primary: oklch(0.80 0.115 182);            /* #57d6c3 */
+  --color-primary-hover: oklch(0.85 0.105 182);
+  --color-primary-foreground: oklch(0.21 0.035 195); /* 9.9:1 on primary */
+  --color-primary-soft: oklch(0.29 0.045 190);
+  --color-primary-soft-foreground: oklch(0.86 0.09 182);
 
-  --shadow-xs: 0 1px 2px 0 hsl(0 0% 0% / 0.3);
-  --shadow-sm: 0 1px 3px 0 hsl(0 0% 0% / 0.4), 0 1px 2px -1px hsl(0 0% 0% / 0.4);
-  --shadow-md: 0 4px 12px -2px hsl(0 0% 0% / 0.5), 0 2px 6px -2px hsl(0 0% 0% / 0.4);
-  --shadow-lg: 0 12px 28px -6px hsl(0 0% 0% / 0.6), 0 6px 12px -6px hsl(0 0% 0% / 0.5);
+  --color-selected: oklch(0.285 0.01 210);
+
+  --color-success: oklch(0.79 0.15 152);             /* 9.9:1 card, 7.8:1 soft */
+  --color-success-soft: oklch(0.28 0.05 155);
+  --color-warning: oklch(0.84 0.13 82);              /* 11:1 card, 8.6:1 soft */
+  --color-warning-soft: oklch(0.29 0.045 80);
+  --color-destructive: oklch(0.74 0.15 24);          /* 7.4:1 card, 6.0:1 soft */
+  --color-destructive-soft: oklch(0.285 0.06 24);
+  --color-danger-solid: oklch(0.58 0.19 26);         /* white text 4.7:1 */
+  --color-danger-solid-hover: oklch(0.62 0.19 26);
+  --color-info: oklch(0.78 0.11 252);                /* 9.1:1 card, 7.3:1 soft */
+  --color-info-soft: oklch(0.28 0.05 258);
+  --color-attention: oklch(0.78 0.14 55);            /* 8.7:1 card, 6.9:1 soft */
+  --color-attention-soft: oklch(0.29 0.055 50);
+  --color-neutral-soft: oklch(0.27 0.009 210);
+
+  /* The aliases again. A custom property that points at another one is
+   * resolved on the element that declares it, so the copies in @theme
+   * (declared on :root) would keep the LIGHT values inside any `.dark`
+   * subtree that is not <html> itself. Re-declaring them here makes every
+   * `.dark` box resolve them against its own tokens. */
+  --color-card-foreground: var(--color-foreground);
+  --color-popover-foreground: var(--color-foreground);
+  --color-secondary-foreground: var(--color-foreground);
+  --color-accent-foreground: var(--color-foreground);
+  --color-selected-foreground: var(--color-foreground);
+  --color-brand: var(--color-primary);
+  --color-brand-foreground: var(--color-primary-foreground);
+  --color-brand-muted: var(--color-primary-soft);
+  --color-sev-critical: var(--color-destructive);
+  --color-sev-critical-soft: var(--color-destructive-soft);
+  --color-sev-error: var(--color-attention);
+  --color-sev-error-soft: var(--color-attention-soft);
+  --color-sev-warning: var(--color-warning);
+  --color-sev-warning-soft: var(--color-warning-soft);
+  --color-sev-info: var(--color-info);
+  --color-sev-info-soft: var(--color-info-soft);
+  --color-status-queued: var(--color-muted-foreground);
+  --color-status-queued-soft: var(--color-neutral-soft);
+  --color-status-running: var(--color-info);
+  --color-status-running-soft: var(--color-info-soft);
+  --color-status-success: var(--color-success);
+  --color-status-success-soft: var(--color-success-soft);
+  --color-status-partial: var(--color-warning);
+  --color-status-partial-soft: var(--color-warning-soft);
+  --color-status-skipped: var(--color-muted-foreground);
+  --color-status-skipped-soft: var(--color-neutral-soft);
+  --color-status-failed: var(--color-destructive);
+  --color-status-failed-soft: var(--color-destructive-soft);
+
+  --shadow-xs: 0 1px 2px 0 oklch(0 0 0 / 0.35);
+  --shadow-sm: 0 1px 3px 0 oklch(0 0 0 / 0.4), 0 1px 2px -1px oklch(0 0 0 / 0.4);
+  --shadow-md: 0 4px 12px -2px oklch(0 0 0 / 0.5), 0 2px 6px -2px oklch(0 0 0 / 0.4);
+  --shadow-lg: 0 16px 32px -8px oklch(0 0 0 / 0.6), 0 6px 12px -6px oklch(0 0 0 / 0.5);
+}
+
+@keyframes celmis-shimmer {
+  from { background-position: 150% 0; }
+  to { background-position: -50% 0; }
+}
+@keyframes celmis-pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 45%, transparent); }
+  60% { box-shadow: 0 0 0 4px color-mix(in oklab, currentColor 0%, transparent); }
 }
 
 @layer base {
@@ -123,19 +257,31 @@
     text-rendering: optimizeLegibility;
   }
   ::selection {
-    background-color: color-mix(in srgb, var(--color-brand) 22%, transparent);
+    background-color: color-mix(in oklab, var(--color-primary) 28%, transparent);
+  }
+  /* Native checkboxes, radios and ranges that no primitive wraps still take
+   * the action colour instead of the OS blue. */
+  :root {
+    accent-color: var(--color-primary);
+  }
+  /* A link or summary without its own focus style still shows where the
+   * keyboard is. Components that draw a ring set outline-none themselves. */
+  :where(a, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+    border-radius: 4px;
   }
   /* Slim, unobtrusive scrollbars. */
   * {
     scrollbar-width: thin;
-    scrollbar-color: var(--color-border) transparent;
+    scrollbar-color: var(--color-border-strong) transparent;
   }
   *::-webkit-scrollbar {
     width: 10px;
     height: 10px;
   }
   *::-webkit-scrollbar-thumb {
-    background-color: var(--color-border);
+    background-color: var(--color-border-strong);
     border-radius: 9999px;
     border: 3px solid transparent;
     background-clip: content-box;
@@ -218,9 +364,8 @@
 }
 .celmis-tour .driver-popover-footer-btn:hover,
 .celmis-tour .driver-popover-footer-btn:focus {
-  background-color: var(--color-brand);
-  color: var(--color-brand-foreground);
-  opacity: 0.9;
+  background-color: var(--color-primary-hover);
+  color: var(--color-primary-foreground);
 }
 /* Previous — like the outline button. */
 .celmis-tour .driver-popover-prev-btn {
@@ -270,4 +415,109 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .celmis-streaming > :last-child::after { animation: none; }
+}
+
+/* ── <Slider> ─────────────────────────────────────────────────────────────
+ * A native range input with a 6px track, a primary fill up to the value
+ * (--range-pct, set by the component) and a 16px thumb that grows a halo
+ * on hover and focus. The input box is 44px tall on touch screens so the
+ * thumb is easy to catch; the track is drawn in the middle of it. */
+.celmis-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 2.75rem;
+  background: transparent;
+  cursor: pointer;
+}
+@media (min-width: 640px) {
+  .celmis-range { height: 1.25rem; }
+}
+.celmis-range:disabled { cursor: not-allowed; opacity: 0.5; }
+.celmis-range:focus-visible { outline: none; }
+.celmis-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: linear-gradient(
+    to right,
+    var(--color-primary) 0 var(--range-pct, 0%),
+    var(--color-muted) var(--range-pct, 0%) 100%
+  );
+  box-shadow: inset 0 0 0 1px var(--color-border);
+}
+.celmis-range::-moz-range-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--color-muted);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+}
+.celmis-range::-moz-range-progress {
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--color-primary);
+}
+.celmis-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -5px;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: var(--color-card);
+  border: 2px solid var(--color-primary);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 150ms var(--ease-out-quint), transform 150ms var(--ease-out-quint);
+}
+.celmis-range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  background: var(--color-card);
+  border: 2px solid var(--color-primary);
+  box-shadow: var(--shadow-sm);
+}
+.celmis-range:hover::-webkit-slider-thumb,
+.celmis-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 5px color-mix(in oklab, var(--color-primary) 22%, transparent);
+}
+.celmis-range:active::-webkit-slider-thumb { transform: scale(1.1); }
+.celmis-range:hover::-moz-range-thumb,
+.celmis-range:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 5px color-mix(in oklab, var(--color-primary) 22%, transparent);
+}
+
+/* ── Toasts (sonner) ──────────────────────────────────────────────────────
+ * The toaster's own palette knows nothing about the theme toggle. These map
+ * its surface and its four tones onto the app tokens: a card with a tinted
+ * icon, rather than a slab of saturated colour. */
+html [data-sonner-toaster][data-sonner-theme] {
+  --normal-bg: var(--color-popover);
+  --normal-text: var(--color-popover-foreground);
+  --normal-border: var(--color-border-strong);
+  --border-radius: 0.75rem;
+  font-family: var(--font-sans);
+}
+html [data-sonner-toast][data-styled="true"] {
+  box-shadow: var(--shadow-lg);
+  gap: 0.625rem;
+}
+[data-sonner-toast][data-styled="true"] [data-description] {
+  color: var(--color-muted-foreground);
+}
+[data-sonner-toast][data-type="success"] [data-icon] { color: var(--color-success); }
+[data-sonner-toast][data-type="error"] [data-icon] { color: var(--color-destructive); }
+[data-sonner-toast][data-type="warning"] [data-icon] { color: var(--color-warning); }
+[data-sonner-toast][data-type="info"] [data-icon] { color: var(--color-info); }
+[data-sonner-toast][data-type="error"] {
+  border-color: color-mix(in oklab, var(--color-destructive) 45%, var(--color-border));
+}
+
+/* Loops that only decorate a wait stop for anyone who asked for less
+ * motion. The state they mark stays visible: the skeleton keeps its tint,
+ * the running dot keeps its colour. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-shimmer,
+  .animate-pulse-dot {
+    animation: none;
+  }
 }

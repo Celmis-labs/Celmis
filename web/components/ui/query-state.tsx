@@ -6,13 +6,13 @@ import type { LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Skeleton } from "@/components/ui/skeleton";
+import { SkeletonRows } from "@/components/ui/skeleton";
 import { useT } from "@/lib/i18n";
 
 /**
  * Standard loading / error / empty / data switch for a useQuery result.
  *
- * - loading → skeleton rows (3 by default)
+ * - loading → list-shaped skeleton rows (3 by default)
  * - error   → danger Callout with the message and a Retry button
  * - data is an empty array AND `empty` given → EmptyState
  * - otherwise → children(data)
@@ -49,13 +49,7 @@ export function QueryState<T>({
   // isPending also covers token-gated queries (`enabled: !!token`) that have
   // not started yet — skeletons are the right thing to show there too.
   if (query.isPending || query.data === undefined) {
-    return (
-      <div className="space-y-2">
-        {Array.from({ length: skeleton }).map((_, i) => (
-          <Skeleton key={i} className="h-10 w-full" />
-        ))}
-      </div>
-    );
+    return <SkeletonRows rows={skeleton} />;
   }
 
   const data = query.data;
