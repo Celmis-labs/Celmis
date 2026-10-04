@@ -229,8 +229,9 @@ def resolve_profile(surface: str, workspace_id: str = "default") -> Profile:
         # it; a proxy alias names whatever THAT proxy maps it to. Letting a
         # tenant's own proxy answer for "embedding-2-test" could write vectors
         # from a different model into the shared collection. So the shared
-        # embeddings profile uses the default tenant's proxy (or the env pair)
-        # and nothing else.
+        # embeddings profile uses the installation embeddings proxy — the
+        # default tenant's row, which a global admin may connect from any
+        # workspace (PUT /api/llm/embeddings/litellm) — and nothing else.
         from src.llm.litellm_proxy import resolve_endpoint
 
         ep = resolve_endpoint(effective_ws)

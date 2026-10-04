@@ -19,6 +19,12 @@ Everything a tech-lead needs to configure the AI reviewer lives here:
     PUT  /api/llm/litellm            — validate-then-save the workspace's
                                        own LiteLLM proxy (URL + virtual key)
     DELETE /api/llm/litellm          — remove it
+    PUT  /api/llm/embeddings         — the installation-wide embeddings
+                                       profile (global admin, any workspace;
+                                       stored on workspace "default")
+    PUT  /api/llm/embeddings/litellm — connect the installation embeddings
+                                       proxy (= default's LiteLLM row) when
+                                       none exists yet; same validate-then-save
     GET  /api/llm/local-setup-guide  — static instructions for pointing a
                                        surface at a self-hosted server.
     GET  /api/llm/model-capabilities — what the INSTALLED litellm knows about
@@ -94,8 +100,10 @@ _BASE_URL_SURFACES = ("chat", "review", "agent")
 _EMBEDDINGS_PROVIDERS = ("google", "gemini", "openai", "mistral", "litellm")
 # A workspace's own LiteLLM proxy (src/llm/litellm_proxy.py): URL + virtual
 # key stored as ONE encrypted credentials row, set ONLY via PUT /api/llm/litellm
-# (validate-then-save) and usable by every surface. Embeddings only where the
-# embeddings profile is actually read — see _litellm_embeddings_allowed.
+# (validate-then-save) and usable by every surface of THAT workspace. The shared
+# embeddings surface never uses the caller's row: it runs on the installation
+# embeddings proxy, the "default" workspace's row — see _can_edit_embeddings
+# and _check_litellm_profile.
 _LITELLM_PROVIDER = "litellm"
 
 # What one agent's entry may carry. Anything else is a 422: "max_tokens"
@@ -286,9 +294,23 @@ class LLMConfigOut(BaseModel):
     # The workspace's own LiteLLM proxy (provider "litellm").
     litellm: LiteLLMProxyOut = Field(
         default_factory=lambda: LiteLLMProxyOut(connected=False))
-    # Whether the embeddings surface may be pointed at a LiteLLM proxy from
-    # THIS workspace — see _litellm_embeddings_allowed.
+    # Whether the CALLER may point the shared embeddings surface at a LiteLLM
+    # proxy — see _can_edit_embeddings. Kept under its old name for clients
+    # that read it; it now answers "is this an installation admin", from any
+    # workspace, because the embeddings profile is installation-wide.
     litellm_embeddings_allowed: bool = False
+    # Embeddings are ONE installation-wide setting (one shared vector
+    # collection, one model, one width), stored on the "default" workspace
+    # whichever workspace the page is opened in. Only a global admin may
+    # change it; everybody else gets the card read-only with the reason.
+    embeddings_editable: bool = False
+    # The installation embeddings proxy = the "default" workspace's LiteLLM
+    # proxy row. Deliberately NOT `litellm` above, which is the CALLER's own
+    # proxy and is never used for the shared collection. Host, masked key
+    # and fingerprint only for a global admin; everybody else learns only
+    # whether one is connected.
+    embeddings_proxy: LiteLLMProxyOut = Field(
+        default_factory=lambda: LiteLLMProxyOut(connected=False))
 
 
 class LLMConfigIn(BaseModel):
@@ -336,6 +358,20 @@ class LLMConfigIn(BaseModel):
     # "leave it alone". Not sending the key at all still leaves the stored map
     # untouched, so a partial PUT from a neighbouring card cannot wipe it.
     agents: dict[str, dict | None] | None = None
+
+
+class EmbeddingsProfileIn(BaseModel):
+    """Body for PUT /api/llm/embeddings — the installation-wide embeddings
+    profile. No base_url: a self-hosted embedder is pinned with the
+    EMBEDDING_* env variables, never from a page (see get_config's seam note).
+    Extra keys are a 422 rather than silently dropped, so a client that sends
+    one learns that here instead of from a profile that never changed."""
+
+    model_config = {"extra": "forbid"}
+
+    provider: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=300)
+    dimensions: int | None = Field(default=None, ge=1, le=65536)
 
 
 class TestConnectionIn(BaseModel):
@@ -487,16 +523,48 @@ def _current_key(provider: str, workspace_id: str = "default") -> str | None:
 # ─── Workspace LiteLLM proxy (provider "litellm") ────────────────────
 
 
-def _litellm_embeddings_allowed(workspace_id: str) -> bool:
-    """May this workspace point the embeddings surface at a LiteLLM proxy?
+def _can_edit_embeddings(user: User) -> bool:
+    """May `user` change the installation-wide embeddings profile?
 
-    Only the default workspace. Embeddings are workspace-SHARED: one Qdrant
-    collection, so `resolve_profile("embeddings", ws)` reads the default
-    tenant's profile whoever calls (src/llm/profiles.py). A profile saved in
-    any other workspace is never read — and a proxy alias only means
-    something on the proxy that defines it. Refused rather than ignored.
+    Only a global admin (``is_admin`` — which the superadmin master account
+    also carries), and from ANY workspace. Embeddings are workspace-SHARED:
+    one Qdrant collection with one model and one vector width, so
+    `resolve_profile("embeddings", ws)` reads the "default" tenant's profile
+    whoever calls (src/llm/profiles.py). A workspace owner changing it would
+    be changing what every other tenant's code is embedded with — and, on a
+    width change, asking to drop their vectors.
+
+    This replaced "only while the default workspace is active". That rule
+    answered the right question with the wrong input: an installation admin
+    working in a shared workspace was refused, and a PUT /config from there
+    merged the profile into a blob nobody reads — a silent no-op whose card
+    snapped back on reload.
     """
-    return workspace_id == "default"
+    return bool(getattr(user, "is_admin", False))
+
+
+_EMBEDDINGS_ADMIN_ONLY = (
+    "embeddings are one installation-wide setting shared by every workspace "
+    "(one vector collection, one model) — only an installation admin can "
+    "change them"
+)
+
+
+def _require_embeddings_editor(user: User) -> None:
+    if not _can_edit_embeddings(user):
+        raise HTTPException(status_code=403, detail=_EMBEDDINGS_ADMIN_ONLY)
+
+
+def _embeddings_proxy_out(user: User) -> LiteLLMProxyOut:
+    """The installation embeddings proxy (the default workspace's row) as the
+    Embeddings card shows it: everything but secrets to a global admin, the
+    bare "connected" bit to anyone else — the operator's host, key tail and
+    fingerprint are not a tenant's business."""
+    if _can_edit_embeddings(user):
+        return _litellm_out("default", show_host=True)
+    from src.llm import litellm_proxy
+
+    return LiteLLMProxyOut(connected=litellm_proxy.resolve_endpoint("default") is not None)
 
 
 def _litellm_out(workspace_id: str, *, show_host: bool = False) -> LiteLLMProxyOut:
@@ -569,27 +637,104 @@ class _ProxyModels:
 def _check_litellm_profile(surface: str, workspace_id: str) -> str:
     """422 unless `surface` may be set to provider "litellm" here.
 
-    Returns the workspace whose proxy the surface will call (embeddings: the
-    shared default tenant's).
+    Returns the workspace whose proxy the surface will call. Embeddings: the
+    "default" tenant's — the installation embeddings proxy — whatever the
+    caller's workspace, and never the caller's own proxy: an alias means what
+    THAT proxy maps it to, so a tenant proxy answering for the shared
+    collection could write another model's vectors into it. WHO may set
+    embeddings is the caller's check (_require_embeddings_editor), not this
+    one's.
     """
     from src.llm import litellm_proxy
 
-    if surface == "embeddings":
-        if not _litellm_embeddings_allowed(workspace_id):
-            raise HTTPException(status_code=422, detail=(
-                "embeddings are shared by every workspace and configured in "
-                "the default workspace; a LiteLLM proxy for embeddings can be "
-                "chosen only there"
-            ))
-        target = "default"
-    else:
-        target = workspace_id
+    target = "default" if surface == "embeddings" else workspace_id
     if litellm_proxy.resolve_endpoint(target) is None:
+        if surface == "embeddings":
+            raise HTTPException(status_code=422, detail=(
+                "no installation embeddings proxy configured — connect a "
+                "LiteLLM proxy on the Embeddings card first"
+            ))
         raise HTTPException(status_code=422, detail=(
             "no LiteLLM proxy configured for this workspace — a workspace "
             "admin saves its URL and key in Settings → LLM first"
         ))
     return target
+
+
+def _merged_embeddings_entry(
+    cur: dict[str, Any], entry: dict[str, Any], proxy_models: _ProxyModels,
+) -> dict[str, Any]:
+    """`entry` merged over the stored embeddings profile `cur`, validated.
+
+    The ONE validation path for the shared embeddings profile — PUT /config
+    (from any workspace) and PUT /embeddings both come through here, so the
+    two cannot accept different things. Pure apart from the proxy model list:
+    the caller loads and saves the default blob under its lock.
+    """
+    out = dict(cur)
+    if entry.get("provider"):
+        out["provider"] = entry["provider"]
+    if entry.get("model"):
+        out["model"] = entry["model"]
+    if entry.get("dimensions"):
+        out["dimensions"] = int(entry["dimensions"])
+    if entry.get("provider") and \
+            entry["provider"] not in (*_EMBEDDINGS_PROVIDERS, _LOCAL_PROVIDER):
+        # Without this guard the save succeeds and the failure surfaces at
+        # index time, inside a queued job with nobody watching (litellm has
+        # no embeddings route for these vendors). See _EMBEDDINGS_PROVIDERS.
+        raise HTTPException(status_code=422, detail=(
+            f"provider '{entry['provider']}' has no embeddings API "
+            "LiteLLM can route to — embeddings can use google, openai "
+            "or mistral, or the LiteLLM proxy. For a self-hosted embedder, set the "
+            "EMBEDDING_* env variables — see "
+            "GET /api/llm/local-setup-guide."
+        ))
+    if out.get("provider") == _LITELLM_PROVIDER and (
+            entry.get("provider") or entry.get("model")):
+        # Fail closed at save time: the INSTALLATION proxy must exist, and
+        # the model must be one it lists — never free text.
+        proxy_ws = _check_litellm_profile("embeddings", "default")
+        proxy_models.require(str(out.get("model") or ""), proxy_ws,
+                             "profile 'embeddings'")
+    if "base_url" in entry:
+        raise HTTPException(status_code=422, detail=(
+            "base_url applies to the chat, review and agent "
+            "surfaces only. Embeddings are configured at the "
+            "installation level via EMBEDDING_* env variables — "
+            "see GET /api/llm/local-setup-guide."
+        ))
+    if out.get("provider") == _LOCAL_PROVIDER:
+        raise HTTPException(status_code=422, detail=(
+            f"provider '{_LOCAL_PROVIDER}' is available for the "
+            "chat, review and agent surfaces only. For "
+            "embeddings, set the EMBEDDING_* env variables — see "
+            "GET /api/llm/local-setup-guide."
+        ))
+    # A stale address from a self-hosted era would silently redirect the
+    # hosted provider's calls.
+    out.pop("base_url", None)
+    return out
+
+
+def _save_shared_embeddings(
+    entry: dict[str, Any], proxy_models: _ProxyModels, *, updated_by: str,
+) -> dict[str, Any]:
+    """Validate `entry` and write it into the DEFAULT workspace's blob.
+
+    The whole load → merge → save runs under the default blob's lock, the
+    proxy check included (PUT /config already holds its lock across the same
+    network check), so a concurrent price save or profile save in the default
+    workspace cannot be lost in between.
+    """
+    with workspace_config_lock("default"):
+        blob = _load_workspace_config("default")
+        profs = dict(blob.get("profiles") or {})
+        profs["embeddings"] = _merged_embeddings_entry(
+            dict(profs.get("embeddings") or {}), entry, proxy_models)
+        blob["profiles"] = profs
+        _save_workspace_config(blob, updated_by=updated_by, workspace_id="default")
+    return profs["embeddings"]
 
 
 # ─── Per-agent configuration: capabilities in, overrides out ─────────
@@ -1073,8 +1218,14 @@ def get_config(
             effective_temperature=effective.get("temperature"),
         )
 
-    reindex_needed = cfg.get("embeddings_indexed_signature") not in (None, embeddings_signature()) \
-        if cfg.get("embeddings_indexed_signature") else False
+    # The indexed signature lives where the reindex endpoint writes it — the
+    # DEFAULT blob, next to the shared profile it fingerprints. Reading the
+    # caller's blob here meant every non-default workspace compared against a
+    # signature that was never written (or was a stale copy), so the
+    # "re-index needed" banner was meaningless outside "default".
+    shared_cfg = cfg if workspace_id == "default" else _load_workspace_config("default")
+    indexed_sig = shared_cfg.get("embeddings_indexed_signature")
+    reindex_needed = bool(indexed_sig) and indexed_sig != embeddings_signature()
 
     # The embeddings SEAM is env-first: EMBEDDING_PROVIDER decides WHOSE SERVER
     # embeds before any profile is consulted (src/llm/completion.py). When it
@@ -1126,7 +1277,9 @@ def get_config(
         gateway_enabled=gateway_enabled,
         litellm=_litellm_out(
             workspace_id, show_host=_can_see_proxy_host(user, workspace_id)),
-        litellm_embeddings_allowed=_litellm_embeddings_allowed(workspace_id),
+        litellm_embeddings_allowed=_can_edit_embeddings(user),
+        embeddings_editable=_can_edit_embeddings(user),
+        embeddings_proxy=_embeddings_proxy_out(user),
     )
 
 
@@ -1164,6 +1317,14 @@ def _put_config(
             "the LiteLLM proxy URL and key are saved with PUT /api/llm/litellm "
             "(Settings → LLM → LiteLLM proxy), never as a bare key"
         ))
+    # The shared embeddings profile: refused BEFORE anything below is written,
+    # so a workspace owner's request that carries it changes nothing at all
+    # rather than saving its keys and then failing halfway.
+    emb_entry = (payload.profiles or {}).get("embeddings")
+    if emb_entry is not None:
+        if not isinstance(emb_entry, dict):
+            raise HTTPException(status_code=422, detail="profiles.embeddings must be an object")
+        _require_embeddings_editor(user)
     # Persist the primary provider api_key first (if provided) — under the
     # workspace's OWN slot so it is both readable (get_config reads ws:{id})
     # and isolated from other tenants.
@@ -1257,26 +1418,27 @@ def _put_config(
         for name, entry in payload.profiles.items():
             if name not in PROFILE_NAMES or not isinstance(entry, dict):
                 continue
+            if name == "embeddings":
+                if workspace_id == "default":
+                    # The default blob IS the shared one and is being rebuilt
+                    # whole by this request — merge into it here, or the
+                    # save below would overwrite a separate write.
+                    cfg["profiles"]["embeddings"] = _merged_embeddings_entry(
+                        dict(cfg["profiles"].get("embeddings") or {}), entry,
+                        proxy_models)
+                else:
+                    # Validated now (fail before anything is saved), written
+                    # to the default blob after this workspace's own save.
+                    _merged_embeddings_entry(
+                        dict((_load_workspace_config("default").get("profiles") or {})
+                              .get("embeddings") or {}),
+                        entry, proxy_models)
+                continue
             cur = dict(cfg["profiles"].get(name) or {})
             if entry.get("provider"):
                 cur["provider"] = entry["provider"]
             if entry.get("model"):
                 cur["model"] = entry["model"]
-            if name == "embeddings" and entry.get("dimensions"):
-                cur["dimensions"] = int(entry["dimensions"])
-            if name == "embeddings" and entry.get("provider") and \
-                    entry["provider"] not in (*_EMBEDDINGS_PROVIDERS, _LOCAL_PROVIDER):
-                # Without this guard the save succeeds and the failure
-                # surfaces at index time, inside a queued job with nobody
-                # watching (litellm has no embeddings route for these
-                # vendors). See _EMBEDDINGS_PROVIDERS.
-                raise HTTPException(status_code=422, detail=(
-                    f"provider '{entry['provider']}' has no embeddings API "
-                    "LiteLLM can route to — embeddings can use google, openai "
-                    "or mistral, or the LiteLLM proxy. For a self-hosted embedder, set the "
-                    "EMBEDDING_* env variables — see "
-                    "GET /api/llm/local-setup-guide."
-                ))
             if cur.get("provider") == _LITELLM_PROVIDER and (
                     entry.get("provider") or entry.get("model")):
                 # Fail closed at save time: the proxy must exist, and the
@@ -1353,6 +1515,15 @@ def _put_config(
         cfg["agents"] = _agent_overrides_from_payload(
             payload.agents, cfg, workspace_id,
         )
+    if workspace_id != "default":
+        # The fix for the old silent no-op: this used to merge the shared
+        # profile into THIS workspace's blob, which resolve_profile never
+        # reads — the save "succeeded" and the card snapped back on reload.
+        # It now goes where it is read, and any stale copy an earlier save
+        # left here is dropped so nothing can mistake it for the real one.
+        cfg["profiles"].pop("embeddings", None)
+        if emb_entry is not None:
+            _save_shared_embeddings(emb_entry, proxy_models, updated_by=user.email)
     _save_workspace_config(cfg, updated_by=user.email, workspace_id=workspace_id)
     # Config changed → drop cached Gemini clients so it takes effect at once.
     try:
@@ -1399,7 +1570,113 @@ def _put_config(
             ip=client_ip(request),
             detail={k: str(v)[:300] for k, v in routing.items()},
         )
+    if emb_entry is not None and workspace_id != "default":
+        _audit_shared_embeddings(user, request, emb_entry, via_workspace=workspace_id)
     return get_config(user=user, workspace_id=workspace_id)
+
+
+def _audit_shared_embeddings(
+    user: User, request: Request, entry: dict[str, Any], *, via_workspace: str,
+) -> None:
+    """One audit row on the tenant whose blob was written ("default"), naming
+    the workspace the admin acted from — the row on the acting workspace alone
+    would put an installation-wide change in one tenant's history only."""
+    record_action(
+        action="llm_config.changed", actor=user.email, actor_id=user.id,
+        workspace_id="default", target="embeddings",
+        ip=client_ip(request),
+        detail={"profiles": str({"embeddings": entry})[:300],
+                "scope": "installation", "via_workspace": via_workspace},
+    )
+
+
+# ─── Installation-wide embeddings (global admin, any workspace) ──────
+
+
+@router.put("/embeddings", response_model=LLMConfigOut)
+def put_embeddings(
+    payload: EmbeddingsProfileIn,
+    request: Request,
+    user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> LLMConfigOut:
+    """Save the installation-wide embeddings profile from any workspace.
+
+    Always written to the "default" workspace's blob — the only one
+    resolve_profile("embeddings", …) reads. A LiteLLM model is checked
+    against the installation embeddings proxy (the default workspace's row),
+    never the caller's own proxy.
+    """
+    # get_current_user + an explicit check rather than Depends(require_admin):
+    # the refusal then carries the sentence the page shows, not the generic
+    # "Admin scope required".
+    _require_embeddings_editor(user)
+    entry = payload.model_dump(exclude_none=True)
+    saved = _save_shared_embeddings(entry, _ProxyModels(), updated_by=user.email)
+    try:
+        from src.llm.completion import reset_caches
+        reset_caches()
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info("embeddings_profile_saved provider=%s model=%s dims=%s via=%s user=%s",
+                saved.get("provider"), saved.get("model"), saved.get("dimensions"),
+                workspace_id, user.email)
+    _audit_shared_embeddings(user, request, entry, via_workspace=workspace_id)
+    return get_config(user=user, workspace_id=workspace_id)
+
+
+@router.put("/embeddings/litellm", response_model=LiteLLMSaveOut)
+def put_embeddings_litellm_proxy(
+    payload: LiteLLMProxyIn,
+    request: Request,
+    user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> LiteLLMSaveOut:
+    """Connect the installation embeddings proxy from the Embeddings card.
+
+    Exactly PUT /api/llm/litellm's validate-then-save (https only, every
+    resolved address public, pinned transport, non-empty /v1/models, one
+    encrypted row) — but stored for workspace "default", whichever workspace
+    is active, and only by a global admin.
+
+    Only while "default" has NO proxy yet. That row is also the default
+    workspace's own chat/review proxy, so replacing it from here would
+    re-point another workspace's traffic from a card about embeddings; an
+    existing one is replaced on the default workspace's LiteLLM proxy row,
+    where that is what the page says it does.
+    """
+    from src.llm import litellm_proxy
+
+    _require_embeddings_editor(user)
+    if litellm_proxy.resolve_endpoint("default") is not None:
+        raise HTTPException(status_code=409, detail=(
+            "the installation embeddings proxy is already connected — replace "
+            "it on the LiteLLM proxy row of the default workspace"
+        ))
+    try:
+        endpoint, ids = litellm_proxy.validate_proxy(payload.base_url, payload.api_key)
+    except litellm_proxy.LiteLLMProxyError as exc:
+        logger.info("litellm_proxy_rejected workspace=default via=%s user=%s reason=%s",
+                    workspace_id, user.email, type(exc).__name__)
+        raise _litellm_http_error(exc) from exc
+    litellm_proxy.save_endpoint("default", endpoint)
+    try:
+        from src.llm.completion import reset_caches
+        reset_caches()
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info("litellm_proxy_saved workspace=default via=%s user=%s fingerprint=%s models=%d",
+                workspace_id, user.email, endpoint.fingerprint, len(ids))
+    record_action(
+        action="llm_key.saved", actor=user.email, actor_id=user.id,
+        workspace_id="default", target=_LITELLM_PROVIDER,
+        ip=client_ip(request),
+        detail={"providers": [_LITELLM_PROVIDER], "slot": workspace_slot("default"),
+                "fingerprint": endpoint.fingerprint, "host": endpoint.host,
+                "models": len(ids), "scope": "installation embeddings",
+                "via_workspace": workspace_id},
+    )
+    return LiteLLMSaveOut(litellm=_litellm_out("default", show_host=True), models=ids)
 
 
 @router.post("/test-connection", response_model=TestConnectionOut)
@@ -1627,7 +1904,18 @@ def _test_litellm_connection(
                 "enter the key to test a different URL — a saved key is "
                 "never sent to a new address"
             ))
-        saved = litellm_proxy.resolve_endpoint(workspace_id)
+        # The embeddings surface runs on the INSTALLATION embeddings proxy —
+        # the default workspace's row — so that is the saved pair to test,
+        # from any workspace. It is the operator's key, so only a global
+        # admin may fire it; a workspace admin testing "embeddings" would
+        # otherwise probe the operator's proxy with the operator's key.
+        if payload.surface == "embeddings":
+            if not _can_edit_embeddings(user):
+                return TestConnectionOut(ok=False, provider=prov,
+                                         detail=_EMBEDDINGS_ADMIN_ONLY)
+            saved = litellm_proxy.resolve_endpoint("default")
+        else:
+            saved = litellm_proxy.resolve_endpoint(workspace_id)
         if saved is None:
             return TestConnectionOut(ok=False, provider=prov, detail=(
                 "no LiteLLM proxy saved — enter its URL and virtual key"
@@ -2044,9 +2332,16 @@ class ProviderModelsOut(BaseModel):
 def provider_models(
     provider: str, user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
+    surface: str | None = None,
 ) -> ProviderModelsOut:
     """List models available for a provider's saved key, split into
-    generation- vs embedding-capable, to populate the /settings/llm dropdowns."""
+    generation- vs embedding-capable, to populate the /settings/llm dropdowns.
+
+    `surface=embeddings` with provider "litellm" lists the INSTALLATION
+    embeddings proxy (the default workspace's row) — the one the shared
+    profile is validated against and called through — never the caller's
+    own proxy, and only for a global admin (the only one who can pick from
+    it). Every other combination is unchanged."""
     import httpx
 
     from src.llm.profiles import get_provider_key
@@ -2058,6 +2353,11 @@ def provider_models(
             detail="self-hosted provider — use POST /api/llm/test-connection "
                    "with the base_url; the probe reports the server's models",
         )
+    if provider == _LITELLM_PROVIDER and surface == "embeddings":
+        if not _can_edit_embeddings(user):
+            return ProviderModelsOut(provider=provider, generation=[], embedding=[],
+                                     detail=_EMBEDDINGS_ADMIN_ONLY)
+        return _litellm_models("default", show_host=True)
     if provider == _LITELLM_PROVIDER:
         return _litellm_models(
             workspace_id, show_host=_can_see_proxy_host(user, workspace_id))

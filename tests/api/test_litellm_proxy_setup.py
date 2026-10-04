@@ -152,10 +152,10 @@ def _save(ws: str = "ws-a", base: str = BASE, key: str = KEY, user=_ADMIN):
                              user=user, workspace_id=ws)
 
 
-def _put(ws: str = "default", **body):
+def _put(ws: str = "default", user=_ADMIN, **body):
     from src.api.routers.llm import LLMConfigIn, put_config
 
-    return put_config(LLMConfigIn(**body), _request(), user=_ADMIN, workspace_id=ws)
+    return put_config(LLMConfigIn(**body), _request(), user=user, workspace_id=ws)
 
 
 def _test(ws: str = "default", **body):
@@ -482,17 +482,244 @@ def test_an_unreachable_proxy_refuses_the_profile(store, proxy):
     assert "cannot verify" in exc.value.detail
 
 
-def test_embeddings_via_the_proxy_only_in_the_default_workspace(store, proxy):
+def _blob(ws: str) -> dict:
+    from src.api.routers.llm import _load_workspace_config
+
+    return _load_workspace_config(ws)
+
+
+_EMB = {"provider": "litellm", "model": "embedding-2-test", "dimensions": 768}
+
+
+def test_embeddings_via_the_proxy_from_any_workspace_for_a_global_admin(store, proxy):
+    """Embeddings are installation-wide: a global admin picks the LiteLLM
+    proxy for them from ANY workspace (here a shared "vp-test"), the profile
+    lands in the default blob — the only one resolve_profile reads — and the
+    model is checked against the INSTALLATION proxy (default's row), never
+    the acting workspace's own proxy."""
+    from src.llm.profiles import resolve_profile
+
     _save("default")
-    out = _put("default", profiles={"embeddings": {"provider": "litellm",
-                                                   "model": "embedding-2-test",
-                                                   "dimensions": 768}})
+    out = _put("default", profiles={"embeddings": dict(_EMB)})
     assert out.profiles["embeddings"].provider == "litellm"
-    _save("ws-a")
+
+    # vp-test has its own, different proxy. The fake network serves one model
+    # list for every host, so WHICH proxy the check asked is read off the
+    # requests below: host and bearer must be the installation row's.
+    _save("vp-test", "https://other.example.com", OTHER_KEY)
+    _put("default", profiles={"embeddings": {"provider": "google",
+                                             "model": "gemini-embedding-001"}})
+    litellm_proxy.reset_cache()
+    n = len(proxy.requests)
+    out = _put("vp-test", profiles={"embeddings": dict(_EMB)})
+    emb = out.profiles["embeddings"]
+    assert (emb.provider, emb.model, emb.dimensions) == ("litellm", "embedding-2-test", 768)
+    assert emb.base_url is None
+    checks = [q for q in proxy.requests[n:] if q.url.path == "/v1/models"]
+    assert checks and all(q.headers["authorization"] == f"Bearer {KEY}" for q in checks)
+    assert all(q.headers["host"] == HOST for q in checks)
+
+    assert _blob("default")["profiles"]["embeddings"]["provider"] == "litellm"
+    assert "embeddings" not in (_blob("vp-test").get("profiles") or {})
+    for caller in ("vp-test", "ws-b", "default"):
+        p = resolve_profile("embeddings", caller)
+        assert (p.provider, p.model, p.dimensions) == ("litellm", "embedding-2-test", 768)
+        assert (p.api_base, p.api_key) == (BASE, KEY)
+
+
+def test_the_old_silent_no_op_is_gone(store, proxy):
+    """Found live: PUT /config from a non-default workspace merged the
+    embeddings profile into THAT workspace's blob, which nothing reads — 200
+    OK, and the card snapped back on reload. The save must now be visible
+    from every workspace, and a stale copy left behind by the old code must
+    not survive the next save."""
+    from src.api.routers.llm import _save_workspace_config, get_config
+
+    _save_workspace_config({"profiles": {"embeddings": {
+        "provider": "openai", "model": "text-embedding-3-large"}}},
+        updated_by="old-code", workspace_id="vp-test")
+    _put("vp-test", profiles={"embeddings": {"provider": "google",
+                                             "model": "gemini-embedding-001"}})
+    for ws in ("vp-test", "default", "ws-b"):
+        cfg = get_config(user=_MEMBER, workspace_id=ws)
+        assert cfg.profiles["embeddings"].provider == "google"
+        assert cfg.profiles["embeddings"].model == "gemini-embedding-001"
+    assert "embeddings" not in (_blob("vp-test").get("profiles") or {})
+    assert _blob("default")["profiles"]["embeddings"]["model"] == "gemini-embedding-001"
+
+
+@pytest.mark.parametrize("ws", ["ws-a", "default"])
+def test_a_workspace_owner_cannot_change_installation_embeddings(store, proxy, ws):
+    """Owner of a workspace — even of "default" — is not an installation
+    admin. The request is refused whole: the provider key riding along in the
+    same body is NOT saved, and the shared profile is untouched."""
+    from src.api.routers.llm import (
+        EmbeddingsProfileIn,
+        LiteLLMProxyIn,
+        put_embeddings,
+        put_embeddings_litellm_proxy,
+    )
+
+    _save("default")
+    _put("default", profiles={"embeddings": dict(_EMB)})
+    before = _blob("default")
     with pytest.raises(HTTPException) as exc:
-        _put("ws-a", profiles={"embeddings": {"provider": "litellm",
-                                              "model": "embedding-2-test"}})
-    assert "default workspace" in exc.value.detail
+        _put(ws, user=_MEMBER, provider_keys={"openai": "sk-owner-key-123456789"},
+             profiles={"embeddings": {"provider": "google", "model": "gemini-embedding-001"}})
+    assert exc.value.status_code == 403 and "installation admin" in exc.value.detail
+    with pytest.raises(HTTPException) as exc:
+        put_embeddings(EmbeddingsProfileIn(provider="google", model="gemini-embedding-001"),
+                       _request(), user=_MEMBER, workspace_id=ws)
+    assert exc.value.status_code == 403
+    litellm_proxy.delete_endpoint("default")
+    with pytest.raises(HTTPException) as exc:
+        put_embeddings_litellm_proxy(LiteLLMProxyIn(base_url=BASE, api_key=KEY), _request(),
+                                     user=_MEMBER, workspace_id=ws)
+    assert exc.value.status_code == 403
+    assert _row(store, "default") is None
+    assert _blob("default")["profiles"] == before["profiles"]
+    assert store.load(provider="openai", user_id=f"ws:{ws}", account_label="default") is None
+    # Chat on the owner's own proxy is still theirs to set.
+    _save(ws)
+    out = _put(ws, user=_MEMBER, profiles={"chat": {"provider": "litellm", "model": "chat-a"}})
+    assert out.profiles["chat"].provider == "litellm"
+
+
+def test_put_embeddings_writes_the_default_blob_from_any_workspace(store, proxy):
+    from src.api.deps import current_workspace_id, get_current_user
+    from src.api.routers import llm as llm_router
+
+    _save("default")
+    app = FastAPI()
+    app.include_router(llm_router.router)
+    app.dependency_overrides[get_current_user] = lambda: _ADMIN
+    app.dependency_overrides[current_workspace_id] = lambda: "vp-test"
+    client = TestClient(app)
+    r = client.put("/api/llm/embeddings", json=dict(_EMB))
+    assert r.status_code == 200, r.text
+    assert r.json()["profiles"]["embeddings"]["provider"] == "litellm"
+    assert r.json()["embeddings_editable"] is True
+    assert _blob("default")["profiles"]["embeddings"]["dimensions"] == 768
+    assert not _blob("vp-test")
+    # Free text, a self-hosted base_url, an unroutable vendor: all refused.
+    bad = client.put("/api/llm/embeddings", json={**_EMB, "model": "made-up"})
+    assert bad.status_code == 422 and "not offered" in bad.text
+    bad = client.put("/api/llm/embeddings", json={**_EMB, "base_url": "http://x"})
+    assert bad.status_code == 422
+    bad = client.put("/api/llm/embeddings", json={"provider": "anthropic", "model": "x"})
+    assert bad.status_code == 422
+    app.dependency_overrides[get_current_user] = lambda: _MEMBER
+    assert client.put("/api/llm/embeddings", json=dict(_EMB)).status_code == 403
+
+
+def test_a_litellm_embeddings_profile_needs_the_installation_proxy(store, proxy):
+    """The acting workspace's own proxy does not count: with no row on
+    "default" the save is refused and says where to connect one."""
+    _save("vp-test")
+    with pytest.raises(HTTPException) as exc:
+        _put("vp-test", profiles={"embeddings": dict(_EMB)})
+    assert exc.value.status_code == 422 and "Embeddings card" in exc.value.detail
+    assert "embeddings" not in (_blob("default").get("profiles") or {})
+
+
+@pytest.mark.parametrize("url", [f"http://{HOST}", "https://10.0.0.7", "https://127.0.0.1"])
+def test_the_inline_installation_proxy_is_validated_like_any_other(store, proxy, url):
+    from src.api.routers.llm import LiteLLMProxyIn, put_embeddings_litellm_proxy
+
+    with pytest.raises(HTTPException) as exc:
+        put_embeddings_litellm_proxy(LiteLLMProxyIn(base_url=url, api_key=KEY), _request(),
+                                     user=_ADMIN, workspace_id="vp-test")
+    assert exc.value.status_code == 422
+    assert _row(store, "default") is None and _row(store, "vp-test") is None
+    assert not [q for q in proxy.requests if q.url.host in ("10.0.0.7", "127.0.0.1")]
+
+
+def test_the_inline_installation_proxy_is_saved_for_default(store, proxy):
+    """Connected from "vp-test", stored on "default", encrypted, audited on
+    "default"; the model list then comes from it for surface=embeddings,
+    and the embeddings Test fires at it. Never replaces an existing row."""
+    from src.api.routers.llm import (
+        LiteLLMProxyIn,
+        provider_models,
+        put_embeddings_litellm_proxy,
+    )
+
+    _save("vp-test", "https://other.example.com", OTHER_KEY)
+    proxy.models = ["chat-a", "embedding-2-test"]
+    with patch("src.api.routers.llm.record_action") as audit:
+        out = put_embeddings_litellm_proxy(LiteLLMProxyIn(base_url=BASE, api_key=KEY),
+                                           _request(), user=_ADMIN, workspace_id="vp-test")
+    assert out.litellm.connected and out.litellm.host == HOST
+    assert "embedding-2-test" in out.models
+    assert KEY not in out.model_dump_json()
+    assert json.loads(_row(store, "default").secret) == {"url": BASE, "key": KEY}
+    assert json.loads(_row(store, "vp-test").secret)["key"] == OTHER_KEY
+    kw = audit.call_args.kwargs
+    assert kw["workspace_id"] == "default" and kw["detail"]["via_workspace"] == "vp-test"
+    assert KEY not in json.dumps(kw, default=str)
+
+    with pytest.raises(HTTPException) as exc:
+        put_embeddings_litellm_proxy(LiteLLMProxyIn(base_url="https://other.example.com",
+                                                    api_key=OTHER_KEY),
+                                     _request(), user=_ADMIN, workspace_id="vp-test")
+    assert exc.value.status_code == 409
+    assert json.loads(_row(store, "default").secret)["key"] == KEY
+
+    emb = provider_models("litellm", user=_ADMIN, workspace_id="vp-test", surface="embeddings")
+    assert emb.embedding == ["embedding-2-test"]
+    own = provider_models("litellm", user=_ADMIN, workspace_id="vp-test")
+    assert own.embedding == ["embedding-2-test"]   # same fake list, vp-test's own row
+    with patch("src.api.deps.is_workspace_admin", return_value=True):
+        member = provider_models("litellm", user=_MEMBER, workspace_id="vp-test",
+                                 surface="embeddings")
+    assert member.embedding == [] and member.generation == []
+    assert HOST not in (member.detail or "")
+
+    n = len(proxy.requests)
+    r = _test("vp-test", api_key="use-saved", surface="embeddings",
+              model="embedding-2-test", dimensions=768)
+    assert r.ok is True and r.vector_width == 768
+    sent = proxy.requests[n:]
+    assert sent and all(q.headers["authorization"] == f"Bearer {KEY}" for q in sent)
+    from src.api.routers.llm import TestConnectionIn, test_connection
+    denied = test_connection(TestConnectionIn(provider="litellm", api_key="use-saved",
+                                              surface="embeddings", model="embedding-2-test"),
+                             user=_MEMBER, workspace_id="vp-test")
+    assert denied.ok is False and "installation admin" in denied.detail
+
+
+def test_get_config_shows_the_installation_embeddings_in_any_workspace(store, proxy):
+    from src.api.routers.llm import _save_workspace_config, get_config
+    from src.llm.profiles import embeddings_signature
+
+    _save("default")
+    _put("vp-test", profiles={"embeddings": dict(_EMB)})
+    with patch("src.api.deps.is_workspace_admin", return_value=True):
+        owner = get_config(user=_MEMBER, workspace_id="ws-b")
+    admin = get_config(user=_ADMIN, workspace_id="vp-test")
+    for cfg in (owner, admin):
+        emb = cfg.profiles["embeddings"]
+        assert (emb.provider, emb.model, emb.dimensions) == ("litellm", "embedding-2-test", 768)
+        assert cfg.embeddings_proxy.connected is True
+        assert KEY not in cfg.model_dump_json() and BASE not in cfg.model_dump_json()
+    assert (owner.embeddings_editable, owner.litellm_embeddings_allowed) == (False, False)
+    assert owner.embeddings_proxy.host is None and owner.embeddings_proxy.masked == ""
+    assert owner.embeddings_proxy.fingerprint is None
+    assert (admin.embeddings_editable, admin.litellm_embeddings_allowed) == (True, True)
+    assert admin.embeddings_proxy.host == HOST
+    # vp-test has no proxy of its own; the installation one is a separate field.
+    assert admin.litellm.connected is False
+
+    # "Re-index needed" compares against the signature the reindex endpoint
+    # writes — on the DEFAULT blob — from every workspace.
+    assert admin.embeddings_reindex_needed is False
+    blob = _blob("default")
+    blob["embeddings_indexed_signature"] = "google:gemini-embedding-001:3072"
+    _save_workspace_config(blob, updated_by="t", workspace_id="default")
+    assert get_config(user=_ADMIN, workspace_id="vp-test").embeddings_reindex_needed is True
+    blob["embeddings_indexed_signature"] = embeddings_signature()
+    _save_workspace_config(blob, updated_by="t", workspace_id="default")
+    assert get_config(user=_ADMIN, workspace_id="vp-test").embeddings_reindex_needed is False
 
 
 def test_models_split_by_mode_or_name(store, proxy):
