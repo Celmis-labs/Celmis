@@ -834,6 +834,142 @@ export const reviewDefaultsApi = {
 };
 
 
+// ─── Review rules (/admin/review-rules) ──────────────────────────────
+
+export type ReviewRuleStatus = "active" | "pending" | "rejected";
+export type ReviewRuleSeverity = "info" | "warning" | "error" | "critical";
+export type ReviewRuleOrigin = "manual" | "library" | "generated" | "imported" | "agent";
+
+/** One rule. `repo_slug` null = every repository of the workspace. */
+export type ReviewRule = {
+  id: number;
+  repo_slug: string | null;
+  scope: "workspace" | "repo";
+  title: string;
+  instructions: string;
+  path_glob: string;
+  severity: ReviewRuleSeverity;
+  agents: string[];
+  examples_good: string;
+  examples_bad: string;
+  rationale: string;
+  status: ReviewRuleStatus;
+  origin: ReviewRuleOrigin;
+  source_ref: string;
+  created_by: string | null;
+  updated_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type ReviewRuleIn = {
+  repo_slug?: string | null;
+  title: string;
+  instructions: string;
+  path_glob?: string | null;
+  severity: ReviewRuleSeverity;
+  agents: string[];
+  examples_good?: string | null;
+  examples_bad?: string | null;
+  status?: "active" | "pending";
+};
+
+export type ReviewRulePatch = Partial<Omit<ReviewRuleIn, "repo_slug" | "status">> & {
+  status?: ReviewRuleStatus;
+};
+
+/** A policy's legacy `folder_rules` entry, shown read-only on the rules page. */
+export type LegacyFolderRule = {
+  pattern: string; prompt: string; title: string; severity_hint: string; agents: string[];
+};
+
+export type ReviewRuleList = {
+  rules: ReviewRule[];
+  counts: { all: number; active: number; pending: number; rejected: number };
+  repo_slug: string | null;
+  legacy_folder_rules: LegacyFolderRule[];
+  workspace_active_count: number;
+  can_edit: boolean;
+  target_agents: string[];
+  severities: ReviewRuleSeverity[];
+  origins: ReviewRuleOrigin[];
+};
+
+export type LibraryRule = {
+  id: string;
+  title: string;
+  instructions: string;
+  severity: ReviewRuleSeverity;
+  languages: string[];
+  tags: string[];
+  path_glob: string;
+  examples_good: string;
+  examples_bad: string;
+  /** The chosen scope already holds a rule with this title. */
+  added: boolean;
+};
+
+export type ReviewRuleJob = {
+  id: string;
+  repo_slug: string;
+  kind: "generate" | "import";
+  status: "queued" | "running" | "completed" | "failed";
+  progress: string;
+  result: { created?: number[]; proposed?: number; skipped?: number; files?: string[] };
+  error: string;
+  created_by: string | null;
+  created_at: string | null;
+  finished_at: string | null;
+};
+
+export const reviewRulesApi = {
+  list: (token: string, f: {
+    scope?: "all" | "workspace" | "repo"; repo?: string | null;
+    status?: ReviewRuleStatus | null; origin?: string | null; q?: string | null;
+  } = {}) =>
+    api<ReviewRuleList>(`/api/review-rules${queryString({
+      scope: f.scope, repo: f.repo, status: f.status, origin: f.origin, q: f.q,
+    })}`, { token }),
+  create: (token: string, payload: ReviewRuleIn) =>
+    api<ReviewRule>("/api/review-rules", { token, method: "POST", json: payload }),
+  update: (token: string, id: number, payload: ReviewRulePatch) =>
+    api<ReviewRule>(`/api/review-rules/${id}`, { token, method: "PATCH", json: payload }),
+  remove: (token: string, id: number) =>
+    api<void>(`/api/review-rules/${id}`, { token, method: "DELETE" }),
+  bulkStatus: (token: string, ids: number[], status: ReviewRuleStatus) =>
+    api<{ updated: number[] }>("/api/review-rules/bulk-status", {
+      token, method: "POST", json: { ids, status },
+    }),
+  bulkDelete: (token: string, ids: number[]) =>
+    api<{ deleted: number[] }>("/api/review-rules/bulk-delete", {
+      token, method: "POST", json: { ids },
+    }),
+  library: (token: string, f: { q?: string; language?: string; repo?: string | null } = {}) =>
+    api<{ rules: LibraryRule[]; languages: string[]; tags: string[] }>(
+      `/api/review-rules/library${queryString({ q: f.q, language: f.language, repo: f.repo })}`,
+      { token },
+    ),
+  addFromLibrary: (
+    token: string, ids: string[], repoSlug: string | null, status: "active" | "pending",
+  ) =>
+    api<{ created: number[]; skipped: number }>("/api/review-rules/library/add", {
+      token, method: "POST", json: { ids, repo_slug: repoSlug, status },
+    }),
+  generate: (token: string, repoSlug: string, count = 8) =>
+    api<ReviewRuleJob>("/api/review-rules/generate", {
+      token, method: "POST", json: { repo_slug: repoSlug, count },
+    }),
+  importFromRepo: (token: string, repoSlug: string) =>
+    api<ReviewRuleJob>("/api/review-rules/import", {
+      token, method: "POST", json: { repo_slug: repoSlug },
+    }),
+  job: (token: string, id: string) =>
+    api<ReviewRuleJob>(`/api/review-rules/jobs/${encodeURIComponent(id)}`, { token }),
+  jobs: (token: string, repo?: string | null) =>
+    api<ReviewRuleJob[]>(`/api/review-rules/jobs${queryString({ repo })}`, { token }),
+};
+
+
 // ─── Model catalog (Stage 11) ───────────────────────────────────────
 
 export type ModelInfo = {

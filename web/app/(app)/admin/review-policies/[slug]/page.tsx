@@ -1125,6 +1125,17 @@ export default function ReviewPolicyEditPage() {
       )}
 
       {activeTab === "rules" && (<>
+      <Callout tone="info">
+        <p>{t("admin.reviewPolicies.detail.rulesLibraryHint")}</p>
+        <Link
+          className="mt-1 inline-flex items-center gap-1 font-medium underline"
+          href={`/admin/review-rules?repo=${encodeURIComponent(slug)}`}
+        >
+          {t("admin.reviewPolicies.detail.rulesLibraryLink")}
+          <ArrowRightIcon className="h-3.5 w-3.5" />
+        </Link>
+      </Callout>
+
       <Card>
         <CardHeader>
           <CardTitle>{t("admin.reviewPolicies.detail.promptTemplateTitle")}</CardTitle>
