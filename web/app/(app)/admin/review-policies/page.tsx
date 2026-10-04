@@ -157,7 +157,7 @@ export default function ReviewPoliciesIndexPage() {
         verifier_model: current.verifier_model ?? null,
         agent_prompt_overrides: current.agent_prompt_overrides ?? {},
         mcp_sources: current.mcp_sources ?? [],
-        disabled_agents: current.disabled_agents ?? [],
+        disabled_agents: current.disabled_agents ?? null,
       });
       qc.invalidateQueries({ queryKey: ["review-policies"] });
       toast.success(
@@ -468,7 +468,9 @@ function BranchesPanel({ slug }: { slug: string }) {
     return <div className="px-4 pb-3 text-xs text-[var(--color-muted-foreground)]">{t("admin.reviewPolicies.loadingBranches")}</div>;
   }
 
-  const targetSet = new Set(detail.data?.target_branches ?? []);
+  const targetSet = new Set(
+    detail.data?.target_branches_effective ?? detail.data?.target_branches ?? [],
+  );
   const listed = branches.data?.branches ?? [];
   // Target branches first, even those past the first page of names.
   const shown = [

@@ -389,8 +389,10 @@ class ReviewOrchestrator:
 
         lifecycle.bind(provider, pr)
 
-        # ── Load per-repo policy (Stage 10) ──
-        policy = self._load_policy(pr.local_slug)
+        # ── Load per-repo policy (Stage 10), with the workspace review
+        # defaults filled in wherever the repository says nothing:
+        # repo (non-null) > workspace > install > built-in.
+        policy = self._resolved_policy(pr.local_slug, workspace_id)
 
         batch = ReviewBatch(pull_request=pr)
         batch.comment_min_severity = (policy or {}).get("comment_min_severity")
@@ -1216,6 +1218,27 @@ class ReviewOrchestrator:
 
     # ─── Stage 10: per-repo policy loading + rules formatting ──
 
+    def _resolved_policy(self, repo_slug: str, workspace_id: str) -> dict | None:
+        """The repo policy merged over the workspace review defaults.
+
+        The defaults are those of the workspace that OWNS the policy row when
+        there is one (the row is keyed by slug alone), else of the workspace
+        the review runs for.
+        """
+        from src.review.review_defaults import merge_policy
+
+        policy = self._load_policy(repo_slug)
+        owner = policy.get("workspace_id") if isinstance(policy, dict) else None
+        return merge_policy(
+            policy, self._load_workspace_defaults(owner or workspace_id),
+        )
+
+    def _load_workspace_defaults(self, workspace_id: str) -> dict | None:
+        """The workspace's review defaults, or None. Blocking; never raises."""
+        from src.review.review_defaults import load_workspace_defaults_sync
+
+        return load_workspace_defaults_sync(workspace_id)
+
     def _load_policy(self, repo_slug: str) -> dict | None:
         """Synchronous policy fetch — runs from a sync context inside the
         review orchestrator (which is itself called from a thread pool by
@@ -1247,9 +1270,17 @@ class ReviewOrchestrator:
                     if row is None:
                         return None
                     return {
+                        "workspace_id": row.workspace_id,
                         "enabled": bool(row.enabled),
                         "prompt_template": row.prompt_template or "",
-                        "target_branches": list(row.target_branches or []),
+                        # NULL inherits the workspace review defaults
+                        # (`_resolved_policy`), so None is kept as None here —
+                        # the same for every field below that a workspace
+                        # may default.
+                        "target_branches": (
+                            None if row.target_branches is None
+                            else list(row.target_branches)
+                        ),
                         "folder_rules": list(row.folder_rules or []),
                         # Stage 11 — per-agent model overrides (None → workspace default)
                         "architect_model": row.architect_model,
@@ -1270,7 +1301,10 @@ class ReviewOrchestrator:
                         # Stage 13 — MCP evidence sources.
                         "mcp_sources": list(row.mcp_sources or []),
                         # Per-repo agent kill-switch — these never run.
-                        "disabled_agents": list(row.disabled_agents or []),
+                        "disabled_agents": (
+                            None if row.disabled_agents is None
+                            else list(row.disabled_agents)
+                        ),
                         # The prefilter's rule deny-list for this repo. NULL
                         # (every row written before the column existed) means
                         # inherit `ReviewSettings.suppressed_rules`; a list —
@@ -1294,16 +1328,21 @@ class ReviewOrchestrator:
                         # lowest severity posted as a PR comment (None = all).
                         # getattr: a row loaded by code older than the
                         # migration simply has neither.
-                        "ignore_globs": list(getattr(row, "ignore_globs", None) or []),
+                        "ignore_globs": (
+                            None if getattr(row, "ignore_globs", None) is None
+                            else list(row.ignore_globs)
+                        ),
                         "comment_min_severity": getattr(
                             row, "comment_min_severity", None),
                         # Kodus-style output settings. getattr for the reason
-                        # above. The two switches default ON: NULL is a row
-                        # that never answered, and silence is not "off".
-                        "summary_enabled": getattr(row, "summary_enabled", None) is not False,
-                        "summary_instructions": getattr(row, "summary_instructions", None),
-                        "started_comment_enabled": (
-                            getattr(row, "started_comment_enabled", None) is not False),
+                        # above. NULL is a row that never answered: it
+                        # inherits the workspace default, then ON — silence
+                        # is never "off" (`_policy_value(..., True)`).
+                        "summary_enabled": getattr(row, "summary_enabled", None),
+                        "summary_instructions": (
+                            getattr(row, "summary_instructions", None) or None),
+                        "started_comment_enabled": getattr(
+                            row, "started_comment_enabled", None),
                         "review_language": getattr(row, "review_language", None),
                         "max_inline_comments": getattr(row, "max_inline_comments", None),
                     }

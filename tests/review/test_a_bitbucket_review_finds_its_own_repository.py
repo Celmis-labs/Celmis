@@ -145,7 +145,7 @@ def test_drift_looks_the_group_up_by_the_local_slug():
 
 
 @pytest.mark.parametrize("func,callee", [
-    ("_review_impl", "_load_policy"),          # the review policy row
+    ("_review_impl", "_resolved_policy"),      # the review policy row (+ ws defaults)
     ("_load_repo_overview", "repo_vault_path"),  # the vault overview
     ("_load_style_guide", "repo_path"),          # the clone
 ])

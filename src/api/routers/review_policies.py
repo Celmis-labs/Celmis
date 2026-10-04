@@ -9,6 +9,14 @@ Endpoints:
     GET    /api/review-policies/{slug}/prompt-preview — effective prompt of one agent
     GET    /api/review-policies/overrides-summary — agent → repos overriding its prompt
 
+Every setting the workspace review defaults also carry (/api/review-defaults:
+agent participation, verifier, comment threshold, inline cap, summary,
+started comment, ignore globs, target branches, suppressed rules) is
+three-layered: this policy's value when it is not null, else the workspace
+default, else the install default. GET reports what the policy says, the
+`*_effective` value, `sources[field]` ("repo" | "workspace" | "install") and
+`inherited[field]` — what a reset to inherited would give.
+
 Per-agent LLM knobs live here too, and this is the layer that WINS: a repo
 policy beats the workspace `agents` entry, which beats the review profile,
 which beats ReviewSettings. The model has been per-repo since Stage 11 (the
@@ -215,11 +223,47 @@ def _review_language_from_payload(incoming: str | None) -> str | None:
 
 def _workspace_review_language(workspace_id: str) -> str:
     """The language an unconfigured repository reviews in. Blocking."""
+    return _workspace_review_language_layer(workspace_id)[0]
+
+
+def _workspace_review_language_layer(workspace_id: str) -> tuple[str, str]:
+    """(language, "workspace" | "install") — the workspace LLM config's
+    `review_language` when it holds one, else the built-in English. Blocking."""
     try:
         from src.api.routers.llm import _load_workspace_config
-        return str(_load_workspace_config(workspace_id).get("review_language") or "en")
+        value = _load_workspace_config(workspace_id).get("review_language")
     except Exception:  # noqa: BLE001
-        return "en"
+        value = None
+    if isinstance(value, str) and value.strip():
+        return value.strip(), "workspace"
+    return "en", "install"
+
+
+async def _load_workspace_defaults(
+    session: AsyncSession, workspace_id: str,
+) -> dict[str, Any] | None:
+    """The workspace review defaults as the resolver's dict, or None.
+
+    Called FIRST in a handler, before anything else is loaded into the
+    session: a failure (a database the migration has not reached yet) is
+    rolled back, and a rollback expires whatever the session already holds.
+    The page still renders — on the install defaults — rather than 500.
+    """
+    from src.db.models import WorkspaceReviewDefaults
+    from src.review.review_defaults import defaults_from_row
+
+    try:
+        return defaults_from_row(await session.get(WorkspaceReviewDefaults, workspace_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("workspace_review_defaults_unavailable ws=%s err=%s",
+                       workspace_id, exc)
+        await session.rollback()
+        return None
+
+
+def _install_defaults() -> dict[str, Any]:
+    from src.review.review_defaults import install_defaults
+    return install_defaults()
 
 
 def _max_inline_default() -> int:
@@ -248,7 +292,7 @@ def _comment_min_severity_from_payload(incoming: str | None) -> str | None:
 
 
 def _ignore_globs_from_payload(incoming: list[str] | None) -> list[str] | None:
-    """Validate and clean a PUT's `ignore_globs`; [] is stored as NULL."""
+    """Validate and clean a PUT's `ignore_globs`; None (inherit) stays None."""
     if incoming is None:
         return None
     from src.review.ignore_globs import validate_ignore_globs
@@ -256,7 +300,8 @@ def _ignore_globs_from_payload(incoming: list[str] | None) -> list[str] | None:
         cleaned = validate_ignore_globs(incoming)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"ignore_globs: {exc}") from exc
-    return cleaned or None
+    # [] is kept: "nothing extra for this repo" over a workspace default.
+    return cleaned
 
 
 def _suppressed_rules_from_payload(incoming: list[str] | None) -> list[str] | None:
@@ -494,16 +539,12 @@ def _validate_agent_llm_overrides(
 
 
 
-def _catalog_fields(workspace_language: str) -> dict[str, Any]:
-    """What every policy response carries about the roster and the defaults,
-    stored row or not."""
+def _catalog_fields() -> dict[str, Any]:
+    """What every policy response carries about the roster, stored row or not."""
     return {
         "overridable_agents": list(_OVERRIDABLE_AGENT_ORDER),
         "rule_target_agents": list(_rule_target_agents()),
         "review_languages": list(_language_codes()),
-        "max_inline_comments_effective": _max_inline_default(),
-        "review_language_effective": workspace_language,
-        "verifier_enabled_default": _verifier_default(),
     }
 
 
@@ -524,18 +565,80 @@ def _stored_folder_rules(raw: list | None) -> list[FolderRule]:
     return out
 
 
+def _layered_fields(
+    row: Any, ws_defaults: dict[str, Any] | None,
+    workspace_language: tuple[str, str],
+) -> dict[str, Any]:
+    """Every inheritable field of a policy response: what THIS policy says,
+    the effective value, its source and what inheriting would give.
+
+    `row` is None for a repository without a policy row — everything then
+    inherits. One function for both shapes, so a stored row and the synthetic
+    default can never disagree about what "inherit" means.
+    """
+    from src.review.review_defaults import INHERITABLE_FIELDS, resolve
+
+    install = _install_defaults()
+    effective, sources = resolve(row, ws_defaults, install)
+    inherited, inherited_sources = resolve(None, ws_defaults, install)
+
+    def own(name: str) -> Any:
+        value = None if row is None else getattr(row, name, None)
+        if isinstance(value, list):
+            return list(value)
+        if name == "summary_instructions" and isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    language, language_source = workspace_language
+    own_language = own("review_language")
+    sources = dict(sources)
+    sources["review_language"] = "repo" if own_language else language_source
+    inherited = {n: inherited[n] for n in INHERITABLE_FIELDS}
+    inherited["review_language"] = language
+
+    return {
+        "target_branches": own("target_branches"),
+        "target_branches_effective": list(effective["target_branches"] or []),
+        "disabled_agents": own("disabled_agents"),
+        "disabled_agents_effective": list(effective["disabled_agents"] or []),
+        "suppressed_rules": own("suppressed_rules"),
+        "suppressed_rules_effective": list(effective["suppressed_rules"] or []),
+        "verifier_enabled": own("verifier_enabled"),
+        "verifier_enabled_effective": bool(effective["verifier_enabled"]),
+        "verifier_enabled_default": bool(inherited["verifier_enabled"]),
+        "ignore_globs": own("ignore_globs"),
+        "ignore_globs_effective": list(effective["ignore_globs"] or []),
+        "comment_min_severity": own("comment_min_severity"),
+        "comment_min_severity_effective": (
+            effective["comment_min_severity"] or COMMENT_SEVERITY_DEFAULT),
+        "summary_enabled": own("summary_enabled"),
+        "summary_enabled_effective": effective["summary_enabled"] is not False,
+        "summary_instructions": own("summary_instructions"),
+        "summary_instructions_effective": effective["summary_instructions"],
+        "started_comment_enabled": own("started_comment_enabled"),
+        "started_comment_enabled_effective": (
+            effective["started_comment_enabled"] is not False),
+        "max_inline_comments": own("max_inline_comments"),
+        "max_inline_comments_effective": int(effective["max_inline_comments"]),
+        "review_language": own_language,
+        "review_language_effective": own_language or language,
+        "sources": sources,
+        "inherited": inherited,
+        "inherited_sources": {
+            **inherited_sources, "review_language": language_source},
+    }
+
+
 def _row_to_out(
     row: RepoReviewPolicy, agents_effective: dict[str, dict] | None = None,
-    workspace_language: str = "en",
+    workspace_language: tuple[str, str] = ("en", "install"),
+    ws_defaults: dict[str, Any] | None = None,
 ) -> ReviewPolicyOut:
-    review_language = getattr(row, "review_language", None)
-    max_inline = getattr(row, "max_inline_comments", None)
-    catalog = _catalog_fields(workspace_language)
     return ReviewPolicyOut(
         repo_slug=row.repo_slug,
         enabled=row.enabled,
         prompt_template=row.prompt_template,
-        target_branches=list(row.target_branches or []),
         folder_rules=_stored_folder_rules(row.folder_rules),
         department=row.department,
         created_at=row.created_at,
@@ -553,67 +656,41 @@ def _row_to_out(
         agent_llm_overrides=dict(row.agent_llm_overrides or {}),
         agents_effective=dict(agents_effective or {}),
         mcp_sources=list(row.mcp_sources or []),
-        disabled_agents=list(row.disabled_agents or []),
-        suppressed_rules=(
-            None if row.suppressed_rules is None else list(row.suppressed_rules)
-        ),
-        suppressed_rules_effective=(
-            _default_suppressed_rules() if row.suppressed_rules is None
-            else list(row.suppressed_rules)
-        ),
-        verifier_enabled=row.verifier_enabled,
-        verifier_enabled_effective=(
-            # "verifier" in the agent deny-list is the old spelling of off and
-            # still wins, the same order `_verifier_enabled` applies in the
-            # orchestrator. Two readers of one rule, so the rule is stated the
-            # same way in both.
-            False if "verifier" in (row.disabled_agents or [])
-            else _verifier_default() if row.verifier_enabled is None
-            else bool(row.verifier_enabled)
-        ),
-        ignore_globs=list(row.ignore_globs or []),
-        comment_min_severity=row.comment_min_severity,
-        comment_min_severity_effective=(
-            row.comment_min_severity or COMMENT_SEVERITY_DEFAULT),
-        summary_enabled=getattr(row, "summary_enabled", None) is not False,
-        summary_instructions=getattr(row, "summary_instructions", None),
-        started_comment_enabled=getattr(row, "started_comment_enabled", None) is not False,
-        review_language=review_language,
-        max_inline_comments=max_inline,
-        **{
-            **catalog,
-            "review_language_effective": review_language or workspace_language,
-            "max_inline_comments_effective": (
-                max_inline if max_inline is not None
-                else catalog["max_inline_comments_effective"]),
-        },
+        **_layered_fields(row, ws_defaults, workspace_language),
+        **_catalog_fields(),
     )
 
 
-def _row_to_list_item(row: RepoReviewPolicy) -> ReviewPolicyListItem:
+def _row_to_list_item(
+    row: RepoReviewPolicy, ws_defaults: dict[str, Any] | None = None,
+) -> ReviewPolicyListItem:
+    from src.review.review_defaults import resolve
+
+    effective, _sources = resolve(row, ws_defaults, _install_defaults())
     return ReviewPolicyListItem(
         repo_slug=row.repo_slug,
         department=row.department,
         enabled=row.enabled,
-        target_branches=list(row.target_branches or []),
+        target_branches=list(effective["target_branches"] or []),
         has_custom_prompt=bool((row.prompt_template or "").strip()),
         folder_rules_count=len(row.folder_rules or []),
-        disabled_agents=list(row.disabled_agents or []),
+        disabled_agents=list(effective["disabled_agents"] or []),
         updated_at=row.updated_at,
     )
 
 
 def _default_out(
     repo_slug: str, agents_effective: dict[str, dict] | None = None,
-    workspace_language: str = "en",
+    workspace_language: tuple[str, str] = ("en", "install"),
+    ws_defaults: dict[str, Any] | None = None,
 ) -> ReviewPolicyOut:
-    """Synthetic 'default' policy when no row exists yet."""
+    """Synthetic 'default' policy when no row exists yet: every inheritable
+    field inherits."""
     now = datetime.now(UTC)
     return ReviewPolicyOut(
         repo_slug=repo_slug,
         enabled=True,
         prompt_template="",
-        target_branches=[],
         folder_rules=[],
         department=None,
         created_at=now,
@@ -628,20 +705,8 @@ def _default_out(
         agent_llm_overrides={},
         agents_effective=dict(agents_effective or {}),
         mcp_sources=[],
-        disabled_agents=[],
-        suppressed_rules=None,
-        suppressed_rules_effective=_default_suppressed_rules(),
-        verifier_enabled=None,
-        verifier_enabled_effective=_verifier_default(),
-        ignore_globs=[],
-        comment_min_severity=None,
-        comment_min_severity_effective=COMMENT_SEVERITY_DEFAULT,
-        summary_enabled=True,
-        summary_instructions=None,
-        started_comment_enabled=True,
-        review_language=None,
-        max_inline_comments=None,
-        **_catalog_fields(workspace_language),
+        **_layered_fields(None, ws_defaults, workspace_language),
+        **_catalog_fields(),
     )
 
 
@@ -691,8 +756,9 @@ async def list_policies(
                 RepoReviewPolicy.department.ilike(pattern),
             )
         )
+    ws_defaults = await _load_workspace_defaults(session, ws_id)
     rows = (await session.scalars(stmt)).all()
-    return [_row_to_list_item(r) for r in rows]
+    return [_row_to_list_item(r, ws_defaults) for r in rows]
 
 
 # NOTE: routes with `{repo_slug:path}` are greedy — `/foo/branches` would
@@ -1037,14 +1103,15 @@ async def get_policy(
     """Return the policy for `repo_slug` in the caller's workspace. If no row
     exists (or it belongs to another tenant) — synthesize defaults so the UI can
     render the form without disclosing another workspace's config."""
+    ws_defaults = await _load_workspace_defaults(session, ws_id)
     row = await session.get(RepoReviewPolicy, repo_slug)
-    ws_language = await asyncio.to_thread(_workspace_review_language, ws_id)
+    ws_language = await asyncio.to_thread(_workspace_review_language_layer, ws_id)
     if row is None or row.workspace_id != ws_id:
         # No policy of its own — but every agent still runs with SOMETHING,
         # and this page is where an operator comes to find out what.
         return _default_out(
             repo_slug, await _effective_agents_for_display({}, ws_id),
-            workspace_language=ws_language,
+            workspace_language=ws_language, ws_defaults=ws_defaults,
         )
     return _row_to_out(
         row,
@@ -1054,7 +1121,7 @@ async def get_policy(
             ),
             ws_id,
         ),
-        workspace_language=ws_language,
+        workspace_language=ws_language, ws_defaults=ws_defaults,
     )
 
 
@@ -1075,6 +1142,7 @@ async def upsert_policy(
     is this workspace's; and the caller's teams grant `review` on it.
     """
     await asyncio.to_thread(_require_repo_in_workspace, repo_slug, ws_id)
+    ws_defaults = await _load_workspace_defaults(session, ws_id)
     row = await session.get(RepoReviewPolicy, repo_slug)
     if row is not None and row.workspace_id != ws_id:
         # Policy rows are PK'd by repo_slug alone; refuse to overwrite one owned
@@ -1111,9 +1179,17 @@ async def upsert_policy(
         row = RepoReviewPolicy(repo_slug=repo_slug, workspace_id=ws_id)
         session.add(row)
 
+    fields = payload.model_fields_set
     row.enabled = payload.enabled
     row.prompt_template = payload.prompt_template
-    row.target_branches = list(payload.target_branches)
+    # Three states: absent keeps what is stored, null inherits the workspace
+    # review defaults, a list ([] = every branch) is this repository's own.
+    if "target_branches" in fields:
+        row.target_branches = (
+            None if payload.target_branches is None
+            else list(dict.fromkeys(
+                b.strip() for b in payload.target_branches if b and b.strip()))
+        )
     row.folder_rules = folder_rules
     row.department = payload.department
     row.updated_by = user.email
@@ -1147,11 +1223,15 @@ async def upsert_policy(
         if isinstance(m, dict) and m.get("name") and m.get("url")
     ]
     # Drop unknown names so a typo can never silently disable nothing (or,
-    # worse, look like it disabled something in the UI).
-    row.disabled_agents = [
-        a for a in dict.fromkeys(payload.disabled_agents or [])
-        if a in TOGGLEABLE_AGENTS
-    ]
+    # worse, look like it disabled something in the UI). Absent keeps, null
+    # inherits the workspace review defaults, a list ([] = every agent runs)
+    # is this repository's own answer.
+    if "disabled_agents" in fields:
+        row.disabled_agents = (
+            None if payload.disabled_agents is None
+            else [a for a in dict.fromkeys(payload.disabled_agents)
+                  if a in TOGGLEABLE_AGENTS]
+        )
     # Only when the request said something: a client without this control
     # — the policy page today — must not reset a list it never rendered.
     if "suppressed_rules" in payload.model_fields_set:
@@ -1170,14 +1250,12 @@ async def upsert_policy(
         row.ignore_globs = ignore_globs
     if "comment_min_severity" in payload.model_fields_set:
         row.comment_min_severity = comment_min_severity
-    # Review output. Absent keeps what is stored; a new row starts on the
-    # defaults explicitly rather than trusting a server default it may not
-    # have been flushed with yet.
-    fields = payload.model_fields_set
-    if "summary_enabled" in fields or row.summary_enabled is None:
-        row.summary_enabled = payload.summary_enabled is not False
-    if "started_comment_enabled" in fields or row.started_comment_enabled is None:
-        row.started_comment_enabled = payload.started_comment_enabled is not False
+    # Review output. Absent keeps what is stored; null inherits the
+    # workspace review default (then on); true/false is this repo's own.
+    if "summary_enabled" in fields:
+        row.summary_enabled = payload.summary_enabled
+    if "started_comment_enabled" in fields:
+        row.started_comment_enabled = payload.started_comment_enabled
     if "summary_instructions" in fields:
         row.summary_instructions = (payload.summary_instructions or "").strip() or None
     if "review_language" in fields:
@@ -1188,12 +1266,14 @@ async def upsert_policy(
     await session.commit()
     await session.refresh(row)
     logger.info(
-        "review_policy_upserted repo=%s by=%s enabled=%s branches=%d "
+        "review_policy_upserted repo=%s by=%s enabled=%s branches=%s "
         "folder_rules=%d disabled_agents=%s agent_llm_overrides=%s "
         "suppressed_rules=%s",
         repo_slug, user.email, row.enabled,
-        len(row.target_branches), len(row.folder_rules),
-        ",".join(row.disabled_agents) or "-",
+        "inherit" if row.target_branches is None else len(row.target_branches),
+        len(row.folder_rules),
+        "inherit" if row.disabled_agents is None
+        else (",".join(row.disabled_agents) or "none"),
         ",".join(sorted(row.agent_llm_overrides or {})) or "-",
         "inherit" if row.suppressed_rules is None
         else (",".join(row.suppressed_rules) or "none"),
@@ -1206,7 +1286,9 @@ async def upsert_policy(
             ),
             ws_id,
         ),
-        workspace_language=await asyncio.to_thread(_workspace_review_language, ws_id),
+        workspace_language=await asyncio.to_thread(
+            _workspace_review_language_layer, ws_id),
+        ws_defaults=ws_defaults,
     )
 
 

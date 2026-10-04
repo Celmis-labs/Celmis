@@ -550,11 +550,17 @@ export type FolderRule = {
   agents?: string[];
 };
 
+/** Where an effective review setting comes from: this repository's policy,
+ *  the workspace review defaults (/admin/review-defaults), or the install. */
+export type SettingSource = "repo" | "workspace" | "install";
+
 export type ReviewPolicy = {
   repo_slug: string;
   enabled: boolean;
   prompt_template: string;
-  target_branches: string[];
+  /** null inherits the workspace review defaults; [] = every branch. */
+  target_branches: string[] | null;
+  target_branches_effective?: string[];
   folder_rules: FolderRule[];
   department: string | null;
   created_at: string;
@@ -601,8 +607,10 @@ export type ReviewPolicy = {
     allowed_tools: string[]; trigger_patterns: string[];
   }>;
   // Agents switched off for this repo — they never run, spend no tokens
-  // and produce no findings.
-  disabled_agents?: string[];
+  // and produce no findings. null inherits the workspace review defaults;
+  // [] is this repo's own "every agent runs".
+  disabled_agents?: string[] | null;
+  disabled_agents_effective?: string[];
   // Whether the LLM false-positive veto runs here. Three states: null is
   // "inherit the install default" (which is OFF), true/false is this repo's
   // own decision.
@@ -612,8 +620,10 @@ export type ReviewPolicy = {
   verifier_enabled_effective?: boolean;
   // What null inherits: the install default. Read-only.
   verifier_enabled_default?: boolean;
-  // Gitignore-ish globs for paths this repo's review never reads.
-  ignore_globs?: string[];
+  // Gitignore-ish globs for paths this repo's review never reads. null
+  // inherits the workspace review defaults; [] is "nothing extra" here.
+  ignore_globs?: string[] | null;
+  ignore_globs_effective?: string[];
   // Lowest severity posted as an inline comment; null inherits (= all).
   comment_min_severity?: "critical" | "error" | "warning" | "info" | null;
   // What a review would apply — read-only, the PUT body drops it.
@@ -622,10 +632,13 @@ export type ReviewPolicy = {
   // (`suppressed_rules_effective`), a list — [] included — replaces it.
   suppressed_rules?: string[] | null;
   suppressed_rules_effective?: string[];
-  // Review output. Absent keys in a PUT keep what is stored.
+  // Review output. Absent keys in a PUT keep what is stored; null inherits.
   summary_enabled?: boolean | null;
+  summary_enabled_effective?: boolean;
   summary_instructions?: string | null;
+  summary_instructions_effective?: string | null;
   started_comment_enabled?: boolean | null;
+  started_comment_enabled_effective?: boolean;
   /** Output language code; null inherits the workspace language. */
   review_language?: string | null;
   review_language_effective?: string;
@@ -636,6 +649,12 @@ export type ReviewPolicy = {
   overridable_agents?: string[];
   rule_target_agents?: string[];
   review_languages?: string[];
+  /** Per inheritable field: the layer the effective value comes from. */
+  sources?: Partial<Record<string, SettingSource>>;
+  /** Per inheritable field: what "reset to inherited" would give, and from
+   *  which layer ("workspace" or "install"). */
+  inherited?: Record<string, unknown>;
+  inherited_sources?: Partial<Record<string, SettingSource>>;
 };
 
 /** Fields the server computes; a PUT carrying them is a 422 (extra=forbid). */
@@ -645,7 +664,11 @@ type ReviewPolicyReadOnly =
   | "verifier_enabled_effective" | "comment_min_severity_effective"
   | "suppressed_rules_effective" | "review_language_effective"
   | "max_inline_comments_effective" | "overridable_agents"
-  | "rule_target_agents" | "review_languages" | "verifier_enabled_default";
+  | "rule_target_agents" | "review_languages" | "verifier_enabled_default"
+  | "target_branches_effective" | "disabled_agents_effective"
+  | "ignore_globs_effective" | "summary_enabled_effective"
+  | "summary_instructions_effective" | "started_comment_enabled_effective"
+  | "sources" | "inherited" | "inherited_sources";
 
 /** GET /api/review-policies/overrides-summary. */
 export type AgentOverridesSummary = {
@@ -750,6 +773,64 @@ export const reviewPoliciesApi = {
    *  overriding its system prompt. */
   overridesSummary: (token: string) =>
     api<AgentOverridesSummary>("/api/review-policies/overrides-summary", { token }),
+};
+
+/** The workspace review defaults — what a repository's review does when its
+ *  own policy says nothing. GET /api/review-defaults. Every value null =
+ *  inherit the install default (`install`); `effective` is what applies to a
+ *  repository that overrides nothing, `sources` where each value comes from. */
+export type WorkspaceReviewDefaults = {
+  workspace_id: string;
+  disabled_agents: string[] | null;
+  verifier_enabled: boolean | null;
+  comment_min_severity: "critical" | "error" | "warning" | "info" | null;
+  max_inline_comments: number | null;
+  summary_enabled: boolean | null;
+  summary_instructions: string | null;
+  started_comment_enabled: boolean | null;
+  ignore_globs: string[] | null;
+  target_branches: string[] | null;
+  suppressed_rules: string[] | null;
+  /** Lives in the workspace LLM config; null = English. */
+  review_language: string | null;
+  /** The workspace LLM config's per-agent block (model included here). */
+  agents: Record<string, AgentLLMOverride>;
+  agents_effective: Record<string, {
+    model: string; max_output_tokens: number | null;
+    reasoning?: string | number | null; temperature?: number | null;
+  }>;
+  install: Record<string, unknown>;
+  effective: Record<string, unknown>;
+  sources: Partial<Record<string, SettingSource>>;
+  toggleable_agents: string[];
+  llm_agents: string[];
+  review_languages: string[];
+  comment_severity_levels: string[];
+  /** field → how many repo policies of this workspace override it. */
+  repo_overrides: Record<string, number>;
+  can_edit: boolean;
+  updated_by: string | null;
+  updated_at: string | null;
+};
+
+/** PUT /api/review-defaults — a key absent keeps what is stored, null goes
+ *  back to the install default. `agents` is sent WHOLE (like /settings/llm). */
+export type WorkspaceReviewDefaultsUpdate = Partial<Pick<WorkspaceReviewDefaults,
+  | "disabled_agents" | "verifier_enabled" | "comment_min_severity"
+  | "max_inline_comments" | "summary_enabled" | "summary_instructions"
+  | "started_comment_enabled" | "ignore_globs" | "target_branches"
+  | "suppressed_rules" | "review_language"
+>> & {
+  agents?: Record<string, AgentLLMOverride | null> | null;
+};
+
+export const reviewDefaultsApi = {
+  get: (token: string) =>
+    api<WorkspaceReviewDefaults>("/api/review-defaults", { token }),
+  save: (token: string, payload: WorkspaceReviewDefaultsUpdate) =>
+    api<WorkspaceReviewDefaults>("/api/review-defaults", {
+      token, method: "PUT", json: payload,
+    }),
 };
 
 

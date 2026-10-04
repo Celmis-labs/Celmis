@@ -595,7 +595,10 @@ class ReviewPolicyIn(BaseModel):
 
     enabled: bool = True
     prompt_template: str = Field(default="", max_length=20_000)
-    target_branches: list[str] = Field(default_factory=list, max_length=50)
+    # Three states, told apart by `model_fields_set`: the key ABSENT keeps
+    # what is stored (a new row inherits); null inherits the workspace review
+    # defaults; a list — [] ("every branch") included — is this repo's own.
+    target_branches: list[str] | None = Field(default=None, max_length=50)
     folder_rules: list[FolderRule] = Field(default_factory=list, max_length=20)
     department: str | None = Field(default=None, max_length=128)
     # Per-agent model overrides (Stage 11). NULL = workspace default.
@@ -627,8 +630,10 @@ class ReviewPolicyIn(BaseModel):
     # Per-repo MCP evidence sources (Stage 13).
     mcp_sources: list[dict] = Field(default_factory=list)
     # Agents that must not run for this repo (no LLM call, no findings).
-    # Unknown names are dropped by the router.
-    disabled_agents: list[str] = Field(default_factory=list, max_length=20)
+    # Unknown names are dropped by the router. Three states like
+    # `target_branches`: absent keeps, null inherits the workspace review
+    # defaults, a list — [] ("every agent runs") included — is this repo's own.
+    disabled_agents: list[str] | None = Field(default=None, max_length=20)
     # Rule ids the review prefilter hides for this repo. Three states on the
     # way in, told apart by `model_fields_set`: the key ABSENT keeps what is
     # stored (so a client that cannot render this control — the policy page
@@ -643,16 +648,17 @@ class ReviewPolicyIn(BaseModel):
     # decision. The default is off — see `ReviewSettings.verifier_enabled`.
     verifier_enabled: bool | None = None
     # Paths this repo's review never reads (gitignore-ish globs, see
-    # src/review/ignore_globs.py). Absent keeps what is stored; null or []
-    # clears it.
+    # src/review/ignore_globs.py). Absent keeps what is stored; null inherits
+    # the workspace review defaults; [] is "nothing extra" for this repo.
     ignore_globs: list[str] | None = Field(default=None, max_length=200)
     # Lowest severity posted as an inline comment: critical | error | warning
     # | info. Absent keeps what is stored; null inherits (= post everything).
     comment_min_severity: str | None = None
     # Review output (Kodus-style). Every one: key ABSENT keeps what is stored,
     # so a client that does not render the control cannot reset it.
-    #   summary_enabled / started_comment_enabled — null goes back to on.
-    #   summary_instructions — null or "" clears.
+    #   summary_enabled / started_comment_enabled — null inherits the
+    #                     workspace review default (then on).
+    #   summary_instructions — null or "" inherits.
     #   review_language — a code from src.llm.prompts.language; null or ""
     #                     inherits the workspace language.
     #   max_inline_comments — 1..100; null inherits REVIEW_MAX_INLINE_COMMENTS.
@@ -671,7 +677,9 @@ class ReviewPolicyOut(BaseModel):
     repo_slug: str
     enabled: bool
     prompt_template: str
-    target_branches: list[str]
+    # What THIS policy says (None = inherit the workspace review defaults).
+    target_branches: list[str] | None = None
+    target_branches_effective: list[str] = Field(default_factory=list)
     folder_rules: list[FolderRule]
     department: str | None
     created_at: datetime
@@ -706,7 +714,10 @@ class ReviewPolicyOut(BaseModel):
     # read — the form still has to render.
     agents_effective: dict[str, dict] = Field(default_factory=dict)
     mcp_sources: list[dict] = Field(default_factory=list)
-    disabled_agents: list[str] = Field(default_factory=list)
+    # What THIS policy says (None = inherit the workspace review defaults) and
+    # which agents a review starting now would actually skip.
+    disabled_agents: list[str] | None = None
+    disabled_agents_effective: list[str] = Field(default_factory=list)
     # What THIS policy says: None when it inherits the code default.
     suppressed_rules: list[str] | None = None
     # What the prefilter will actually hide if a review started now — the
@@ -721,17 +732,21 @@ class ReviewPolicyOut(BaseModel):
     # reason `suppressed_rules_effective` is: the layer that wins has to show
     # what it is winning over.
     verifier_enabled_effective: bool = False
-    # What "inherit" resolves to (REVIEW_VERIFIER_ENABLED), so a reset
-    # control can say what it resets to.
+    # What "inherit" resolves to (the workspace review default, else
+    # REVIEW_VERIFIER_ENABLED), so a reset control can say what it resets to.
     verifier_enabled_default: bool = False
-    ignore_globs: list[str] = Field(default_factory=list)
     # What THIS policy says (None = inherit) and what a review would apply.
+    ignore_globs: list[str] | None = None
+    ignore_globs_effective: list[str] = Field(default_factory=list)
     comment_min_severity: str | None = None
     comment_min_severity_effective: str = "info"
-    # Review output. The switches are always a decision (NULL reads as on).
-    summary_enabled: bool = True
+    # Review output. None = inherit the workspace default (then on).
+    summary_enabled: bool | None = None
+    summary_enabled_effective: bool = True
     summary_instructions: str | None = None
-    started_comment_enabled: bool = True
+    summary_instructions_effective: str | None = None
+    started_comment_enabled: bool | None = None
+    started_comment_enabled_effective: bool = True
     # What THIS policy says (None = inherit) and what a review would use.
     review_language: str | None = None
     review_language_effective: str = "en"
@@ -745,8 +760,84 @@ class ReviewPolicyOut(BaseModel):
     rule_target_agents: list[str] = Field(default_factory=list)
     # The output-language codes `review_language` accepts.
     review_languages: list[str] = Field(default_factory=list)
+    # Per inheritable field: which layer the effective value comes from —
+    # "repo" (this policy), "workspace" (the workspace review defaults,
+    # /admin/review-defaults) or "install" (env / built-in).
+    sources: dict[str, str] = Field(default_factory=dict)
+    # Per inheritable field: what it would be if this policy said nothing —
+    # the value a "reset to inherited" control resets to.
+    inherited: dict[str, Any] = Field(default_factory=dict)
+    # Per inheritable field: where that inherited value comes from —
+    # "workspace" or "install".
+    inherited_sources: dict[str, str] = Field(default_factory=dict)
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class WorkspaceReviewDefaultsIn(BaseModel):
+    """PUT /api/review-defaults — the active workspace's review defaults.
+
+    A PATCH in effect: a key ABSENT keeps what is stored, null goes back to
+    the install default, a value sets the workspace default. `agents` (per
+    agent model / ceiling / reasoning / temperature) and `review_language`
+    are written to the workspace LLM config — their one workspace home — with
+    the same validation /api/llm/config applies.
+    """
+
+    disabled_agents: list[str] | None = Field(default=None, max_length=20)
+    verifier_enabled: bool | None = None
+    comment_min_severity: str | None = None
+    max_inline_comments: int | None = Field(default=None, ge=1, le=100)
+    summary_enabled: bool | None = None
+    summary_instructions: str | None = Field(default=None, max_length=4000)
+    started_comment_enabled: bool | None = None
+    ignore_globs: list[str] | None = Field(default=None, max_length=200)
+    target_branches: list[str] | None = Field(default=None, max_length=50)
+    suppressed_rules: list[str] | None = Field(default=None, max_length=200)
+    review_language: str | None = Field(default=None, max_length=16)
+    # Sent WHOLE like the /settings/llm `agents` block: {} clears every
+    # override, {"agent": null} clears one, absent keeps the stored map.
+    agents: dict[str, dict | None] | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WorkspaceReviewDefaultsOut(BaseModel):
+    """GET /api/review-defaults — what this workspace says (None = inherit
+    the install default), what is in force, and where each value comes from."""
+
+    workspace_id: str
+    disabled_agents: list[str] | None = None
+    verifier_enabled: bool | None = None
+    comment_min_severity: str | None = None
+    max_inline_comments: int | None = None
+    summary_enabled: bool | None = None
+    summary_instructions: str | None = None
+    started_comment_enabled: bool | None = None
+    ignore_globs: list[str] | None = None
+    target_branches: list[str] | None = None
+    suppressed_rules: list[str] | None = None
+    review_language: str | None = None
+    # The workspace `agents` blob from the LLM config (model included at this
+    # layer) and what each agent runs with when a repo overrides nothing.
+    agents: dict[str, dict] = Field(default_factory=dict)
+    agents_effective: dict[str, dict] = Field(default_factory=dict)
+    # Install defaults: what null resolves to, per field.
+    install: dict[str, Any] = Field(default_factory=dict)
+    # Effective value per field for a repository that overrides nothing.
+    effective: dict[str, Any] = Field(default_factory=dict)
+    sources: dict[str, str] = Field(default_factory=dict)
+    # Roster / vocabulary the page renders its controls from.
+    toggleable_agents: list[str] = Field(default_factory=list)
+    llm_agents: list[str] = Field(default_factory=list)
+    review_languages: list[str] = Field(default_factory=list)
+    comment_severity_levels: list[str] = Field(default_factory=list)
+    # How many repo policies of this workspace override each field — a
+    # default changed here does nothing for those repositories.
+    repo_overrides: dict[str, int] = Field(default_factory=dict)
+    can_edit: bool = False
+    updated_by: str | None = None
+    updated_at: datetime | None = None
 
 
 class AgentPromptOverrideRepo(BaseModel):
@@ -770,6 +861,7 @@ class ReviewPolicyListItem(BaseModel):
     repo_slug: str
     department: str | None
     enabled: bool
+    # Effective — the repo's own list, or the workspace default it inherits.
     target_branches: list[str]
     has_custom_prompt: bool  # True if prompt_template != ''
     folder_rules_count: int

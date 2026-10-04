@@ -61,6 +61,16 @@ export default function AgentsIndexPage() {
         {t("admin.agents.precedenceBody")}
       </Callout>
 
+      {/* Prompts live here; which agents take part in a review, and on which
+          model with which limits, are set on the workspace review defaults
+          (and per repository on its policy). */}
+      <Callout tone="info">
+        {t("admin.agents.reviewDefaultsNote")}{" "}
+        <Link className="underline" href="/admin/review-defaults?tab=agents">
+          {t("admin.agents.reviewDefaultsLink")}
+        </Link>
+      </Callout>
+
       {agents.isLoading && <p className="text-sm">{t("admin.agents.loading")}</p>}
 
       <div className="grid gap-3">

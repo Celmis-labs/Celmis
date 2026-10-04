@@ -250,9 +250,9 @@ class RepoReviewPolicy(Base, TimestampMixin):
     prompt_template: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="",
     )
-    target_branches: Mapped[list] = mapped_column(
-        JSONB, nullable=False, server_default="[]",
-    )
+    # NULL inherits the workspace review defaults (then: every branch); a
+    # list — [] included, meaning "every branch" — is this repository's own.
+    target_branches: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     folder_rules: Mapped[list] = mapped_column(
         JSONB, nullable=False, server_default="[]",
     )
@@ -311,10 +311,11 @@ class RepoReviewPolicy(Base, TimestampMixin):
 
     # Per-repo agent kill-switch: ["quality", "tests", ...]. The orchestrator
     # skips these before dispatching the parallel run, so a disabled agent
-    # costs nothing. Empty list = every agent runs (default).
-    disabled_agents: Mapped[list] = mapped_column(
-        JSONB, nullable=False, server_default="[]",
-    )
+    # costs nothing. NULL inherits the workspace review defaults
+    # (`WorkspaceReviewDefaults.disabled_agents`); a list — [] included,
+    # meaning "every agent runs" — is this repository's own answer and
+    # replaces the workspace's outright.
+    disabled_agents: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     # Rule ids the review prefilter hides for this repo, e.g.
     # ["quality.todo", "tests.no-coverage"]. Replaces
@@ -362,19 +363,18 @@ class RepoReviewPolicy(Base, TimestampMixin):
     comment_min_severity: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # ── Review output, per repository (Kodus-style customization) ──
-    # The two switches are nullable but default TRUE (a server default in the
-    # migration, a Python default here), so every row that predates them keeps
-    # the summary and the "review started" comment it already had. Readers
-    # treat NULL as on, never off.
+    # NULL inherits the workspace review defaults, then the built-in ON —
+    # never off. True/False is this repository's own decision. (They shipped
+    # with a server default TRUE; migration e4c8a1f7b2d9 turned the TRUE no
+    # operator could tell apart from "never answered" into NULL, which reads
+    # the same until a workspace default says otherwise.)
     #: Post the PR summary for this repository.
-    summary_enabled: Mapped[bool | None] = mapped_column(
-        Boolean, nullable=True, default=True,
-    )
-    #: Extra instructions for the summary writer. NULL/empty = none.
+    summary_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: Extra instructions for the summary writer. NULL/empty = inherit.
     summary_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
     #: Post a "review started" comment when a review begins.
     started_comment_enabled: Mapped[bool | None] = mapped_column(
-        Boolean, nullable=True, default=True,
+        Boolean, nullable=True,
     )
     #: Output language code ("en", "uk", …; src.llm.prompts.language).
     #: NULL = the workspace's review_language.
@@ -385,6 +385,49 @@ class RepoReviewPolicy(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_repo_review_policies_department", "department"),
     )
+
+
+# ════════════════════════════════════════════════════════════════════
+# WorkspaceReviewDefaults — the workspace layer under every repo policy
+# ════════════════════════════════════════════════════════════════════
+class WorkspaceReviewDefaults(Base, TimestampMixin):
+    """What a repository's review does when its own policy says nothing.
+
+    One row per workspace, every setting nullable: NULL is "inherit the
+    install default" (env / ReviewSettings / built-in), exactly as NULL on a
+    `RepoReviewPolicy` column is "inherit THIS row". Resolution, everywhere a
+    review reads one of these (src/review/review_defaults.py):
+
+        repo policy (non-null) > workspace default (non-null) > install > built-in
+
+    Per-agent model / output ceiling / reasoning and the review language are
+    NOT columns here: their workspace layer already lives in the workspace LLM
+    config blob (`agents`, `review_language`, /settings/llm), and one setting
+    with two workspace homes is the failure this project keeps hitting. The
+    review-defaults API reads and writes them there.
+    """
+
+    __tablename__ = "workspace_review_defaults"
+
+    workspace_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    #: Agents that do not run unless a repository says otherwise.
+    disabled_agents: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    #: The LLM false-positive veto; NULL = REVIEW_VERIFIER_ENABLED.
+    verifier_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: Lowest severity posted inline; NULL = post everything.
+    comment_min_severity: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Inline-comment cap 1..100; NULL = REVIEW_MAX_INLINE_COMMENTS.
+    max_inline_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    summary_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    summary_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_comment_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: Paths no repository of this workspace reviews unless it says otherwise.
+    ignore_globs: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    #: Base branches reviewed; NULL / [] = every branch.
+    target_branches: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    #: Prefilter rule deny-list; NULL = ReviewSettings.suppressed_rules.
+    suppressed_rules: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # ════════════════════════════════════════════════════════════════════

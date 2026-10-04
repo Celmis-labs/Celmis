@@ -7,6 +7,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ArrowLeftIcon,
+  ArrowRightIcon,
   CopyIcon,
   EyeIcon,
   HelpCircleIcon,
@@ -26,7 +27,9 @@ import {
   type ModelCapabilities,
   type ReviewPolicy,
   type RuleSeverityHint,
+  type SettingSource,
 } from "@/lib/api";
+import { globError, globLines } from "@/lib/ignore-globs";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { useCanEditPrompts } from "@/lib/use-analytics-access";
@@ -104,10 +107,13 @@ function languageName(code: string): string {
   }
 }
 
-/** "overridden here" vs "inherited" — the one badge every field uses. */
-function OriginBadge({ overridden, inheritedLabel }: {
+/** "overridden here" vs "inherited" — the one badge every field uses.
+ *  `from` names the layer an inherited value comes from: the workspace review
+ *  defaults (/admin/review-defaults) or the install default. */
+function OriginBadge({ overridden, inheritedLabel, from }: {
   overridden: boolean;
   inheritedLabel?: string;
+  from?: SettingSource;
 }) {
   const t = useT();
   return overridden ? (
@@ -116,7 +122,10 @@ function OriginBadge({ overridden, inheritedLabel }: {
     </Badge>
   ) : (
     <Badge variant="outline" className="ml-2 text-[9px] font-normal">
-      {inheritedLabel ?? t("admin.reviewPolicies.detail.badgeInherited")}
+      {inheritedLabel
+        ?? (from === "install"
+          ? t("admin.reviewPolicies.detail.badgeInstallDefault")
+          : t("admin.reviewPolicies.detail.badgeInherited"))}
     </Badge>
   );
 }
@@ -230,49 +239,6 @@ function policyAgentLLMOverrides(
  *  `COMMENT_SEVERITY_LEVELS` in src/api/routers/review_policies.py. */
 const COMMENT_THRESHOLDS = ["", "warning", "error", "critical"] as const;
 
-/** One pattern per line → the list the API stores, blank lines dropped. */
-function globLines(text: string): string[] {
-  return text.split("\n").map((l) => l.trim()).filter(Boolean);
-}
-
-/** Whether a `[...]` class in the pattern would not compile — the server's
- *  `_tokens` builds `[body]` (a leading `!` negates) and refuses on a
- *  regex error, e.g. a reversed range `[z-a]`. */
-function globBadClass(line: string): boolean {
-  let i = 0;
-  while ((i = line.indexOf("[", i)) !== -1) {
-    const end = line.indexOf("]", i + 2);
-    if (end === -1) return false;
-    let body = line.slice(i + 1, end).replace(/\\/g, "\\\\");
-    if (body.startsWith("!")) body = "^" + body.slice(1);
-    try {
-      new RegExp(`[${body}]`);
-    } catch {
-      return true;
-    }
-    i = end + 1;
-  }
-  return false;
-}
-
-/** The first problem with a glob list, as an i18n key + the offending line,
- *  or null. The same refusals `validate_ignore_globs` makes on the server, so
- *  a bad pattern is caught at the keyboard rather than as a 422 on Save. */
-function globError(lines: string[]): { key: string; line: string } | null {
-  for (const line of lines) {
-    if (line.startsWith("!")) return { key: "review.settings.globNegation", line };
-    if (line.startsWith("#")) return { key: "review.settings.globComment", line };
-    if (/[\t\r\n]/.test(line)) return { key: "review.settings.globWhitespace", line };
-    if (line.replace(/[/*]/g, "") === "") return { key: "review.settings.globEverything", line };
-    if (line.length > 300) return { key: "review.settings.globTooLong", line: line.slice(0, 40) };
-    // MAX_STARS in src/review/ignore_globs.py.
-    if ((line.match(/\*/g) ?? []).length > 8) return { key: "review.settings.globTooManyStars", line };
-    if (globBadClass(line)) return { key: "review.settings.globBadClass", line };
-  }
-  if (lines.length > 200) return { key: "review.settings.globTooMany", line: String(lines.length) };
-  return null;
-}
-
 export default function ReviewPolicyEditPage() {
   const params = useParams<{ slug: string }>();
   const router = useRouter();
@@ -301,7 +267,8 @@ export default function ReviewPolicyEditPage() {
   const [enabled, setEnabled] = useState(true);
   const [department, setDepartment] = useState("");
   const [promptTemplate, setPromptTemplate] = useState("");
-  const [targetBranches, setTargetBranches] = useState<string[]>([]);
+  /** null inherits the workspace review defaults; [] = every branch. */
+  const [targetBranches, setTargetBranches] = useState<string[] | null>(null);
   const [folderRules, setFolderRules] = useState<FolderRule[]>([]);
   /** Model, output ceiling and reasoning per agent, as one draft each — the
    *  same three-field shape /settings/llm edits, because it is the same three
@@ -313,22 +280,27 @@ export default function ReviewPolicyEditPage() {
    *  server says may carry one (`overridable_agents`). */
   const [promptOverrides, setPromptOverrides] = useState<Record<string, string>>({});
   const [previewAgent, setPreviewAgent] = useState<string | null>(null);
-  const [disabledAgents, setDisabledAgents] = useState<string[]>([]);
+  /** null inherits the workspace review defaults; a list is this repo's own
+   *  answer ([] = every agent runs). */
+  const [disabledAgents, setDisabledAgents] = useState<string[] | null>(null);
   // The veto is a stage, not an agent, and it is OFF unless this repo
   // asks. Its own boolean rather than an entry in the agent deny-list:
   // squeezing a stage into that list is what made the default
   // un-invertible on the server.
   // Three states: null inherits the install default, true/false decides.
   const [verifierChoice, setVerifierChoice] = useState<boolean | null>(null);
-  const [ignoreGlobsText, setIgnoreGlobsText] = useState("");
+  /** null inherits the workspace's globs; a string ("" included) is this
+   *  repo's own list. */
+  const [ignoreGlobsText, setIgnoreGlobsText] = useState<string | null>(null);
   const [commentMinSeverity, setCommentMinSeverity] = useState<string>("");
   /** null inherits the code default list; a list (even []) replaces it. */
   const [suppressedRules, setSuppressedRules] = useState<string[] | null>(null);
   const [suppressedDraft, setSuppressedDraft] = useState("");
   const [maxInlineText, setMaxInlineText] = useState("");
-  const [summaryEnabled, setSummaryEnabled] = useState(true);
+  /** null inherits the workspace default (then on). */
+  const [summaryEnabled, setSummaryEnabled] = useState<boolean | null>(null);
   const [summaryInstructions, setSummaryInstructions] = useState("");
-  const [startedCommentEnabled, setStartedCommentEnabled] = useState(true);
+  const [startedCommentEnabled, setStartedCommentEnabled] = useState<boolean | null>(null);
   /** "" inherits the workspace language. */
   const [reviewLanguage, setReviewLanguage] = useState("");
   const [mcpSources, setMcpSources] = useState<Array<{
@@ -368,7 +340,9 @@ export default function ReviewPolicyEditPage() {
     setEnabled(policy.data.enabled);
     setDepartment(policy.data.department ?? "");
     setPromptTemplate(policy.data.prompt_template);
-    setTargetBranches(policy.data.target_branches);
+    setTargetBranches(
+      policy.data.target_branches == null ? null : [...policy.data.target_branches],
+    );
     setFolderRules(policy.data.folder_rules);
     setAgentDrafts(agentDraftsFrom(policy.data));
     const po = policy.data.agent_prompt_overrides ?? {};
@@ -378,12 +352,16 @@ export default function ReviewPolicyEditPage() {
       ),
     ));
     setMcpSources(policy.data.mcp_sources ?? []);
-    setDisabledAgents(policy.data.disabled_agents ?? []);
+    setDisabledAgents(
+      policy.data.disabled_agents == null ? null : [...policy.data.disabled_agents],
+    );
     // `verifier_enabled` is what THIS repo said; `_effective` is what a
     // review would do, deny-list and install default folded in. A switch
     // has to show the second — it is the answer the reader is checking.
     setVerifierChoice(policy.data.verifier_enabled ?? null);
-    setIgnoreGlobsText((policy.data.ignore_globs ?? []).join("\n"));
+    setIgnoreGlobsText(
+      policy.data.ignore_globs == null ? null : policy.data.ignore_globs.join("\n"),
+    );
     setCommentMinSeverity(policy.data.comment_min_severity ?? "");
     setSuppressedRules(
       policy.data.suppressed_rules == null ? null : [...policy.data.suppressed_rules],
@@ -391,9 +369,9 @@ export default function ReviewPolicyEditPage() {
     setMaxInlineText(
       policy.data.max_inline_comments == null ? "" : String(policy.data.max_inline_comments),
     );
-    setSummaryEnabled(policy.data.summary_enabled !== false);
+    setSummaryEnabled(policy.data.summary_enabled ?? null);
     setSummaryInstructions(policy.data.summary_instructions ?? "");
-    setStartedCommentEnabled(policy.data.started_comment_enabled !== false);
+    setStartedCommentEnabled(policy.data.started_comment_enabled ?? null);
     setReviewLanguage(policy.data.review_language ?? "");
     setDirty(false);
   }, [policy.data]);
@@ -423,10 +401,23 @@ export default function ReviewPolicyEditPage() {
   );
   const promptAgents = policy.data?.overridable_agents
     ?? Object.keys(promptOverrides);
+  /** What each field resolves to when this repo says nothing, and from where
+   *  — the workspace review defaults or the install. */
+  const inherited = policy.data?.inherited ?? {};
+  const inheritedFrom = (field: string): SettingSource =>
+    policy.data?.inherited_sources?.[field] ?? "install";
+  const inheritedList = (field: string): string[] =>
+    Array.isArray(inherited[field]) ? (inherited[field] as string[]) : [];
+  const inheritedBool = (field: string, fallback: boolean): boolean =>
+    typeof inherited[field] === "boolean" ? (inherited[field] as boolean) : fallback;
+  const branchesShown = targetBranches ?? inheritedList("target_branches");
+  const disabledShown = disabledAgents ?? inheritedList("disabled_agents");
+  const summaryOn = summaryEnabled ?? inheritedBool("summary_enabled", true);
+  const startedOn = startedCommentEnabled ?? inheritedBool("started_comment_enabled", true);
   const ruleTargets = policy.data?.rule_target_agents ?? [];
   /** What the verifier does when this repo says nothing: the deny-list's old
    *  spelling of off still wins, then the install default. */
-  const verifierInherited = disabledAgents.includes("verifier")
+  const verifierInherited = disabledShown.includes("verifier")
     ? false
     : policy.data?.verifier_enabled_default ?? false;
   const verifierOn = verifierChoice ?? verifierInherited;
@@ -452,7 +443,7 @@ export default function ReviewPolicyEditPage() {
     (agent, i) => agentMaxOutError(agentDrafts[agent].maxOut, agentCaps[i].caps),
   );
   const agentLLMBlocked = maxOutErrors.some((e) => e !== null);
-  const ignoreGlobs = globLines(ignoreGlobsText);
+  const ignoreGlobs = globLines(ignoreGlobsText ?? "");
   const ignoreGlobsError = globError(ignoreGlobs);
   const maxInlineBad = maxInlineError(maxInlineText);
   const saveBlocked = agentLLMBlocked || ignoreGlobsError !== null || maxInlineBad;
@@ -474,6 +465,7 @@ export default function ReviewPolicyEditPage() {
       reviewPoliciesApi.upsert(token!, slug, {
         enabled,
         prompt_template: promptTemplate,
+        // null inherits the workspace review defaults.
         target_branches: targetBranches,
         // Optional fields only when they say something: a rule using none of
         // them is saved exactly as `{pattern, prompt}`, as it always was.
@@ -514,16 +506,18 @@ export default function ReviewPolicyEditPage() {
         // Turning the veto on has to clear the OLD spelling of off as
         // well, or the deny-list keeps winning and the switch looks
         // broken to whoever just flipped it.
-        disabled_agents: verifierChoice === true
-          ? disabledAgents.filter((a) => a !== "verifier")
-          : disabledAgents,
+        disabled_agents: disabledAgents === null
+          ? null
+          : verifierChoice === true
+            ? disabledAgents.filter((a) => a !== "verifier")
+            : disabledAgents,
         verifier_enabled: verifierChoice,
         // Only once the policy has loaded, for the reason the overrides above
         // wait: an unloaded form would send "no globs" and "inherit" over
         // whatever is stored. Omitted keys keep the stored values.
         ...(policy.data
           ? {
-              ignore_globs: ignoreGlobs,
+              ignore_globs: ignoreGlobsText === null ? null : ignoreGlobs,
               comment_min_severity:
                 (commentMinSeverity || null) as ReviewPolicy["comment_min_severity"],
               suppressed_rules: suppressedRules,
@@ -563,9 +557,10 @@ export default function ReviewPolicyEditPage() {
 
   const toggleBranch = (b: string) => {
     setDirty(true);
-    setTargetBranches((prev) =>
-      prev.includes(b) ? prev.filter((x) => x !== b) : [...prev, b],
-    );
+    setTargetBranches((prev) => {
+      const cur = prev ?? inheritedList("target_branches");
+      return cur.includes(b) ? cur.filter((x) => x !== b) : [...cur, b];
+    });
   };
 
   /** A pick from the branch picker. A listed branch toggles; typed text
@@ -581,7 +576,7 @@ export default function ReviewPolicyEditPage() {
       return;
     }
     setTargetBranches((prev) => {
-      const next = [...prev];
+      const next = [...(prev ?? inheritedList("target_branches"))];
       for (const b of parsed) if (!next.includes(b)) next.push(b);
       return next;
     });
@@ -673,7 +668,11 @@ export default function ReviewPolicyEditPage() {
             {slug}
           </h1>
           <p className="text-sm text-[var(--color-muted-foreground)] mt-1">
-            {t("admin.reviewPolicies.detail.subtitle")}
+            {t("admin.reviewPolicies.detail.subtitle")}{" "}
+            {t("admin.reviewPolicies.detail.inheritsWorkspaceDefaultsNote")}{" "}
+            <Link className="underline" href="/admin/review-defaults">
+              {t("admin.reviewPolicies.detail.workspaceDefaultsLink")}
+            </Link>
           </p>
         </div>
         <HelpButton onClick={() => setHelpOpen(true)} aria-label={t("admin.reviewPolicies.helpTitle")} />
@@ -748,12 +747,21 @@ export default function ReviewPolicyEditPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-1.5">
-            {t("admin.reviewPolicies.detail.branchesTitle")}
-            <Tooltip label={t("admin.reviewPolicies.detail.branchesTooltip")}>
-              <HelpCircleIcon className="h-3.5 w-3.5 text-[var(--color-muted-foreground)]" />
-            </Tooltip>
-          </CardTitle>
+          <div className="flex items-start justify-between gap-2">
+            <CardTitle className="flex items-center gap-1.5">
+              {t("admin.reviewPolicies.detail.branchesTitle")}
+              <Tooltip label={t("admin.reviewPolicies.detail.branchesTooltip")}>
+                <HelpCircleIcon className="h-3.5 w-3.5 text-[var(--color-muted-foreground)]" />
+              </Tooltip>
+              <OriginBadge
+                overridden={targetBranches !== null}
+                from={inheritedFrom("target_branches")}
+              />
+            </CardTitle>
+            {targetBranches !== null && (
+              <ResetToInherited onClick={() => { setTargetBranches(null); setDirty(true); }} />
+            )}
+          </div>
           <CardDescription>
             {t("admin.reviewPolicies.detail.branchesDesc")}
             {branches.data?.default_branch && (
@@ -765,13 +773,21 @@ export default function ReviewPolicyEditPage() {
           {/* Live read-out of the rule the backend actually applies
               (src/review/orchestrator.py — skip only when the list is
               non-empty and the PR base branch is not in it). */}
-          <Callout tone={targetBranches.length === 0 ? "info" : "success"}>
-            {targetBranches.length === 0
+          <Callout tone={branchesShown.length === 0 ? "info" : "success"}>
+            {branchesShown.length === 0
               ? t("admin.reviewPolicies.detail.branchesSemanticsAll")
               : t("admin.reviewPolicies.detail.branchesSemanticsFiltered", {
-                  branches: targetBranches.join(", "),
+                  branches: branchesShown.join(", "),
                 })}
           </Callout>
+          {targetBranches === null && (
+            <p className="text-xs text-[var(--color-muted-foreground)] mt-2">
+              {t("admin.reviewPolicies.detail.inheritsWorkspaceDefaultsNote")}{" "}
+              <Link className="underline" href="/admin/review-defaults">
+                {t("admin.reviewPolicies.detail.workspaceDefaultsLink")}
+              </Link>
+            </p>
+          )}
           <p className="text-xs text-[var(--color-muted-foreground)] mt-2">
             {t("admin.reviewPolicies.detail.branchesExactMatchNote")}
           </p>
@@ -803,7 +819,7 @@ export default function ReviewPolicyEditPage() {
               onChange={pickBranch}
               search={(q) => reviewPoliciesApi.branches(token!, slug, q).then(toBranchResult)}
               queryKey={["review-policies", "branches", slug]}
-              selected={targetBranches}
+              selected={branchesShown}
               keepOpenOnSelect
               allowCustom
               disabled={!token}
@@ -815,13 +831,13 @@ export default function ReviewPolicyEditPage() {
             </p>
           </div>
 
-          {targetBranches.length > 0 && (
+          {branchesShown.length > 0 && (
             <div className="mt-3">
               <p className="text-xs text-[var(--color-muted-foreground)] mb-1">
                 {t("admin.reviewPolicies.detail.branchesSelectedLabel")}
               </p>
               <div className="flex flex-wrap gap-2">
-                {targetBranches.map((b) => (
+                {branchesShown.map((b) => (
                   <Badge key={b} variant="outline" className="font-mono">
                     {b}
                     {branches.data?.default_branch === b && " ★"}
@@ -855,7 +871,10 @@ export default function ReviewPolicyEditPage() {
             <div className="flex items-center justify-between gap-2">
               <Label htmlFor="comment-min-severity">
                 {t("review.settings.thresholdLabel")}
-                <OriginBadge overridden={!!commentMinSeverity} />
+                <OriginBadge
+                  overridden={!!commentMinSeverity}
+                  from={inheritedFrom("comment_min_severity")}
+                />
               </Label>
               {commentMinSeverity && (
                 <ResetToInherited onClick={() => { setCommentMinSeverity(""); setDirty(true); }} />
@@ -871,7 +890,14 @@ export default function ReviewPolicyEditPage() {
               }}
               options={COMMENT_THRESHOLDS.map((level) => ({
                 value: level,
-                label: t(`review.settings.threshold.${level || "all"}`),
+                label: level
+                  ? t(`review.settings.threshold.${level}`)
+                  : t("admin.reviewPolicies.detail.inheritOption", {
+                      value: t(`review.settings.threshold.${
+                        inherited.comment_min_severity && inherited.comment_min_severity !== "info"
+                          ? String(inherited.comment_min_severity)
+                          : "all"}`),
+                    }),
               }))}
             />
             <p className="text-xs text-[var(--color-muted-foreground)]">
@@ -883,7 +909,10 @@ export default function ReviewPolicyEditPage() {
             <div className="flex items-center justify-between gap-2">
               <Label htmlFor="max-inline">
                 {t("admin.reviewPolicies.detail.maxInlineLabel")}
-                <OriginBadge overridden={!!maxInlineText.trim()} />
+                <OriginBadge
+                  overridden={!!maxInlineText.trim()}
+                  from={inheritedFrom("max_inline_comments")}
+                />
               </Label>
               {maxInlineText.trim() && (
                 <ResetToInherited onClick={() => { setMaxInlineText(""); setDirty(true); }} />
@@ -896,7 +925,7 @@ export default function ReviewPolicyEditPage() {
               min={MAX_INLINE_MIN}
               max={MAX_INLINE_MAX}
               className="w-full sm:w-40"
-              placeholder={String(policy.data?.max_inline_comments_effective ?? "")}
+              placeholder={String(inherited.max_inline_comments ?? "")}
               value={maxInlineText}
               aria-invalid={maxInlineBad ? true : undefined}
               aria-describedby="max-inline-hint"
@@ -920,7 +949,10 @@ export default function ReviewPolicyEditPage() {
             <div className="flex items-center justify-between gap-2">
               <Label htmlFor="review-language">
                 {t("admin.reviewPolicies.detail.languageLabel")}
-                <OriginBadge overridden={!!reviewLanguage} />
+                <OriginBadge
+                  overridden={!!reviewLanguage}
+                  from={inheritedFrom("review_language")}
+                />
               </Label>
               {reviewLanguage && (
                 <ResetToInherited onClick={() => { setReviewLanguage(""); setDirty(true); }} />
@@ -969,30 +1001,41 @@ export default function ReviewPolicyEditPage() {
               <Label htmlFor="summary-enabled" className="font-medium">
                 {t("admin.reviewPolicies.detail.summaryEnabledLabel")}
                 <OriginBadge
-                  overridden={!summaryEnabled}
-                  inheritedLabel={t("admin.reviewPolicies.detail.badgeDefault")}
+                  overridden={summaryEnabled !== null}
+                  from={inheritedFrom("summary_enabled")}
                 />
               </Label>
               <p className="text-xs text-[var(--color-muted-foreground)]">
                 {t("admin.reviewPolicies.detail.summaryEnabledHint")}
               </p>
+              {summaryEnabled !== null && (
+                <ResetToInherited onClick={() => { setSummaryEnabled(null); setDirty(true); }} />
+              )}
             </div>
             <Switch
               id="summary-enabled"
-              checked={summaryEnabled}
+              checked={summaryOn}
               onCheckedChange={(v) => { setSummaryEnabled(v); setDirty(true); }}
             />
           </div>
           <div className="space-y-1">
             <Label htmlFor="summary-instructions">
               {t("admin.reviewPolicies.detail.summaryInstructionsLabel")}
+              <OriginBadge
+                overridden={!!summaryInstructions.trim()}
+                from={inheritedFrom("summary_instructions")}
+              />
             </Label>
             <Textarea
               id="summary-instructions"
               rows={4}
               maxLength={SUMMARY_INSTRUCTIONS_MAX}
-              disabled={!summaryEnabled}
-              placeholder={t("admin.reviewPolicies.detail.summaryInstructionsPlaceholder")}
+              disabled={!summaryOn}
+              placeholder={
+                typeof inherited.summary_instructions === "string" && inherited.summary_instructions
+                  ? inherited.summary_instructions
+                  : t("admin.reviewPolicies.detail.summaryInstructionsPlaceholder")
+              }
               value={summaryInstructions}
               onChange={(e) => { setSummaryInstructions(e.target.value); setDirty(true); }}
             />
@@ -1007,17 +1050,22 @@ export default function ReviewPolicyEditPage() {
               <Label htmlFor="started-comment" className="font-medium">
                 {t("admin.reviewPolicies.detail.startedCommentLabel")}
                 <OriginBadge
-                  overridden={!startedCommentEnabled}
-                  inheritedLabel={t("admin.reviewPolicies.detail.badgeDefault")}
+                  overridden={startedCommentEnabled !== null}
+                  from={inheritedFrom("started_comment_enabled")}
                 />
               </Label>
               <p className="text-xs text-[var(--color-muted-foreground)]">
                 {t("admin.reviewPolicies.detail.startedCommentHint")}
               </p>
+              {startedCommentEnabled !== null && (
+                <ResetToInherited
+                  onClick={() => { setStartedCommentEnabled(null); setDirty(true); }}
+                />
+              )}
             </div>
             <Switch
               id="started-comment"
-              checked={startedCommentEnabled}
+              checked={startedOn}
               onCheckedChange={(v) => { setStartedCommentEnabled(v); setDirty(true); }}
             />
           </div>
@@ -1029,10 +1077,18 @@ export default function ReviewPolicyEditPage() {
       {activeTab === "ignore" && (
       <Card>
         <CardHeader>
-          <CardTitle>
-            {t("admin.reviewPolicies.detail.ignoreTitle")}
-            <OriginBadge overridden={ignoreGlobs.length > 0} />
-          </CardTitle>
+          <div className="flex items-start justify-between gap-2">
+            <CardTitle>
+              {t("admin.reviewPolicies.detail.ignoreTitle")}
+              <OriginBadge
+                overridden={ignoreGlobsText !== null}
+                from={inheritedFrom("ignore_globs")}
+              />
+            </CardTitle>
+            {ignoreGlobsText !== null && (
+              <ResetToInherited onClick={() => { setIgnoreGlobsText(null); setDirty(true); }} />
+            )}
+          </div>
           <CardDescription>{t("admin.reviewPolicies.detail.ignoreDesc")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-1">
@@ -1042,8 +1098,12 @@ export default function ReviewPolicyEditPage() {
             rows={8}
             spellCheck={false}
             className="font-mono text-xs"
-            placeholder={"docs/**\n*.snap\nmigrations/*.py"}
-            value={ignoreGlobsText}
+            placeholder={
+              ignoreGlobsText === null && inheritedList("ignore_globs").length > 0
+                ? inheritedList("ignore_globs").join("\n")
+                : "docs/**\n*.snap\nmigrations/*.py"
+            }
+            value={ignoreGlobsText ?? ""}
             aria-invalid={ignoreGlobsError ? true : undefined}
             aria-describedby="ignore-globs-hint"
             onChange={(e) => {
@@ -1331,7 +1391,10 @@ export default function ReviewPolicyEditPage() {
             {t("admin.reviewPolicies.detail.modelOverridesDesc1")}{" "}
             (<Link className="underline" href="/settings/llm">{t("admin.reviewPolicies.detail.linkByok")}</Link>).{" "}
             {t("admin.reviewPolicies.detail.modelOverridesDesc2")}{" "}
-            <Link className="underline" href="/settings/llm#review-agents">{t("admin.reviewPolicies.detail.linkLlmSetup")}</Link>.
+            <Link className="underline" href="/settings/llm#review-agents">{t("admin.reviewPolicies.detail.linkLlmSetup")}</Link>.{" "}
+            <Link className="underline" href="/admin/review-defaults?tab=agents">
+              {t("admin.reviewPolicies.detail.workspaceDefaultsLink")}
+            </Link>
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -1506,14 +1569,33 @@ export default function ReviewPolicyEditPage() {
       {activeTab === "agents" && (<>
       <Card>
         <CardHeader>
-          <CardTitle>{t("admin.reviewPolicies.detail.agentToggleTitle")}</CardTitle>
-          <CardDescription>
-            {t("admin.reviewPolicies.detail.agentToggleDesc")}
-          </CardDescription>
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <CardTitle>
+                {t("admin.reviewPolicies.detail.agentToggleTitle")}
+                <OriginBadge
+                  overridden={disabledAgents !== null}
+                  from={inheritedFrom("disabled_agents")}
+                />
+              </CardTitle>
+              <CardDescription>
+                {t("admin.reviewPolicies.detail.agentToggleDesc")}{" "}
+                {t("admin.reviewPolicies.detail.agentToggleInheritNote")}{" "}
+                <Link className="underline" href="/admin/review-defaults?tab=agents">
+                  {t("admin.reviewPolicies.detail.workspaceDefaultsLink")}
+                </Link>
+              </CardDescription>
+            </div>
+            {disabledAgents !== null && (
+              <ResetToInherited onClick={() => { setDisabledAgents(null); setDirty(true); }} />
+            )}
+          </div>
         </CardHeader>
         <CardContent className="space-y-3">
           {TOGGLEABLE_AGENTS.map((agent) => {
-            const on = !disabledAgents.includes(agent);
+            const on = !disabledShown.includes(agent);
+            const modelField = POLICY_AGENT_MODEL_FIELD[agent as PolicyAgent];
+            const effective = policy.data?.agents_effective?.[agent];
             return (
               <div
                 key={agent}
@@ -1531,15 +1613,36 @@ export default function ReviewPolicyEditPage() {
                   <p className="mt-0.5 text-xs text-[var(--color-muted-foreground)]">
                     {t(`admin.reviewPolicies.agentRole.${agent}`)}
                   </p>
+                  {/* Model and limits sit one tab over; say which are in
+                      force and link straight to them. */}
+                  {modelField && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("models")}
+                      className="mt-1 inline-flex items-center gap-1 text-xs text-[var(--color-muted-foreground)] hover:underline"
+                    >
+                      {effective?.model
+                        ? t("admin.reviewPolicies.detail.agentRunsOn", {
+                            model: effective.model,
+                            tokens: effective.max_output_tokens ?? "—",
+                          })
+                        : t("admin.reviewPolicies.detail.agentModelLink")}
+                      {policy.data?.[modelField] || policy.data?.agent_llm_overrides?.[agent]
+                        ? ` · ${t("admin.reviewPolicies.detail.badgeOverridden")}`
+                        : ""}
+                      <ArrowRightIcon className="h-3 w-3" />
+                    </button>
+                  )}
                 </div>
                 <Switch
                   id={`toggle-${agent}`}
                   checked={on}
                   onCheckedChange={(v) => {
                     setDirty(true);
-                    setDisabledAgents((prev) =>
-                      v ? prev.filter((a) => a !== agent) : [...prev, agent],
-                    );
+                    setDisabledAgents((prev) => {
+                      const cur = prev ?? inheritedList("disabled_agents");
+                      return v ? cur.filter((a) => a !== agent) : [...cur, agent];
+                    });
                   }}
                 />
               </div>
@@ -1559,7 +1662,7 @@ export default function ReviewPolicyEditPage() {
                 )}
                 <OriginBadge
                   overridden={verifierChoice !== null}
-                  inheritedLabel={t("admin.reviewPolicies.detail.badgeInstallDefault")}
+                  from={inheritedFrom("verifier_enabled")}
                 />
               </Label>
               <p className="mt-0.5 text-xs text-[var(--color-muted-foreground)]">
@@ -1604,7 +1707,7 @@ export default function ReviewPolicyEditPage() {
                   <Label htmlFor={`prompt-${agent}`} className="font-medium capitalize">
                     {agent}
                     <OriginBadge overridden={own} inheritedLabel={inheritedLabel} />
-                    {(agent === "verifier" ? !verifierOn : disabledAgents.includes(agent)) && (
+                    {(agent === "verifier" ? !verifierOn : disabledShown.includes(agent)) && (
                       <Badge variant="destructive" className="ml-2 text-[9px]">
                         {t("admin.reviewPolicies.detail.agentOffBadge")}
                       </Badge>
