@@ -382,7 +382,7 @@ async def _dispatch_refresh(
             return
         cfg = next(
             (c for c in store.list_for_workspace(workspace_id)
-             if c.full_name == full_name and c.provider == provider),
+             if c.full_name.lower() == full_name.lower() and c.provider == provider),
             None,
         )
         if cfg is None:

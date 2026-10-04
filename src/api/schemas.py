@@ -132,6 +132,29 @@ RepoIndexStatus = Literal[
 ]
 
 
+class RepoWebhookOut(BaseModel):
+    """A repository's review webhook, as far as we know. Never carries a secret.
+
+    `status`: installed | not_installed | failed | skipped | unknown.
+    `reason` is a short code when not installed (permission, auth, not_found,
+    no_public_url, no_credentials, not_admin, rejected, network, …), `message`
+    says what happened and `hint` what the token needs.
+    """
+
+    provider: str
+    status: str
+    url: str | None = None
+    events: list[str] = Field(default_factory=list)
+    hook_id: str | None = None
+    action: str | None = None
+    reason: str | None = None
+    message: str | None = None
+    hint: str | None = None
+    last_delivery: dict[str, Any] | None = None
+    full_name: str | None = None
+    updated_at: str | None = None
+
+
 class RepoOut(BaseModel):
     slug: str  # internal slug e.g. github_owner-name
     provider: str
@@ -197,6 +220,9 @@ class RepoOut(BaseModel):
     #: against. Rendering null as "up to date" is the same mistake as
     #: reporting zero vulnerabilities for an ecosystem nobody scanned.
     up_to_date: bool | None = None
+    #: The review webhook's last known state (no live provider call on the
+    #: list). On POST /api/repos: the outcome of the automatic install.
+    webhook: RepoWebhookOut | None = None
 
 
 class RepoAddRequest(BaseModel):

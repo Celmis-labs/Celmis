@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from src.api.deps import current_workspace_id, get_current_user
+from src.review.webhook_install import EVENTS
 from src.review.webhook_secrets import (
     resolve_webhook_secret,
     save_webhook_secret,
@@ -89,15 +90,17 @@ def _webhook_url(request: Request, provider: str, workspace_id: str) -> str:
 
 
 # Per provider: the header it signs with, how it verifies, and the events to
-# subscribe to. Kept here rather than in the UI so the two cannot drift.
+# subscribe to. Kept here rather than in the UI so the two cannot drift — and
+# the event lists come from the automatic installer, so a hook pasted by hand
+# subscribes to exactly what an installed one does.
 _SCHEME = {
     "github": ("X-Hub-Signature-256", "HMAC-SHA256 over the request body",
-               ["pull_request"]),
+               list(EVENTS["github"])),
     "gitlab": ("X-Gitlab-Token", "plaintext token comparison (GitLab does not "
                                  "sign the body)",
                ["Merge request events"]),
     "bitbucket": ("X-Hub-Signature", "HMAC-SHA256 over the request body",
-                  ["pullrequest:created", "pullrequest:updated"]),
+                  list(EVENTS["bitbucket"])),
 }
 
 

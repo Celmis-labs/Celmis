@@ -29,6 +29,7 @@ import { Select } from "@/components/ui/select";
 
 import { WorkspaceBadge } from "@/components/workspace-badge";
 import { RepoFreshness } from "@/components/repo-freshness";
+import { RepoWebhookControl } from "@/components/repo-webhook";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader,
   DialogTitle, DialogTrigger,
@@ -479,6 +480,9 @@ function RepoRow({
                 </Button>
               )}
               <BranchPicker repo={repo} onChange={onChange} />
+              {/* Without a webhook nothing is ever reviewed automatically, and
+                  nothing else on this page would say so. */}
+              <RepoWebhookControl repo={repo} />
               <a
                 href={repo.url}
                 target="_blank"

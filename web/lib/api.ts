@@ -202,6 +202,31 @@ export interface RepoOut {
   /** true / false / **null**, and null is an answer — we cannot say. Never
    *  checked, the check failed, or nothing recorded to compare against. */
   up_to_date?: boolean | null;
+  /** The review webhook's last known state (the list makes no provider
+   *  call). On POST /api/repos: what the automatic install did. null/absent
+   *  = never attempted. */
+  webhook?: RepoWebhook | null;
+}
+
+/** A repository's review webhook. Never carries the secret.
+ *
+ *  `status`: installed | not_installed | failed | skipped | unknown.
+ *  `reason` (when not installed): permission, auth, not_found,
+ *  no_public_url, no_credentials, not_admin, auto_review_disabled,
+ *  rejected, network, inactive, … */
+export interface RepoWebhook {
+  provider: string;
+  status: "installed" | "not_installed" | "failed" | "skipped" | "unknown";
+  url: string | null;
+  events: string[];
+  hook_id: string | null;
+  action: string | null;
+  reason: string | null;
+  message: string | null;
+  hint: string | null;
+  last_delivery: Record<string, unknown> | null;
+  full_name: string | null;
+  updated_at: string | null;
 }
 
 /** POST /api/repos body. `index` defaults to true server-side — send false
