@@ -2511,7 +2511,7 @@
   "ee.license.errorGeneric": "Něco se pokazilo. Zkuste to znovu.",
   "ee.license.loadFailed": "Stav licence se nepodařilo načíst.",
   "admin.workspaces.createSuperadminOnly": "Shared workspaces are created by the superadmin. Everyone already has a personal workspace.",
-  "admin.workspaces.readOnlyHint": "Only this workspace's owner or admin manages its members; owner, admin and editor roles are granted by the superadmin.",
+  "admin.workspaces.readOnlyHint": "Only this workspace's owner or admin manages its members: the owner grants admin, editor, member and viewer, an admin only member and viewer; the owner role is granted by the superadmin.",
   "admin.workspaces.roleChanged": "Role changed",
   "nav.users": "Users",
   "roles.promptsReadOnly": "Read-only: editing prompts and review policies needs the editor, admin or owner role in this workspace.",

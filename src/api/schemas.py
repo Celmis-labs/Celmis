@@ -78,7 +78,8 @@ class UserOut(BaseModel):
     name: str
     is_admin: bool
     #: The env master account (src/users/roles.py `is_superadmin`) — the only
-    #: one who may grant owner/admin/editor or create a shared workspace.
+    #: one who may grant owner, grant anything in a workspace they do not own,
+    #: or create a shared workspace.
     is_superadmin: bool = False
     auth_method: str
     has_password: bool

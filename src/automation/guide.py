@@ -94,7 +94,9 @@ automatic review per repository there, or ask this agent to do it for a set.
 
 Workspace roles, lowest to highest: viewer, member, editor, admin, owner.
 Admins and owners change settings and invite people on
-[Workspaces & members](/admin/workspaces).
+[Workspaces & members](/admin/workspaces). An owner grants and removes admin,
+editor, member and viewer; an admin only member and viewer; owner itself is
+granted by the superadmin.
 """
 
 #: `[label](/route)` — the only link shape the guide uses and the only one an

@@ -90,8 +90,9 @@ def require_superadmin(user: User = Depends(get_current_user)) -> User:
     """The env master account only (src/users/roles.py `is_superadmin`).
 
     NOT every global admin: an OIDC_ADMIN_ROLE admin keeps the platform pages
-    (`require_admin`) but cannot hand out owner/admin/editor or create a shared
-    workspace — those are the master account's.
+    (`require_admin`) but cannot hand out owner (nor admin/editor outside a
+    workspace they own) or create a shared workspace — those are the master
+    account's.
     """
     from src.users.roles import is_superadmin
 

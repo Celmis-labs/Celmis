@@ -16,6 +16,7 @@ import pytest
 
 from src.users.roles import (
     DELEGABLE_ROLES,
+    OWNER_GRANTABLE_ROLES,
     PRIVILEGED_ROLES,
     VALID_WORKSPACE_ROLES,
     can_change,
@@ -68,10 +69,13 @@ def _expected(actor, actor_role, current, new) -> bool:
         return False
     if actor is SUPER:
         return True
-    if actor_role not in ("owner", "admin"):
-        return False
     touched = {r for r in (current, new) if r is not None}
-    return touched <= {"member", "viewer"}
+    if actor_role == "owner":
+        # The owner manages everyone in their workspace except an owner.
+        return "owner" not in touched
+    if actor_role == "admin":
+        return touched <= {"member", "viewer"}
+    return False
 
 
 ROLES = [None, *sorted(VALID_WORKSPACE_ROLES)]
@@ -92,9 +96,24 @@ def test_the_named_cases():
     for target in ("owner", "admin", "editor"):
         assert not can_change(PLAIN, "admin", target, "member")
         assert not can_change(PLAIN, "admin", target, None)
-    # nor grant any of them
+        # nor grant any of them
+        assert not can_change(PLAIN, "admin", None, target)
+        assert not can_change(PLAIN, "admin", "member", target)
+    # owner: grants, changes and removes admin and editor ...
+    for role in ("admin", "editor"):
+        assert can_change(PLAIN, "owner", None, role)
+        assert can_change(PLAIN, "owner", "member", role)
+        assert can_change(PLAIN, "owner", role, "viewer")
+        assert can_change(PLAIN, "owner", role, None)
+    assert can_change(PLAIN, "owner", "admin", "editor")
+    assert can_change(PLAIN, "owner", "editor", "admin")
+    # ... but never owner: not granting it, not touching an owner row (their
+    # own included), not even owner -> owner
     for role in PRIVILEGED_ROLES:
         assert not can_change(PLAIN, "owner", None, role)
+        assert not can_change(PLAIN, "owner", "admin", role)
+    for new in (None, "admin", "member"):
+        assert not can_change(PLAIN, "owner", "owner", new)
     # member <-> viewer, add, remove
     assert can_change(PLAIN, "admin", "member", "viewer")
     assert can_change(PLAIN, "owner", "viewer", "member")
@@ -109,7 +128,9 @@ def test_the_named_cases():
 def test_grantable_roles():
     assert grantable_roles(SUPER, None) == VALID_WORKSPACE_ROLES
     assert grantable_roles(PLAIN, "admin") == DELEGABLE_ROLES == {"member", "viewer"}
-    assert grantable_roles(PLAIN, "owner") == DELEGABLE_ROLES
+    assert grantable_roles(PLAIN, "owner") == OWNER_GRANTABLE_ROLES == {
+        "admin", "editor", "member", "viewer"}
+    assert frozenset({"owner"}) == PRIVILEGED_ROLES
     for role in (None, "editor", "member", "viewer"):
         assert grantable_roles(PLAIN, role) == frozenset()
     assert grantable_roles(GLOBAL_ADMIN, None) == frozenset()
@@ -129,6 +150,7 @@ def test_the_web_copy_states_the_same_split():
         return set(re.findall(r'"([a-z]+)"', m.group(1)))
 
     assert array("PRIVILEGED_ROLES") == set(PRIVILEGED_ROLES)
+    assert array("OWNER_GRANTABLE_ROLES") == set(OWNER_GRANTABLE_ROLES)
     assert array("DELEGABLE_ROLES") == set(DELEGABLE_ROLES)
     from src.users.roles import TEAM_ROLES
 

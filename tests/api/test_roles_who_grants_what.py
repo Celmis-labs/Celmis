@@ -2,8 +2,9 @@
 
 The rule (src/users/roles.py `can_change`), product owner's decision:
 
-  * owner / admin / editor — the SUPERADMIN only (the env master account):
-    grant, change to or from, remove.
+  * owner — the SUPERADMIN only (the env master account): grant, change to
+    or from, remove.
+  * admin / editor — the superadmin, or that workspace's OWNER.
   * member / viewer — the superadmin, or that workspace's owner/admin.
   * A shared workspace is created by the superadmin only.
   * A global admin who is not the master account is NOT a superadmin.
@@ -37,8 +38,16 @@ from tests.api.rbac_world import world
     ("admin_a", "admin2_a", "member", False),     # nor another admin
     ("admin_a", "editor_a", "viewer", False),     # nor an editor
     ("admin_a", "admin_a", "owner", False),       # nor promote themselves
-    ("owner_a", "admin_a", "member", False),      # the owner neither
-    ("owner_a", "member_a", "admin", False),
+    # the owner manages admins and editors too …
+    ("owner_a", "admin_a", "member", True),
+    ("owner_a", "member_a", "admin", True),
+    ("owner_a", "member_a", "editor", True),
+    ("owner_a", "editor_a", "admin", True),
+    ("owner_a", "admin2_a", "editor", True),
+    # … but never owner, nor their own row
+    ("owner_a", "member_a", "owner", False),
+    ("owner_a", "admin_a", "owner", False),
+    ("owner_a", "owner_a", "admin", False),
     # editor / member / viewer grant nothing
     ("editor_a", "member_a", "viewer", False),
     ("member_a", "viewer_a", "member", False),
@@ -100,7 +109,9 @@ async def test_the_superadmin_adds_anyone_with_any_role(tmp_path, monkeypatch):
     ("admin_a", "owner_a", False),
     ("admin_a", "admin2_a", False),
     ("admin_a", "editor_a", False),
-    ("owner_a", "admin_a", False),
+    ("owner_a", "admin_a", True),
+    ("owner_a", "editor_a", True),
+    ("owner_a", "owner_a", False),
     ("editor_a", "member_a", False),
     ("gadmin", "member_a", False),
     ("su", "owner_a", True),
@@ -127,6 +138,10 @@ async def test_delete_member_follows_the_grant_matrix(tmp_path, monkeypatch, act
     ("admin_a", "owner_a", False),     # the takeover the demotion rule would leave open
     ("admin_a", "admin2_a", False),
     ("admin_a", "editor_a", False),
+    ("owner_a", "admin_a", True),      # the owner may re-role them, so may reset
+    ("owner_a", "editor_a", True),
+    ("owner_a", "both", False),        # ... but not past their own workspace
+    ("admin_a", "both", False),
     ("su", "owner_a", True),
 ])
 async def test_a_reset_link_is_bounded_like_a_grant(tmp_path, monkeypatch, actor, target, ok):
@@ -194,6 +209,8 @@ def test_personal_workspace_provisioning_still_makes_an_owner():
     ("admin_a", "member", 201),
     ("admin_a", "viewer", 201),
     ("owner_a", "viewer", 201),
+    ("owner_a", "editor", 201),
+    ("owner_a", "admin", 201),
     ("admin_a", "editor", 403),
     ("admin_a", "admin", 403),
     ("owner_a", "owner", 403),
@@ -267,6 +284,39 @@ async def test_a_member_link_does_not_demote_the_owner_who_clicks_it(tmp_path, m
                                 headers=w.h("owner_a"))
         assert r.status_code == 403, r.text
         assert await w.role("owner_a", "ws-a") == "owner"
+
+
+async def test_an_owner_admin_link_makes_an_admin(tmp_path, monkeypatch):
+    async with world(tmp_path, monkeypatch) as w:
+        token = await _link(w, "owner_a", "admin")
+        r = await w.client.post("/api/invites/accept", json={"token": token},
+                                headers=w.h("loner"))
+        assert r.status_code == 200, r.text
+        assert await w.role("loner", "ws-a") == "admin"
+
+
+async def test_an_owner_admin_link_dies_when_the_owner_is_no_longer_owner(tmp_path,
+                                                                         monkeypatch):
+    """Accept re-checks against the inviter's CURRENT right: an owner made
+    admin since may hand out members and viewers only."""
+    async with world(tmp_path, monkeypatch) as w:
+        token = await _link(w, "owner_a", "editor")
+        r = await w.client.put(
+            f"/api/workspaces/{w.ws['ws-a']}/members/{w.uid('owner_a')}",
+            json={"role": "admin"}, headers=w.h("su"))
+        assert r.status_code == 200, r.text
+        r = await w.client.post("/api/invites/accept", json={"token": token},
+                                headers=w.h("loner"))
+        assert r.status_code == 403, r.text
+        assert await w.role("loner", "ws-a") is None
+
+
+async def test_owner_direct_add_promotes_a_member_to_admin(tmp_path, monkeypatch):
+    async with world(tmp_path, monkeypatch) as w:
+        r = await w.client.post("/api/invites", headers=w.h("owner_a"),
+                                json={"role": "admin", "email": "member-a@acme-corp.io"})
+        assert r.status_code == 201 and r.json()["added_directly"], r.text
+        assert await w.role("member_a", "ws-a") == "admin"
 
 
 async def test_a_superadmin_editor_link_makes_an_editor(tmp_path, monkeypatch):

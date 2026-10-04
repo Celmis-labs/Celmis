@@ -13,8 +13,8 @@ creation. Redeeming is done by an authenticated user (sign up first, then
 accept), which keeps the flow simple and avoids a second account-creation path.
 
 An invite can only carry a role its creator may grant (`can_change` in
-src/users/roles.py): a workspace owner/admin invites members and viewers, the
-superadmin anything. The right is checked twice — when the invite is made, and
+src/users/roles.py): a workspace admin invites members and viewers, its owner
+also admins and editors, the superadmin anything. The right is checked twice — when the invite is made, and
 again when it is redeemed, against the creator as they are THEN — so a link
 minted by an admin who has since been removed grants nothing.
 

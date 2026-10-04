@@ -19,14 +19,21 @@ What each role may do inside its workspace:
     analytics. No members, invites, teams, LLM keys, git connections, licence.
   * ``admin``   — editor powers plus member/viewer management, LLM keys and
     git connections (`WORKSPACE_ADMIN_ROLES`).
-  * ``owner``   — admin, and the one who may delete the workspace.
+  * ``owner``   — admin, plus admin/editor management, and the one who may
+    delete the workspace.
 
 Who may GRANT a role is a separate question with one answer, `can_change`:
 
-  * owner / admin / editor (`PRIVILEGED_ROLES`) — the SUPERADMIN only:
-    granting one, changing a member to or from one, removing one.
+  * owner (`PRIVILEGED_ROLES`) — the SUPERADMIN only: granting it, changing
+    somebody to or from it, removing it.
+  * admin / editor — the superadmin, or the OWNER of that workspace
+    (`OWNER_GRANTABLE_ROLES`).
   * member / viewer (`DELEGABLE_ROLES`) — the superadmin, or an owner/admin of
     THAT workspace.
+
+Both ends of a change must be in the actor's grantable set, so an admin can
+neither demote the owner nor touch another admin or an editor, and an owner
+never touches an owner row — their own included.
 
 The superadmin is the env master account (CELMIS_MASTER_EMAIL +
 CELMIS_MASTER_KEY, user id ``master-admin``) and nobody else. Other global
@@ -60,10 +67,13 @@ WORKSPACE_ADMIN_ROLES: frozenset[str] = frozenset({"owner", "admin"})
 PROMPT_EDITOR_ROLES: frozenset[str] = frozenset({"owner", "admin", "editor"})
 
 #: Roles only the superadmin may grant, change to or from, or remove.
-PRIVILEGED_ROLES: frozenset[str] = frozenset({"owner", "admin", "editor"})
+PRIVILEGED_ROLES: frozenset[str] = frozenset({"owner"})
 
-#: Roles a workspace owner/admin may hand out and take back themselves.
-DELEGABLE_ROLES: frozenset[str] = VALID_WORKSPACE_ROLES - PRIVILEGED_ROLES
+#: Roles a workspace OWNER may hand out and take back in their workspace.
+OWNER_GRANTABLE_ROLES: frozenset[str] = VALID_WORKSPACE_ROLES - PRIVILEGED_ROLES
+
+#: Roles a workspace admin (and owner) may hand out and take back themselves.
+DELEGABLE_ROLES: frozenset[str] = frozenset({"member", "viewer"})
 
 #: Labels a TEAM membership may carry. A team role is a label inside a team —
 #: what the team may do to a repository is `RepoTeamAccess.permission`, not
@@ -139,6 +149,8 @@ def grantable_roles(actor: Any, actor_role: str | None) -> frozenset[str]:
     """Roles `actor` may hand out in a workspace where they hold `actor_role`."""
     if is_superadmin(actor):
         return VALID_WORKSPACE_ROLES
+    if actor_role == "owner":
+        return OWNER_GRANTABLE_ROLES
     if actor_role in WORKSPACE_ADMIN_ROLES:
         return DELEGABLE_ROLES
     return frozenset()
@@ -168,7 +180,8 @@ def can_change(
         return False
     # Both ends must be grantable: an admin can neither promote to editor nor
     # touch somebody who already is one — that is the "admin demotes the
-    # owner" case, refused.
+    # owner" case, refused — and an owner cannot touch an owner row (theirs
+    # included): owner is never in their set.
     if current_role is not None and current_role not in allowed:
         return False
     return new_role is None or new_role in allowed
