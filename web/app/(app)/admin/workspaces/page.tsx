@@ -11,8 +11,8 @@
  * Every control here is drawn only for someone the API would let use it
  * (`grantableRoles` / `canChangeMember` in lib/roles.ts, the copy of
  * `can_change` in src/users/roles.py): a workspace owner/admin manages members
- * and viewers; owner/admin/editor are the superadmin's to hand out, and only
- * the superadmin creates a shared workspace.
+ * and viewers, the owner also admins and editors; owner is the superadmin's to
+ * hand out, and only the superadmin creates a shared workspace.
  */
 
 import { useState } from "react";

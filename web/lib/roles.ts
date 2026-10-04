@@ -5,16 +5,19 @@
  * editor is the prompt editor: agent prompts, review policies and analytics
  * in its workspace — no members, invites, keys or connections.
  *
- * Who may grant what: owner/admin/editor only the superadmin (the env master
- * account); member/viewer also the workspace's own owner/admin. The API
- * enforces it (`can_change`); this copy only decides which controls to draw.
+ * Who may grant what: owner only the superadmin (the env master account);
+ * admin/editor also the workspace's own owner; member/viewer also the
+ * workspace's owner/admin. The API enforces it (`can_change`); this copy only
+ * decides which controls to draw.
  */
 export const WS_ROLES = ["viewer", "member", "editor", "admin", "owner"] as const;
 export type WorkspaceRole = (typeof WS_ROLES)[number];
 
 /** Roles only the superadmin may grant, change to or from, or remove. */
-export const PRIVILEGED_ROLES: readonly string[] = ["owner", "admin", "editor"];
-/** Roles a workspace owner/admin hands out themselves. */
+export const PRIVILEGED_ROLES: readonly string[] = ["owner"];
+/** Roles a workspace owner hands out in their workspace. */
+export const OWNER_GRANTABLE_ROLES: readonly string[] = ["admin", "editor", "member", "viewer"];
+/** Roles a workspace admin (and owner) hands out themselves. */
 export const DELEGABLE_ROLES: readonly string[] = ["member", "viewer"];
 /** Roles that administer a workspace. */
 export const WORKSPACE_ADMIN_ROLES: readonly string[] = ["owner", "admin"];
@@ -33,6 +36,7 @@ export function roleLabel(t: (key: string) => string, role: string): string {
 /** Roles this actor may grant in a workspace where they hold `actorRole`. */
 export function grantableRoles(isSuperadmin: boolean, actorRole: string | null | undefined): string[] {
   if (isSuperadmin) return [...WS_ROLES];
+  if (actorRole === "owner") return [...OWNER_GRANTABLE_ROLES];
   if (actorRole && WORKSPACE_ADMIN_ROLES.includes(actorRole)) return [...DELEGABLE_ROLES];
   return [];
 }

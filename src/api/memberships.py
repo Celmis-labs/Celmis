@@ -64,9 +64,9 @@ def refuse_unless_can_change(
         raise HTTPException(
             status_code=403,
             detail=(
-                "Only the superadmin can grant, change or remove owner, admin "
-                "or editor; workspace owners and admins manage members and "
-                "viewers."
+                "Only the superadmin can grant, change or remove owner; the "
+                "workspace owner manages admins and editors; owners and admins "
+                "manage members and viewers."
             ),
         )
 

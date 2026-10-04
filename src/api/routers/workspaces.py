@@ -17,9 +17,9 @@ Endpoints:
     DELETE /api/workspaces/{id}/members/{user_id}
 
 Who may write a membership is `can_change` in src/users/roles.py, applied by
-src/api/memberships.py for every route that writes one: owner/admin/editor are
-the superadmin's to grant, change and remove; an owner/admin of the workspace
-manages members and viewers.
+src/api/memberships.py for every route that writes one: owner is the
+superadmin's to grant, change and remove; the workspace's owner manages admins
+and editors; an owner/admin of the workspace manages members and viewers.
 """
 
 from __future__ import annotations
@@ -288,7 +288,8 @@ async def member_reset_link(
     # A reset link is a takeover of the account it is minted for, so it is
     # bounded by the same rule as changing that member: a workspace admin may
     # mint one for a member or viewer, never for another admin, an editor or
-    # the owner — otherwise "cannot demote the owner" was one click from
+    # the owner (the owner, likewise, for an admin/editor/member/viewer but
+    # never for another owner) — otherwise "cannot demote the owner" was one click from
     # "can become the owner".
     #
     # And it is bounded by EVERY workspace the account belongs to, not just
