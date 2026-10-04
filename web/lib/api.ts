@@ -876,9 +876,19 @@ export type LLMConfig = {
   /** The workspace's own LiteLLM proxy (provider "litellm"). Optional only
    *  for an API that predates it. */
   litellm?: LiteLLMProxyStatus;
-  /** Whether the embeddings card may offer the LiteLLM proxy — only in the
-   *  workspace whose embeddings profile is the shared one that runs. */
+  /** Whether the embeddings card may offer the LiteLLM proxy. Same answer as
+   *  `embeddings_editable` (an installation admin, from any workspace); kept
+   *  for older pages that read it. */
   litellm_embeddings_allowed?: boolean;
+  /** Embeddings are ONE installation-wide setting (one shared vector
+   *  collection), stored on the default workspace whichever workspace is
+   *  active. Only a global admin may change it; everyone else sees the card
+   *  read-only. */
+  embeddings_editable?: boolean;
+  /** The installation embeddings proxy — the default workspace's LiteLLM
+   *  row, never this workspace's own `litellm`. Host/masked/fingerprint only
+   *  for a global admin. */
+  embeddings_proxy?: LiteLLMProxyStatus;
 };
 
 /** Never the key or the full URL: last 4 of the key, its sha256
@@ -1037,8 +1047,20 @@ export const llmApi = {
     api<ModelPrices>("/api/llm/litellm/prices", { token, method: "PUT", json: body }),
   localSetupGuide: (token: string) =>
     api<LocalSetupGuide>("/api/llm/local-setup-guide", { token }),
-  providerModels: (token: string, provider: string) =>
-    api<ProviderModels>(`/api/llm/models?provider=${encodeURIComponent(provider)}`, { token }),
+  /** `surface: "embeddings"` with provider "litellm" lists the INSTALLATION
+   *  embeddings proxy (default workspace's row) instead of this workspace's. */
+  providerModels: (token: string, provider: string, surface?: "embeddings") =>
+    api<ProviderModels>(
+      `/api/llm/models?provider=${encodeURIComponent(provider)}${surface ? `&surface=${surface}` : ""}`,
+      { token }),
+  /** Save the installation-wide embeddings profile — global admin, any
+   *  workspace; always stored on the default workspace. */
+  saveEmbeddings: (token: string, body: { provider: string; model: string; dimensions?: number }) =>
+    api<LLMConfig>("/api/llm/embeddings", { token, method: "PUT", json: body }),
+  /** Connect the installation embeddings proxy (stored for the default
+   *  workspace) while none exists — same validate-then-save as saveLiteLLM. */
+  saveEmbeddingsLiteLLM: (token: string, body: { base_url: string; api_key: string }) =>
+    api<LiteLLMSaveResult>("/api/llm/embeddings/litellm", { token, method: "PUT", json: body }),
   /** What this exact model supports. `model` is a LiteLLM model string —
    *  "gemini/gemini-3-flash-preview", not the bare "gemini-3-flash-preview" a
    *  profile stores, because litellm resolves vendor from the prefix. */

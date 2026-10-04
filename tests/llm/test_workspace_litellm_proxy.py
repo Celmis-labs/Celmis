@@ -122,20 +122,40 @@ def test_the_profile_carries_the_pair(store, monkeypatch):
 
 
 def test_shared_embeddings_never_use_the_callers_proxy(store, monkeypatch):
-    """The alias means what the DEFAULT tenant's proxy maps it to; a tenant's
-    own proxy must not answer for the shared collection."""
+    """The alias means what the INSTALLATION embeddings proxy (the default
+    tenant's row) maps it to; a tenant's own proxy must not answer for the
+    shared collection — from whichever workspace the profile was saved or is
+    resolved, now that a global admin can save it from any of them."""
     from src.llm import profiles
 
     _save("ws-a")
     blob = {"profiles": {"embeddings": {"provider": "litellm",
                                         "model": "embedding-2-test"}}}
-    monkeypatch.setattr(profiles, "_blob", lambda workspace_id="default": blob)
+    seen: list[str] = []
+
+    def _blob(workspace_id="default"):
+        seen.append(workspace_id)
+        return blob
+
+    monkeypatch.setattr(profiles, "_blob", _blob)
     p = profiles.resolve_profile("embeddings", "ws-a")
+    # No installation proxy yet: fail closed (no address, no key) rather than
+    # borrow ws-a's — which IS connected and would happily answer.
     assert p.api_base is None and p.api_key == ""
+    # And the profile itself was read from the default tenant, not ws-a.
+    assert seen and set(seen) == {"default"}
 
     _save("default", "https://shared.example.com", "sk-default-key-1234567")
-    p = profiles.resolve_profile("embeddings", "ws-a")
-    assert p.api_base == "https://shared.example.com"
+    for caller in ("ws-a", "vp-test", "default"):
+        p = profiles.resolve_profile("embeddings", caller)
+        assert p.api_base == "https://shared.example.com"
+        assert p.api_key == "sk-default-key-1234567"
+        assert p.api_key != KEY
+    # The tenant's own proxy is still its own for chat — only the shared
+    # surface is pinned to the installation row.
+    monkeypatch.setattr(profiles, "_blob", lambda workspace_id="default": {
+        "profiles": {"chat": {"provider": "litellm", "model": ALIAS}}})
+    assert profiles.resolve_profile("chat", "ws-a").api_base == BASE
 
 
 # ─── 2. Routing ───────────────────────────────────────────────────────
