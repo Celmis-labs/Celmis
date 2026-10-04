@@ -20,7 +20,7 @@ derives it from there.
 
 ## [Unreleased]
 
-## [2.2.2] — 2026-10-04
+## [2.2.3] — 2026-10-04
 
 ### Added
 
