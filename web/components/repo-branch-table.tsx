@@ -17,17 +17,17 @@
  */
 
 import { useMemo, useState } from "react";
-import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { GitBranchIcon, Loader2Icon } from "lucide-react";
 
-import { api, type RepoOut } from "@/lib/api";
+import { api, branchesApi, type RepoOut } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
-import { Select } from "@/components/ui/select";
+import { BranchCombobox, toBranchResult } from "@/components/branch-combobox";
 
-/** Sentinel for "no branch saved" — an empty string is a valid Select value
+/** Sentinel for "no branch saved" — an empty string is a valid picker value
  *  but not a valid branch, which is exactly the distinction needed. */
 const PROVIDER_DEFAULT = "";
 
@@ -44,17 +44,8 @@ export function RepoBranchTable({
   const qc = useQueryClient();
   const [edits, setEdits] = useState<Record<string, string>>({});
 
-  // One branch list per row. Enabled only for the rows on screen, and cached
-  // for five minutes — this is a provider call per repository.
-  const branchQueries = useQueries({
-    queries: repos.map((r) => ({
-      queryKey: ["repo-branches", r.slug],
-      queryFn: () => api<string[]>(`/api/repos/${r.slug}/branches`, { token }),
-      enabled: !!token,
-      staleTime: 5 * 60_000,
-      retry: false,
-    })),
-  });
+  // No branch list is fetched until a row's picker is opened: it is a
+  // provider call per repository, and most rows are never touched.
 
   const dirty = useMemo(
     () => repos.filter((r) => r.slug in edits && edits[r.slug] !== (r.branch ?? "")),
@@ -101,24 +92,9 @@ export function RepoBranchTable({
       </div>
 
       <div className="max-h-72 space-y-1.5 overflow-y-auto">
-        {repos.map((r, i) => {
-          const q = branchQueries[i];
+        {repos.map((r) => {
           const saved = r.branch ?? PROVIDER_DEFAULT;
           const current = edits[r.slug] ?? saved;
-          const options = [
-            {
-              value: PROVIDER_DEFAULT,
-              label: t("deps.branchProviderDefault"),
-            },
-            // A branch saved on the registration but absent from the provider
-            // list (renamed, deleted, or the list failed to load) must stay
-            // selectable — dropping it would silently rewrite the setting the
-            // moment someone opens this table.
-            ...(saved && !(q?.data ?? []).includes(saved)
-              ? [{ value: saved, label: saved, hint: t("deps.branchTableMissing") }]
-              : []),
-            ...(q?.data ?? []).map((b) => ({ value: b, label: b })),
-          ];
           return (
             <div
               key={r.slug}
@@ -128,17 +104,22 @@ export function RepoBranchTable({
                 {r.full_name}
               </span>
               <div className="flex items-center gap-1.5">
-                <Select
+                {/* A branch saved on the registration but absent from the
+                    provider list (renamed, deleted, or the list failed to
+                    load) stays the shown value — the picker never rewrites
+                    the setting just by being opened. */}
+                <BranchCombobox
                   value={current}
                   onChange={(v) => setEdits((prev) => ({ ...prev, [r.slug]: v }))}
-                  options={options}
-                  disabled={q?.isLoading}
-                  className="w-full"
-                  placeholder={
-                    q?.isLoading
-                      ? t("deps.branchLoading")
-                      : t("deps.branchPickPlaceholder")
-                  }
+                  search={(q) => branchesApi.forRepo(token!, r.slug, q).then(toBranchResult)}
+                  queryKey={["repo-branches", r.slug]}
+                  leadingOptions={[
+                    { value: PROVIDER_DEFAULT, label: t("deps.branchProviderDefault") },
+                  ]}
+                  disabled={!token}
+                  ariaLabel={r.full_name}
+                  className="w-full min-w-0"
+                  placeholder={t("deps.branchPickPlaceholder")}
                 />
                 {/* What this run will ACTUALLY read, which is not the saved
                     value while an override is set. Saying so here is the

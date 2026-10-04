@@ -20,6 +20,30 @@ derives it from there.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Branch pickers show every branch and can search them.** The branch lists
+  on Repositories (the branch chip and the PR filter), Dependencies (the
+  run-wide override and the per-repository table) and the review policy's
+  target branches read one provider page — 100 names — and presented it as the
+  whole list. The server now follows every page (GitHub `Link`, GitLab
+  `X-Next-Page`, Bitbucket `next`) up to 5,000 names, caches the listing for
+  90 s per repository and credential, and searches it (`?q=`, case-insensitive
+  substring; GitLab and Bitbucket are also searched server-side when the cap
+  cut the listing). The default branch comes first, then the most recently
+  updated where the provider says so (GitLab, Bitbucket), else A→Z. Every
+  picker is one searchable, keyboard-accessible combobox that says how many
+  matches it is not showing. The review-policy list now comes from the
+  provider too; it read the local clone, which is single-branch.
+
+### Changed
+
+- `GET /api/repos/{slug}/branches` returns an object —
+  `{repo_slug, branches, default_branch, total, truncated, source, error}` —
+  instead of a bare list, and takes `q` and `limit` (default 100, max 1000).
+  `GET /api/review-policies/{slug}/branches` takes the same parameters and
+  gains `total`, `truncated` and `source`.
+
 ## [2.2.1] — 2026-10-04
 
 The version jumps from 0.2.1 to 2.2.1 by the maintainer's decision; nothing in
