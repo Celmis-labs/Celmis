@@ -1435,7 +1435,12 @@ export type Team = {
   member_count: number;
 };
 
-export type TeamMember = { user_id: string; role: string };
+export type TeamMember = { user_id: string; role: string; email?: string; name?: string };
+/** A workspace member who could be added to a team (GET …/candidates). */
+export type TeamCandidate = {
+  user_id: string; email: string; name: string; workspace_role: string;
+};
+export type TeamCandidates = { members: TeamCandidate[]; total: number };
 export type RepoAccess = { repo_slug: string; permission: string };
 export type MyTeams = {
   teams: Team[];
@@ -1450,12 +1455,19 @@ export const teamsApi = {
     api<void>(`/api/teams/${id}`, { token, method: "DELETE" }),
   members: (token: string, id: string) =>
     api<TeamMember[]>(`/api/teams/${id}/members`, { token }),
-  upsertMember: (token: string, teamId: string, userId: string, role: string) =>
-    api<TeamMember>(`/api/teams/${teamId}/members/${userId}`, {
+  /** Workspace members not yet in the team, matching `q` by name or email. */
+  candidates: (token: string, teamId: string, q = "") =>
+    api<TeamCandidates>(
+      `/api/teams/${teamId}/candidates?q=${encodeURIComponent(q)}`, { token }),
+  /** `user` is a user id or an email address of a workspace member. */
+  upsertMember: (token: string, teamId: string, user: string, role: string) =>
+    api<TeamMember>(`/api/teams/${teamId}/members/${encodeURIComponent(user)}`, {
       token, method: "PUT", json: { role },
     }),
   removeMember: (token: string, teamId: string, userId: string) =>
-    api<void>(`/api/teams/${teamId}/members/${userId}`, { token, method: "DELETE" }),
+    api<void>(`/api/teams/${teamId}/members/${encodeURIComponent(userId)}`, {
+      token, method: "DELETE",
+    }),
   repos: (token: string, id: string) =>
     api<RepoAccess[]>(`/api/teams/${id}/repos`, { token }),
   grantRepo: (token: string, teamId: string, repoSlug: string, permission: string) =>
