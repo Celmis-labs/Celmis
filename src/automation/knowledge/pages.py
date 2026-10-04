@@ -78,8 +78,11 @@ The [setup wizard](/onboarding) ("Get started") walks through the same order:
    from the connected provider, or paste a clone URL). Indexing is queued
    automatically and its progress shows on the same page and in the
    [Job queue](/admin/jobs).
-4. Review: on [Review history](/reviews) switch a repository on in the
-   "Auto-review PRs" panel (and set up the webhook in the "Connect auto-review" card under it), or review one pull request with the "Run a review" card.
+4. Review: press "Install webhook" on the repository's row (owner or admin;
+   it creates the provider webhook and switches auto-review on), or switch it
+   on in the "Auto-review PRs" panel on [Review history](/reviews) and set up
+   the webhook by hand; or review one pull request with the "Run a review"
+   card there.
 5. Tune: per-repository settings live in
    [Review policies](/admin/review-policies), workspace-wide reviewer prompts
    in [AI Agents](/admin/agents).

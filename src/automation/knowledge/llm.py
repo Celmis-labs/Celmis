@@ -60,7 +60,8 @@ Models per surface — a card each with "Provider", "Model" and "Save":
 - "Per-agent overrides" — "Model", "Max output tokens", "Reasoning",
   "Temperature" per review agent; empty inherits from the review card. A
   repository's policy can override these again (policy → "Models & limits").
-- "Embeddings" — see the embeddings section.
+- "Embeddings" — installation-wide, changed by a global admin only; see the
+  embeddings section.
 Self-hosted (Ollama, vLLM, LM Studio): choose "Self-hosted (OpenAI-compatible)" as the provider on Chat, Review or Agent, fill "Base URL" (e.g. `http://host.docker.internal:11434/v1`), the exact model name and
 "API key (optional)", then "Test connection". A private address needs the
 operator's `EGRESS_ALLOW_PRIVATE_NETWORK=1`.
@@ -82,11 +83,27 @@ offer and their prices ("Refresh pricing (OpenRouter)").
                 "розмірн", "размерн", "qdrant", "vector"),
         body="""
 Embeddings (the vectors behind Q&A and semantic search) are
-INSTALLATION-WIDE: one profile and one shared vector collection for every
-workspace. On [LLM Setup](/settings/llm), card "Embeddings": provider Google
-Gemini, OpenAI or Mistral AI (the LiteLLM proxy only in the default
-workspace), the model, and "Dimensions" (128–3072, default 3072). Embeddings
-use that provider's key from "Provider keys".
+INSTALLATION-WIDE: one model and one shared vector collection for every
+workspace. On [LLM Setup](/settings/llm) the "Embeddings" card carries the
+badge "Installation-wide" and shows what is in use for every workspace.
+
+Who: only a GLOBAL admin (installation admin) can change it — from whichever
+workspace is active; it is always saved for the whole installation.
+Everyone else, workspace owners included, sees the card read-only ("Embeddings are shared by every workspace (one vector collection, one model), so only an installation admin can change them. This card shows what is in use.").
+
+Change it (global admin):
+1. On [LLM Setup](/settings/llm), card "Embeddings": pick the provider —
+   Google Gemini, OpenAI, Mistral AI, or the LiteLLM proxy — the model, and
+   "Dimensions" (128–3072, default 3072). Press "Save".
+2. LiteLLM for embeddings uses the INSTALLATION embeddings proxy, never a
+   workspace's own proxy. If none is connected yet, the card asks for its
+   https URL and virtual key inline: "Verify and connect" checks them against
+   the proxy's model list and stores them encrypted as the default
+   workspace's LiteLLM proxy ("Installation embeddings proxy connected").
+   Replacing an existing one is done on the default workspace's LiteLLM
+   proxy row.
+3. Google/OpenAI/Mistral embeddings use that provider's key from "Provider
+   keys" of the workspace being indexed.
 
 When the server operator sets `EMBEDDING_PROVIDER` (self-hosted embeddings
 via `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`), the card
@@ -95,8 +112,8 @@ server environment.
 
 Changing the embeddings model or dimension makes existing vectors
 incomparable ("The embeddings profile changed — re-indexing is required for search to work correctly."). Then press "Reindex everything" on the same card:
-it queues a re-embed job per indexed repository. It needs a GLOBAL admin (a
-workspace admin gets 403 Admin scope required). On a multi-workspace
+it queues a re-embed job per indexed repository of every workspace. It needs
+a GLOBAL admin. On a multi-workspace
 installation a change of width is refused (409) because it would delete
 every workspace's vectors.
 

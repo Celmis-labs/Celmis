@@ -103,6 +103,60 @@ def test_a_question_reads_the_section_it_is_about(question, section):
     assert section in ids[:3], (question, ids)
 
 
+@pytest.mark.parametrize(("question", "section"), [
+    # Webhook auto-install (Repositories → "Install webhook").
+    ("як встановити вебхук для bitbucket", "webhook-install"),
+    ("How do I install the webhook automatically?", "webhook-install"),
+    ("webhook failed — what permissions does the token need?", "webhook-install"),
+    # Lifecycle comments and per-repo summary settings.
+    ("how do I turn off the PR summary for one repo", "pr-comments"),
+    ("як вимкнути коментар про початок рев'ю?", "pr-comments"),
+    ("Как поменять язык ревью для одного репозитория?", "pr-comments"),
+    ("limit the number of inline comments per review", "pr-comments"),
+    # Installation-wide embeddings.
+    ("хто може змінити модель ембедингів?", "embeddings"),
+    ("can I use LiteLLM for embeddings?", "embeddings"),
+    # Rules addressed to some agents.
+    ("add a custom rule only for the security agent in one repository",
+     "agent-prompts"),
+])
+def test_the_v022_features_are_found(question, section):
+    from src.automation.knowledge import select_sections
+
+    ids = [s.id for s in select_sections(question)]
+    assert section in ids[:2], (question, ids)
+
+
+def test_the_policy_tabs_named_are_the_tabs_on_screen():
+    """The knowledge names the policy page's tabs; a renamed tab fails here
+    rather than in an answer that sends somebody to a tab that is gone."""
+    from src.automation.knowledge import BY_ID
+
+    en = json.loads((_REPO / "web" / "lib" / "i18n" / "messages" / "en.json")
+                    .read_text(encoding="utf-8"))
+    tabs = [v for k, v in en.items()
+            if k.startswith("admin.reviewPolicies.detail.tab.")]
+    body = BY_ID["review-policies"].body
+    assert len(tabs) == 7
+    for tab in tabs:
+        assert f'"{tab}"' in body, tab
+
+
+def test_the_roles_section_reports_what_an_owner_may_grant():
+    """Computed, not written: whatever `grantable_roles` says an owner may
+    grant is what the agent says."""
+    from types import SimpleNamespace
+
+    from src.automation.knowledge import BY_ID
+    from src.users.roles import WORKSPACE_ROLE_RANK, grantable_roles
+
+    plain = SimpleNamespace(id="x", email="", is_admin=False, is_active=True,
+                            has_google=False, has_oidc=False)
+    grants = sorted(grantable_roles(plain, "owner"), key=WORKSPACE_ROLE_RANK.get)
+    line = ", ".join(f"`{r}`" for r in grants)
+    assert f"A workspace `owner` may give and take back: {line}" in BY_ID["roles"].body
+
+
 def test_a_question_with_no_keyword_still_gets_the_page_map():
     from src.automation.knowledge import select_sections
 

@@ -58,25 +58,29 @@ comments.
   also enter the workspace slug (bitbucket.org/<workspace>/) and the Atlassian
   email you log in with.
 
-After connecting, add repositories on [Repositories](/repositories). Turn on
-automatic review per repository in the "Auto-review PRs" panel on
-[Code review](/reviews) (the webhook URL and secret are in the card below
-it), or ask this agent to do it for a set.
+After connecting, add repositories on [Repositories](/repositories). Each
+row has "Install webhook" (owner or admin): Celmis creates the review webhook
+on the provider with the workspace's token and switches auto-review on. The
+per-repository switches are also in the "Auto-review PRs" panel on
+[Code review](/reviews), with the URL and secret for a manual setup in the
+card below it. Or ask this agent to switch review on for a set.
 
 ## Review prompts and rules
 
-- Per-policy prompt: open [Review policies](/admin/review-policies), pick a
-  policy, then the "Prompt & rules" tab — the prompt template and folder rules
-  live there. Other tabs: General & branches, Models & limits, MCP sources,
-  Agents (per-policy agent prompt overrides).
-- Which files a review reads and which findings become comments: the
-  "Review output" card on the policy's General & branches tab. "Ignore paths
-  (one glob per line)" skips paths such as `vendor/**` on top of the built-in
-  skip list; "Post comments for" sets the lowest severity posted as a PR
-  comment (lower ones are still counted in the summary).
+- Per-repository settings: open [Review policies](/admin/review-policies),
+  pick the repository. Tabs: "General" (on/off, target branches), "Agents &
+  prompts" (which agents run, and this repository's own prompt for any
+  agent, the verifier included), "Rules" (prompt template, custom rules
+  addressed to chosen agents, suppressed rule ids), "Comments & summary"
+  ("Post comments for", "Max inline comments per review", "Review language",
+  "Post a PR summary", "Post a “review started” comment"), "Ignore paths",
+  "Models & limits", "MCP sources". A link may open a tab directly with
+  `?tab=agents`, `?tab=rules`, `?tab=comments` and so on.
 - Workspace-wide agent prompts: [Review agents](/admin/agents) lists the
   specialised reviewers; "Edit prompt" opens one, saves a workspace override,
-  and "Reset to default" restores the built-in text.
+  and "Reset to default" restores the built-in text. A repository's own
+  prompt (its policy, "Agents & prompts") wins over the workspace one; the
+  agent card says how many repositories override it.
 
 ## LLM keys and models
 
@@ -85,11 +89,12 @@ it), or ask this agent to do it for a set.
   the key of the embeddings provider chosen there (Google, OpenAI or
   Mistral). The same page holds a LiteLLM proxy (an OpenAI-compatible
   gateway: its URL and key) and the model profile for each
-  surface: chat, review, agent and embeddings. A self-hosted server (Ollama,
+  surface: chat, review and agent. A self-hosted server (Ollama,
   vLLM, LM Studio) is picked there as the "Self-hosted (OpenAI-compatible)"
   provider.
-- Changing the embeddings model or dimension needs a re-index:
-  "Reindex everything" on the same page.
+- Embeddings are installation-wide (one model for every workspace): only a
+  global admin changes them, on the same page; changing the model or
+  dimension needs "Reindex everything".
 - Which models exist and what they cost: [Model catalog](/settings/models).
 
 ## Roles

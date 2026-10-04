@@ -28,41 +28,51 @@ SECTIONS = (
                 "system prompt"),
         body="""
 Yes — agent prompts can be changed for the whole workspace AND per
-repository. Two places:
+repository, for every agent that has a prompt (defect, contract, security and
+the verifier). Two places:
 
 A. Workspace-wide — [AI Agents](/admin/agents) (Code review → "AI Agents"):
-1. Open the agent (defect, contract, security or verifier) with "Edit prompt".
+1. Open the agent with "Edit prompt".
 2. Edit the text in the "System prompt" card and press "Save override".
-   Every review in this workspace then uses it ("custom prompt active").
+   Every review in this workspace uses it ("custom prompt active") — except
+   in repositories that set their own prompt for that agent.
 3. "Reset to default" discards the workspace edit and returns to the built-in
    text.
+Each agent card shows "Overridden in repositories: {count}", and the agent's
+page lists them under "Repository overrides" — their reviews ignore the
+workspace prompt.
 
 B. Per repository — [Review policies](/admin/review-policies):
 1. Find the repository (filter "Repository") and open its settings (the
-   settings icon), which opens `/admin/review-policies/<repo>`.
-2. Tab "Agents" → card "Agent system prompts (this repo)": a field per agent
-   (defect, contract, security). Blank means inherit ("Leave blank to inherit"). "Preview" shows the effective prompt exactly as the reviewer
-   will send it (save first to preview unsaved edits).
+   settings icon), which opens `/admin/review-policies/<repo>`; a link can
+   open the tab directly with `?tab=agents`.
+2. Tab "Agents & prompts" → card "Agent system prompts (this repo)": one box
+   per agent, the verifier included. A badge says whether it is "overridden here" or inherits ("inherits workspace prompt" / "inherits built-in prompt"); an empty box inherits. "Start from inherited" copies the
+   inherited text in to edit; "Reset to inherited" clears the override;
+   "Preview" shows the composed prompt exactly as the reviewer will send it
+   (save first to preview unsaved edits).
 3. Press "Save". It applies from the next review of that repository.
-Also per repository, tab "Prompt & rules": "Prompt template" (rules every
-agent receives as a mandatory checklist for this repository, up to 20,000
-characters) and "Folder rules" (a glob such as `src/api/**/*.py` plus rules
-added only when a changed file matches).
+Also per repository, tab "Rules": "Prompt template" (rules every agent
+receives as a mandatory checklist, up to 20,000 characters) and "Custom rules" — each with a "Title", "Files (glob)" such as `src/api/**/*.py`,
+"Report violations as" (a severity, or "Agent decides"), "Applies to" (all
+agents, or "Only the selected agents") and "Rule instructions". A rule is
+added only when a changed file matches, and only to the agents it is for.
 
 Which prompt an agent uses (the base, highest priority first):
-1. The repository's override (policy → Agents → "Agent system prompts (this repo)").
+1. The repository's override (policy → "Agents & prompts" → "Agent system prompts (this repo)").
 2. The workspace override ([AI Agents](/admin/agents)).
 3. The built-in prompt.
-Then, always appended on top of whichever base won: the workspace-wide rules
-from [LLM Setup](/settings/llm), this repository's "Prompt template" and
-matching "Folder rules", and a language instruction when the review language
-is not English. So a repository override replaces the workspace prompt for
-that repository only; rules add to the prompt rather than replace it.
+The page says the same: "Precedence: this repository's prompt → workspace prompt (AI Agents) → built-in default." Then, always appended on top of
+whichever base won: the workspace-wide rules from [LLM Setup](/settings/llm),
+this repository's "Prompt template" and the matching custom rules for that
+agent, and a language instruction when the review language is not English.
+So a repository override replaces the workspace prompt for that repository
+only; rules add to the prompt rather than replace it.
 
 Who: editing either needs the editor, admin or owner role in the workspace
 (or a global admin); policies additionally need review permission on that
 repository when team grants are configured. Others see "Read-only: editing prompts and review policies needs the editor, admin or owner role in this workspace." Careful: a broken prompt can silently produce zero findings —
-use "Preview", and "Reset to default" to recover.
+use "Preview", and "Reset to inherited" or "Reset to default" to recover.
 """,
     ),
     Section(
@@ -83,34 +93,41 @@ use "Preview", and "Reset to default" to recover.
 A policy is the review configuration of ONE repository; there is no shared
 named policy. A repository without a saved policy runs on defaults: review
 on, no extra rules, every target branch. Changes apply from the next review.
+Every field is optional; an empty one inherits the workspace or install
+default (badges "inherited from workspace", "install default").
 
-[Review policies](/admin/review-policies) lists repositories as "With a saved policy ({count})" and "On defaults ({count})", with an "Enable review" switch per row (switching
-it off saves a policy). The settings icon opens the repository's policy with
-five tabs; press "Save" at the bottom ("Reset to default" deletes the policy):
+[Review policies](/admin/review-policies) lists repositories as "With a saved policy ({count})" and "On defaults ({count})", with an "Enable review" switch per row (switching it off saves a policy). The settings icon opens the
+repository's policy. Its tabs (a link can open one with `?tab=general`,
+`agents`, `rules`, `comments`, `ignore`, `models` or `mcp`); press "Save" at
+the bottom ("Reset to default" deletes the whole policy):
 
-1. "General & branches"
-   - "AI review enabled" — off skips PR review for this repository entirely.
-   - "Department" — a grouping label only; it changes nothing in reviews.
-   - "Target branches" — only PRs whose BASE branch is checked are reviewed;
-     none checked = every branch. Names match exactly (no globs:
-     `release/*` does not match `release/1.2`); add one not listed with "Add a branch by name (if it is not in the list above)".
-   - "Review output": "Post comments for" = "All findings", "Warning and above (hides nits)", "Critical + error" or "Only critical" — findings below it
-     are not posted but are still counted in the summary, kept in history and
-     tracked on Issues. "Ignore paths (one glob per line)" skips paths such
-     as `vendor/**` on top of the built-in skip list (no negation, at most 200
-     patterns).
-2. "Prompt & rules" — "Prompt template" and "Folder rules" (see the prompts
+1. "General" — "AI review enabled" (off skips PR review for this repository
+   entirely); "Department" (a grouping label only); "Target branches" (only
+   PRs whose BASE branch is checked are reviewed; none checked = every
+   branch; names match exactly, no globs — `release/*` does not match
+   `release/1.2`; add one with "Add a branch by name (if it is not in the list above)").
+2. "Agents & prompts" — "Agents in the review" switches (defect, contract,
+   security, structural; a disabled agent is never run and costs nothing;
+   with all off the review is skipped), the verifier's own switch (off by
+   default: a second model pass that drops low-confidence findings and merges
+   duplicates, one extra call per review), and "Agent system prompts (this repo)" for every agent, the verifier included.
+3. "Rules" — "Prompt template", "Custom rules" (title, files glob, severity,
+   which agents; up to 20) and "Suppressed rule ids" (findings with these
+   rule ids are dropped before anything is posted; the install default list
+   applies until "Override for this repository" is used).
+4. "Comments & summary" — card "Inline comments": "Post comments for" ("All findings", "Warning and above (hides nits)", "Critical + error", "Only critical"; findings below it are not posted but are still counted in the
+   summary, kept in history and tracked on Issues), "Max inline comments per review" (1–100; empty = install default, 20), "Review language" (language
+   of finding titles, bodies and the summary; default = the workspace's).
+   Card "Summary & status comments": "Post a PR summary", "Summary instructions" and "Post a “review started” comment" (see the PR comments
    section).
-3. "Models & limits" — "Per-agent LLM (model, output ceiling, reasoning)" for
+5. "Ignore paths" — "Ignore paths (one glob per line)": files never read by
+   this repository's review, on top of the built-in skip list (lockfiles,
+   build output, binaries); no negation, at most 200 patterns.
+6. "Models & limits" — "Per-agent LLM (model, output ceiling, reasoning)" for
    defect, contract, security and verifier; blank inherits the workspace
-   default from [LLM Setup](/settings/llm). Precedence: this policy >
-   workspace agent settings > review profile > install default.
-4. "MCP sources" — "MCP context sources" whose output is added to the review
-   context (as untrusted input): "Name", "URL", "Auth type", "Credentials store key", trigger regexes, allowed tools; "+ Sentry preset".
-5. "Agents" — "Agents in the review" switches (defect, contract, security,
-   structural, and the verifier). A disabled agent is never run and costs
-   nothing; with all off the review is skipped. Plus the per-repository
-   agent prompts.
+   default from [LLM Setup](/settings/llm).
+7. "MCP sources" — "MCP context sources" queried for evidence (output added
+   as untrusted input): "Name", "URL", "Auth type", "Credentials store key", trigger regexes, allowed tools; "+ Sentry preset".
 
 Who: editor, admin or owner of the workspace (or a global admin); everyone
 can read.
@@ -143,7 +160,8 @@ other repositories, when the repository is indexed):
 - cve — the PR's own dependency changes checked against OSV.
 - verifier — a post-processor: a deterministic filter (dedup, confidence
   floor, severity sort) always runs; its LLM false-positive veto is off by
-  default and switched on per repository in the policy's "Agents" tab.
+  default and switched on per repository in the policy's "Agents & prompts"
+  tab.
 - compliance — after the agents, one LLM call per matching rule from
   [Compliance](/admin/compliance).
 defect, contract and security are critical: if one fails, the verdict cannot
@@ -155,9 +173,10 @@ error → COMMENT; otherwise APPROVE; nothing reviewed → SKIPPED. Skipped when
 review is off for the repository, the base branch is not a target branch,
 the PR is a draft, the diff is over 500 KB, or every file is ignored.
 
-On the PR: inline comments for findings at or above the policy's "Post comments for" level (at most 20, worst first), plus ONE summary comment
-updated in place on every push (verdict, counts by severity, scope, time and
-tokens).
+On the PR: one status comment that says the review started and becomes the
+summary when it ends (see the PR comments section), plus inline comments for
+findings at or above the policy's "Post comments for" level (worst first, at
+most "Max inline comments per review", default 20).
 
 Run one review by hand — [Review history](/reviews), card "Run a review":
 1. Pick "Repository" and "Open pull request", or "or paste a link manually"
@@ -169,6 +188,50 @@ Run one review by hand — [Review history](/reviews), card "Run a review":
 Admins can "Re-run" a past review (it does not post again). Findings have
 Accept / Dismiss / Apply (Apply = commit the suggested fix; GitHub only,
 needs Contents write).
+""",
+    ),
+    Section(
+        id="pr-comments",
+        title="What Celmis posts on a pull request: started comment, summary, inline",
+        keywords=(
+            "summary", "pr summary", "walkthrough", "started", "status comment",
+            "placeholder", "inline", "comment", "comments", "max inline",
+            "language", "review language", "turn off", "disable",
+            "підсумок", "резюме", "саммарі", "коментар", "мова", "вимкн",
+            "розпочат", "почал",
+            "итог", "комментар", "язык", "выключ", "отключ",
+        ),
+        strong=("summary", "walkthrough", "started", "підсумок", "резюме",
+                "саммарі", "итог", "inline", "language", "почат", "начал",
+                "мова", "мову", "мови", "язык"),
+        body="""
+What Celmis writes on a pull request (GitHub, GitLab and Bitbucket alike):
+
+1. When a review starts, ONE status comment appears saying Celmis is
+   reviewing the PR (head commit, agents, number of files, start time). On by
+   default; per repository it is "Post a “review started” comment".
+2. When the review ends, that SAME comment is rewritten into the summary — no
+   second thread, updated in place on every new push. With "Post a PR summary" on (the default) it has: Summary (2–5 sentences on what the PR
+   changes), Changes walkthrough (a table, one line per changed file, up to 30
+   files), Findings (by severity and source, the top ones linked to the code)
+   and the verdict, with scope and performance folded below. Summary and
+   walkthrough come from one extra cheap model call; if it fails they are
+   just left out. "Summary instructions" steers that text for one repository
+   (e.g. what to lead with). With "Post a PR summary" off the comment is the
+   compact form: the verdict and the findings count only.
+3. Inline comments: findings at or above "Post comments for", worst first, at
+   most "Max inline comments per review" (install default 20). Lower ones are
+   still counted in the summary and tracked on [Issues](/issues).
+4. A review skipped (draft, too large, nothing to review) or failing after it
+   started rewrites the same comment with the reason — never a new comment.
+
+To change any of this for ONE repository (editor, admin or owner):
+1. [Review policies](/admin/review-policies) → the repository's settings
+   icon → tab "Comments & summary" (link: `?tab=comments`).
+2. Switch "Post a PR summary" or "Post a “review started” comment", fill "Summary instructions", set "Post comments for", "Max inline comments per review" (1–100) or "Review language" (language of finding titles,
+   bodies and the summary; empty = the workspace's review language on
+   [LLM Setup](/settings/llm)).
+3. Press "Save" — it applies from the next review.
 """,
     ),
     Section(
