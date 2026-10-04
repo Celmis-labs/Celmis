@@ -55,7 +55,7 @@ PAGE_SIZE = 100
 #: Seconds a listing is reused. Short enough that a branch pushed a minute ago
 #: appears on the next open; long enough that every keystroke of a search is
 #: served from memory.
-CACHE_TTL = 90.0
+CACHE_TTL = 300.0
 _CACHE_MAX = 256
 #: Longest search term accepted. A branch name is rarely past 100 characters;
 #: this only stops an absurd query string from reaching the provider.
@@ -380,16 +380,60 @@ def page_of(listing: BranchListing, q: str, limit: int) -> BranchPage:
 
 def branch_page(provider: str, full_name: str, secret: str, email: str = "",
                 *, q: str = "", limit: int = 100) -> BranchPage:
-    """The answer a dropdown needs: matches for ``q``, at most ``limit``."""
+    """The answer a dropdown needs: matches for ``q``, at most ``limit``.
+
+    Measured on a real Bitbucket repository with 2,092 branches: walking every
+    page took ~19 s, one page ~1.2 s, a BBQL search ~0.7 s. A dropdown cannot
+    wait 19 s on its first open, so where the provider can search (GitLab,
+    Bitbucket) the full walk is never on the request path:
+
+      * a full listing already in the cache answers anything at once;
+      * a search goes to the provider (``search=`` / BBQL) and is cached per
+        term — every branch of the repository stays findable;
+      * an empty query reads only the first page(s) — newest first, default
+        branch on top — and says ``truncated`` so the picker asks the person
+        to type.
+
+    GitHub has no branch-search API, so there the full walk (capped, cached)
+    is still the only way to find a branch by substring.
+    """
     q = normalize_query(q)
-    full = cached_branches(provider, full_name, secret, email)
-    if not q or not full.truncated or provider not in ("gitlab", "bitbucket"):
-        return page_of(full, q, limit)
-    # The cap cut the full list: ask the provider to search the whole repo.
-    narrowed = cached_branches(provider, full_name, secret, email, search=q)
-    merged = BranchListing(
-        names=tuple(dict.fromkeys((*narrowed.names, *full.names))),
-        default_branch=full.default_branch or narrowed.default_branch,
-        truncated=narrowed.truncated,
-    )
-    return page_of(merged, q, limit)
+    fp = credential_fingerprint(secret, email)
+    full = _cache_get((provider, full_name.lower(), fp, ""))
+    if full is None and provider not in _SEARCHABLE:
+        full = cached_branches(provider, full_name, secret, email)
+    if full is not None:
+        if not q or not full.truncated or provider not in _SEARCHABLE:
+            return page_of(full, q, limit)
+        narrowed = cached_branches(provider, full_name, secret, email, search=q)
+        merged = BranchListing(
+            names=tuple(dict.fromkeys((*narrowed.names, *full.names))),
+            default_branch=full.default_branch or narrowed.default_branch,
+            truncated=narrowed.truncated,
+        )
+        return page_of(merged, q, limit)
+    if q:
+        return page_of(
+            cached_branches(provider, full_name, secret, email, search=q), q, limit)
+    return page_of(_cached_head(provider, full_name, secret, email,
+                                cap=max(limit, PAGE_SIZE)), "", limit)
+
+
+#: Providers whose API searches branch names server-side.
+_SEARCHABLE = ("gitlab", "bitbucket")
+
+
+def _cached_head(provider: str, full_name: str, secret: str, email: str,
+                 *, cap: int) -> BranchListing:
+    """The newest ``cap`` branches (plus the default), behind the same cache.
+
+    Keyed apart from the full listing and from any search term, so a cheap
+    head never stands in for "every branch" anywhere else."""
+    key = (provider, full_name.lower(), credential_fingerprint(secret, email),
+           f"\x00head:{cap}")
+    hit = _cache_get(key)
+    if hit is not None:
+        return hit
+    listing = fetch_branches(provider, full_name, secret, email, cap=cap)
+    _cache_put(key, listing)
+    return listing

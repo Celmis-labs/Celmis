@@ -20,6 +20,21 @@ derives it from there.
 
 ## [Unreleased]
 
+## [2.2.4] — 2026-10-04
+
+### Fixed
+
+- **A branch picker opens in about a second on a repository with thousands of
+  branches.** 2.2.3 listed every branch, but did it by walking every provider
+  page before answering: ~19 s on a real Bitbucket repository with 2,092
+  branches. Where the provider can search branch names (GitLab, Bitbucket) the
+  full walk is now off the request path: a search goes to the provider
+  (~0.7 s, every branch still findable), an empty query reads only the newest
+  page with the default branch on top (~1.2 s) and says there is more, and a
+  full listing already in the cache answers anything at once. GitHub, which
+  has no branch-search API, keeps the capped full walk. The cache now keeps a
+  listing for 5 minutes instead of 90 s.
+
 ## [2.2.3] — 2026-10-04
 
 ### Added

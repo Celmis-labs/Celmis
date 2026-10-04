@@ -218,8 +218,10 @@ def test_bitbucket_cap_then_bbql_search_finds_the_rest(monkeypatch):
     p = Provider(_bitbucket(names)).install(monkeypatch)
     monkeypatch.setattr(br, "BRANCH_CAP", 200)
 
-    full = br.branch_page("bitbucket", "team/repo", "pw", "me@x", limit=50)
-    assert full.truncated is True and len(full.branches) == 50 and full.total == 200
+    # An empty query reads only the head (one page), never the whole repo.
+    head = br.branch_page("bitbucket", "team/repo", "pw", "me@x", limit=50)
+    assert head.truncated is True and len(head.branches) == 50 and head.total == 100
+    assert len(p.calls("/refs/branches")) == 1
 
     found = br.branch_page("bitbucket", "team/repo", "pw", "me@x", q='odd"one')
     assert found.branches == ['odd"one\\x']
@@ -372,3 +374,57 @@ async def test_policy_route_without_a_token_reads_the_clone(registry, monkeypatc
                               ws_id="ws-a", q="topic", limit=100)
 
     assert out.source == "clone" and out.branches == ["Topic-A"] and out.total == 1
+
+
+# ─── the full walk stays off the request path where the provider searches ──
+
+
+def test_a_bitbucket_search_never_walks_every_page(monkeypatch):
+    """2,092 branches took ~19 s to walk on a real repository; a search must
+    not wait for that. It is one BBQL request, and it still finds a branch
+    that sits far past the first page."""
+    names = [f"feature/x{i:04d}" for i in range(950)] + ["VP-1231-far-away"]
+    p = Provider(_bitbucket(names)).install(monkeypatch)
+
+    found = br.branch_page("bitbucket", "team/repo", "pw", "me@x", q="vp-1231")
+
+    assert found.branches == ["VP-1231-far-away"]
+    unfiltered = [r for r in p.calls("/refs/branches") if not r.url.params.get("q")]
+    assert unfiltered == []
+
+
+def test_an_empty_query_reads_the_head_and_says_there_is_more(monkeypatch):
+    names = [f"feature/x{i:04d}" for i in range(950)]
+    p = Provider(_bitbucket(names, default="develop")).install(monkeypatch)
+
+    head = br.branch_page("bitbucket", "team/repo", "pw", "me@x", limit=100)
+
+    assert head.truncated is True
+    assert len(p.calls("/refs/branches")) == 1
+    again = br.branch_page("bitbucket", "team/repo", "pw", "me@x", limit=100)
+    assert again.branches == head.branches
+    assert len(p.calls("/refs/branches")) == 1          # served from the cache
+
+
+def test_a_cached_full_listing_answers_without_asking_again(monkeypatch):
+    names = [f"feature/x{i:04d}" for i in range(250)] + ["needle"]
+    p = Provider(_bitbucket(names)).install(monkeypatch)
+    br.cached_branches("bitbucket", "team/repo", "pw", "me@x")      # warm the full walk
+    before = len(p.requests)
+
+    found = br.branch_page("bitbucket", "team/repo", "pw", "me@x", q="needle")
+    everything = br.branch_page("bitbucket", "team/repo", "pw", "me@x", limit=1000)
+
+    assert found.branches == ["needle"] and everything.total == 251
+    assert everything.truncated is False
+    assert len(p.requests) == before
+
+
+def test_github_still_walks_every_page_to_search(monkeypatch):
+    """No branch-search API on GitHub: the capped, cached full walk stays."""
+    names = [f"feature/{i:03d}" for i in range(260)] + ["main"]
+    Provider(_github(names)).install(monkeypatch)
+
+    hit = br.branch_page("github", "acme/big", "ghp", q="feature/25")
+
+    assert hit.branches == [f"feature/{i}" for i in range(250, 260)]
