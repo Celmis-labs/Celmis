@@ -20,6 +20,75 @@ derives it from there.
 
 ## [Unreleased]
 
+## [2.2.1] — 2026-10-04
+
+The version jumps from 0.2.1 to 2.2.1 by the maintainer's decision; nothing in
+the compatibility promise changed with it — upgrade the same way as before
+(new images, migrations run on start).
+
+### Added
+
+- **The review announces itself and ends in one Kodus-style summary.** On
+  GitHub, GitLab and Bitbucket a "🔄 Celmis is reviewing this PR…" comment is
+  posted as soon as a review starts (commit, agents, file count), and the same
+  comment is rewritten in place into the summary: verdict, **Summary** (a short
+  overview of what the PR changes), **Changes walkthrough** (one line per file,
+  up to 30), **Findings** (by severity and by agent, top findings with links),
+  and scope/performance in a collapsed block. The overview and walkthrough come
+  from one extra cheap LLM call on the review's own client (booked as
+  `review_summary`, 45 s timeout, no retries); if it fails the summary is
+  rendered without those sections — the review never fails because of it.
+  Skipped and failed runs finalize a placeholder ("⏭️ Skipped: …" /
+  "❌ Review failed: …") but never overwrite a finished summary. A summary that
+  could not be written now marks the run PARTIAL with `post_error` on every
+  provider (it already did on Bitbucket).
+- **Per-repository review customization, Kodus-style.** The review policy page
+  is organised into tabs — General, Agents & prompts, Rules, Comments & summary,
+  Ignore paths, Models & limits, MCP sources (deep-linkable with `?tab=`).
+  - Every overridable agent, the verifier included, can have its own system
+    prompt per repository, with preview, an inherited/overridden badge and
+    reset. The verifier's prompt override was stored but never read; it is now
+    honoured (repo → workspace → built-in).
+  - Structured custom rules: title, file glob, severity hint and the agents a
+    rule applies to; old `{pattern, prompt}` rules work unchanged.
+  - Suppressed rule ids, per-repo review language, inline-comment cap (1–100),
+    summary on/off, summary instructions and the "review started" switch.
+    New nullable columns on `repo_review_policies` (migration `d7a3e9c51b64`).
+  - The AI Agents page says that a repository override wins and shows, per
+    agent, in how many repositories it is overridden, with links
+    (`GET /api/review-policies/overrides-summary`, workspace-scoped).
+- **Webhooks install themselves.** "Install webhook" / "Repair webhook" on every
+  repository row creates (or updates in place, never duplicates) the review
+  webhook on GitHub, GitLab or Bitbucket with the workspace's secret, and turns
+  auto-review on. Registration through the API with `auto_review` tries it too;
+  a refusal never fails registration and comes back with the reason and the
+  token permission to add. Manual setup stays one click away. Requires a public
+  `PUBLIC_BASE_URL`. `POST|GET|DELETE /api/repos/{slug}/webhook`. Repository
+  lookups for webhooks are case-insensitive (fail-closed on ambiguity).
+  The empty Issues and Pull requests pages now say that nothing has been
+  reviewed yet and link to installing the webhook or running a review.
+- **The Celmis agent knows the product.** A packaged knowledge base (29
+  sections, EN/UK/RU keywords) is searched per question and sent with the
+  prompt; answers are concrete numbered steps with real page names, in the
+  user's language, and say whether the asker's role allows the action.
+
+### Changed
+
+- **Embeddings are an installation-wide setting** edited by a global admin
+  from any workspace (`PUT /api/llm/embeddings`), and LiteLLM is offered for
+  them: the installation embeddings proxy is the default workspace's proxy and
+  can be connected inline from the Embeddings card. Saving embeddings from a
+  non-default workspace used to be silently discarded; it is now stored where
+  it is read, or refused with a reason. A workspace owner who is not a global
+  admin can no longer change embeddings.
+- **A workspace owner grants admin and editor** (and member/viewer) in their
+  own workspace; the owner role itself stays with the superadmin, and an admin
+  still manages only members and viewers.
+
+### Fixed
+
+- Review policies help no longer says the verifier always runs (it is opt-in).
+
 ## [0.2.1] — 2026-10-03
 
 ### Added
