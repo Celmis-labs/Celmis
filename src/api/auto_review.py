@@ -237,7 +237,7 @@ class AutoReviewStore:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT DISTINCT workspace_id FROM auto_review_config "
-                "WHERE provider=? AND full_name=?",
+                "WHERE provider=? AND full_name=? COLLATE NOCASE",
                 (provider, full_name),
             ).fetchall()
         ws = {r["workspace_id"] for r in rows}
@@ -263,9 +263,18 @@ class AutoReviewStore:
         bound to more than one workspace, returns None. An ambiguous repo must
         not run under a guessed tenant's keys.
         """
+        # Case-insensitive on purpose. Every provider treats owner/name
+        # case-insensitively, and the payload carries the PROVIDER's spelling
+        # ("acme/billing-api" from Bitbucket) while the row carries whatever
+        # the user typed or pasted ("Acme/Billing-API"). An exact match made
+        # such a repo look unregistered and every delivery was dropped as
+        # "no workspace binding". Matching more loosely cannot widen a
+        # tenant's reach: two workspaces holding case-variants of one name
+        # are two workspaces, and the rule below refuses them both.
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM auto_review_config WHERE provider=? AND full_name=?",
+                "SELECT * FROM auto_review_config "
+                "WHERE provider=? AND full_name=? COLLATE NOCASE",
                 (provider, full_name),
             ).fetchall()
         if not rows:
@@ -306,11 +315,14 @@ class AutoReviewStore:
     def existing_workspace_binding(self, provider: str, full_name: str) -> str | None:
         """The workspace_id an already-registered repo is bound to (across all
         users), or None if unregistered. Enforces a 1:1 repo→workspace binding
-        at registration time so a repo can never span two tenants."""
+        at registration time so a repo can never span two tenants.
+
+        Case-insensitive, like the webhook lookup: `Acme/Repo` and `acme/repo`
+        are one repository at the provider, so they are one binding here."""
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT workspace_id FROM auto_review_config "
-                "WHERE provider=? AND full_name=? LIMIT 1",
+                "WHERE provider=? AND full_name=? COLLATE NOCASE LIMIT 1",
                 (provider, full_name),
             ).fetchone()
         return row["workspace_id"] if row else None

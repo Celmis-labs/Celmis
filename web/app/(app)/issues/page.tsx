@@ -28,6 +28,7 @@ import { formatDateTime } from "@/lib/format";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import { WorkspaceBadge } from "@/components/workspace-badge";
+import { NoReviewsYetHint } from "@/components/repo-webhook";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -204,6 +205,7 @@ export default function IssuesPage() {
                   <p className="mx-auto mt-1 max-w-md text-xs text-[var(--color-muted-foreground)]">
                     {t("issues.emptyDesc")}
                   </p>
+                  <NoReviewsYetHint />
                 </div>
               ) : (
                 <>

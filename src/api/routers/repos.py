@@ -26,7 +26,9 @@ from src.api.deps import (
     client_ip,
     current_workspace_id,
     get_current_user,
+    is_workspace_admin,
     require_repo_permission,
+    require_workspace_admin,
 )
 from src.api.schemas import (
     AutoReviewToggle,
@@ -38,6 +40,7 @@ from src.api.schemas import (
     RepoDeveloperScan,
     RepoOut,
     RepoOwnerItem,
+    RepoWebhookOut,
 )
 from src.config import get_settings, is_valid_repo_slug
 from src.credentials import resolve_git_credential
@@ -87,6 +90,7 @@ def list_repos(
     # renders the same as "no database here", because the repositories page
     # has to load without one.
     states = read_index_states(cfg_by_slug)
+    hooks = _webhook_states(workspace_id)
 
     out: list[RepoOut] = []
     # Primary source: auto_review_config (user-registered repos)
@@ -114,6 +118,7 @@ def list_repos(
             last_remote_sha=st.last_remote_sha if st else None,
             last_check_error=st.last_check_error if st else None,
             up_to_date=st.up_to_date if st else None,
+            webhook=_webhook_out(hooks.get(slug)),
         ))
     return out
 
@@ -261,6 +266,7 @@ def add_repo(
     )
     logger.info("repo_registered ws=%s repo=%s index=%s by=%s",
                 workspace_id, parsed.slug, index_status, user.email)
+    webhook = _auto_install_on_register(cfg, user, workspace_id)
     return RepoOut(
         slug=parsed.slug,
         provider=parsed.provider.value,
@@ -272,6 +278,7 @@ def add_repo(
         branch=cfg.branch,
         index_queued=index_status == INDEX_QUEUED,
         index_status=index_status,
+        webhook=_webhook_out(webhook),
     )
 
 
@@ -297,6 +304,7 @@ async def remove_repo(
         store = get_auto_review_store()
         if not store.delete_in_workspace(workspace_id, slug):
             store.delete(user.id, slug)
+        _forget_webhook_state(workspace_id, slug)
         # Registering a repository was audited; removing one was not. Half a
         # lifecycle in the file reads as a repository that is still connected
         # long after somebody disconnected it.
@@ -317,6 +325,7 @@ async def remove_repo(
         # purge scoped only by slug can take another workspace's vectors with
         # it.
         report = await do_purge(slug, session=session, workspace_id=workspace_id)
+    _forget_webhook_state(workspace_id, slug)
     # A separate action from the unregister above, because it is a separate
     # event: this one destroys the clone, the graph, the vault notes, the
     # Qdrant points and the review history. "Repository removed" covering both
@@ -1401,6 +1410,243 @@ def list_branches(
     except httpx.HTTPError:
         return []
     return []
+
+
+# ─── Review webhook: install / status / remove ───────────────────────
+#
+# Registering a repository with auto-review on used to stop at the database
+# row: nothing told the provider to deliver, so nothing was ever reviewed and
+# /pull-requests stayed empty with no reason given. These endpoints (and the
+# automatic attempt in `add_repo`) install the webhook with the workspace's
+# own git token — see src/review/webhook_install.py for the provider calls.
+
+
+def _webhook_states(workspace_id: str) -> dict:
+    """Last known webhook state per slug. Never raises: the list must render."""
+    try:
+        from src.review.webhook_install import get_webhook_state_store
+        return get_webhook_state_store().for_workspace(workspace_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("webhook_state_unreadable ws=%s err=%s", workspace_id, exc)
+        return {}
+
+
+def _forget_webhook_state(workspace_id: str, slug: str) -> None:
+    try:
+        from src.review.webhook_install import get_webhook_state_store
+        get_webhook_state_store().delete(workspace_id, slug)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("webhook_state_delete_failed ws=%s repo=%s err=%s",
+                       workspace_id, slug, exc)
+
+
+def _remember_webhook_state(workspace_id: str, slug: str, st: Any) -> None:
+    try:
+        from src.review.webhook_install import get_webhook_state_store
+        get_webhook_state_store().save(workspace_id, slug, st)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("webhook_state_save_failed ws=%s repo=%s err=%s",
+                       workspace_id, slug, exc)
+
+
+def _webhook_out(st: Any) -> RepoWebhookOut | None:
+    if st is None:
+        return None
+    return RepoWebhookOut(**st.as_dict())
+
+
+def _bind_to_installed_hook(cfg: RepoConfig, st: Any) -> None:
+    """Make the auto-review row agree with the hook that now exists.
+
+    The receiver drops a delivery for a repository that is not bound, or bound
+    but switched off — so a hook installed for a disabled row would deliver
+    into nothing, which is the exact failure this feature exists to end. The
+    provider's own spelling of the name is stored when it differs only in
+    case, so the row matches what the payload will carry byte for byte (the
+    lookup is case-insensitive too; this keeps the two agreeing everywhere
+    else the name is compared or shown).
+    """
+    canonical = st.full_name or cfg.full_name
+    if canonical != cfg.full_name:
+        if canonical.lower() == cfg.full_name.lower():
+            cfg.full_name = canonical
+        else:
+            # Renamed or transferred at the provider: deliveries will name the
+            # new repository and not match this row. Say so instead of
+            # rewriting a binding the user did not ask to move.
+            st.message = (
+                f"The provider calls this repository {canonical!r}, but it is "
+                f"registered here as {cfg.full_name!r}; deliveries will not "
+                "match until it is re-registered under the new name."
+            )
+    cfg.enabled = True
+    cfg.mode = "webhook"
+    get_auto_review_store().upsert(cfg)
+
+
+def _install_webhook(cfg: RepoConfig, user_id: str) -> Any:
+    """Install (or repair), bind, remember. Returns a WebhookStatus."""
+    from src.review import webhook_install as wi
+
+    base, problem = wi.public_base_url()
+    if base is None:
+        st = wi.WebhookStatus(
+            provider=cfg.provider, status="skipped",
+            events=wi.EVENTS.get(cfg.provider, []),
+            reason="no_public_url", message=problem,
+        )
+    else:
+        st = wi.install(cfg, user_id=user_id, base=base)
+        if st.status == "installed":
+            _bind_to_installed_hook(cfg, st)
+    _remember_webhook_state(cfg.workspace_id, cfg.repo_slug, st)
+    return st
+
+
+def _auto_install_on_register(cfg: RepoConfig, user: User, workspace_id: str) -> Any:
+    """The automatic attempt at registration. Never raises — a webhook problem
+    must not cost the caller the registration they just made."""
+    try:
+        from src.review import webhook_install as wi
+
+        events = wi.EVENTS.get(cfg.provider, [])
+        if not cfg.enabled:
+            return wi.WebhookStatus(
+                provider=cfg.provider, status="skipped", events=events,
+                reason="auto_review_disabled",
+                message="Auto-review is off for this repository, so no webhook "
+                        "was installed.")
+        base, problem = wi.public_base_url()
+        if base is None:
+            st = wi.WebhookStatus(
+                provider=cfg.provider, status="skipped", events=events,
+                reason="no_public_url", message=problem)
+            _remember_webhook_state(workspace_id, cfg.repo_slug, st)
+            return st
+        # Installing writes to the provider with the WORKSPACE's token and
+        # creates the workspace's webhook secret: an admin's action, the same
+        # bar the explicit endpoint holds.
+        if not is_workspace_admin(user, workspace_id):
+            st = wi.WebhookStatus(
+                provider=cfg.provider, status="skipped", events=events,
+                reason="not_admin",
+                message="Only a workspace owner or admin can install the "
+                        "webhook. Ask one to press Install webhook.")
+            _remember_webhook_state(workspace_id, cfg.repo_slug, st)
+            return st
+        return _install_webhook(cfg, user.id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("webhook_auto_install_failed ws=%s repo=%s err=%s",
+                       workspace_id, cfg.repo_slug, type(exc).__name__)
+        return None
+
+
+def _repo_or_404(workspace_id: str, slug: str) -> RepoConfig:
+    cfg = get_auto_review_store().get_in_workspace(workspace_id, slug)
+    if cfg is None:
+        # 404 for "registered in another workspace" too: whether some other
+        # tenant has this slug is not this caller's business.
+        raise HTTPException(status_code=404, detail="Repo not registered")
+    return cfg
+
+
+def _require_public_base() -> str:
+    from src.review.webhook_install import public_base_url
+
+    base, problem = public_base_url()
+    if base is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=problem)
+    return base
+
+
+@router.post("/{slug}/webhook", response_model=RepoWebhookOut)
+def install_repo_webhook(
+    slug: str,
+    request: Request,
+    user: User = Depends(require_workspace_admin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> RepoWebhookOut:
+    """Install or repair the review webhook on the provider.
+
+    Idempotent: an existing hook with our URL is updated, never duplicated.
+    A provider refusal (token without webhook permission, …) is answered as
+    `status: "failed"` with `reason`, `message` and `hint` — 200, because the
+    request was understood and the answer is about the provider, not the call.
+    409 when PUBLIC_BASE_URL is not usable.
+    """
+    cfg = _repo_or_404(workspace_id, slug)
+    _require_public_base()
+    st = _install_webhook(cfg, user.id)
+    record_action(
+        action="repo.webhook_installed" if st.status == "installed"
+        else "repo.webhook_install_failed",
+        actor=user.email, actor_id=user.id, workspace_id=workspace_id,
+        target=slug, ip=client_ip(request),
+        detail={"provider": cfg.provider, "status": st.status,
+                "reason": st.reason, "action": st.action},
+    )
+    return RepoWebhookOut(**st.as_dict())
+
+
+@router.get("/{slug}/webhook", response_model=RepoWebhookOut)
+def get_repo_webhook(
+    slug: str,
+    live: bool = Query(True, description="Ask the provider (false: last known state)"),
+    user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> RepoWebhookOut:
+    """Is our webhook on the provider, with which events, and — where the
+    provider says — how did the last delivery go."""
+    from src.review import webhook_install as wi
+
+    cfg = _repo_or_404(workspace_id, slug)
+    base, problem = wi.public_base_url()
+    known = _webhook_states(workspace_id).get(slug)
+    if base is None:
+        return RepoWebhookOut(
+            provider=cfg.provider, status=known.status if known else "unknown",
+            events=wi.EVENTS.get(cfg.provider, []), reason="no_public_url",
+            message=problem,
+        )
+    if not live:
+        if known is not None:
+            return RepoWebhookOut(**known.as_dict())
+        return RepoWebhookOut(provider=cfg.provider, status="unknown",
+                              url=wi.webhook_url(base, cfg.provider, workspace_id),
+                              events=wi.EVENTS.get(cfg.provider, []))
+    st = wi.status(cfg, user_id=user.id, base=base)
+    if st.status in ("installed", "not_installed"):
+        _remember_webhook_state(workspace_id, slug, st)
+    return RepoWebhookOut(**st.as_dict())
+
+
+@router.delete("/{slug}/webhook", response_model=RepoWebhookOut)
+def delete_repo_webhook(
+    slug: str,
+    request: Request,
+    user: User = Depends(require_workspace_admin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> RepoWebhookOut:
+    """Remove our webhook from the provider (only ours — matched by URL).
+
+    Auto-review stays as it was; only the delivery mode falls back to what the
+    provider supports without a webhook (polling, or manual on Bitbucket).
+    """
+    from src.review import webhook_install as wi
+
+    cfg = _repo_or_404(workspace_id, slug)
+    base = _require_public_base()
+    st = wi.uninstall(cfg, user_id=user.id, base=base)
+    if st.status == "not_installed" and cfg.mode == "webhook":
+        cfg.mode = _default_mode(cfg.provider, cfg.enabled)
+        get_auto_review_store().upsert(cfg)
+    _remember_webhook_state(workspace_id, slug, st)
+    record_action(
+        action="repo.webhook_removed", actor=user.email, actor_id=user.id,
+        workspace_id=workspace_id, target=slug, ip=client_ip(request),
+        detail={"provider": cfg.provider, "status": st.status, "reason": st.reason},
+    )
+    return RepoWebhookOut(**st.as_dict())
 
 
 # ─── helpers ─────────────────────────────────────────────────────────
