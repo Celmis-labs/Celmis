@@ -101,7 +101,13 @@ _OVERRIDABLE_AGENTS = frozenset(_OVERRIDABLE_AGENT_ORDER)
 
 
 TOGGLEABLE_AGENTS = (
-    "defect", "contract", "security", "structural", "cve",
+    "defect", "contract", "security",
+    # The 2.3 Kodus-category finders. `business_logic` is off by default
+    # (`ReviewOrchestrator.OFF_BY_DEFAULT`) and switched ON through
+    # `enabled_agents`; it is listed here so it can also be forced off, and
+    # so a deny-list naming it is not refused as an unknown agent.
+    "performance", "business_logic",
+    "structural", "cve",
     # The verifier is a stage, not an agent, but it is switchable for the same
     # reason the agents are: measured on a 50-PR benchmark it dropped 40 of
     # 187 candidates at a 1024-token ceiling and 61 of 75 once that ceiling
@@ -855,11 +861,15 @@ async def prompt_preview(
     from src.review.orchestrator import ReviewOrchestrator
     from src.review.policy_rules import render_policy_rules
 
+    # First, before the policy row is loaded: a failure here rolls the
+    # session back (see `_load_workspace_defaults`).
+    ws_defaults = await _load_workspace_defaults(session, ws_id)
     row = await session.get(RepoReviewPolicy, repo_slug)
     if row is not None and row.workspace_id != ws_id:
         row = None  # another tenant's policy — never disclose; preview defaults
     agent_overrides = dict(row.agent_prompt_overrides or {}) if row else {}
     review_language = getattr(row, "review_language", None) if row else None
+    base_instruction = _preview_base_instruction(row, ws_defaults)
     source = await asyncio.to_thread(_prompt_source, agent, agent_overrides, ws_id)
 
     if agent == "verifier":
@@ -871,6 +881,7 @@ async def prompt_preview(
             pull_request=_preview_pr(repo_slug),
             repo_agent_prompts=agent_overrides,
             workspace_id=ws_id,
+            base_instruction=base_instruction,
         )
         return {
             "agent": agent,
@@ -914,6 +925,7 @@ async def prompt_preview(
         repo_agent_prompts=agent_overrides,
         workspace_id=ws_id,
         review_language=review_language,
+        base_instruction=base_instruction,
     )
     effective_system = _compose_effective_system_prompt(
         agent_name=agent,
@@ -926,6 +938,20 @@ async def prompt_preview(
         "user_prompt_template": a.user_prompt_template,
         "prompt_source": source,
     }
+
+
+def _preview_base_instruction(row: Any, ws_defaults: dict[str, Any] | None) -> str:
+    """The base instruction a review of this repository would carry: the
+    repository's own, else the workspace default — the order
+    `merge_policy` gives a review — clamped exactly as the orchestrator
+    clamps it. Read with getattr/.get because the setting is newer than
+    some rows (and than the code that may have loaded them)."""
+    from src.review.agents.base import clamp_base_instruction
+
+    own = getattr(row, "base_instruction", None) if row is not None else None
+    if own is None:
+        own = (ws_defaults or {}).get("base_instruction")
+    return clamp_base_instruction(own)
 
 
 def _preview_pr(repo_slug: str):

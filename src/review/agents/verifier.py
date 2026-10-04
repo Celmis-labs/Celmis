@@ -63,6 +63,7 @@ from src.review.agents.base import (
     _review_model,
     agent_llm_settings,
     balanced_json_span,
+    base_instruction_block,
 )
 from src.review.models import Finding, FindingSeverity
 from src.review.settings import get_review_settings
@@ -913,16 +914,39 @@ Return JSON: {"keep": [<indices keep>], "reasons": {"<dropped_idx>": "<why>"}}
 _SYSTEM = _VERIFIER_SYSTEM
 
 
+#: Said after the team's base instruction in the verifier's prompt. The
+#: finders were told how to write; the verifier is told the same text so it
+#: judges a finding written that way as written correctly — and, in the same
+#: breath, that wording is never a reason to drop one. The veto's whole job is
+#: consequences, and a filter that started vetoing on tone would be a new way
+#: to lose a real defect.
+_BASE_INSTRUCTION_RIDER = (
+    "The finders were given this instruction for how to write. Read their "
+    "findings in its light, and never drop a finding for its wording, form or "
+    "tone — only for the reasons listed above."
+)
+
+
 def verifier_system_prompt(context: AgentContext) -> str:
     """The verifier's system prompt for this review.
 
     The same precedence the finders use (`_compose_effective_system_prompt`):
     this repository's override, else the workspace's /admin/agents override,
-    else the built-in. Nothing is appended — the verifier answers
-    `{"keep": [...]}` and reads no repo rules, so the finder's output contract
-    and rule blocks would only confuse it. An override that stops asking for
-    that shape fails open (every finding kept), never closed.
+    else the built-in. One thing is appended, and only one: the policy's base
+    instruction, the team's rules for how every suggestion is written. The
+    verifier answers `{"keep": [...]}` and reads no repo rules, so the
+    finder's output contract and rule blocks would only confuse it. An
+    override that stops asking for that shape fails open (every finding
+    kept), never closed.
     """
+    base = _verifier_base_prompt(context)
+    block = base_instruction_block(getattr(context, "base_instruction", ""))
+    if not block:
+        return base
+    return f"{base.rstrip()}\n\n{block}\n\n{_BASE_INSTRUCTION_RIDER}"
+
+
+def _verifier_base_prompt(context: AgentContext) -> str:
     repo_override = ((context.repo_agent_prompts or {}).get("verifier") or "").strip()
     if repo_override:
         return repo_override

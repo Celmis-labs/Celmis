@@ -132,12 +132,15 @@ def categorize(agent: str | None, rule_id: str | None, title: str | None) -> str
     The mapping, in priority order (first match wins):
       1. security — agent `security` or `cve`, or a security word in
          rule_id/title (cwe, injection, secret, auth, …);
-      2. performance — a performance word (n+1, slow, quadratic, …);
+      2. performance — agent `performance`, or a performance word (n+1,
+         slow, quadratic, …);
       3. style — a style word (naming, format, typo, docstring, …);
       4. maintainability — agent `structural`, or a maintainability word
          (duplication, magic number, dead code, complexity, …);
-      5. bug — agent `defect`, `contract` or `breaking_change`, or a bug word
-         (null, race, exception, wrong, …);
+      5. bug — agent `defect`, `contract`, `business_logic` or
+         `breaking_change`, or a bug word (null, race, exception, wrong, …) —
+         a change that does not do what its pull request says is a bug to
+         the person tracking it;
       6. other — everything else, `compliance` included.
     Keywords outrank the agent for 2–4 because the defect agent finds slow
     code and naming problems too, and the rule id says which it was.
@@ -150,13 +153,13 @@ def categorize(agent: str | None, rule_id: str | None, title: str | None) -> str
 
     if a in ("security", "cve") or has(_SECURITY_WORDS):
         return "security"
-    if has(_PERF_WORDS):
+    if a == "performance" or has(_PERF_WORDS):
         return "performance"
     if has(_STYLE_WORDS):
         return "style"
     if a == "structural" or has(_MAINT_WORDS):
         return "maintainability"
-    if a in ("defect", "contract", "breaking_change") or has(_BUG_WORDS):
+    if a in ("defect", "contract", "business_logic", "breaking_change") or has(_BUG_WORDS):
         return "bug"
     return "other"
 

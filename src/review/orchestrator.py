@@ -21,14 +21,22 @@ from dataclasses import dataclass
 
 from src.review.agents import (
     AgentContext,
+    BusinessLogicAgent,
     ContractAgent,
     CveAgent,
     DefectAgent,
+    PerformanceAgent,
     SecurityAgent,
     StructuralAgent,
     VerifierAgent,
 )
-from src.review.agents.base import AgentRunResult, LLMReviewAgent, ReviewAgent
+from src.review.agents.base import (
+    AgentRunResult,
+    LLMReviewAgent,
+    ReviewAgent,
+    base_instruction_block,
+    clamp_base_instruction,
+)
 from src.review.graph_context import build_graph_context
 from src.review.models import Finding, PullRequest, ReviewBatch, ReviewVerdict
 from src.review.providers import get_provider_for
@@ -281,6 +289,20 @@ class _PRSummaryJob:
 class ReviewOrchestrator:
     """End-to-end PR review."""
 
+    #: Agents in the roster that run only where a policy opts them in, by
+    #: name, in `enabled_agents`. Every other agent runs unless a policy
+    #: names it in `disabled_agents` — so the built-in default roster is
+    #: everything in `_default_agents()` minus this set: performance ON,
+    #: business_logic OFF.
+    #:
+    #: A separate opt-in list rather than a default `disabled_agents`
+    #: entry, because that list already holds operators' decisions. A
+    #: repository that switched `cve` off before 2.3 stored ["cve"]; reading
+    #: that list as "business_logic is on here" would start a new paid model
+    #: call on every one of its reviews without anyone having asked for it.
+    #: `disabled_agents` still wins over an opt-in: off is off.
+    OFF_BY_DEFAULT: frozenset[str] = frozenset({"business_logic"})
+
     def __init__(
         self,
         settings: ReviewSettings | None = None,
@@ -310,6 +332,13 @@ class ReviewOrchestrator:
             DefectAgent(),
             ContractAgent(),
             SecurityAgent(),
+            # The Kodus-category finders (2.3). Both are always in the
+            # roster — the prompt preview, the per-repo prompt overrides and
+            # the rule targets are all derived from this list — and whether
+            # they RUN is `_dormant_agents`: performance by default, business
+            # logic only where a policy opts in.
+            PerformanceAgent(),
+            BusinessLogicAgent(),
             StructuralAgent(),
             # Deterministic like StructuralAgent — no LLM, no tokens. Reads
             # pr.hunks, pr.raw_diff and pr.skipped_files only. Fails into
@@ -320,6 +349,22 @@ class ReviewOrchestrator:
             # the partial banner already names the missing signal.
             CveAgent(),
         ]
+
+    @classmethod
+    def _dormant_agents(cls, policy, disabled_agents: set[str] | None = None) -> set[str]:
+        """The off-by-default agents this policy did not opt in.
+
+        `enabled_agents` is read through `_policy_value`, so a repository, a
+        workspace default or nothing at all may decide it; nothing deciding
+        means the built-in roster, i.e. every `OFF_BY_DEFAULT` agent sits
+        out. An agent named in `disabled_agents` is not reported here — it is
+        off by the operator's word, which the caller already logs as such.
+        """
+        enabled = {
+            str(a).strip().lower()
+            for a in (_policy_value(policy, "enabled_agents", None) or [])
+        }
+        return set(cls.OFF_BY_DEFAULT) - enabled - set(disabled_agents or ())
 
     def review(
         self,
@@ -570,6 +615,12 @@ class ReviewOrchestrator:
             str(a).strip().lower()
             for a in ((policy or {}).get("disabled_agents") or [])
         }
+        # The off-by-default agents nobody opted in. Kept apart from
+        # `disabled_agents` because that set means "an operator switched this
+        # off" — it is logged as a warning and checked for stale names — and
+        # this one means "the built-in roster does not run it", which is the
+        # normal state of every review and worth nothing louder than debug.
+        dormant_agents = self._dormant_agents(policy, disabled_agents)
 
         # ── "🔄 Celmis is reviewing this PR…" — posted now, after every skip
         # gate (a skipped PR gets no placeholder to take back) and before the
@@ -579,7 +630,9 @@ class ReviewOrchestrator:
             if engine == "claude_code":
                 roster = ["claude_code"]
             else:
-                roster = [a.name for a in self.agents if a.name not in disabled_agents]
+                roster = [a.name for a in self.agents
+                          if a.name not in disabled_agents
+                          and a.name not in dormant_agents]
                 if self._verifier_enabled(policy, disabled_agents)[0]:
                     roster.append("verifier")
             lifecycle.started(roster, started_at=_display_time(batch.started_at))
@@ -622,6 +675,9 @@ class ReviewOrchestrator:
                 # One reviewer plays every agent, so it gets the rules
                 # addressed to particular agents as well as the shared ones.
                 custom_rules="\n\n".join(p for p in (
+                    # The team's base instruction first, as every API-engine
+                    # agent carries it right after its own prompt.
+                    base_instruction_block(getattr(context, "base_instruction", "")),
                     context.custom_rules,
                     render_policy_rules(policy, engine_pr.changed_files).targeted,
                 ) if p),
@@ -694,7 +750,7 @@ class ReviewOrchestrator:
                 "old names are not mapped onto their successors on purpose",
                 sorted(unknown), sorted(roster))
         agent_results = self._run_agents_parallel(
-            context, disabled_agents=disabled_agents,
+            context, disabled_agents=disabled_agents, dormant_agents=dormant_agents,
         )
 
         # Aggregate findings + Stage 11 cost accounting.
@@ -781,6 +837,19 @@ class ReviewOrchestrator:
                 # record says nothing about.
                 if why:
                     batch.agent_errors[stage] = why
+            # An agent that chose not to look — the business-logic agent on a
+            # pull request that states no intent. Skipped, not failed and not
+            # run: it lands in `agents_skipped` with its reason beside it, and
+            # NOT in `agent_errors`, whose presence is what makes the summary
+            # call a review thinner than a full one. Nothing went wrong.
+            skip_reason = getattr(r, "skip_reason", None)
+            if skip_reason and not r.error:
+                if r.agent not in batch.agents_skipped:
+                    batch.agents_skipped.append(r.agent)
+                batch.skip_reasons[r.agent] = skip_reason
+                logger.info("agent_skipped_itself agent=%s reason=%s",
+                            r.agent, skip_reason)
+                continue
             if r.error:
                 logger.warning("agent_error agent=%s code=%s err=%s",
                                r.agent, getattr(r, "error_code", None) or "-",
@@ -1116,6 +1185,11 @@ class ReviewOrchestrator:
             repo_agent_prompts=dict((policy or {}).get("agent_prompt_overrides") or {}),
             agent_custom_rules=agent_custom_rules,
             review_language=((policy or {}).get("review_language") or None),
+            # How every suggestion is written — the team's base instruction,
+            # clamped to its 2000-character cap here so no prompt can carry
+            # more whatever the settings layer let through.
+            base_instruction=clamp_base_instruction(
+                _policy_value(policy, "base_instruction", None)),
         )
 
     # ─── Stage 11: BYOK LLM client + per-agent model resolution ──
@@ -1529,6 +1603,7 @@ class ReviewOrchestrator:
         context: AgentContext,
         *,
         disabled_agents: set[str] | None = None,
+        dormant_agents: set[str] | None = None,
     ) -> list[AgentRunResult]:
         """Run all agents in parallel — LLM calls are I/O bound, and at most
         `settings.agent_concurrency` of them run at once (see the pool split
@@ -1540,10 +1615,14 @@ class ReviewOrchestrator:
         degrade the verdict the way a crashed agent does.
         """
         skip = disabled_agents or set()
-        active = [a for a in self.agents if a.name not in skip]
+        dormant = dormant_agents or set()
+        active = [a for a in self.agents
+                  if a.name not in skip and a.name not in dormant]
         for a in self.agents:
             if a.name in skip:
                 logger.warning("agent_skipped_by_policy agent=%s", a.name)
+            elif a.name in dormant:
+                logger.debug("agent_off_by_default agent=%s", a.name)
         if not active:
             return []
         # Two pools, one bound. max_workers used to be len(active): six

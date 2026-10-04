@@ -223,7 +223,7 @@ def test_the_placeholder_is_up_while_the_agents_run_and_becomes_the_summary(
     assert "### Changes walkthrough" in body
     assert "| `src/mod0.py` | +2 / -0 | Adds the cache \\| wrapper |" in body
     assert "invented.py" not in body
-    assert "**By severity:**" in body and "**By source:** defect: **1**" in body
+    assert "**By severity:**" in body and "**By category:** Bug: **1**" in body
     assert ("[`src/mod0.py:2`](https://github.com/o/r/blob/abcdef1234567890/"
             "src/mod0.py#L2)") in body
     assert "<details>" in body
@@ -496,7 +496,7 @@ def _batch(**kw) -> ReviewBatch:
 def test_the_compact_form_is_the_default_for_a_hand_built_batch():
     body = _format_summary(_batch(findings=[_finding()]), MARKER)
     assert "### Scope" in body and "### Findings" in body
-    assert "<details>" not in body and "**By source:**" not in body
+    assert "<details>" not in body and "**By category:**" not in body
 
 
 def test_the_rich_form_without_prose_omits_both_sections():
@@ -528,7 +528,7 @@ def test_findings_by_severity_and_source_with_the_threshold_note():
                    comment_min_severity="warning")
     body = _format_summary(batch, MARKER)
     assert "🔴 Critical: **1**" in body and "💡 Info: **1**" in body
-    assert "**By source:** defect: **2** · security: **1**" in body
+    assert "**By category:** Bug: **2** · Security: **1**" in body
     assert "1. 🔴 **SQLi**" in body
     assert "Naming" not in body.split("**Top findings:**")[1].split("_")[0]
     assert "1 below the comment threshold" in body

@@ -146,6 +146,12 @@ class ReviewSettings(BaseSettings):
     defect_model: str = "gemini-3.6-flash"
     contract_model: str = "gemini-3.6-flash"
     security_model: str = "gemini-3.6-flash"
+    #: The two Kodus-category finders added in 2.3. Same floor as the rest of
+    #: the roster, for the reason above: with performance on by default a
+    #: review makes four finder calls (still at most `agent_concurrency` at
+    #: once), and flash is what answered at four.
+    performance_model: str = "gemini-3.6-flash"
+    business_logic_model: str = "gemini-3.6-flash"
     verifier_model: str = "gemini-3.6-flash"
 
     # ─── Review limits ───────────────────────────────────────────────
@@ -453,7 +459,8 @@ def _legacy_env_bridge(settings: ReviewSettings) -> None:
 #: absent on purpose: they are deterministic and never call a model, so an
 #: output ceiling for them would be a control that does nothing.
 REVIEW_AGENTS: tuple[str, ...] = (
-    "defect", "contract", "security", "verifier", "compliance",
+    "defect", "contract", "security", "performance", "business_logic",
+    "verifier", "compliance",
 )
 
 #: Pre-restructure agent names → who inherited the remit. Consulted where a

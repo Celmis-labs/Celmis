@@ -24,6 +24,7 @@ from src.review.agents.base import (
     AgentRunResult,
     _llm_timeout,
     agent_llm_settings,
+    base_instruction_block,
 )
 from src.review.models import Finding, FindingSeverity, HunkSide
 from src.review.settings import AgentLLMSettings
@@ -49,6 +50,24 @@ a PR diff. Answer with strict JSON: {"passes": bool, "reason": "..."}.\n\
 - reason: one sentence, cite the specific file:line if applicable.\n\
 Do not add prose outside the JSON.
 """
+
+
+#: Said after the team's base instruction. The reply is a strict-JSON verdict
+#: under the tightest output ceiling in the review, so the instruction may
+#: shape the one sentence a person reads and nothing else.
+_BASE_INSTRUCTION_RIDER = (
+    "Apply that instruction to the wording of `reason` only. The reply is "
+    "still exactly the JSON object described above."
+)
+
+
+def compliance_system_prompt(context: AgentContext) -> str:
+    """The compliance auditor's prompt, plus the policy's base instruction —
+    how every suggestion in the review is written — when there is one."""
+    block = base_instruction_block(getattr(context, "base_instruction", ""))
+    if not block:
+        return _SYSTEM
+    return f"{_SYSTEM.rstrip()}\n\n{block}\n\n{_BASE_INSTRUCTION_RIDER}\n"
 
 
 def load_active_checks(repo_slug: str) -> list[ComplianceCheckSpec]:
@@ -184,7 +203,7 @@ def _evaluate(
         response = context.llm_client.generate(
             prompt=prompt,
             agent="compliance",
-            system_instruction=_SYSTEM,
+            system_instruction=compliance_system_prompt(context),
             operation="compliance_check",
             repo=pr.repo,
             temperature=0.0,
