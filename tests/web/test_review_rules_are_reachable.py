@@ -11,12 +11,12 @@ import json
 import re
 
 from tests.web.test_a_configured_reasoning_setting_survives_the_save import (
-    POLICY,
     WEB,
     _strip_comments,
 )
 
 PAGE = WEB / "app" / "(app)" / "admin" / "review-rules" / "page.tsx"
+SETTINGS = WEB / "components" / "review-settings"
 TABS = WEB / "components" / "section-tabs.tsx"
 API = WEB / "lib" / "api.ts"
 MESSAGES = WEB / "lib" / "i18n" / "messages"
@@ -33,11 +33,13 @@ def test_the_page_is_a_tab_of_code_review():
     assert PAGE.is_file()
 
 
-def test_the_repo_policy_rules_tab_links_to_the_repos_rules():
-    code = _code(POLICY)
-    rules_tab = code[code.index('activeTab === "rules"'):]
-    rules_tab = rules_tab[:rules_tab.index("activeTab ===", 30)]
-    assert "/admin/review-rules?repo=" in rules_tab
+def test_the_repo_settings_rules_section_links_to_the_repos_rules():
+    """The Rules section of a repository's settings opens the library on
+    that repository; the legacy folder rules point there too."""
+    rules = _code(SETTINGS / "section-rules.tsx")
+    assert "/admin/review-rules?repo=" in rules
+    assert "reviewRulesApi.list(" in rules, "the section no longer shows the counts"
+    assert "/admin/review-rules?repo=" in _code(SETTINGS / "section-advanced.tsx")
 
 
 def test_the_api_client_names_every_route_the_router_serves():

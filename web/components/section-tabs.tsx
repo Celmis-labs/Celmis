@@ -16,11 +16,15 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { ChevronDownIcon } from "lucide-react";
 import { useSession } from "next-auth/react";
 import { useT } from "@/lib/i18n";
 import { useCanViewAnalytics } from "@/lib/use-analytics-access";
 import { useFeatureOff } from "@/lib/use-capabilities";
 import { cn } from "@/lib/utils";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 export type TabDef = {
   href: string;
@@ -40,6 +44,10 @@ export type TabDef = {
    * and also when /api/capabilities explicitly reports `review_analytics`
    * off: an enterprise feature this installation is not licensed for. */
   analyticsOnly?: boolean;
+  /** Listed under a "More" menu at the end of the row instead of as a tab
+   *  of its own: still part of the section (sidebar highlight, breadcrumb),
+   *  just not worth a permanent slot. */
+  more?: boolean;
 };
 
 export const SECTION_TABS = {
@@ -58,23 +66,25 @@ export const SECTION_TABS = {
     { href: "/docs", labelKey: "docs.title" },
     { href: "/admin/intel", labelKey: "nav.intel" },
   ],
+  // Code review: the work (reviews, the PRs they ran on, the findings they
+  // left), what steers it (rules, settings) and the lead's view. Settings is
+  // ONE tab: the workspace defaults, every repository's overrides and the
+  // agent prompts used to be three tabs (Review defaults, Review policies,
+  // AI Agents) holding thirds of the same settings; their routes redirect to
+  // /review-settings. Compliance and Deprecations are rarely opened and sit
+  // under "More" so the row stays one line at 1024px.
   review: [
     { href: "/reviews", labelKey: "nav.reviews" },
-    // Findings followed across a PR's pushes, the reviewed PRs themselves,
-    // and the lead's view over both.
-    { href: "/issues", labelKey: "issues.navLabel" },
     { href: "/pull-requests", labelKey: "prs.navLabel" },
-    { href: "/analytics", labelKey: "analytics.navLabel", analyticsOnly: true },
-    { href: "/admin/review-policies", labelKey: "nav.reviewPolicies" },
-    // The workspace layer under every repo policy: which agents take part,
-    // their models and limits, comment and summary settings, ignore paths.
-    { href: "/admin/review-defaults", labelKey: "nav.reviewDefaults" },
+    // Findings followed across a PR's pushes.
+    { href: "/issues", labelKey: "issues.navLabel" },
     // The rules library: workspace and per-repository rules, the built-in
     // library, generated and imported proposals waiting for approval.
     { href: "/admin/review-rules", labelKey: "nav.reviewRules" },
-    { href: "/admin/agents", labelKey: "nav.agents" },
-    { href: "/admin/compliance", labelKey: "nav.compliance" },
-    { href: "/admin/deprecations", labelKey: "nav.deprecations" },
+    { href: "/review-settings", labelKey: "nav.reviewSettings" },
+    { href: "/analytics", labelKey: "analytics.navLabel", analyticsOnly: true },
+    { href: "/admin/compliance", labelKey: "nav.compliance", more: true },
+    { href: "/admin/deprecations", labelKey: "nav.deprecations", more: true },
   ],
   qa: [
     { href: "/projects", labelKey: "nav.projects" },
@@ -139,7 +149,8 @@ export const SECTION_TABS = {
   // What is left is the global-infrastructure section proper — every /admin
   // route that no workspace-scoped section claims. Sanity check for anyone
   // adding a page here: /admin/{access,teams,workspaces} are Team,
-  // /admin/{agents,compliance,deprecations,review-policies} are Code review,
+  // /admin/{compliance,deprecations,review-rules} are Code review (the old
+  // /admin/{agents,review-defaults,review-policies} redirect to /review-settings),
   // /admin/intel is Sources, /admin/{audit,jobs,logs,notifications} are
   // Monitoring, and /admin/usage is its own section above. The rest are these.
   admin: [
@@ -153,7 +164,7 @@ export const SECTION_TABS = {
 
 export type SectionKey = keyof typeof SECTION_TABS;
 
-export type SectionTab = { href: string; label: string; exact?: boolean };
+export type SectionTab = { href: string; label: string; exact?: boolean; more?: boolean };
 
 /** Widened view of the same object. Indexing SECTION_TABS with a `SectionKey`
  * variable yields a union of readonly tuples, and calling `.some()` on such a
@@ -219,38 +230,72 @@ export function SectionTabs({
             href: d.href,
             label: t(d.labelKey),
             exact: d.exact,
+            more: d.more,
           }))
       : []);
   if (tabs.length === 0) return null;
+  const primary = tabs.filter((tab) => !tab.more);
+  const more = tabs.filter((tab) => tab.more);
+  const activeMore = more.find((tab) => matchesTab(pathname, tab));
+
+  const tabClass = (active: boolean) => cn(
+    // These are the section navigation — 38px on a phone made
+    // switching between Reviews / Rules / Settings a coin flip.
+    "-mb-px inline-flex min-h-11 items-center gap-1 whitespace-nowrap border-b-2 px-3 py-2 text-sm transition-colors sm:min-h-0",
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-ring)]",
+    active
+      ? "border-[var(--color-brand)] font-medium text-[var(--color-foreground)]"
+      : "border-transparent text-[var(--color-muted-foreground)] hover:border-[var(--color-border)] hover:text-[var(--color-foreground)]",
+  );
 
   return (
     <nav
-      aria-label="Section"
+      aria-label={t("nav.sectionTabs")}
       className={cn(
         "flex gap-1 overflow-x-auto border-b border-[var(--color-border)]",
         className,
       )}
     >
-      {tabs.map((tab) => {
+      {primary.map((tab) => {
         const active = matchesTab(pathname, tab);
         return (
           <Link
             key={tab.href}
             href={tab.href}
             aria-current={active ? "page" : undefined}
-            className={cn(
-              // These are the section navigation — 38px on a phone made
-              // switching between Reviews / Policies / Agents a coin flip.
-              "-mb-px inline-flex min-h-11 items-center whitespace-nowrap border-b-2 px-3 py-2 text-sm transition-colors sm:min-h-0",
-              active
-                ? "border-[var(--color-brand)] font-medium text-[var(--color-foreground)]"
-                : "border-transparent text-[var(--color-muted-foreground)] hover:border-[var(--color-border)] hover:text-[var(--color-foreground)]",
-            )}
+            className={tabClass(active)}
           >
             {tab.label}
           </Link>
         );
       })}
+      {more.length > 0 && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-current={activeMore ? "page" : undefined}
+              className={tabClass(Boolean(activeMore))}
+            >
+              {activeMore ? activeMore.label : t("nav.more")}
+              <ChevronDownIcon className="h-3.5 w-3.5 opacity-60" aria-hidden />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            {more.map((tab) => (
+              <DropdownMenuItem key={tab.href} asChild>
+                <Link
+                  href={tab.href}
+                  aria-current={matchesTab(pathname, tab) ? "page" : undefined}
+                  className="cursor-pointer"
+                >
+                  {tab.label}
+                </Link>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
     </nav>
   );
 }

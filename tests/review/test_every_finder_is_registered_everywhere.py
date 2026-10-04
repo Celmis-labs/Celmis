@@ -199,21 +199,30 @@ def test_every_finder_has_a_web_label():
         assert name in labels, name
 
 
-def test_the_policy_page_switches_cover_the_on_by_default_finders():
-    """The repo page's deny-list switches read "on unless disabled", so the
-    on-by-default finders are there and the opted-in ones are not."""
-    from src.api.routers.review_policies import TOGGLEABLE_AGENTS
+def test_the_settings_switches_cover_every_finder():
+    """The Review categories section draws one switch per agent of the
+    server's participation map (`agent_participation_defaults`), not a list
+    of its own; an opt-in agent (built-in off) is switched through
+    `enabled_agents`, the others through `disabled_agents`."""
     from src.review.orchestrator import ReviewOrchestrator
+    from src.review.review_defaults import AGENT_PARTICIPATION_DEFAULTS
 
-    code = _strip_comments(POLICY.read_text(encoding="utf-8"))
-    m = re.search(r"const TOGGLEABLE_AGENTS = \[([^\]]*)\]", code)
+    section = WEB / "components" / "review-settings" / "section-categories.tsx"
+    code = _strip_comments(section.read_text(encoding="utf-8"))
+    assert "meta.participationDefaults" in code
+    assert "defaults[agent] === false" in code, "opt-in agents lost their badge"
+    m = re.search(r"const FINDER_ORDER = \[([^\]]*)\]", code)
     assert m
-    page = set(re.findall(r'"(\w+)"', m.group(1)))
-    assert page <= set(TOGGLEABLE_AGENTS)
-    on_by_default = _finders() - ReviewOrchestrator.OFF_BY_DEFAULT
-    assert on_by_default <= page
-    assert not (page & ReviewOrchestrator.OFF_BY_DEFAULT)
-    assert "...OFF_BY_DEFAULT_AGENTS" in code, "the help dialog lost the opt-in agents"
+    order = set(re.findall(r'"(\w+)"', m.group(1)))
+    assert order <= set(AGENT_PARTICIPATION_DEFAULTS), "the order names an unknown agent"
+    # Every finder the orchestrator runs can be switched, and the opt-in
+    # ones are exactly the ones whose built-in is off.
+    assert _finders() <= set(AGENT_PARTICIPATION_DEFAULTS)
+    off = {a for a, on in AGENT_PARTICIPATION_DEFAULTS.items() if not on}
+    assert off & _finders() == ReviewOrchestrator.OFF_BY_DEFAULT & _finders()
+    model = _strip_comments(POLICY.read_text(encoding="utf-8"))
+    switch = model[model.index("export function switchAgent("):]
+    assert "defaults[agent] === false" in switch and "enabled_agents" in switch
 
 
 @pytest.mark.parametrize("path", sorted(MESSAGES.glob("*.json")), ids=lambda p: p.stem)

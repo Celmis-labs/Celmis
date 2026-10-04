@@ -387,7 +387,7 @@ async def test_rules_go_to_the_store_as_pending_when_it_exists(
     assert out["status"] == "pending" and out["count"] == 2
     hrefs = [link["href"] for link in out["links"]]
     assert "/admin/review-rules?status=pending" in hrefs
-    assert "/admin/review-policies/billing-api?tab=rules" in hrefs
+    assert "/review-settings?repo=billing-api&section=advanced" in hrefs
     assert ("repo", "billing-api", "review", WS) in person["calls"]
     assert "policy" not in routes, "the store path also wrote the policy"
 
@@ -446,7 +446,7 @@ async def test_without_the_store_rules_are_appended_through_the_policy_save(
     assert "disabled_agents" not in payload.model_fields_set
     assert out["status"] == "active" and out["count"] == 2
     assert [link["href"] for link in out["links"]] == [
-        "/admin/review-policies/billing-api?tab=rules"]
+        "/review-settings?repo=billing-api&section=advanced"]
     assert ("editor", WS) in person["calls"]
     assert ("repo", "billing-api", "review", WS) in person["calls"]
 
@@ -491,7 +491,7 @@ async def test_a_workspace_setting_goes_through_the_defaults_route(
     out = await update_review_setting(_actor(), _Session(), scope="workspace",
                                       key="max_inline_comments", value="15")
     assert routes["defaults"] == ({"max_inline_comments": 15}, WS, "u-1")
-    assert out["value"] == 15 and out["links"][0]["href"] == "/admin/review-defaults"
+    assert out["value"] == 15 and out["links"][0]["href"] == "/review-settings?section=filters"
 
 
 @pytest.mark.asyncio

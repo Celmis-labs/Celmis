@@ -56,7 +56,7 @@ def test_the_planner_is_handed_the_guide(monkeypatch):
 
 
 @pytest.mark.parametrize("route", [
-    "/connections", "/settings/llm", "/admin/review-policies", "/admin/agents",
+    "/connections", "/settings/llm", "/review-settings", "/admin/review-rules",
     "/automation",
 ])
 def test_the_guide_names_the_pages_people_ask_about(route):
@@ -82,13 +82,16 @@ def test_an_unknown_link_keeps_its_words_and_loses_its_target():
 
 
 def test_a_page_under_a_named_route_is_kept():
-    """`/admin/review-policies/default` is real; the guide names its parent."""
+    """`/projects/<id>` is real; the guide names its parent."""
     from src.automation.guide import keep_known_links
 
-    text = "[policy](/admin/review-policies/default)"
+    text = "[project](/projects/42)"
     assert keep_known_links(text) == text
     # A sibling that merely shares the prefix is not a child.
-    assert keep_known_links("[x](/admin/review-policiesX)") == "x"
+    assert keep_known_links("[x](/projectsX)") == "x"
+    # A settings link keeps its query: the scope and section are in it.
+    deep = "[prompts](/review-settings?repo=acme-api&section=prompts)"
+    assert keep_known_links(deep) == deep
     # Protocol-relative is another site.
     assert keep_known_links("[x](//evil.example)") == "x"
 
