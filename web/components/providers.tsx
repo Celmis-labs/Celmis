@@ -45,7 +45,10 @@ export function Providers({
               {children}
             </MotionConfig>
           </LazyMotion>
-          <Toaster position="top-right" richColors closeButton />
+          {/* Toned by globals.css (Toasts): a card with a tinted icon in either
+              theme, instead of sonner's saturated rich colours, which did
+              not follow the theme toggle. */}
+          <Toaster position="top-right" closeButton />
         </QueryClientProvider>
       </I18nProvider>
     </SessionProvider>

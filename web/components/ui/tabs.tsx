@@ -38,11 +38,12 @@ export function Tabs({
 export function TabsList({ className, children }: { className?: string; children: React.ReactNode }) {
   return (
     <div
+      role="tablist"
       className={cn(
         // The 44px phone target belongs HERE, not on the trigger: a trigger
         // taller than its track paints its active background outside the
         // track, which is exactly what it looked like.
-        "inline-flex h-11 items-center justify-center rounded-lg bg-[var(--color-secondary)] p-1 text-[var(--color-muted-foreground)] sm:h-9",
+        "inline-flex h-11 items-center justify-center gap-0.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-muted)] p-0.5 text-[var(--color-muted-foreground)] sm:h-9",
         className,
       )}
     >
@@ -66,14 +67,16 @@ export function TabsTrigger({
   return (
     <button
       type="button"
+      role="tab"
+      aria-selected={active}
       onClick={() => ctx.setValue(value)}
       className={cn(
         // Fills the track, so the target is the track's height and the
         // active background can never exceed it.
-        "inline-flex h-full items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-all",
+        "inline-flex h-full items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-[color,background-color,box-shadow] duration-150",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]",
         active
-          ? "bg-[var(--color-background)] text-[var(--color-foreground)] shadow"
+          ? "bg-[var(--color-card)] text-[var(--color-foreground)] shadow-[var(--shadow-sm)] ring-1 ring-[var(--color-border-strong)]/60 dark:bg-[var(--color-selected)]"
           : "hover:text-[var(--color-foreground)]",
         className,
       )}
