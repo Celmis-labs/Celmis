@@ -209,14 +209,15 @@ each team a permission on repositories — `read`, `review` or `admin`. A
 person's effective permission on a repository is the highest one earned
 through any of their teams; global admins bypass the checks.
 1. "Create team": "Name", "Description", "Add".
-2. In the team add members (email or id, with a team label such as reviewer)
-   and press "Add".
+2. In the team pick a member of the workspace ("Search by name or email",
+   then "Pick a member…"), choose a team label such as reviewer and press
+   "Add". Only workspace members can join a team — invite people first.
 3. "Repository access": pick a repository and permission, press "Grant".
 Until a repository has any grant, single-tenant installations leave it open
 to everyone in the workspace.
 
 [Code access](/admin/access) ("Research access"): what a team may explore in
-a repository through Q&A, graph, search and MCP.
+a repository through Q&A, graph, code search, generated documentation and MCP.
 1. "Add / update rule" — "Repository", "Team", "Visibility" ("None (hidden)",
    "Metadata only" = documentation and structure, "Full code").
 2. "Deny globs (always hidden)" — paths that are refused even at full code
