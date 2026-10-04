@@ -418,14 +418,24 @@ async def _dispatch_review(
     post_comments: bool = True,
     head_sha: str = "",
     expected_workspace_id: str | None = None,
+    skip_reason: str | None = None,
+    pr_meta: dict | None = None,
 ) -> None:
     """Enqueue the review as a durable job. If the sync queue fails,
     fall back to inline dispatch (legacy behaviour) so a broken DB
-    connection doesn't drop the webhook."""
+    connection doesn't drop the webhook.
+
+    `skip_reason` ("draft") is a delivery the handler already decided not to
+    review. It still comes through here, after the tenant checks, so the
+    skip is recorded as a run in the right workspace — a draft that left no
+    trace read, on the pull-requests page, exactly like a webhook that never
+    arrived.
+    """
     # Derive the tenant from the repo — the webhook is unauthenticated, so this
     # is the ONLY tenant binding. workspace_for_repo returns None when the repo
     # is unknown OR bound to more than one workspace; in both cases we FAIL
     # CLOSED (skip) rather than guess and run under the wrong tenant's keys.
+    # Nothing is recorded for these: there is no workspace to record it in.
     from src.api.auto_review import get_auto_review_store
     cfg = get_auto_review_store().config_for_repo(provider_name, repo)
     if cfg is None:
@@ -437,22 +447,6 @@ async def _dispatch_review(
         return
     workspace_id = cfg.workspace_id
 
-    # A delivery is not permission. Auto-review off means off, whoever POSTs.
-    #
-    # The dispatcher used to consult only the repo→workspace binding, so a
-    # webhook left installed after somebody switched auto-review off kept
-    # spending that workspace's model budget on every pull request. The
-    # binding row survives the toggle — that is what the toggle toggles — so
-    # "the repo is known" was never the same question as "the owner wants
-    # this".
-    if not cfg.enabled:
-        logger.info(
-            "webhook_auto_review_disabled provider=%s repo=%s pr=%d ws=%s — "
-            "skipping (the repo is bound but auto-review is switched off)",
-            provider_name, repo, pr_number, workspace_id,
-        )
-        return
-
     # The URL's workspace and the repo's workspace must be the SAME workspace.
     #
     # Per-workspace secrets stop tenant A signing for tenant B's URL, and this
@@ -461,6 +455,9 @@ async def _dispatch_review(
     # The signature checks out, and without this line the delivery flows on
     # with workspace_id=B — so the review runs on B's provider token, spends
     # B's LLM budget and comments as B, on a request A composed.
+    #
+    # Checked BEFORE anything is recorded: a skipped run written into B's
+    # history on A's say-so would be the same hole, smaller.
     #
     # `None` is the legacy un-suffixed route: it has no workspace in the URL to
     # compare, so there is nothing to assert and the binding stands alone, as
@@ -474,6 +471,69 @@ async def _dispatch_review(
         )
         return
 
+    from src.review.dispatch import execute_review, record_gate_skip
+
+    # A delivery is not permission. Auto-review off means off, whoever POSTs.
+    #
+    # The dispatcher used to consult only the repo→workspace binding, so a
+    # webhook left installed after somebody switched auto-review off kept
+    # spending that workspace's model budget on every pull request. The
+    # binding row survives the toggle — that is what the toggle toggles — so
+    # "the repo is known" was never the same question as "the owner wants
+    # this". The skip is recorded, so the PR shows why it was not reviewed.
+    if not cfg.enabled:
+        logger.info(
+            "webhook_auto_review_disabled provider=%s repo=%s pr=%d ws=%s — "
+            "skipping (the repo is bound but auto-review is switched off)",
+            provider_name, repo, pr_number, workspace_id,
+        )
+        await asyncio.to_thread(
+            record_gate_skip, provider_name, repo, pr_number,
+            user_id=cfg.user_id, workspace_id=workspace_id, source="webhook",
+            gate_key="gate_enabled", gate_name="Check review is enabled",
+            reason=("Auto-review disabled: automatic review is switched off for "
+                    "this repository."),
+            pr_meta=pr_meta,
+        )
+        return
+
+    if skip_reason == "draft":
+        logger.info("webhook_draft_skipped provider=%s repo=%s pr=%d ws=%s",
+                    provider_name, repo, pr_number, workspace_id)
+        await asyncio.to_thread(
+            record_gate_skip, provider_name, repo, pr_number,
+            user_id=cfg.user_id, workspace_id=workspace_id, source="webhook",
+            gate_key="gate_draft", gate_name="Check draft status",
+            reason=("Draft: the pull request is a draft; it is reviewed once it "
+                    "is marked ready."),
+            pr_meta=pr_meta,
+        )
+        return
+
+    from src.review.stages import now_iso
+
+    payload = {
+        "provider": provider_name,
+        "repo": repo,
+        "pr_number": pr_number,
+        "post_comments": post_comments,
+        "workspace_id": workspace_id,
+        # The config row's owner, never the literal "default".
+        #
+        # This one string was the whole of why automatic review did not
+        # work. `resolve_auth(user_id, workspace_id)` looks for a
+        # personal Claude credential keyed by user id and falls back to
+        # `ws:{workspace_id}`; "default" matches neither, so a
+        # workspace whose Claude account is connected personally — the
+        # default in the UI — failed every webhook review in 0.06s and
+        # posted "this pull request has NOT been reviewed" to the PR.
+        # The poller never had the bug: it passes `cfg.user_id`.
+        "user_id": cfg.user_id,
+        # Who asked and when — the run's "Review started" and "Queued"
+        # stages are written from these when the worker picks the job up.
+        "source": "webhook",
+        "enqueued_at": now_iso(),
+    }
     try:
         from src.sync.queue import KIND_REVIEW, enqueue
         # Dedup key matches the poller's exactly (no head_sha), so a PR spotted
@@ -481,24 +541,7 @@ async def _dispatch_review(
         dedup = f"review:{provider_name}:{repo}#{pr_number}"
         enqueue(
             kind=KIND_REVIEW,
-            payload={
-                "provider": provider_name,
-                "repo": repo,
-                "pr_number": pr_number,
-                "post_comments": post_comments,
-                "workspace_id": workspace_id,
-                # The config row's owner, never the literal "default".
-                #
-                # This one string was the whole of why automatic review did not
-                # work. `resolve_auth(user_id, workspace_id)` looks for a
-                # personal Claude credential keyed by user id and falls back to
-                # `ws:{workspace_id}`; "default" matches neither, so a
-                # workspace whose Claude account is connected personally — the
-                # default in the UI — failed every webhook review in 0.06s and
-                # posted "this pull request has NOT been reviewed" to the PR.
-                # The poller never had the bug: it passes `cfg.user_id`.
-                "user_id": cfg.user_id,
-            },
+            payload=payload,
             dedup_key=dedup,
             enqueued_by=f"webhook:{provider_name}",
         )
@@ -509,59 +552,22 @@ async def _dispatch_review(
             provider_name, pr_number, exc,
         )
 
-    # Inline fallback (previous behaviour).
-    from src.review.orchestrator import ReviewOrchestrator
-    from src.review.providers import get_provider_for
-    from src.review.providers.base import PullRequestProviderError
-
+    # Inline fallback — the worker's own body, so the run is recorded with its
+    # stages exactly as a queued one would be.
     logger.info(
         "review_dispatch_start provider=%s repo=%s pr=%d workspace=%s",
         provider_name, repo, pr_number, workspace_id,
     )
     try:
-        orchestrator = ReviewOrchestrator()
-        # user_id here for the same reason as in the queue payload above: both
-        # `get_provider_for` and `orchestrator.review` default it to "default",
-        # and that default is what broke the queued path. The poller's inline
-        # fallback has always passed it; this one silently did not.
-        provider = get_provider_for(
-            provider_name, user_id=cfg.user_id, workspace_id=workspace_id,
-        )
-        try:
-            # Run in a thread pool (orchestrator sync — uses ThreadPool internally)
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: orchestrator.review(
-                    provider_name, repo, pr_number,
-                    dry_run=not post_comments,
-                    post_comments=True,
-                    provider=provider,
-                    user_id=cfg.user_id,
-                    workspace_id=workspace_id,
-                ),
-            )
-        finally:
-            provider.close()
-
-        logger.info(
-            "review_dispatch_done provider=%s repo=%s pr=%d "
-            "findings=%d verdict=%s posted=%s",
-            provider_name, repo, pr_number,
-            len(result.batch.findings), result.batch.verdict.value,
-            result.posted,
-        )
-    except PullRequestProviderError as exc:
-        logger.error(
-            "review_dispatch_provider_error provider=%s repo=%s pr=%d err=%s",
-            provider_name, repo, pr_number, exc,
-        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: execute_review(payload))
+        logger.info("review_dispatch_done provider=%s repo=%s pr=%d",
+                    provider_name, repo, pr_number)
     except Exception as exc:  # noqa: BLE001
         logger.exception(
             "review_dispatch_unhandled provider=%s repo=%s pr=%d err=%s",
             provider_name, repo, pr_number, exc,
         )
-
 
 # ─── FastAPI app factory ───────────────────────────────────────
 
@@ -743,9 +749,23 @@ def build_webhook_app(
         # — unless the repository reviews drafts (`run_on_drafts`, repo >
         # workspace > built-in False). Asked only of a draft, so every other
         # delivery costs what it did; an unbound repo answers False.
-        is_draft = (payload.get("pull_request") or {}).get("draft", False)
+        gh_pr = payload.get("pull_request") or {}
+        is_draft = gh_pr.get("draft", False)
         if (is_draft and pr_info["action"] == "opened"
                 and not await _reviews_drafts("github", pr_info["repo"])):
+            # Recorded as a skipped run (after the tenant checks), so the
+            # pull-requests page says "Skipped — draft" instead of nothing.
+            asyncio.create_task(_dispatch_review(
+                "github", pr_info["repo"], pr_info["number"],
+                expected_workspace_id=workspace_id, skip_reason="draft",
+                pr_meta={
+                    "title": gh_pr.get("title"),
+                    "author": (gh_pr.get("user") or {}).get("login"),
+                    "url": gh_pr.get("html_url"),
+                    "head_ref": (gh_pr.get("head") or {}).get("ref"),
+                    "base_ref": (gh_pr.get("base") or {}).get("ref"),
+                },
+            ))
             return JSONResponse({"status": "skipped", "reason": "draft PR"})
 
         asyncio.create_task(_dispatch_review(
@@ -859,7 +879,24 @@ def build_webhook_app(
         # reviews drafts, in which case the draft's review is the review of
         # that sha and the later "ready" event is rightly a duplicate.
         is_draft = bool(attrs.get("work_in_progress") or attrs.get("draft"))
-        if is_draft and not await _reviews_drafts("gitlab", mr_info["repo"]):
+        skip_draft = is_draft and not await _reviews_drafts("gitlab", mr_info["repo"])
+        if skip_draft and mr_info["action"] in ("open", "reopen"):
+            # Recorded as a skipped run — see the GitHub handler. Once per
+            # opening, not on every push to a draft (GitLab fires "update"
+            # for each), which would be a row per commit saying the same.
+            asyncio.create_task(_dispatch_review(
+                "gitlab", mr_info["repo"], mr_info["number"],
+                expected_workspace_id=workspace_id, skip_reason="draft",
+                pr_meta={
+                    "title": attrs.get("title"),
+                    "author": (payload.get("user") or {}).get("username"),
+                    "url": attrs.get("url"),
+                    "head_ref": attrs.get("source_branch"),
+                    "base_ref": attrs.get("target_branch"),
+                },
+            ))
+            return JSONResponse({"status": "skipped", "reason": "draft MR"})
+        if skip_draft:
             return JSONResponse({"status": "skipped", "reason": "draft MR"})
 
         delivery_key = f"gl:{proj}:{iid}:{sha}"

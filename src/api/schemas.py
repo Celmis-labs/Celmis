@@ -457,6 +457,114 @@ class ReviewRunOut(BaseModel):
     #: before the column), which a consumer must not read as "nothing was
     #: hidden" — the same rule as `parameter_adjustments`.
     hidden: HiddenReportOut | None = None
+    #: When the run ended; null while it is queued or running.
+    finished_at: str | None = None
+    #: One sentence: why the run ended the way it did — "Skipped — Branch
+    #: mismatch: target branch 'master' does not match configured patterns
+    #: ['main']". On every row, list and detail alike.
+    status_reason: str | None = None
+    #: The PR the run reviewed, when known.
+    pr_provider: str | None = None
+    pr_repo: str | None = None
+    pr_number: int | None = None
+    #: The ordered stages (src/review/stages.py). Shipped on the detail view
+    #: and on a pull request's run list; null on /history rows ("not
+    #: shipped") and on runs recorded before stages existed ("not recorded").
+    stages: list[ReviewStageOut] | None = None
+
+
+class ReviewStageOut(BaseModel):
+    """One stage of a review run — Kodus-style timeline row."""
+
+    #: Stable id: received | queued | retry | fetch_pr | settings |
+    #: ignore_globs | gate_enabled | gate_target_branch | context | gate_draft
+    #: | gate_size | gate_hunks | summary | agent:<name> | verifier |
+    #: breaking_change | compliance | publish | record | finished. Open
+    #: vocabulary — the page renders an unknown key by its `name`.
+    key: str
+    #: English label, the fallback when the page has no translation for `key`.
+    name: str
+    #: success | skipped | failed | running
+    status: str
+    started_at: str | None = None
+    duration_ms: int | None = None
+    #: A sentence, written from templates — never a provider's error text.
+    reason: str = ""
+    #: Scalars for chips: model, tokens_in, tokens_out, findings, …
+    meta: dict | None = None
+
+
+ReviewRunOut.model_rebuild()
+
+
+class QueuedReviewOut(BaseModel):
+    """One PR's answer to a manual or bulk review request."""
+
+    number: int
+    run_id: str | None = None
+    #: queued | inline | duplicate | failed
+    status: str
+    reason: str = ""
+
+
+class BulkReviewIn(BaseModel):
+    """POST /api/repos/{slug}/pulls/review-all.
+
+    Which PRs: `numbers` when given, otherwise every open PR matching `q` and
+    `branch` — the list the page is showing. `confirm` must be true: a bulk
+    review spends model budget on up to `BULK_LIMIT` PRs at once and is never
+    started by a stray request.
+    """
+
+    numbers: list[int] | None = Field(default=None, max_length=200)
+    q: str = Field(default="", max_length=200)
+    branch: str | None = Field(default=None, max_length=255)
+    post_comments: bool = True
+    confirm: bool = False
+
+
+class BulkReviewOut(BaseModel):
+    requested: int
+    queued: int
+    items: list[QueuedReviewOut]
+
+
+class OpenPullOut(BaseModel):
+    """An open PR/MR of a registered repository, any target branch."""
+
+    provider: str
+    repo: str
+    number: int
+    title: str
+    author: str
+    state: str = "open"
+    url: str
+    created_at: str | None = None
+    updated_at: str | None = None
+    source_branch: str | None = None
+    target_branch: str | None = None
+    draft: bool = False
+    #: The newest Celmis run of this PR, if any.
+    last_review_status: str | None = None
+    last_review_reason: str | None = None
+    last_run_id: str | None = None
+    last_review_at: str | None = None
+
+
+class OpenPullListOut(BaseModel):
+    items: list[OpenPullOut]
+    #: Matching PRs before `limit`/`offset`.
+    total: int
+    #: Open PRs read from the provider before filtering.
+    open_total: int
+    limit: int
+    offset: int
+    #: True when the provider listing was cut at the read cap.
+    truncated: bool = False
+    #: Distinct target branches of the open PRs, for the filter.
+    target_branches: list[str] = Field(default_factory=list)
+    #: The most PRs one "Review all open PRs" request may queue.
+    bulk_limit: int = 25
 
 
 # ═══════════════════════════════════════════════════════════════════

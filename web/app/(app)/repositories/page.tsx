@@ -8,7 +8,9 @@ import {
   branchesApi,
   intelApi,
   llmApi,
-  type PullRequestSummary,
+  openPullsApi,
+  type OpenPull,
+  type QueuedReview,
   type RepoAddRequest,
   type RepoBrowseItem,
   type RepoOut,
@@ -16,7 +18,9 @@ import {
   type RepoDeveloperScan,
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
-import { useT } from "@/lib/i18n";
+import { useI18n, useT } from "@/lib/i18n";
+import { formatDateTime } from "@/lib/format";
+import { relativeTime } from "@/lib/review-stages";
 import { useSpotlightOnMount } from "@/lib/tour";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -28,6 +32,8 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select } from "@/components/ui/select";
 import { BranchCombobox, toBranchResult } from "@/components/branch-combobox";
+import { useConfirm } from "@/components/ui/confirm-dialog";
+import { RUN_VARIANT } from "@/components/review-timeline";
 
 import { WorkspaceBadge } from "@/components/workspace-badge";
 import { RepoFreshness } from "@/components/repo-freshness";
@@ -652,117 +658,222 @@ function BranchPicker({ repo, onChange }: { repo: RepoOut; onChange: () => void 
   );
 }
 
+const PR_PAGE = 25;
+
+/** The list of open PRs a person reviews by hand: every open PR of the
+ *  repository whatever branch it targets, all provider pages, searchable,
+ *  each with its last Celmis review. "Review" queues one; "Review all open
+ *  PRs" queues every PR the filters show (at most `bulk_limit`), after a
+ *  confirmation, through the same queue — so each run records its stages. */
 function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
   const token = useToken();
-  const t = useT();
+  const { t, locale } = useI18n();
+  const qc = useQueryClient();
+  const { confirm, dialog } = useConfirm();
   const [branch, setBranch] = useState<string>("");
   const [sort, setSort] = useState<"newest" | "recently_updated" | "oldest">("newest");
+  const [q, setQ] = useState("");
+  const [offset, setOffset] = useState(0);
 
+  const filters = { q: q.trim(), branch, sort, limit: PR_PAGE, offset };
   const prs = useQuery({
-    queryKey: ["pulls", slug, branch, sort],
-    queryFn: () => {
-      const qs = new URLSearchParams({ sort });
-      if (branch) qs.set("branch", branch);
-      return api<PullRequestSummary[]>(
-        `/api/repos/${slug}/pulls?${qs.toString()}`, { token },
-      );
-    },
+    queryKey: ["pulls", slug, filters],
+    queryFn: () => openPullsApi.list(token!, slug, filters),
     enabled: !!token,
+    placeholderData: keepPreviousData,
   });
+  const refresh = () => qc.invalidateQueries({ queryKey: ["pulls", slug] });
+
+  const answer = (r: QueuedReview) => {
+    if (r.status === "duplicate") toast.info(t("repositories.reviewDuplicate"));
+    else if (r.status === "failed") toast.error(r.reason || t("repositories.reviewFailed"));
+    else toast.success(t("repositories.reviewQueued", { id: (r.run_id ?? "").slice(0, 8) }));
+  };
   const trigger = useMutation({
-    mutationFn: async (pr: PullRequestSummary) => {
-      const ref = `${pr.provider}:${pr.repo}#${pr.number}`;
-      return api<{ id: string; verdict: string; pr_ref: string }>("/api/reviews/trigger", {
-        method: "POST",
-        token,
-        json: { pr_ref: ref, post_comments: true },
-      });
-    },
-    onSuccess: (res) => {
-      toast.success(t("repositories.reviewQueued", { id: res.id.slice(0, 8) }));
+    mutationFn: async (pr: OpenPull) => openPullsApi.review(token!, slug, pr.number),
+    onSuccess: (r) => { answer(r); refresh(); },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const bulk = useMutation({
+    mutationFn: async () => openPullsApi.reviewAll(token!, slug, {
+      q: q.trim(), branch: branch || null, confirm: true,
+    }),
+    onSuccess: (r) => {
+      toast.success(t("repositories.reviewAllQueued", { queued: r.queued, requested: r.requested }));
+      refresh();
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const data = prs.data;
+  const limit = data?.bulk_limit ?? 25;
+  const tooMany = (data?.total ?? 0) > limit;
+  const onReviewAll = async () => {
+    if (!data || data.total === 0 || tooMany) return;
+    const ok = await confirm({
+      title: t("repositories.reviewAllTitle", { n: data.total }),
+      description: t("repositories.reviewAllDesc"),
+      confirmLabel: t("repositories.reviewAllConfirm"),
+    });
+    if (ok) bulk.mutate();
+  };
+  const pick = <V,>(set: (v: V) => void) => (v: V) => { set(v); setOffset(0); };
+
   return (
     <div className="mt-3 sm:pl-12">
+      {dialog}
       <div className="rounded-md border border-dashed border-[var(--color-border)] p-3">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
           <div className="text-xs uppercase tracking-wide text-[var(--color-muted-foreground)]">
             {repo.provider === "gitlab" ? t("repositories.openMergeRequests") : t("repositories.openPullRequests")}
+            {data && (
+              <span className="ml-2 normal-case tracking-normal">
+                {t("repositories.prCount", { shown: data.total, total: data.open_total })}
+              </span>
+            )}
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <BranchCombobox
-              value={branch}
-              onChange={setBranch}
-              search={(q) => branchesApi.forRepo(token!, slug, q).then(toBranchResult)}
-              queryKey={["repo-branches", slug]}
-              leadingOptions={[{ value: "", label: t("repositories.allBranches") }]}
-              disabled={!token}
-              className="h-9 max-w-[16rem] rounded border-[var(--color-input)] px-2 text-sm sm:h-7 sm:text-xs"
-            />
-            <Select
-              value={sort}
-              onChange={(v) => setSort(v as typeof sort)}
-              options={[
-                { value: "newest", label: t("repositories.sortNewest") },
-                { value: "recently_updated", label: t("repositories.sortRecentlyUpdated") },
-                { value: "oldest", label: t("repositories.sortOldest") },
-              ]}
-              className="h-9 rounded border-[var(--color-input)] px-2 text-sm sm:h-7 sm:text-xs"
-            />
-          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!data || data.total === 0 || tooMany || bulk.isPending}
+            title={tooMany ? t("repositories.reviewAllTooMany", { n: data?.total ?? 0, max: limit }) : undefined}
+            onClick={onReviewAll}
+          >
+            <SparklesIcon className="h-3 w-3" />
+            {t("repositories.reviewAll", { n: Math.min(data?.total ?? 0, limit) })}
+          </Button>
         </div>
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <Input
+            aria-label={t("repositories.prSearch")}
+            placeholder={t("repositories.prSearch")}
+            value={q}
+            onChange={(e) => pick(setQ)(e.target.value)}
+            className="h-9 max-w-[18rem] text-sm sm:h-7 sm:text-xs"
+          />
+          <BranchCombobox
+            value={branch}
+            onChange={pick(setBranch)}
+            search={(term) => branchesApi.forRepo(token!, slug, term).then(toBranchResult)}
+            queryKey={["repo-branches", slug]}
+            leadingOptions={[{ value: "", label: t("repositories.allTargetBranches") }]}
+            disabled={!token}
+            className="h-9 max-w-[16rem] rounded border-[var(--color-input)] px-2 text-sm sm:h-7 sm:text-xs"
+          />
+          <Select
+            value={sort}
+            onChange={(v) => pick(setSort)(v as typeof sort)}
+            options={[
+              { value: "newest", label: t("repositories.sortNewest") },
+              { value: "recently_updated", label: t("repositories.sortRecentlyUpdated") },
+              { value: "oldest", label: t("repositories.sortOldest") },
+            ]}
+            className="h-9 rounded border-[var(--color-input)] px-2 text-sm sm:h-7 sm:text-xs"
+          />
+        </div>
+        {tooMany && (
+          <p className="mb-2 text-xs text-[var(--color-muted-foreground)]">
+            {t("repositories.reviewAllTooMany", { n: data?.total ?? 0, max: limit })}
+          </p>
+        )}
+        {data?.truncated && (
+          <p className="mb-2 text-xs text-[var(--color-warning)]">
+            {t("repositories.prTruncated", { n: data.open_total })}
+          </p>
+        )}
         {prs.isLoading ? (
           <div className="text-sm text-[var(--color-muted-foreground)]">{t("repositories.loading")}</div>
         ) : prs.error ? (
           <div className="text-sm text-[var(--color-destructive)]">
             {(prs.error as Error).message}
           </div>
-        ) : (prs.data?.length ?? 0) === 0 ? (
+        ) : (data?.items.length ?? 0) === 0 ? (
           <div className="text-sm text-[var(--color-muted-foreground)]">{t("repositories.noOpenPrs")}</div>
         ) : (
-          <ul className="flex flex-col gap-1">
-            {/* Row on desktop, stacked card on a phone — the title plus two
-                actions cannot share a 390px line without overflowing. */}
-            {prs.data!.map((pr) => (
-              <li
-                key={`${pr.provider}-${pr.number}`}
-                className="flex flex-col gap-2 rounded px-2 py-2 hover:bg-[var(--color-accent)] sm:flex-row sm:items-center sm:justify-between sm:py-1.5"
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="shrink-0 font-mono text-xs text-[var(--color-muted-foreground)]">
-                    #{pr.number}
-                  </span>
-                  <span className="truncate text-sm">{pr.title}</span>
-                  {pr.author && (
-                    <span className="truncate text-xs text-[var(--color-muted-foreground)]">
-                      · {pr.author}
-                    </span>
-                  )}
-                </div>
-                <div className="flex items-center justify-end gap-2 sm:shrink-0">
-                  <a
-                    href={pr.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex min-h-9 items-center gap-0.5 text-xs text-[var(--color-muted-foreground)] hover:underline"
-                  >
-                    {t("repositories.viewLink")} <ExternalLinkIcon className="h-3 w-3" />
-                  </a>
-                  <Button
-                    size="sm"
-                    variant="default"
-                    disabled={trigger.isPending}
-                    onClick={() => trigger.mutate(pr)}
-                  >
-                    <SparklesIcon className="h-3 w-3" />
-                    {t("repositories.reviewButton")}
+          <>
+            <ul className="flex flex-col gap-1">
+              {/* Row on desktop, stacked card on a phone — the title plus two
+                  actions cannot share a 390px line without overflowing. */}
+              {data!.items.map((pr) => (
+                <li
+                  key={`${pr.provider}-${pr.number}`}
+                  className="flex flex-col gap-2 rounded px-2 py-2 hover:bg-[var(--color-accent)] sm:flex-row sm:items-center sm:justify-between sm:py-1.5"
+                >
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="shrink-0 font-mono text-xs text-[var(--color-muted-foreground)]">
+                        #{pr.number}
+                      </span>
+                      <span className="truncate text-sm">{pr.title}</span>
+                      {pr.draft && (
+                        <Badge variant="outline" className="text-[10px]">{t("repositories.draft")}</Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[var(--color-muted-foreground)]">
+                      <span className="max-w-[22rem] truncate font-mono"
+                        title={`${pr.target_branch ?? "?"} ← ${pr.source_branch ?? "?"}`}>
+                        {pr.target_branch ?? "?"} ← {pr.source_branch ?? "?"}
+                      </span>
+                      {pr.author && <span>· {pr.author}</span>}
+                      <span title={formatDateTime(pr.updated_at)}>
+                        · {t("repositories.prUpdated", { time: relativeTime(pr.updated_at ?? pr.created_at, locale) })}
+                      </span>
+                      <span>·</span>
+                      {pr.last_review_status ? (
+                        <Badge variant={RUN_VARIANT[pr.last_review_status] ?? "default"}
+                          className="text-[10px]" title={pr.last_review_reason ?? undefined}>
+                          {t("repositories.lastReview")}: {t(`prs.review.${pr.last_review_status}`)}
+                        </Badge>
+                      ) : (
+                        <span>{t("repositories.notReviewed")}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-end gap-2 sm:shrink-0">
+                    <a
+                      href={pr.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex min-h-9 items-center gap-0.5 text-xs text-[var(--color-muted-foreground)] hover:underline"
+                    >
+                      {t("repositories.viewLink")} <ExternalLinkIcon className="h-3 w-3" />
+                    </a>
+                    <Button
+                      size="sm"
+                      variant="default"
+                      disabled={trigger.isPending}
+                      onClick={() => trigger.mutate(pr)}
+                    >
+                      <SparklesIcon className="h-3 w-3" />
+                      {t("repositories.reviewButton")}
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {data!.total > PR_PAGE && (
+              <div className="mt-2 flex items-center justify-between text-xs text-[var(--color-muted-foreground)]">
+                <span>
+                  {t("issues.range", {
+                    from: data!.offset + 1,
+                    to: data!.offset + data!.items.length,
+                    total: data!.total,
+                  })}
+                </span>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" disabled={offset === 0}
+                    onClick={() => setOffset(Math.max(0, offset - PR_PAGE))}>
+                    {t("repositories.prev")}
+                  </Button>
+                  <Button size="sm" variant="outline"
+                    disabled={data!.offset + data!.items.length >= data!.total}
+                    onClick={() => setOffset(offset + PR_PAGE)}>
+                    {t("repositories.next")}
                   </Button>
                 </div>
-              </li>
-            ))}
-          </ul>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

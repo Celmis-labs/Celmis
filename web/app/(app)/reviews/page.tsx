@@ -8,8 +8,8 @@ import {
 import { useSession } from "next-auth/react";
 import {
   api, applyFixApi, findingsApi,
-  feedbackApi, workspacesApi,
-  type ApplyFixIn, type FindingOut, type FindingsPayload, type PullRequestSummary,
+  feedbackApi, openPullsApi, workspacesApi,
+  type ApplyFixIn, type FindingOut, type FindingsPayload, type OpenPull,
   type RepoOut, type ReviewRunOut,
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
@@ -964,7 +964,7 @@ function FindingsBreakdown({ run }: { run: ReviewRunOut }) {
  * works for self-hosted instances too — so we send the shorthand and keep
  * `pr.url` purely as a "open the PR" link. Same construction as the PR list
  * on the Repositories page. */
-function prRefOf(pr: PullRequestSummary): string {
+function prRefOf(pr: OpenPull): string {
   return `${pr.provider}:${pr.repo}#${pr.number}`;
 }
 
@@ -987,12 +987,13 @@ function ManualTrigger() {
   // One repo → nothing to choose, so pre-select it without an effect.
   const repoList = repos.data ?? [];
   const effSlug = slug || (repoList.length === 1 ? repoList[0].slug : "");
-  // Key + URL match the Repositories page list (branch="", sort="newest"),
-  // so the two views share one cache entry.
+  // Every open PR, any target branch (the server walks every provider page);
+  // the first 200 newest are offered here, the Repositories page pages them.
   const prs = useQuery({
-    queryKey: ["pulls", effSlug, "", "newest"],
+    queryKey: ["pulls", effSlug, { sort: "newest", limit: 200 }],
     queryFn: () =>
-      api<PullRequestSummary[]>(`/api/repos/${effSlug}/pulls?sort=newest`, { token }),
+      openPullsApi.list(token!, effSlug, { sort: "newest", limit: 200 })
+        .then((r) => r.items),
     enabled: !!token && !!effSlug && !manual,
   });
   const selectedPr = (prs.data ?? []).find((p) => prRefOf(p) === prRef);
@@ -1093,7 +1094,8 @@ function ManualTrigger() {
                     placeholder={t("common.select")}
                     options={(prs.data ?? []).map((p) => ({
                       value: prRefOf(p),
-                      label: `#${p.number} — ${p.title.length > 70 ? `${p.title.slice(0, 70)}…` : p.title}`,
+                      label: `#${p.number} — ${p.title.length > 70 ? `${p.title.slice(0, 70)}…` : p.title}`
+                        + ` (${p.target_branch ?? "?"} ← ${p.source_branch ?? "?"})`,
                     }))}
                   />
                   {selectedPr && (

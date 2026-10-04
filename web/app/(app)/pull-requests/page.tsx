@@ -4,13 +4,16 @@
  * /pull-requests — the pull requests Celmis reviewed, and what became of them.
  *
  * A row per PR (not per run): how many times it was reviewed, how the last
- * review went, how many issues it carries by severity, and whether it was
- * merged or closed — the state comes from the provider's webhook.
+ * review went and why, how many issues it carries by severity, and whether it
+ * was merged or closed — the state comes from the provider's webhook. A row
+ * expands into its reviews, and each review into its stages.
  */
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { ExternalLinkIcon, GitPullRequestIcon } from "lucide-react";
+import {
+  ChevronDownIcon, ChevronRightIcon, ExternalLinkIcon, GitPullRequestIcon,
+} from "lucide-react";
 
 import {
   pullRequestsApi,
@@ -25,6 +28,7 @@ import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import { WorkspaceBadge } from "@/components/workspace-badge";
 import { NoReviewsYetHint } from "@/components/repo-webhook";
+import { PullRequestReviews } from "@/components/review-timeline";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -143,6 +147,7 @@ export default function PullRequestsPage() {
                   <Table>
                     <THead>
                       <TR>
+                        <TH className="w-6"><span className="sr-only">{t("prs.expand")}</span></TH>
                         <TH>{t("prs.col.number")}</TH>
                         <TH>{t("prs.col.title")}</TH>
                         <TH>{t("prs.col.repo")}</TH>
@@ -188,14 +193,30 @@ export default function PullRequestsPage() {
   );
 }
 
+/** Columns of the PR table — the expanded row spans all of them. */
+const COLS = 10;
+
 function PrRow({ pr }: { pr: ReviewedPullRequest }) {
   const t = useT();
+  const [open, setOpen] = useState(false);
   const sev = pr.by_severity ?? {};
   const severityTitle = (["critical", "error", "warning", "info"] as const)
     .map((s) => `${t(`issues.severity.${s}`)}: ${sev[s] ?? 0}`)
     .join(" · ");
   return (
-    <TR>
+    <Fragment>
+    <TR className={open ? "bg-[var(--color-accent)]/30" : undefined}>
+      <TD className="w-6">
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-label={open ? t("prs.collapse") : t("prs.expand")}
+          onClick={() => setOpen((v) => !v)}
+          className="inline-flex h-7 w-7 items-center justify-center rounded hover:bg-[var(--color-accent)]"
+        >
+          {open ? <ChevronDownIcon className="h-4 w-4" /> : <ChevronRightIcon className="h-4 w-4" />}
+        </button>
+      </TD>
       <TD className="whitespace-nowrap font-mono">
         {pr.url ? (
           <a href={pr.url} target="_blank" rel="noreferrer"
@@ -211,8 +232,9 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
         </Badge>
       </TD>
       <TD className="whitespace-nowrap">{pr.repo}</TD>
-      <TD className="max-w-[12rem] truncate font-mono" title={pr.head_ref ?? ""}>
-        {pr.head_ref ?? "—"}
+      <TD className="max-w-[14rem] truncate font-mono"
+        title={`${pr.base_ref ?? "?"} ← ${pr.head_ref ?? "?"}`}>
+        {pr.base_ref ? <>{pr.base_ref} ← </> : null}{pr.head_ref ?? "—"}
       </TD>
       <TD className="whitespace-nowrap">{pr.author ?? "—"}</TD>
       <TD className="whitespace-nowrap" title={formatDateTime(pr.opened_at)}>
@@ -227,13 +249,30 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
           </span>
         )}
       </TD>
-      <TD className="whitespace-nowrap">
+      <TD className="max-w-[18rem]">
         {pr.last_review_status ? (
-          <Badge variant={REVIEW_VARIANT[pr.last_review_status] ?? "default"}>
-            {t(`prs.review.${pr.last_review_status}`)}
-          </Badge>
+          <div className="flex flex-col gap-0.5">
+            <Badge variant={REVIEW_VARIANT[pr.last_review_status] ?? "default"}
+              className="self-start">
+              {t(`prs.review.${pr.last_review_status}`)}
+            </Badge>
+            {pr.last_review_reason && pr.last_review_status !== "complete" && (
+              <span className="line-clamp-2 text-[10px] text-[var(--color-muted-foreground)]"
+                title={pr.last_review_reason}>
+                {pr.last_review_reason}
+              </span>
+            )}
+          </div>
         ) : "—"}
       </TD>
     </TR>
+    {open && (
+      <TR className="hover:bg-transparent">
+        <TD colSpan={COLS} className="bg-[var(--color-muted)]/30 px-4 py-3">
+          <PullRequestReviews prId={pr.id} />
+        </TD>
+      </TR>
+    )}
+    </Fragment>
   );
 }

@@ -3,6 +3,8 @@
  * Bearer to the FastAPI backend.
  */
 
+import type { ReviewStage } from "./review-stages";
+
 // API_BASE — how this bundle reaches FastAPI.
 //
 // IN THE BROWSER, A RELATIVE PATH, because the answer belongs to wherever the
@@ -309,6 +311,17 @@ export interface ReviewRunOut {
    *  the LLM veto's drops. Absent on runs recorded before it was written
    *  down, which is "nobody wrote it down", not "nothing was hidden". */
   hidden?: HiddenReport | null;
+  /** When the run ended; null while queued or running. */
+  finished_at?: string | null;
+  /** One sentence: why the run ended the way it did ("Skipped — Branch
+   *  mismatch: …"). */
+  status_reason?: string | null;
+  pr_provider?: string | null;
+  pr_repo?: string | null;
+  pr_number?: number | null;
+  /** The ordered stages — shipped on the detail view and on a pull request's
+   *  run list; null on history rows and on runs recorded before stages. */
+  stages?: ReviewStage[] | null;
 }
 
 /** Findings a run hid before posting, by cause. Every field may be missing
@@ -2333,6 +2346,8 @@ export type ReviewedPullRequest = {
   head_sha: string | null;
   /** complete | partial | skipped | failed — the last review's outcome */
   last_review_status: string | null;
+  /** Why the last review ended that way, when the run says. */
+  last_review_reason?: string | null;
   last_run_id: string | null;
   reviews_count: number;
   issues_total: number;
@@ -2357,6 +2372,71 @@ export const pullRequestsApi = {
     limit?: number; offset?: number;
   } = {}) =>
     api<ReviewedPullRequestList>(`/api/pull-requests${queryString(f)}`, { token }),
+  /** Every recorded review of one PR, newest first, each with its stages. */
+  runs: (token: string, prId: string) =>
+    api<{ pr_id: string; items: ReviewRunOut[] }>(
+      `/api/pull-requests/${encodeURIComponent(prId)}/runs`, { token }),
+};
+
+/** An open PR/MR of a registered repository — any target branch. */
+export type OpenPull = {
+  provider: string;
+  repo: string;
+  number: number;
+  title: string;
+  author: string;
+  state: string;
+  url: string;
+  created_at: string | null;
+  updated_at: string | null;
+  source_branch: string | null;
+  target_branch: string | null;
+  draft: boolean;
+  last_review_status: string | null;
+  last_review_reason: string | null;
+  last_run_id: string | null;
+  last_review_at: string | null;
+};
+
+export type OpenPullList = {
+  items: OpenPull[];
+  total: number;
+  open_total: number;
+  limit: number;
+  offset: number;
+  truncated: boolean;
+  target_branches: string[];
+  bulk_limit: number;
+};
+
+export type QueuedReview = {
+  number: number;
+  run_id: string | null;
+  /** queued | inline | duplicate | failed */
+  status: string;
+  reason: string;
+};
+
+export type OpenPullFilters = {
+  q?: string; branch?: string; sort?: string; limit?: number; offset?: number;
+};
+
+export const openPullsApi = {
+  list: (token: string, slug: string, f: OpenPullFilters = {}) =>
+    api<OpenPullList>(
+      `/api/repos/${encodeURIComponent(slug)}/pulls${queryString(f)}`, { token }),
+  review: (token: string, slug: string, number: number, postComments = true) =>
+    api<QueuedReview>(
+      `/api/repos/${encodeURIComponent(slug)}/pulls/${number}/review`
+      + `?post_comments=${postComments ? "true" : "false"}`,
+      { token, method: "POST" }),
+  reviewAll: (token: string, slug: string, body: {
+    q?: string; branch?: string | null; numbers?: number[];
+    post_comments?: boolean; confirm: boolean;
+  }) =>
+    api<{ requested: number; queued: number; items: QueuedReview[] }>(
+      `/api/repos/${encodeURIComponent(slug)}/pulls/review-all`,
+      { token, method: "POST", json: body }),
 };
 
 export type AnalyticsSummary = {

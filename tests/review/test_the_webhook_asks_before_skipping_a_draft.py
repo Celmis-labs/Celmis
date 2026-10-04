@@ -141,9 +141,17 @@ def test_a_github_draft_is_dispatched_only_when_drafts_are_reviewed(client, monk
     if on:
         assert r.status_code == 202 and r.json()["status"] == "accepted"
         dispatch.assert_called_once()
+        assert dispatch.call_args.kwargs.get("skip_reason") is None
     else:
         assert r.json() == {"status": "skipped", "reason": "draft PR"}
-        dispatch.assert_not_called()
+        _only_the_skip_is_recorded(dispatch)
+
+
+def _only_the_skip_is_recorded(dispatch) -> None:
+    """A skipped draft still reaches the dispatcher — only to be RECORDED as
+    a skipped run (src/review/dispatch.py:record_gate_skip), never reviewed."""
+    dispatch.assert_called_once()
+    assert dispatch.call_args.kwargs["skip_reason"] == "draft"
 
 
 @pytest.mark.parametrize("on", [False, True])
@@ -157,6 +165,7 @@ def test_a_gitlab_draft_is_dispatched_only_when_drafts_are_reviewed(client, monk
     if on:
         assert r.status_code == 202, r.text
         dispatch.assert_called_once()
+        assert dispatch.call_args.kwargs.get("skip_reason") is None
     else:
         assert r.json() == {"status": "skipped", "reason": "draft MR"}
-        dispatch.assert_not_called()
+        _only_the_skip_is_recorded(dispatch)

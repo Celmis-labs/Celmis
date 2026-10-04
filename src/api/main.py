@@ -61,8 +61,8 @@ from src.api.routers import qa as qa_router
 from src.api.routers import repos as repos_router
 from src.api.routers import review_defaults as review_defaults_router
 from src.api.routers import review_policies as review_policies_router
-from src.api.routers import review_settings as review_settings_router
 from src.api.routers import review_rules as review_rules_router
+from src.api.routers import review_settings as review_settings_router
 from src.api.routers import reviews as reviews_router
 from src.api.routers import search as search_router_mod
 from src.api.routers import spend as spend_router

@@ -88,7 +88,9 @@ CREATE TABLE IF NOT EXISTS review_runs (
     -- failed" is the exact false negative these columns were added to close.
     agents_run      TEXT,
     agents_skipped  TEXT,
-    agents_failed   TEXT
+    agents_failed   TEXT,
+    -- The ordered stages of the run (src/review/stages.py), as a JSON list.
+    stages_json     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_review_runs_user_started
@@ -190,6 +192,17 @@ _MIGRATIONS = [
     # the provider refused, and this is what it said" — kept as the provider's
     # own words because "post failed" is not something an operator can act on.
     "ALTER TABLE review_runs ADD COLUMN post_error TEXT",
+    # The ordered stages of the run — received, queued, fetch, each gate,
+    # each agent, verifier, summary, publish, record, finished — with status,
+    # start time, duration and a sentence each (src/review/stages.py). A run
+    # row said how a review ended and never how it got there, so a skip for a
+    # branch mismatch read exactly like a skip for a draft. NULL is "this row
+    # predates the column"; the API serves it as null, never as [].
+    "ALTER TABLE review_runs ADD COLUMN stages_json TEXT",
+    # A PR's runs are listed by its coordinates (the pull-requests page and
+    # the open-PR list's "last review" column).
+    "CREATE INDEX IF NOT EXISTS idx_review_runs_pr"
+    " ON review_runs(pr_provider, pr_repo, pr_number)",
 ]
 
 
@@ -298,6 +311,37 @@ def _adjustments(row: sqlite3.Row) -> list[dict] | None:
     if not isinstance(parsed, list):
         return None
     return [a for a in parsed if isinstance(a, dict)]
+
+
+def _col(row: sqlite3.Row, column: str):
+    """A column that a later migration added, or None on an older row."""
+    # sqlite3.Row again — `x in row` tests the VALUES; see _drift_hits.
+    return row[column] if column in row.keys() else None  # noqa: SIM118
+
+
+def _stages_json(stages: list[dict]) -> str:
+    """The stage list as stored: normalised and bounded."""
+    from src.review.stages import MAX_STAGES, normalize_stage
+
+    clean = [s for s in (normalize_stage(x) for x in list(stages)[:MAX_STAGES]) if s]
+    return json.dumps(clean, ensure_ascii=False)
+
+
+def _stages(row: sqlite3.Row) -> list[dict] | None:
+    """The stored stages, or None when the row never recorded any."""
+    from src.review.stages import parse_stages
+
+    try:
+        return parse_stages(_col(row, "stages_json"))
+    except Exception:  # noqa: BLE001 — unreadable is "not recorded"
+        return None
+
+
+def run_stage_sink(run_id: str, store=None):
+    """A recorder sink that writes the stage list onto the run row."""
+    def _sink(stages: list[dict]) -> None:
+        (store or get_review_run_store()).set_stages(run_id, stages)
+    return _sink
 
 
 def adjustments_payload(batch) -> list[dict] | None:
@@ -518,6 +562,23 @@ class ReviewRun:
     #: means the review exists, is stored in `findings_json`, and never
     #: reached the pull request — two different things to do about it.
     post_error: str | None = None
+    #: The PR this run is about. Written at insert time by every writer that
+    #: knows it (so a run that fails before fetching the PR still belongs to
+    #: it), and again from the fetched PR when the run completes.
+    pr_provider: str | None = None
+    pr_repo: str | None = None
+    pr_number: int | None = None
+    #: The ordered stages (src/review/stages.py). None means "not recorded" —
+    #: a row written before the column; [] would mean "recorded, none".
+    stages: list[dict] | None = None
+
+    @property
+    def status_reason(self) -> str | None:
+        """One sentence saying why the run ended the way it did."""
+        from src.review.stages import status_reason
+
+        return status_reason(self.stages, status=self.status, summary=self.summary,
+                             error_message=self.error_message)
 
     @property
     def adjustments_count(self) -> int:
@@ -571,7 +632,59 @@ class ReviewRunStore:
                     run.workspace_id,
                 ),
             )
+        self._write_extras(run)
         return run
+
+    def insert_if_absent(self, run: ReviewRun) -> bool:
+        """Insert unless a row with this id exists. True when inserted.
+
+        The queue path creates its row before enqueueing and the worker
+        ensures it again on pickup, so either may run first.
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO review_runs
+                   (id, user_id, pr_ref, status, verdict, summary, started_at,
+                    finished_at, workspace_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (run.id, run.user_id, run.pr_ref, run.status, run.verdict,
+                 run.summary, run.started_at, run.finished_at, run.workspace_id),
+            )
+            inserted = cur.rowcount > 0
+        if inserted:
+            self._write_extras(run)
+        return inserted
+
+    def _write_extras(self, run: ReviewRun) -> None:
+        """The migrated columns a new row may already know: PR coordinates
+        and stages. Separate from the INSERT so its column list stays the one
+        every database version has."""
+        fields: list[str] = []
+        values: list = []
+        for col, val in (("pr_provider", run.pr_provider), ("pr_repo", run.pr_repo),
+                         ("pr_number", run.pr_number)):
+            if val is not None:
+                fields.append(f"{col} = ?")
+                values.append(val)
+        if run.stages is not None:
+            fields.append("stages_json = ?")
+            values.append(_stages_json(run.stages))
+        if not fields:
+            return
+        values.append(run.id)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE review_runs SET {', '.join(fields)} WHERE id = ?", values)
+
+    def delete(self, run_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM review_runs WHERE id = ?", (run_id,))
+
+    def set_stages(self, run_id: str, stages: list[dict]) -> None:
+        """Persist the stage list — the recorder's sink."""
+        with self._connect() as conn:
+            conn.execute("UPDATE review_runs SET stages_json = ? WHERE id = ?",
+                         (_stages_json(stages), run_id))
 
     def update(
         self, run_id: str, *,
@@ -609,6 +722,7 @@ class ReviewRunStore:
         parameter_adjustments: list[dict] | None = None,
         hidden: dict | None = None,
         post_error: str | None = None,
+        stages: list[dict] | None = None,
     ) -> None:
         fields: list[str] = []
         values: list = []
@@ -650,6 +764,9 @@ class ReviewRunStore:
         if hidden is not None:
             fields.append("hidden_json = ?")
             values.append(json.dumps(dict(hidden), ensure_ascii=False))
+        if stages is not None:
+            fields.append("stages_json = ?")
+            values.append(_stages_json(stages))
         if posted is not None:
             fields.append("posted = ?")
             values.append(int(posted))
@@ -684,6 +801,68 @@ class ReviewRunStore:
             return None
         return (row["workspace_id"] or "default", row["pr_provider"],
                 row["pr_repo"], int(row["pr_number"]))
+
+    def list_for_pr(
+        self, workspace_id: str, provider: str, repo: str, number: int, *,
+        user_id: str = "", limit: int = 20,
+    ) -> list[ReviewRun]:
+        """The runs of one pull request, newest first.
+
+        Matched by the PR columns, and by `pr_ref` for rows that predate them
+        or failed before the PR was fetched.
+        """
+        ref = f"{provider}:{repo}#{int(number)}"
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM review_runs
+                   WHERE (workspace_id = ?
+                          OR (workspace_id = 'default' AND user_id = ?))
+                     AND ((pr_provider = ? AND pr_repo = ? AND pr_number = ?)
+                          OR pr_ref = ?)
+                   ORDER BY started_at DESC
+                   LIMIT ?""",
+                (workspace_id, user_id, provider, repo, int(number), ref,
+                 max(1, min(int(limit), 100))),
+            ).fetchall()
+        return [self._row_to_run(r) for r in rows]
+
+    def latest_for_prs(
+        self, workspace_id: str, provider: str, repo: str, numbers: list[int],
+    ) -> dict[int, ReviewRun]:
+        """number → the newest run of that PR, for a list of open PRs."""
+        nums = sorted({int(n) for n in numbers})
+        if not nums:
+            return {}
+        out: dict[int, ReviewRun] = {}
+        with self._connect() as conn:
+            for i in range(0, len(nums), 500):
+                chunk = nums[i:i + 500]
+                marks = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""SELECT * FROM review_runs
+                        WHERE workspace_id = ? AND pr_provider = ? AND pr_repo = ?
+                          AND pr_number IN ({marks})
+                        ORDER BY started_at DESC""",
+                    (workspace_id, provider, repo, *chunk),
+                ).fetchall()
+                for r in rows:
+                    n = int(r["pr_number"])
+                    if n not in out:
+                        out[n] = self._row_to_run(r)
+        return out
+
+    def get_many(self, run_ids: list[str]) -> dict[str, ReviewRun]:
+        ids = [i for i in dict.fromkeys(run_ids) if i]
+        out: dict[str, ReviewRun] = {}
+        with self._connect() as conn:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                marks = ",".join("?" for _ in chunk)
+                for r in conn.execute(
+                    f"SELECT * FROM review_runs WHERE id IN ({marks})", chunk,
+                ).fetchall():
+                    out[r["id"]] = self._row_to_run(r)
+        return out
 
     def list_for_user(self, user_id: str, *, limit: int = 50) -> list[ReviewRun]:
         with self._connect() as conn:
@@ -749,6 +928,10 @@ class ReviewRunStore:
             # sqlite3.Row again — see the note in _drift_hits.
             post_error=(row["post_error"]
                         if "post_error" in row.keys() else None),  # noqa: SIM118
+            pr_provider=_col(row, "pr_provider"),
+            pr_repo=_col(row, "pr_repo"),
+            pr_number=_col(row, "pr_number"),
+            stages=_stages(row),
         )
 
 
@@ -788,9 +971,44 @@ def pr_snapshot(batch) -> dict:
     }
 
 
+def record_issues_stage(stages, result, *, run_id: str, workspace_id: str,
+                        status: str) -> None:
+    """Upsert the PR record and its issues, as the "Record issues" stage."""
+    from src.review.issues import record_review_run
+
+    if stages is not None:
+        stages.begin("record", "Record issues")
+    ok = record_review_run(result, run_id=run_id, workspace_id=workspace_id,
+                           status=status)
+    if stages is None:
+        return
+    if ok is False:
+        stages.end("record", "failed",
+                   "The pull request record and its issues could not be written "
+                   "(see the server log).")
+    elif status in ("complete", "partial"):
+        stages.end("record", "success",
+                   "Pull request record and tracked issues updated.")
+    else:
+        stages.end("record", "success",
+                   "Pull request record updated; issues are only tracked for "
+                   "reviews that ran.")
+
+
+def finish_stages(stages, run_status: str, *, batch=None,
+                  error: str | None = None) -> None:
+    """The "Finished" stage, shared by every writer."""
+    if stages is None:
+        return
+    from src.review.stages import finish_reason
+
+    stages.finish(run_status, finish_reason(
+        run_status, batch=batch, outcome_reason=stages.outcome_reason, error=error))
+
+
 def record_completed_review(
     result, *, run_id: str, store=None, drift_facts: dict | None = None,
-    workspace_id: str | None = None,
+    workspace_id: str | None = None, stages=None,
 ) -> None:
     """Write a finished review into the run store.
 
@@ -929,6 +1147,6 @@ def record_completed_review(
     if workspace_id is None:
         existing = store.get(run_id) if hasattr(store, "get") else None
         workspace_id = getattr(existing, "workspace_id", None) or "default"
-    from src.review.issues import record_review_run
-    record_review_run(result, run_id=run_id, workspace_id=workspace_id,
-                      status=final_status)
+    record_issues_stage(stages, result, run_id=run_id,
+                        workspace_id=workspace_id, status=final_status)
+    finish_stages(stages, final_status, batch=batch)
