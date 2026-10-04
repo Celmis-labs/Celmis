@@ -16,7 +16,7 @@ import logging
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,7 +32,11 @@ from src.api.deps import (
 )
 from src.api.schemas import (
     AutoReviewToggle,
-    PullRequestSummary,
+    BulkReviewIn,
+    BulkReviewOut,
+    OpenPullListOut,
+    OpenPullOut,
+    QueuedReviewOut,
     RepoAddRequest,
     RepoBranchesOut,
     RepoBranchUpdate,
@@ -1329,39 +1333,222 @@ def browse_provider_developers(
     )
 
 
-# ─── Bitbucket — list open PRs (manual mode) ─────────────────────────
+# ─── Open PRs — list and review by hand (every provider) ─────────────
+#
+# The list used to be ONE provider page (50 PRs) presented as the whole list,
+# and on Bitbucket it always sent Basic auth — so a workspace access token
+# (Bearer) could trigger a review it could not list. Now: every open PR,
+# any target branch, all pages (src/repos/open_pulls.py), searchable, with
+# each PR's last Celmis review beside it; and reviews started from here go
+# through the queue, so every one is recorded with its stages.
 
 
-@router.get("/{slug}/pulls", response_model=list[PullRequestSummary])
-def list_open_prs(
-    slug: str,
-    branch: str | None = Query(default=None, description="Filter by target branch"),
-    sort: str = Query(default="newest", pattern="^(newest|recently_updated|oldest)$"),
-    user: User = Depends(get_current_user),
-    workspace_id: str = Depends(current_workspace_id),
-) -> list[PullRequestSummary]:
-    """Return open PRs/MRs for a registered repo with optional branch + sort."""
-    store = get_auto_review_store()
-    cfg = store.get_in_workspace(workspace_id, slug)
+def _registered_repo(slug: str, workspace_id: str) -> RepoConfig:
+    cfg = get_auto_review_store().get_in_workspace(workspace_id, slug)
     if cfg is None:
         raise HTTPException(status_code=404, detail="Repo not registered")
-    creds = resolve_git_credential(cfg.provider, user_id=user.id, workspace_id=cfg.workspace_id)
+    return cfg
+
+
+def _repo_credential(cfg: RepoConfig, user: User) -> tuple[str, str]:
+    """(secret, atlassian e-mail) for the repo's provider, or 400."""
+    creds = resolve_git_credential(cfg.provider, user_id=user.id,
+                                   workspace_id=cfg.workspace_id)
     if creds is None:
         raise HTTPException(
             status_code=400,
             detail=f"No {cfg.provider} token saved — connect first",
         )
+    return creds.secret, str((creds.metadata or {}).get("atlassian_email") or "")
 
-    if cfg.provider == "github":
-        return _list_pulls_github(cfg.full_name, creds.secret, branch=branch, sort=sort)
-    if cfg.provider == "gitlab":
-        return _list_pulls_gitlab(cfg.full_name, creds.secret, branch=branch, sort=sort)
-    if cfg.provider == "bitbucket":
-        email = (creds.metadata or {}).get("atlassian_email") or ""
-        return _list_pulls_bitbucket(
-            cfg.full_name, str(email), creds.secret, branch=branch, sort=sort,
+
+def _open_listing(cfg: RepoConfig, secret: str, email: str, *,
+                  branch: str | None, refresh: bool = False):
+    from src.repos import open_pulls
+
+    label = {"github": "GitHub", "gitlab": "GitLab",
+             "bitbucket": "Bitbucket"}.get(cfg.provider, cfg.provider)
+    try:
+        return open_pulls.cached_open_pulls(
+            cfg.provider, cfg.full_name, secret, email,
+            target=branch or None, refresh=refresh,
         )
-    return []
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        logger.warning("open_pulls_failed repo=%s provider=%s status=%s",
+                       cfg.repo_slug, cfg.provider, code)
+        hint = (" — check the saved token's permissions" if code in (401, 403)
+                else "")
+        raise HTTPException(
+            status_code=502,
+            detail=f"{label} answered HTTP {code} to the open pull request "
+                   f"listing{hint}",
+        ) from None
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("open_pulls_failed repo=%s provider=%s err=%s",
+                       cfg.repo_slug, cfg.provider, type(exc).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail=f"{label} could not be reached to list open pull requests",
+        ) from None
+
+
+@router.get("/{slug}/pulls", response_model=OpenPullListOut)
+def list_open_prs(
+    slug: str,
+    branch: str | None = Query(
+        default=None, max_length=255,
+        description="Only PRs targeting this branch; empty = every branch"),
+    q: str = Query(default="", max_length=200,
+                   description="Title, #number, author or branch name"),
+    sort: str = Query(default="newest", pattern="^(newest|recently_updated|oldest)$"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    refresh: bool = Query(default=False, description="Bypass the 30s cache"),
+    user: User = Depends(require_repo_permission("read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> OpenPullListOut:
+    """Every open PR/MR of a registered repo — any target branch, all pages —
+    with search, an optional target-branch filter, and each PR's last review."""
+    from src.api.review_runs import get_review_run_store
+    from src.repos import open_pulls
+    from src.review.dispatch import BULK_LIMIT
+
+    cfg = _registered_repo(slug, workspace_id)
+    secret, email = _repo_credential(cfg, user)
+    listing = _open_listing(cfg, secret, email, branch=branch, refresh=refresh)
+    chosen = open_pulls.select(listing.items, q=q, target=branch or None, sort=sort)
+    page = chosen[offset:offset + limit]
+    try:
+        latest = get_review_run_store().latest_for_prs(
+            cfg.workspace_id, cfg.provider, cfg.full_name, [p.number for p in page])
+    except Exception as exc:  # noqa: BLE001 — the list is worth more than the badge
+        logger.warning("open_pulls_last_review_unreadable repo=%s err=%s",
+                       slug, type(exc).__name__)
+        latest = {}
+    items = []
+    for p in page:
+        run = latest.get(p.number)
+        items.append(OpenPullOut(
+            provider=cfg.provider, repo=cfg.full_name, number=p.number,
+            title=p.title, author=p.author, url=p.url,
+            created_at=p.created_at, updated_at=p.updated_at,
+            source_branch=p.source_branch, target_branch=p.target_branch,
+            draft=p.draft,
+            last_review_status=run.status if run else None,
+            last_review_reason=run.status_reason if run else None,
+            last_run_id=run.id if run else None,
+            last_review_at=run.started_at if run else None,
+        ))
+    return OpenPullListOut(
+        items=items, total=len(chosen), open_total=len(listing.items),
+        limit=limit, offset=offset, truncated=listing.truncated,
+        target_branches=sorted({p.target_branch for p in listing.items
+                                if p.target_branch}),
+        bulk_limit=BULK_LIMIT,
+    )
+
+
+def _run_inline(payload: dict) -> None:
+    """The queue is unavailable: run the review here, as the worker would."""
+    from src.review.dispatch import execute_review
+
+    try:
+        execute_review(payload)
+    except Exception:  # noqa: BLE001 — recorded on the run already
+        logger.exception("manual_review_inline_failed run=%s", payload.get("run_id"))
+
+
+def _queue_one(cfg: RepoConfig, number: int, *, user: User, post_comments: bool,
+               source: str, background: BackgroundTasks) -> QueuedReviewOut:
+    from src.review.dispatch import enqueue_review_run
+
+    try:
+        res = enqueue_review_run(
+            cfg.provider, cfg.full_name, number, user_id=user.id,
+            workspace_id=cfg.workspace_id, post_comments=post_comments,
+            source=source,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("manual_review_enqueue_failed repo=%s pr=%s",
+                         cfg.repo_slug, number)
+        return QueuedReviewOut(number=number, status="failed",
+                               reason=f"Could not record the review ({type(exc).__name__}).")
+    if res.status == "inline":
+        background.add_task(_run_inline, res.payload)
+    return QueuedReviewOut(number=number, run_id=res.run_id, status=res.status,
+                           reason=res.reason)
+
+
+@router.post("/{slug}/pulls/{number}/review", response_model=QueuedReviewOut)
+def review_open_pr(
+    slug: str,
+    number: int,
+    background: BackgroundTasks,
+    post_comments: bool = Query(default=True),
+    user: User = Depends(require_repo_permission("review")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> QueuedReviewOut:
+    """Queue a review of one open PR. The run row exists before the job, so
+    it shows as queued at once and its stages fill in as the worker goes."""
+    if number < 1:
+        raise HTTPException(status_code=422, detail="PR number must be positive")
+    cfg = _registered_repo(slug, workspace_id)
+    return _queue_one(cfg, number, user=user, post_comments=post_comments,
+                      source="manual", background=background)
+
+
+@router.post("/{slug}/pulls/review-all", response_model=BulkReviewOut)
+def review_all_open_prs(
+    slug: str,
+    body: BulkReviewIn,
+    request: Request,
+    background: BackgroundTasks,
+    user: User = Depends(require_repo_permission("review")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> BulkReviewOut:
+    """Queue a review of every open PR matching the page's filters (or the
+    listed `numbers`), at most `BULK_LIMIT`, after explicit confirmation."""
+    from src.repos import open_pulls
+    from src.review.dispatch import BULK_LIMIT
+
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Bulk review needs confirmation (confirm: true).",
+        )
+    cfg = _registered_repo(slug, workspace_id)
+    secret, email = _repo_credential(cfg, user)
+    # Fresh, not cached: this spends model budget on what it reads.
+    listing = _open_listing(cfg, secret, email, branch=body.branch, refresh=True)
+    if body.numbers:
+        open_numbers = {p.number for p in listing.items}
+        targets = sorted({int(n) for n in body.numbers if int(n) in open_numbers})
+    else:
+        targets = [p.number for p in open_pulls.select(
+            listing.items, q=body.q, target=body.branch or None)]
+    if len(targets) > BULK_LIMIT:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"{len(targets)} open pull requests match; at most "
+                    f"{BULK_LIMIT} can be reviewed in one request — narrow the "
+                    f"search or the target-branch filter."),
+        )
+    items = [
+        _queue_one(cfg, n, user=user, post_comments=body.post_comments,
+                   source="bulk", background=background)
+        for n in targets
+    ]
+    queued = sum(1 for i in items if i.status in ("queued", "inline"))
+    record_action(
+        action="review.bulk_queued", actor=user.email, actor_id=user.id,
+        workspace_id=workspace_id, target=slug, ip=client_ip(request),
+        detail={"requested": len(targets), "queued": queued,
+                "branch": body.branch or "", "q": bool(body.q)},
+    )
+    logger.info("bulk_review_queued repo=%s requested=%d queued=%d by=%s",
+                slug, len(targets), queued, user.email)
+    return BulkReviewOut(requested=len(targets), queued=queued, items=items)
 
 
 @router.get("/{slug}/branches", response_model=RepoBranchesOut)
@@ -1803,123 +1990,6 @@ def _browse_bitbucket(
             private=bool(r.get("is_private")),
             default_branch=str((r.get("mainbranch") or {}).get("name") or "main"),
             already_added=_full_name_to_slug("bitbucket", full_name) in existing,
-        ))
-    return out
-
-
-_GITHUB_SORT = {
-    "newest": ("created", "desc"),
-    "oldest": ("created", "asc"),
-    "recently_updated": ("updated", "desc"),
-}
-_GITLAB_SORT = {
-    "newest": ("created_at", "desc"),
-    "oldest": ("created_at", "asc"),
-    "recently_updated": ("updated_at", "desc"),
-}
-_BITBUCKET_SORT = {
-    "newest": "-created_on",
-    "oldest": "created_on",
-    "recently_updated": "-updated_on",
-}
-
-
-def _list_pulls_github(
-    full_name: str, token: str, *,
-    branch: str | None = None, sort: str = "newest",
-) -> list[PullRequestSummary]:
-    sort_field, direction = _GITHUB_SORT.get(sort, _GITHUB_SORT["newest"])
-    params: dict[str, str | int] = {
-        "state": "open", "per_page": 50,
-        "sort": sort_field, "direction": direction,
-    }
-    if branch:
-        params["base"] = branch
-    resp = _get(
-        f"https://api.github.com/repos/{full_name}/pulls",
-        headers={"Authorization": f"Bearer {token}"},
-        params=params, timeout=15.0,
-    )
-    resp.raise_for_status()
-    return [
-        PullRequestSummary(
-            provider="github",
-            repo=full_name,
-            number=int(p.get("number", 0)),
-            title=str(p.get("title") or ""),
-            author=str((p.get("user") or {}).get("login") or ""),
-            state=str(p.get("state") or "open"),
-            url=str(p.get("html_url") or ""),
-            created_at=p.get("created_at"),
-            updated_at=p.get("updated_at"),
-        )
-        for p in resp.json()
-    ]
-
-
-def _list_pulls_gitlab(
-    full_name: str, token: str, *,
-    branch: str | None = None, sort: str = "newest",
-) -> list[PullRequestSummary]:
-    import urllib.parse as _u
-    project_id = _u.quote(full_name, safe="")
-    order_by, direction = _GITLAB_SORT.get(sort, _GITLAB_SORT["newest"])
-    params: dict[str, str | int] = {
-        "state": "opened", "per_page": 50,
-        "order_by": order_by, "sort": direction,
-    }
-    if branch:
-        params["target_branch"] = branch
-    resp = _get(
-        f"https://gitlab.com/api/v4/projects/{project_id}/merge_requests",
-        headers={"PRIVATE-TOKEN": token},
-        params=params, timeout=15.0,
-    )
-    resp.raise_for_status()
-    return [
-        PullRequestSummary(
-            provider="gitlab",
-            repo=full_name,
-            number=int(m.get("iid", 0)),
-            title=str(m.get("title") or ""),
-            author=str((m.get("author") or {}).get("username") or ""),
-            state=str(m.get("state") or "opened"),
-            url=str(m.get("web_url") or ""),
-            created_at=m.get("created_at"),
-            updated_at=m.get("updated_at"),
-        )
-        for m in resp.json()
-    ]
-
-
-def _list_pulls_bitbucket(
-    full_name: str, email: str, token: str, *,
-    branch: str | None = None, sort: str = "newest",
-) -> list[PullRequestSummary]:
-    sort_param = _BITBUCKET_SORT.get(sort, _BITBUCKET_SORT["newest"])
-    params: dict[str, str | int] = {
-        "state": "OPEN", "pagelen": 50, "sort": sort_param,
-    }
-    if branch:
-        params["q"] = f'destination.branch.name="{branch}"'
-    resp = _get(
-        f"https://api.bitbucket.org/2.0/repositories/{full_name}/pullrequests",
-        auth=(email, token),
-        params=params, timeout=15.0,
-    )
-    resp.raise_for_status()
-    out: list[PullRequestSummary] = []
-    for p in resp.json().get("values", []):
-        out.append(PullRequestSummary(
-            provider="bitbucket",
-            repo=full_name,
-            number=int(p.get("id", 0)),
-            title=str(p.get("title") or ""),
-            author=str((p.get("author") or {}).get("nickname") or ""),
-            state=str(p.get("state") or "OPEN"),
-            url=str((p.get("links", {}).get("html", {}) or {}).get("href", "")),
-            created_at=p.get("created_on"),
-            updated_at=p.get("updated_on"),
         ))
     return out
 
