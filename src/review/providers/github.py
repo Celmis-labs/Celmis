@@ -67,6 +67,7 @@ from src.review.providers.base import (
     _format_review_pointer,
     _format_summary,
     _snap_to_span,
+    _with_marker,
 )
 from src.review.settings import get_review_settings
 
@@ -335,6 +336,13 @@ class GitHubPRProvider(PullRequestProvider):
         keep_summary_id = next(
             (cid for kind, cid in stale if kind == _ISSUE_COMMENT), None,
         )
+        # The lifecycle comment this run already posted ("🔄 reviewing…") IS
+        # the summary: the final body goes into it, whatever its age. With
+        # re-runs replacing it is the oldest marked comment anyway (the
+        # placeholder was upserted into that one); with history kept it is the
+        # only way the placeholder is replaced instead of joined.
+        if self._status_comment_id is not None:
+            keep_summary_id = self._status_comment_id
         if keep_summary_id is not None and pr.url:
             review_payload["body"] = self._review_body(
                 batch, settings.comment_marker,
@@ -392,9 +400,11 @@ class GitHubPRProvider(PullRequestProvider):
         summary_id = self._upsert_summary(
             owner, name, pr.number, summary_body, keep_summary_id,
         )
+        # Consumed: the next review on this instance starts its own lifecycle.
+        self._status_comment_id = None
 
         result = review_resp.json()
-        return {
+        response: dict[str, Any] = {
             "review_id": result.get("id"),
             "summary_comment_id": summary_id,
             "html_url": result.get("html_url"),
@@ -408,6 +418,39 @@ class GitHubPRProvider(PullRequestProvider):
             # half-done cleanup look like a finished one.
             "cleanup": cleanup,
         }
+        if summary_id is None:
+            # The review itself is up (it carries the verdict), so this is
+            # not a delivery failure — but the full summary is missing, and
+            # the caller logs it rather than letting it pass as posted.
+            response["summary_error"] = "the summary comment could not be written"
+        return response
+
+    # ─── Lifecycle comment ("🔄 reviewing…" → summary) ──────────
+
+    def upsert_status_comment(
+        self, pr: PullRequest, body: str, *, create: bool = True,
+    ) -> int | None:
+        """See `PullRequestProvider.upsert_status_comment`."""
+        if pr.provider != "github":
+            raise PullRequestProviderError(
+                f"GitHub provider received non-github PR: {pr.provider}"
+            )
+        settings = get_review_settings()
+        owner, name = self._split_repo(pr.repo)
+        existing = self._status_comment_id
+        if existing is None and settings.replace_on_synchronize:
+            existing = self.find_existing_review_comment(
+                pr.repo, pr.number, settings.comment_marker,
+            )
+        if existing is None and not create:
+            return None
+        cid = self._upsert_summary(
+            owner, name, pr.number,
+            _with_marker(body, settings.comment_marker), existing,
+        )
+        if cid is not None:
+            self._status_comment_id = cid
+        return cid
 
     # ─── Review body: pointer + proof of authorship ─────────────
 

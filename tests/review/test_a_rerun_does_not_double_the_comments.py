@@ -1793,3 +1793,195 @@ class TestMarkedIdLookup:
         provider.close()
 
         assert existing == summary_id
+
+
+# ─── The lifecycle comment: "🔄 reviewing…" and the summary are ONE comment ──
+#
+# `upsert_status_comment` posts the placeholder the moment a review begins;
+# `post_review` must then write the final summary INTO it — never next to it.
+# The fakes store state, so "one comment, same id, new body" is a fact about
+# what is left on the pull request, not a count of requests.
+
+STARTED = "## 🔄 Celmis is reviewing this PR…"
+
+
+def _top_level_bitbucket(fake: _FakeBitbucket) -> list[dict]:
+    return [c for c in fake.comments if not c.get("inline")]
+
+
+def _top_level_gitlab(fake: _FakeGitLab) -> list[dict]:
+    return [n for n in fake.notes if n.get("type") != "DiffNote"]
+
+
+class TestTheStartedCommentBecomesTheSummary:
+    def test_github_started_then_replaced_in_place(self, settings) -> None:
+        fake = _FakeGitHub()
+        provider = _github(fake)
+        batch = _batch("github", "o/r", 1, findings=2)
+
+        cid = provider.upsert_status_comment(batch.pull_request, STARTED)
+        assert [c["id"] for c in fake.issue] == [cid]
+        assert MARKER in fake.issue[0]["body"], "the placeholder cannot be found again"
+        assert STARTED in fake.issue[0]["body"]
+
+        result = provider.post_review(batch)
+        provider.close()
+
+        assert [c["id"] for c in fake.issue] == [cid], "a second summary appeared"
+        assert result["summary_comment_id"] == cid
+        assert STARTED not in fake.issue[0]["body"]
+        assert "Code Review for PR #1" in fake.issue[0]["body"]
+
+    def test_github_rerun_adopts_the_previous_summary(self, settings) -> None:
+        fake = _FakeGitHub()
+        previous = fake.add_issue(f"{MARKER}\n## old summary")
+        provider = _github(fake)
+        batch = _batch("github", "o/r", 1, findings=1)
+
+        assert provider.upsert_status_comment(batch.pull_request, STARTED) == previous
+        assert STARTED in fake.issue[0]["body"]
+        provider.post_review(batch)
+        provider.close()
+
+        assert [c["id"] for c in fake.issue] == [previous]
+        assert STARTED not in fake.issue[0]["body"]
+
+    def test_github_two_full_runs_leave_one_summary(self, settings) -> None:
+        fake = _FakeGitHub()
+        provider = _github(fake)
+        batch = _batch("github", "o/r", 1, findings=2)
+        for _ in range(2):
+            provider.upsert_status_comment(batch.pull_request, STARTED)
+            provider.post_review(batch)
+        provider.close()
+
+        assert len(fake.issue) == 1
+        assert len(fake.inline) == 2
+
+    def test_github_keep_history_replaces_only_this_runs_placeholder(
+        self, settings_keep_history,
+    ) -> None:
+        """History kept: the previous summary stays as a record, this run's
+        placeholder is a NEW comment, and the summary goes into that one —
+        not a third comment next to it."""
+        fake = _FakeGitHub()
+        previous = fake.add_issue(f"{MARKER}\n## old summary")
+        provider = _github(fake)
+        batch = _batch("github", "o/r", 1, findings=1)
+
+        cid = provider.upsert_status_comment(batch.pull_request, STARTED)
+        assert cid != previous
+        result = provider.post_review(batch)
+        provider.close()
+
+        assert [c["id"] for c in fake.issue] == [previous, cid]
+        assert result["summary_comment_id"] == cid
+        assert "old summary" in fake.issue[0]["body"]
+        assert STARTED not in fake.issue[1]["body"]
+
+    def test_github_finalize_without_a_comment_posts_nothing(self, settings) -> None:
+        fake = _FakeGitHub()
+        provider = _github(fake)
+        pr = _batch("github", "o/r", 1).pull_request
+        assert provider.upsert_status_comment(pr, "skipped", create=False) is None
+        provider.close()
+        assert fake.issue == []
+
+    def test_gitlab_started_then_replaced_in_place(self, settings) -> None:
+        fake = _FakeGitLab()
+        provider = _gitlab(fake)
+        batch = _batch("gitlab", "g/p", 5, findings=2)
+
+        nid = provider.upsert_status_comment(batch.pull_request, STARTED)
+        assert [n["id"] for n in _top_level_gitlab(fake)] == [nid]
+        result = provider.post_review(batch)
+        provider.close()
+
+        top = _top_level_gitlab(fake)
+        assert [n["id"] for n in top] == [nid]
+        assert result["summary_note_id"] == nid
+        assert STARTED not in top[0]["body"]
+        assert MARKER in top[0]["body"]
+
+    def test_gitlab_rerun_keeps_one_note(self, settings) -> None:
+        fake = _FakeGitLab()
+        provider = _gitlab(fake)
+        batch = _batch("gitlab", "g/p", 5, findings=1)
+        for _ in range(2):
+            provider.upsert_status_comment(batch.pull_request, STARTED)
+            provider.post_review(batch)
+        provider.close()
+        assert len(_top_level_gitlab(fake)) == 1
+        assert len(fake.notes) == 2  # one inline + one summary
+
+    def test_gitlab_keep_history_replaces_only_this_runs_placeholder(
+        self, settings_keep_history,
+    ) -> None:
+        fake = _FakeGitLab()
+        previous = fake.add_note(f"{MARKER}\n## old summary")
+        provider = _gitlab(fake)
+        batch = _batch("gitlab", "g/p", 5, findings=0)
+
+        nid = provider.upsert_status_comment(batch.pull_request, STARTED)
+        provider.post_review(batch)
+        provider.close()
+
+        assert [n["id"] for n in _top_level_gitlab(fake)] == [previous, nid]
+        assert STARTED not in fake.notes[1]["body"]
+
+    def test_bitbucket_started_then_replaced_in_place(self, settings) -> None:
+        fake = _FakeBitbucket()
+        provider = _bitbucket(fake)
+        batch = _batch("bitbucket", "ws/r", 3, findings=2)
+
+        cid = provider.upsert_status_comment(batch.pull_request, STARTED)
+        result = provider.post_review(batch)
+        provider.close()
+
+        top = _top_level_bitbucket(fake)
+        assert [c["id"] for c in top] == [cid]
+        assert result["summary_comment_id"] == cid
+        assert STARTED not in top[0]["content"]["raw"]
+        assert "error" not in result
+
+    def test_bitbucket_rerun_keeps_one_summary(self, settings) -> None:
+        fake = _FakeBitbucket()
+        provider = _bitbucket(fake)
+        batch = _batch("bitbucket", "ws/r", 3, findings=2)
+        for _ in range(2):
+            provider.upsert_status_comment(batch.pull_request, STARTED)
+            provider.post_review(batch)
+        provider.close()
+        assert len(_top_level_bitbucket(fake)) == 1
+        assert len(fake.comments) == 3
+
+    def test_bitbucket_a_lost_summary_is_a_delivery_failure(self, settings) -> None:
+        """Inline comments and the summary are per-request writes that were
+        only LOGGED on failure, so a run came back "posted" with no verdict on
+        the pull request. A summary that did not arrive now rides in `error`,
+        which the run record stores as `post_error`."""
+        fake = _FakeBitbucket()
+
+        def _refuse_summary(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST" and request.url.path.endswith("/comments"):
+                payload = json.loads(request.content)
+                if not payload.get("inline"):
+                    return httpx.Response(503, json={"message": "down"})
+            return fake(request)
+
+        provider = BitbucketPRProvider(token="fake")
+        _patch_client(provider, httpx.MockTransport(_refuse_summary))
+        result = provider.post_review(_batch("bitbucket", "ws/r", 3, findings=1))
+        provider.close()
+
+        assert result["summary_comment_id"] is None
+        assert "503" in result["summary_error"]
+        assert result["error"] == result["summary_error"]
+        assert len(fake.comments) == 1, "the inline comment still went up"
+
+        from src.api.review_runs import post_failure
+
+        class _Result:
+            provider_response = result
+
+        assert post_failure(_Result()) == result["error"]

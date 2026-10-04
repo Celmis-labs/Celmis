@@ -44,6 +44,7 @@ from src.review.providers.base import (
     _format_finding_body,
     _format_summary,
     _snap_to_span,
+    _with_marker,
 )
 from src.review.settings import get_review_settings
 
@@ -303,9 +304,12 @@ class GitLabPRProvider(PullRequestProvider):
                 )
 
         # 4. Drop the previous run's notes, now that this run's are up
+        #    The lifecycle comment this run posted ("🔄 reviewing…") is the
+        #    note kept and rewritten, so placeholder and summary are one note.
         keep_summary_id, cleanup = self._delete_stale_notes(
             project_path, pr.number, stale,
             protected=protected, listing_complete=listing_complete,
+            prefer_keep=self._status_comment_id,
         )
 
         # 5. Top-level summary note
@@ -314,8 +318,9 @@ class GitLabPRProvider(PullRequestProvider):
             _format_summary(batch, marker=settings.comment_marker),
             keep_summary_id,
         )
+        self._status_comment_id = None
 
-        return {
+        response = {
             "summary_note_id": summary_id,
             "discussions_posted": posted,
             "discussions_failed": failed,
@@ -324,6 +329,36 @@ class GitLabPRProvider(PullRequestProvider):
             # half-done cleanup look like a finished one.
             "cleanup": cleanup,
         }
+        if summary_id is None:
+            response["summary_error"] = "the summary note could not be written"
+        return response
+
+    # ─── Lifecycle comment ("🔄 reviewing…" → summary) ──────────
+
+    def upsert_status_comment(
+        self, pr: PullRequest, body: str, *, create: bool = True,
+    ) -> int | None:
+        """See `PullRequestProvider.upsert_status_comment`."""
+        if pr.provider != "gitlab":
+            raise PullRequestProviderError(
+                f"GitLab provider received non-gitlab PR: {pr.provider}"
+            )
+        settings = get_review_settings()
+        project_path = quote(pr.repo, safe="")
+        existing = self._status_comment_id
+        if existing is None and settings.replace_on_synchronize:
+            existing = self.find_existing_review_comment(
+                pr.repo, pr.number, settings.comment_marker,
+            )
+        if existing is None and not create:
+            return None
+        nid = self._upsert_summary(
+            project_path, pr.number,
+            _with_marker(body, settings.comment_marker), existing,
+        )
+        if nid is not None:
+            self._status_comment_id = nid
+        return nid
 
     # ─── Idempotency: what a previous run left behind ────────────
 
@@ -465,6 +500,7 @@ class GitLabPRProvider(PullRequestProvider):
         *,
         protected: set[int],
         listing_complete: bool,
+        prefer_keep: int | None = None,
     ) -> tuple[int | None, dict]:
         """Delete the previous run's notes; return the summary worth keeping.
 
@@ -489,13 +525,18 @@ class GitLabPRProvider(PullRequestProvider):
         Nothing here raises: a review with duplicate notes beats no review, so a
         failure is logged, counted, and surfaced in the returned stats.
         """
-        keep_summary_id: int | None = None
+        # `prefer_keep` — the lifecycle note this run already wrote — wins
+        # over "the first one found"; a marked summary that is neither is
+        # surplus like any other.
+        keep_summary_id: int | None = prefer_keep
         deleted = 0
         failed = 0
         kept_threaded = 0
         for kind, nid in stale:
             if kind == _SUMMARY_NOTE and keep_summary_id is None:
                 keep_summary_id = nid
+                continue
+            if kind == _SUMMARY_NOTE and nid == keep_summary_id:
                 continue
             if nid in protected:
                 kept_threaded += 1
