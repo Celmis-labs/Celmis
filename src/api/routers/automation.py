@@ -120,7 +120,17 @@ async def plan(
     for the same model call twice. It is a queue job now — so it survives the
     browser, survives an API restart, and can be told to stop.
     """
+    from src.api.memberships import actor_role
     from src.sync.queue import KIND_AUTOMATION_PLAN, enqueue
+    from src.users.roles import is_superadmin
+
+    # Who is asking, for a how-to answer that can say whether THEY may do it.
+    # Read here, where the session is, rather than in the worker.
+    caller = {
+        "role": await actor_role(session, user, workspace_id),
+        "is_admin": bool(getattr(user, "is_admin", False)),
+        "is_superadmin": is_superadmin(user),
+    }
 
     row = AutomationRun(
         id=str(uuid.uuid4()),
@@ -139,7 +149,7 @@ async def plan(
         payload={
             "run_id": row.id, "message": payload.message,
             "workspace_id": workspace_id, "user_id": user.id,
-            "user_email": user.email,
+            "user_email": user.email, "caller": caller,
         },
         # One attempt. A retry would charge for the same sentence twice and
         # the person is watching a spinner that has to end either way.
