@@ -355,6 +355,24 @@ def _suppressed_rules_from_payload(incoming: list[str] | None) -> list[str] | No
     return list(dict.fromkeys(cleaned))
 
 
+def target_branches_from_payload(incoming: list[str] | None) -> list[str] | None:
+    """A PUT's `target_branches`, cleaned: None stays None (inherit), entries
+    stripped and de-duplicated in order. Names, globs and `!` exclusions are
+    accepted (src/review/branch_patterns.py); an entry that could never match
+    — a bare `!`, `!!x`, a space inside — is a 422 naming it. Shared by both
+    layers, so a repository and its workspace refuse the same entries."""
+    if incoming is None:
+        return None
+    from src.review.branch_patterns import clean_patterns, pattern_error
+
+    cleaned = clean_patterns(incoming)
+    for entry in cleaned:
+        problem = pattern_error(entry)
+        if problem:
+            raise HTTPException(status_code=422, detail=f"target_branches: {problem}")
+    return cleaned
+
+
 # ─── 2.3.0 settings: shaping + validation, shared by both layers ─────
 
 
@@ -1360,6 +1378,7 @@ async def upsert_policy(
         payload.comment_min_severity)
     folder_rules = _folder_rules_from_payload(payload.folder_rules)
     review_language = _review_language_from_payload(payload.review_language)
+    target_branches = target_branches_from_payload(payload.target_branches)
     v23_updates = v23_updates_from_payload(payload)
     if payload.agent_llm_overrides is not None and agent_llm_overrides:
         # Only what this request actually sent. Re-checking a map the payload
@@ -1389,11 +1408,7 @@ async def upsert_policy(
     # Three states: absent keeps what is stored, null inherits the workspace
     # review defaults, a list ([] = every branch) is this repository's own.
     if "target_branches" in fields:
-        row.target_branches = (
-            None if payload.target_branches is None
-            else list(dict.fromkeys(
-                b.strip() for b in payload.target_branches if b and b.strip()))
-        )
+        row.target_branches = target_branches
     row.folder_rules = folder_rules
     row.department = payload.department
     row.updated_by = user.email

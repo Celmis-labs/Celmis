@@ -839,7 +839,7 @@ class ReviewBatch:
             # can actually act on.
             return (
                 "⚠ REVIEW SKIPPED — no agent ran: every agent is disabled "
-                "for this repository (see /admin/review-policies). This pull "
+                "for this repository (see /review-settings). This pull "
                 "request has NOT been reviewed. Re-enable at least one agent "
                 "to resume reviews.\n\n"
             )

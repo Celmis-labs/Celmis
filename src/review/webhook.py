@@ -429,7 +429,8 @@ async def _dispatch_review(
     review. It still comes through here, after the tenant checks, so the
     skip is recorded as a run in the right workspace — a draft that left no
     trace read, on the pull-requests page, exactly like a webhook that never
-    arrived.
+    arrived. A draft whose base branch the target patterns exclude is
+    recorded as that skip instead: marking it ready would not get it reviewed.
     """
     # Derive the tenant from the repo — the webhook is unauthenticated, so this
     # is the ONLY tenant binding. workspace_for_repo returns None when the repo
@@ -498,6 +499,30 @@ async def _dispatch_review(
         return
 
     if skip_reason == "draft":
+        # A draft into a branch the target patterns leave out is not
+        # "reviewed once it is marked ready" — it is never reviewed, and the
+        # recorded reason says so, in the orchestrator gate's own words (one
+        # matcher, src/review/branch_patterns.py).
+        base_ref = str((pr_meta or {}).get("base_ref") or "")
+        if base_ref:
+            from src.review.branch_patterns import branch_targeted, skip_sentence
+            from src.review.review_defaults import target_branches_for_repo
+
+            patterns = await asyncio.to_thread(
+                target_branches_for_repo, provider_name, repo)
+            if patterns and not branch_targeted(base_ref, patterns):
+                logger.info(
+                    "webhook_draft_skipped reason=branch_not_targeted provider=%s "
+                    "repo=%s pr=%d base=%s ws=%s",
+                    provider_name, repo, pr_number, base_ref, workspace_id)
+                await asyncio.to_thread(
+                    record_gate_skip, provider_name, repo, pr_number,
+                    user_id=cfg.user_id, workspace_id=workspace_id, source="webhook",
+                    gate_key="gate_target_branch", gate_name="Validate target branch",
+                    reason=skip_sentence(base_ref, patterns),
+                    pr_meta=pr_meta,
+                )
+                return
         logger.info("webhook_draft_skipped provider=%s repo=%s pr=%d ws=%s",
                     provider_name, repo, pr_number, workspace_id)
         await asyncio.to_thread(

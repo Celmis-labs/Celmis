@@ -37,6 +37,9 @@ from src.review.agents.base import (
     base_instruction_block,
     clamp_base_instruction,
 )
+from src.review.branch_patterns import branch_targeted
+from src.review.branch_patterns import pass_sentence as branch_pass_sentence
+from src.review.branch_patterns import skip_sentence as branch_skip_sentence
 from src.review.graph_context import build_graph_context
 from src.review.models import (
     SUMMARY_EXISTING_DESCRIPTION,
@@ -735,7 +738,7 @@ class ReviewOrchestrator:
                         pr.number, pr.repo_slug)
             batch.summary = (
                 "Review skipped — AI reviewer is disabled for this repo "
-                "(see /admin/review-policies)."
+                "(see /review-settings)."
             )
             batch.verdict = ReviewVerdict.SKIPPED
             batch.mark_complete()
@@ -746,40 +749,32 @@ class ReviewOrchestrator:
         stages.end("gate_enabled", "success",
                    "The AI reviewer is enabled for this repository.")
 
-        # Hard skip — base branch not in target list
+        # Hard skip — the base branch is not one the target patterns cover.
+        # Names, globs (`release/*`) and exclusions (`!main`, exclusion wins;
+        # negations only = every branch except those): one matcher,
+        # src/review/branch_patterns.py, which the webhook's early draft skip
+        # asks as well, so the two gates cannot disagree about a branch.
         stages.begin("gate_target_branch", "Validate target branch")
         targets = list((policy or {}).get("target_branches") or [])
-        if (policy is not None
-                and policy["target_branches"]
-                and pr.base_ref
-                and pr.base_ref not in policy["target_branches"]):
+        if (policy is not None and targets and pr.base_ref
+                and not branch_targeted(pr.base_ref, targets)):
             logger.info(
-                "review_skipped reason=branch_not_targeted pr=%d base=%s allowed=%s",
-                pr.number, pr.base_ref, policy["target_branches"],
+                "review_skipped reason=branch_not_targeted pr=%d base=%s patterns=%s",
+                pr.number, pr.base_ref, targets,
             )
-            batch.summary = (
-                f"Review skipped — base branch '{pr.base_ref}' is not in the "
-                f"configured target list {policy['target_branches']}."
-            )
+            reason = branch_skip_sentence(pr.base_ref, targets)
+            batch.summary = f"Review skipped — {reason}"
             batch.verdict = ReviewVerdict.SKIPPED
             batch.mark_complete()
-            stages.end("gate_target_branch", "skipped",
-                       f"Branch mismatch: target branch '{pr.base_ref}' does not "
-                       f"match configured patterns {_quoted_list(targets)}.",
+            stages.end("gate_target_branch", "skipped", reason,
                        ends_run=True, meta={"target_branch": pr.base_ref})
             lifecycle.skipped(
                 f"the base branch `{pr.base_ref}` is not one this repository "
                 f"reviews", feedback=actions.status_feedback,
             )
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
-        if targets:
-            stages.end("gate_target_branch", "success",
-                       f"Target branch '{pr.base_ref or '?'}' matches configured "
-                       f"patterns {_quoted_list(targets)}.")
-        else:
-            stages.end("gate_target_branch", "success",
-                       f"No target-branch restriction configured; target branch "
-                       f"'{pr.base_ref or '?'}' is reviewed.")
+        stages.end("gate_target_branch", "success",
+                   branch_pass_sentence(pr.base_ref, targets))
 
         # ── Build agent context (passes custom_rules from policy + matching folder_rules) ──
         # The agents get the PR with the FILTERED diff text. Compliance and
