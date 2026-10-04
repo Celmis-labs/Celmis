@@ -793,6 +793,26 @@ export type WorkspaceReviewDefaults = {
   suppressed_rules: string[] | null;
   /** Lives in the workspace LLM config; null = English. */
   review_language: string | null;
+  /** 2.3.0 settings — null = the built-in (see `install`). */
+  enabled_agents: string[] | null;
+  run_on_drafts: boolean | null;
+  approve_when_clean: boolean | null;
+  request_changes_on_critical: boolean | null;
+  status_feedback: boolean | null;
+  committable_suggestions: boolean | null;
+  apply_filters_to_rules: boolean | null;
+  summary_target: "comment" | "description" | null;
+  summary_on_new_commits: "nothing" | "append" | "replace" | null;
+  summary_existing_description: "append" | "complement" | "replace" | null;
+  base_instruction: string | null;
+  message_started: string | null;
+  message_finished_header: string | null;
+  /** agent → runs for a repo that overrides nothing; and the built-in map
+   *  (false = opt-in, switched on through enabled_agents). */
+  agent_participation_effective: Record<string, boolean>;
+  agent_participation_defaults: Record<string, boolean>;
+  setting_choices: Record<string, string[]>;
+  message_placeholders: string[];
   /** The workspace LLM config's per-agent block (model included here). */
   agents: Record<string, AgentLLMOverride>;
   agents_effective: Record<string, {
@@ -820,6 +840,11 @@ export type WorkspaceReviewDefaultsUpdate = Partial<Pick<WorkspaceReviewDefaults
   | "max_inline_comments" | "summary_enabled" | "summary_instructions"
   | "started_comment_enabled" | "ignore_globs" | "target_branches"
   | "suppressed_rules" | "review_language"
+  | "enabled_agents" | "run_on_drafts" | "approve_when_clean"
+  | "request_changes_on_critical" | "status_feedback" | "committable_suggestions"
+  | "apply_filters_to_rules" | "summary_target" | "summary_on_new_commits"
+  | "summary_existing_description" | "base_instruction" | "message_started"
+  | "message_finished_header"
 >> & {
   agents?: Record<string, AgentLLMOverride | null> | null;
 };

@@ -69,9 +69,22 @@ function tabFromUrl(): DefaultsTab | null {
 }
 const noSubscribe = () => () => {};
 
+/** The 2.3.0 settings this page has no controls for yet (the settings
+ *  redesign brings them). Carried from the GET and sent back as they were,
+ *  so a save from this page never resets one it cannot show. */
+type CarriedSettings = Pick<WorkspaceReviewDefaults,
+  | "run_on_drafts" | "approve_when_clean" | "request_changes_on_critical"
+  | "status_feedback" | "committable_suggestions" | "apply_filters_to_rules"
+  | "summary_target" | "summary_on_new_commits" | "summary_existing_description"
+  | "base_instruction" | "message_started" | "message_finished_header"
+>;
+
 /** The editable state of the page — null everywhere means "inherit". */
 type Draft = {
   disabledAgents: string[] | null;
+  /** Opt-in agents switched on (those whose built-in is off). */
+  enabledAgents: string[] | null;
+  carried: CarriedSettings;
   verifier: boolean | null;
   threshold: string;
   maxInline: string;
@@ -87,6 +100,21 @@ type Draft = {
 function draftFrom(d: WorkspaceReviewDefaults): Draft {
   return {
     disabledAgents: d.disabled_agents == null ? null : [...d.disabled_agents],
+    enabledAgents: d.enabled_agents == null ? null : [...d.enabled_agents],
+    carried: {
+      run_on_drafts: d.run_on_drafts,
+      approve_when_clean: d.approve_when_clean,
+      request_changes_on_critical: d.request_changes_on_critical,
+      status_feedback: d.status_feedback,
+      committable_suggestions: d.committable_suggestions,
+      apply_filters_to_rules: d.apply_filters_to_rules,
+      summary_target: d.summary_target,
+      summary_on_new_commits: d.summary_on_new_commits,
+      summary_existing_description: d.summary_existing_description,
+      base_instruction: d.base_instruction,
+      message_started: d.message_started,
+      message_finished_header: d.message_finished_header,
+    },
     verifier: d.verifier_enabled,
     threshold: d.comment_min_severity ?? "",
     maxInline: d.max_inline_comments == null ? "" : String(d.max_inline_comments),
@@ -239,6 +267,8 @@ export default function ReviewDefaultsPage() {
       const d = draft!;
       const payload: WorkspaceReviewDefaultsUpdate = {
         disabled_agents: d.disabledAgents,
+        enabled_agents: d.enabledAgents,
+        ...d.carried,
         verifier_enabled: d.verifier,
         comment_min_severity: (d.threshold || null) as WorkspaceReviewDefaults["comment_min_severity"],
         max_inline_comments: d.maxInline.trim() ? Number(d.maxInline.trim()) : null,
@@ -277,6 +307,12 @@ export default function ReviewDefaultsPage() {
   });
 
   const disabledShown = draft?.disabledAgents ?? (install.disabled_agents as string[] | undefined) ?? [];
+  const enabledShown = draft?.enabledAgents ?? (install.enabled_agents as string[] | undefined) ?? [];
+  // An opt-in agent (built-in off) is on only when named in enabled_agents;
+  // a name in disabled_agents still wins — the server's rule, in
+  // src/review/review_defaults.py.
+  const optIn = (agent: string) => data?.agent_participation_defaults?.[agent] === false;
+  const agentsSet = draft !== null && (draft.disabledAgents !== null || draft.enabledAgents !== null);
   const finders = (data?.toggleable_agents ?? []).filter((a) => a !== "verifier");
   const verifierOn = draft?.verifier ?? Boolean(install.verifier_enabled);
   const summaryOn = draft?.summary ?? true;
@@ -345,19 +381,23 @@ export default function ReviewDefaultsPage() {
               <div>
                 <CardTitle>
                   {t("admin.reviewPolicies.detail.agentToggleTitle")}
-                  <LayerBadge set={draft.disabledAgents !== null} />
+                  <LayerBadge set={agentsSet} />
                 </CardTitle>
                 <CardDescription>{t("admin.reviewDefaults.agentsDesc")}</CardDescription>
               </div>
-              {draft.disabledAgents !== null && (
-                <ResetButton onClick={() => update({ disabledAgents: null })} disabled={!canEdit} />
+              {agentsSet && (
+                <ResetButton
+                  onClick={() => update({ disabledAgents: null, enabledAgents: null })}
+                  disabled={!canEdit}
+                />
               )}
             </div>
           </CardHeader>
           <CardContent className="space-y-3">
             <OverrideCount count={data?.repo_overrides?.disabled_agents} />
             {finders.map((agent) => {
-              const on = !disabledShown.includes(agent);
+              const on = !disabledShown.includes(agent)
+                && (!optIn(agent) || enabledShown.includes(agent));
               return (
                 <div
                   key={agent}
@@ -382,6 +422,16 @@ export default function ReviewDefaultsPage() {
                     disabled={!canEdit}
                     onCheckedChange={(v) => {
                       const cur = draft.disabledAgents ?? [];
+                      if (optIn(agent)) {
+                        const en = (draft.enabledAgents ?? []).filter((a) => a !== agent);
+                        update({
+                          enabledAgents: v ? [...en, agent] : en,
+                          ...(v && cur.includes(agent)
+                            ? { disabledAgents: cur.filter((a) => a !== agent) }
+                            : {}),
+                        });
+                        return;
+                      }
                       update({
                         disabledAgents: v ? cur.filter((a) => a !== agent) : [...cur, agent],
                       });
