@@ -126,7 +126,7 @@ SECTIONS = (
 Where: [Workspaces](/admin/workspaces) (Team & access → "Workspaces"). Each
 workspace is a card; open it to see "Members" and "Invitations". Managing
 members needs owner or admin of that workspace (or the superadmin); others
-read "Only this workspace's owner or admin manages its members; owner, admin and editor roles are granted by the superadmin."
+read "Only this workspace's owner or admin manages its members: the owner grants admin, editor, member and viewer, an admin only member and viewer; the owner role is granted by the superadmin."
 
 Add somebody who already has an account (and shares a workspace with you):
 1. In "Members" pick them in "— select user —", choose the role, press
