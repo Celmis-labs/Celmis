@@ -508,7 +508,7 @@
   "admin.reviewPolicies.helpAgentPromptsBody": "Replace any agent's system prompt — the verifier included — for this repo only. A repo prompt wins over the workspace prompt on /admin/agents; an empty field inherits it.",
   "admin.reviewPolicies.helpAgentPromptsTitle": "Agent prompt overrides",
   "admin.reviewPolicies.helpAgentRolesTitle": "What each agent does",
-  "admin.reviewPolicies.helpAgentToggleBody": "Switch individual agents off for this repo — a disabled agent makes no LLM call, spends no tokens and returns no findings. The verifier always runs.",
+  "admin.reviewPolicies.helpAgentToggleBody": "Switch individual agents off for this repo — a disabled agent makes no LLM call, spends no tokens and returns no findings. The verifier has its own switch on this page and is off by default.",
   "admin.reviewPolicies.helpAgentToggleTitle": "Agents in the review",
   "admin.reviewPolicies.helpBranchesBody": "The list of PR target (base) branches that trigger a review — leave it empty to review every PR regardless of its target branch; there is no built-in main/master default.",
   "admin.reviewPolicies.helpBranchesTitle": "Target branches",

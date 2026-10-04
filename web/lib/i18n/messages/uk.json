@@ -508,7 +508,7 @@
   "admin.reviewPolicies.helpAgentPromptsBody": "Замініть системний промпт будь-якого агента — зокрема верифікатора — лише для цього репозиторію. Промпт репозиторію має пріоритет над промптом робочого простору на /admin/agents; порожнє поле його успадковує.",
   "admin.reviewPolicies.helpAgentPromptsTitle": "Оверрайди промптів агентів",
   "admin.reviewPolicies.helpAgentRolesTitle": "Що робить кожен агент",
-  "admin.reviewPolicies.helpAgentToggleBody": "Вимикай окремих агентів для цього репозиторію — вимкнений агент не робить викликів LLM, не витрачає токенів і не дає знахідок. Verifier працює завжди.",
+  "admin.reviewPolicies.helpAgentToggleBody": "Вимикай окремих агентів для цього репозиторію — вимкнений агент не робить викликів LLM, не витрачає токенів і не дає знахідок. Верифікатор вмикається окремим перемикачем на цій сторінці й за замовчуванням вимкнений.",
   "admin.reviewPolicies.helpAgentToggleTitle": "Агенти в рев'ю",
   "admin.reviewPolicies.helpBranchesBody": "Список цільових (базових) гілок PR, які тригерять рев'ю — залиште порожнім, щоб рецензувати кожен PR незалежно від цільової гілки; вбудованого дефолту main/master немає.",
   "admin.reviewPolicies.helpBranchesTitle": "Цільові гілки",
