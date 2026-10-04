@@ -32,7 +32,7 @@ GUIDE = """\
 - [Ask the code](/projects): a project groups indexed repositories so one question searches all of them. [All chats](/chats), [Code search](/search).
 - [Claude agent](/claude): connect a Claude subscription token, then run coding sessions against a repository.
 - [Celmis agent](/automation): this conversation as a full page, with the list of past chats. Also opened from the round button at the bottom right of every page.
-- Monitoring: [Alerts](/alerts) (Grafana or any webhook), [Notifications](/admin/notifications) (Slack, Telegram, email channels), [Job queue](/admin/jobs), [Audit log](/admin/audit) (every LLM call).
+- Monitoring: [Alerts](/alerts) (Grafana or any webhook), [Notifications](/admin/notifications) (Slack, Discord, Google Chat or webhook channels), [Job queue](/admin/jobs), [Audit log](/admin/audit) (every LLM call).
 - [Usage & cost](/admin/usage): spend per workspace and the budget cap.
 - Team: [Workspaces & members](/admin/workspaces) (invite people, set roles), [Teams](/admin/teams), [Code access](/admin/access).
 - Settings: [Account](/settings), [LLM keys & models](/settings/llm), [Model catalog](/settings/models), [Git connections](/connections), [MCP for your editor](/settings/mcp).
@@ -59,7 +59,9 @@ comments.
   email you log in with.
 
 After connecting, add repositories on [Repositories](/repositories). Turn on
-automatic review per repository there, or ask this agent to do it for a set.
+automatic review per repository in the "Auto-review PRs" panel on
+[Code review](/reviews) (the webhook URL and secret are in the card below
+it), or ask this agent to do it for a set.
 
 ## Review prompts and rules
 
@@ -122,9 +124,17 @@ def _routes(text: str) -> frozenset[str]:
         m.group(2) for m in _LINK.finditer(text) if m.group(2).startswith("/"))
 
 
-#: Every in-app route the guide names. Derived, never listed by hand: a second
-#: list would be the one that is not updated when a page moves.
-GUIDE_ROUTES: frozenset[str] = _routes(GUIDE)
+def _knowledge_routes() -> frozenset[str]:
+    """The routes the deeper knowledge (`src.automation.knowledge`) links."""
+    from src.automation.knowledge import all_text
+
+    return _routes(all_text())
+
+
+#: Every in-app route the guide or the knowledge behind it names. Derived,
+#: never listed by hand: a second list would be the one that is not updated
+#: when a page moves.
+GUIDE_ROUTES: frozenset[str] = _routes(GUIDE) | _knowledge_routes()
 
 
 #: Named routes whose children are real pages addressed by a name or an id:

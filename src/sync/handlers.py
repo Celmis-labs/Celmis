@@ -543,6 +543,9 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
             interpret, p["message"], workspace_id=workspace_id,
             user_id=p.get("user_id", ""),
             on_note=on_note, should_stop=should_stop,
+            # Absent on a job queued before the field existed; the planner
+            # then says which role a task needs instead of whether they hold it.
+            caller=p.get("caller"),
         )
         plan = resolve_scope(plan, workspace_id=workspace_id)
     except Exception as exc:  # noqa: BLE001

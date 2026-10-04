@@ -118,9 +118,11 @@ CATALOGUE: dict[str, dict[str, Any]] = {
         "summary": "Answer a how-do-I or where-is question about using the "
                    "app: adding GitHub, GitLab or Bitbucket tokens and which "
                    "scopes they need, editing review prompts, review "
-                   "policies and reviewers, provider API keys, a LiteLLM "
-                   "proxy, members, roles and invitations, or which page "
-                   "holds a setting. Answered from the guide.",
+                   "policies and reviewers globally or per repository, "
+                   "webhooks, indexing, issues, analytics, provider API "
+                   "keys, a LiteLLM proxy, usage and budget, alerts, SSO, "
+                   "members, roles and invitations, who may change what, or "
+                   "which page holds a setting. Answered from the guide.",
         "reads": True,
         "arguments": {},
     },
@@ -235,18 +237,48 @@ _HELP = """
 HOW-TO AND WHERE-IS QUESTIONS — the help action.
 
 For help, the plan's note is not one sentence: it IS the whole answer, and the
-person reads it while you write it. Write it from the product guide below and
-from nothing else. If the guide does not cover the question, say so plainly
-and point to the page closest to it. Keep it short — two to six sentences, or
-a short list.
+person reads it while you write it. Write it from the product guide and the
+product knowledge below, and from nothing else — not from what you remember
+about other products.
+
+How to answer:
+- Answer the question that was asked, first and directly ("Yes — per
+  repository too: ..."), then how to do it.
+- A task is numbered steps: which page to open (as a link), which tab, card,
+  field or button (its label exactly as the knowledge quotes it, in quotes),
+  what to type or choose, and what happens after saving.
+- Say which role the task needs and whether the person asking has it: their
+  role and global status are given with the request. If they lack it, say
+  who can do it for them rather than only listing steps they cannot take.
+- Use the detail the knowledge gives that the question needs — scopes, URL
+  paths, precedence, limits. A complete answer may be fifteen lines; a short
+  question still gets a short answer.
+- Never answer with "see the guide", "it is described in the X section" or
+  "check the documentation" when the knowledge below contains the answer:
+  the guide is for you, the person cannot see it. Only when the knowledge
+  truly does not cover the question, say so plainly in one sentence and point
+  to the page closest to it.
+
+Write the whole answer in the language of the request. Translate page names
+and explanations; keep quoted button labels, code, URL paths and scopes as the
+knowledge writes them, because that is the text on screen.
 
 Link every page you mention as a markdown link to its path exactly as the
-guide writes it, for example [Repositories](/repositories). Translate the
-label into the language of the request and keep the path as it is. Never
-link anywhere else and never make a path up. Then return exactly one step:
+guide or the knowledge writes it, for example [Repositories](/repositories).
+Translate the link text and keep the path as it is. Never link anywhere else
+and never make a path up. Then return exactly one step:
 {"action": "help", "arguments": {}}.
 
 Product guide:
+
+"""
+
+#: Heads the sections picked for this one question. After the guide, so the
+#: stable part of the system prompt stays a prefix a provider can cache.
+_KNOWLEDGE_HEADER = """
+Product knowledge for this question (the sections most relevant to it, each
+written from the product's code and screens — prefer it to the guide where
+it is more specific):
 
 """
 
@@ -358,6 +390,31 @@ def _catalogue_prompt() -> str:
     return "\n".join(lines)
 
 
+#: The planner's output ceiling — sized for the longest thing it writes, a
+#: step-by-step help answer in a Cyrillic language.
+HELP_MAX_OUTPUT_TOKENS = 2500
+
+
+def _caller_line(caller: dict[str, Any] | None) -> str:
+    """Who is asking, in one paragraph the model can quote back."""
+    if not caller:
+        return ("The person asking: their role in this workspace is not "
+                "known — when a task needs a role, say which one.")
+    role = caller.get("role") or "none (not a member of this workspace)"
+    if caller.get("is_superadmin"):
+        status = ("They are the superadmin (the installation's master "
+                  "account): they may do and grant everything.")
+    elif caller.get("is_admin"):
+        status = ("They are a global admin of the installation (platform "
+                  "pages, every workspace visible), but NOT the superadmin; "
+                  "inside this workspace their role above decides what they "
+                  "may grant.")
+    else:
+        status = "They are not a global admin."
+    return (f"The person asking: their role in this workspace is {role}. "
+            f"{status}")
+
+
 def interpret(
     message: str,
     *,
@@ -365,6 +422,7 @@ def interpret(
     user_id: str,
     on_note: Callable[[str], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    caller: dict[str, Any] | None = None,
 ) -> Plan:
     """Read a sentence into a plan. Runs nothing.
 
@@ -376,8 +434,13 @@ def interpret(
     that is possible at all. `should_stop` is asked between chunks, so a person
     pressing Stop interrupts the model instead of waiting for it to finish.
     Pass neither and this is the single blocking call it has always been.
+
+    `caller` is who is asking — ``{"role", "is_admin", "is_superadmin"}`` —
+    so a how-to answer can say whether THEY can do it, rather than listing
+    steps behind a button their role does not draw.
     """
     from src.automation.guide import GUIDE
+    from src.automation.knowledge import knowledge_for
     from src.llm.client import build_llm_client
 
     # ══ FIELD ORDER IS THE FEATURE. DO NOT "TIDY" IT. ══════════════════
@@ -400,11 +463,13 @@ def interpret(
     prompt = (
         f"Available actions:\n{_catalogue_prompt()}\n\n"
         f"Request: {message}\n\n"
+        f"{_caller_line(caller)}\n\n"
         'Answer with JSON only, with the fields in EXACTLY this order — '
         '"language" first, then "note", then "steps":\n'
         '{"language": "<ISO 639-1 code of the language the REQUEST was '
         'written in>", '
-        '"note": "<one sentence about the whole request>", '
+        '"note": "<one sentence about the whole request — for help, the '
+        'whole answer>", '
         '"steps": [{"action": "<name>", "arguments": {...}, '
         '"note": "<one sentence about this step>"}]}\n'
         'An empty steps list means you did not recognise an action.'
@@ -450,12 +515,17 @@ def interpret(
 
     response = client.generate(
         prompt=prompt, agent="automation",
-        system_instruction=_SYSTEM + _HELP + GUIDE,
+        # The guide is the stable part, the knowledge the per-question part:
+        # in that order, everything up to the knowledge is the same prefix on
+        # every call.
+        system_instruction=(_SYSTEM + _HELP + GUIDE + _KNOWLEDGE_HEADER
+                            + knowledge_for(message)),
         mode="qa", operation="automation_interpret", temperature=0.0,
-        # A help answer is a paragraph with links rather than a sentence,
-        # and in Cyrillic a paragraph is twice the tokens it is in English.
-        # 800 cut those answers off mid-word.
-        max_output_tokens=1500,
+        # A help answer is numbered steps with links, not a sentence, and in
+        # Cyrillic it is twice the tokens it is in English. 800 cut those
+        # answers off mid-word; 1500 cut the step-by-step ones off at step
+        # five. A plan that is not help stops long before this.
+        max_output_tokens=HELP_MAX_OUTPUT_TOKENS,
         # Only when somebody is listening. A caller that wants neither the
         # sentence nor the ability to stop takes the plain call — one path
         # fewer to be wrong in the CLI and in tests.
