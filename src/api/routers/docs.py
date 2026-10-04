@@ -13,6 +13,17 @@ documentation generator, and this is the part that was missing.
 `path` comes from the client and names a file on disk, so it is resolved and
 checked against the repo's own vault directory before anything is opened. A
 path that escapes is a 404, not an error message describing the boundary.
+
+Research access (src/access/resolver.py) applies here as it does to Q&A,
+search and MCP. Generated documentation IS the `metadata` level — the
+resolver's own definition: "metadata → docs / architecture notes only" — so:
+
+  * visibility `none` → the repository's documentation is refused (403);
+  * `metadata` or `code` → readable;
+  * a note whose source path (`path` in its frontmatter) a deny glob or an
+    allow-list miss conceals is left out of the listing and the exports, and
+    reads as not found — `RepoAccessDecision.path_denied`, the same test Q&A
+    applies to vault hits.
 """
 
 from __future__ import annotations
@@ -72,6 +83,37 @@ def _vault_dir(slug: str, workspace_id: str) -> Path:
     if slug not in owned:
         raise HTTPException(status_code=404, detail="Repo not registered")
     return get_settings().repo_vault_path(slug)
+
+
+_NO_DOCS_ACCESS = ("Your team's access rules do not include this repository, so "
+                   "its documentation is not available to you. Ask a workspace "
+                   "admin for access (Team & access → Code access).")
+
+
+def _decisions(user: User, workspace_id: str, slugs: list[str]) -> dict:
+    """The caller's research access for ``slugs`` — the resolver Q&A uses."""
+    from src.access import resolve_access
+
+    return resolve_access(user_id=user.id, is_admin=user.is_admin,
+                          workspace_id=workspace_id, repos=slugs)
+
+
+def _readable_vault(slug: str, user: User, workspace_id: str):
+    """(vault dir, decision) for a repository whose docs the caller may read.
+
+    404 when the repository is not this workspace's, 403 when the access rules
+    hide it from the caller altogether (visibility `none`)."""
+    directory = _vault_dir(slug, workspace_id)
+    dec = _decisions(user, workspace_id, [slug]).get(slug)
+    if dec is None or not dec.researchable:
+        raise HTTPException(status_code=403, detail=_NO_DOCS_ACCESS)
+    return directory, dec
+
+
+def _concealed(post: frontmatter.Post, dec) -> bool:  # noqa: ANN001
+    """True when ``dec`` hides the source path this note documents."""
+    source = post.metadata.get("path") if isinstance(post.metadata, dict) else None
+    return bool(source) and dec.path_denied(str(source))
 
 
 def _title_of(post: frontmatter.Post, path: Path) -> str:
@@ -173,6 +215,13 @@ def export_all_docs(
         repos = [r for r in repos if r.full_name.startswith(prefix)]
     if not repos:
         raise HTTPException(status_code=404, detail="No repositories in scope.")
+    decisions = _decisions(user, workspace_id, [r.repo_slug for r in repos])
+    hidden = sorted(r.repo_slug for r in repos
+                    if not (decisions.get(r.repo_slug) and
+                            decisions[r.repo_slug].researchable))
+    repos = [r for r in repos if r.repo_slug not in hidden]
+    if not repos:
+        raise HTTPException(status_code=403, detail=_NO_DOCS_ACCESS)
 
     buf = io.BytesIO()
     included = 0
@@ -189,10 +238,13 @@ def export_all_docs(
             if not notes:
                 empty.append(cfg.repo_slug)
                 continue
+            dec = decisions[cfg.repo_slug]
             for path in notes:
                 try:
                     post = frontmatter.load(path)
                 except Exception:  # noqa: BLE001 — one unreadable note is not an outage
+                    continue
+                if _concealed(post, dec):
                     continue
                 body = post.content
                 block = post.metadata.get("provenance")
@@ -211,6 +263,14 @@ def export_all_docs(
                 + "\n".join(f"  - {s}" for s in sorted(empty))
                 + "\n\nGenerate it from the Documentation page, or with\n"
                   "POST /api/docs/generate {\"missing_only\": true}.\n")
+        if hidden:
+            # Said, not silently dropped: the archive is a claim to be "the
+            # documentation", and these are outside what this reader may see.
+            zf.writestr(
+                "NOT-INCLUDED.txt",
+                "Your team's access rules do not include these repositories,\n"
+                "so their documentation is not in this archive:\n"
+                + "\n".join(f"  - {s}" for s in hidden) + "\n")
 
     if not included:
         raise HTTPException(
@@ -237,13 +297,15 @@ def list_notes(
     user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> DocsOverview:
-    directory = _vault_dir(slug, workspace_id)
+    directory, dec = _readable_vault(slug, user, workspace_id)
     files = _notes(directory)
     out: list[NoteSummary] = []
     for path in files[:MAX_NOTES]:
         try:
             post = frontmatter.load(path)
         except Exception:  # noqa: BLE001 — one unreadable note is not an outage
+            continue
+        if _concealed(post, dec):
             continue
         out.append(NoteSummary(
             path=str(path.relative_to(directory)),
@@ -279,9 +341,12 @@ def read_note(
     user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> NoteOut:
-    directory = _vault_dir(slug, workspace_id)
+    directory, dec = _readable_vault(slug, user, workspace_id)
     full = _resolve(directory, path)
     post = frontmatter.load(full)
+    if _concealed(post, dec):
+        # Exactly the answer for a note that does not exist.
+        raise HTTPException(status_code=404, detail="Note not found")
     return NoteOut(
         path=path,
         title=_title_of(post, full),
@@ -307,7 +372,7 @@ def export_docs(
 
     from src.docs.export import Note, to_docx, to_markdown
 
-    directory = _vault_dir(slug, workspace_id)
+    directory, dec = _readable_vault(slug, user, workspace_id)
     files = _notes(directory)[:MAX_NOTES]
     if not files:
         raise HTTPException(
@@ -320,6 +385,8 @@ def export_docs(
         try:
             post = frontmatter.load(path)
         except Exception:  # noqa: BLE001
+            continue
+        if _concealed(post, dec):
             continue
         # The mark travels into the export. A Word file attached to an email
         # or a PDF in a filing is exactly the copy somebody hands over, and

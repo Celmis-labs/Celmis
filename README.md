@@ -621,7 +621,7 @@ restarts, and the copy nobody maintains is the one that corrupts the queue.
 ## Who can see what
 
 Access is resolved per repository, per team, and it governs every surface at
-once — Q&A, graph, search, MCP:
+once — Q&A, graph, code search, generated documentation, MCP:
 
 | setting | effect |
 |---|---|

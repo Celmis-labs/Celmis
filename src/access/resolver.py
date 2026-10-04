@@ -6,6 +6,10 @@ same:
 
   * Q&A retrieval  (``src/qa/multi_repo_retriever.py``)
   * MCP tool bodies (``src/mcp_server/http_app.py``)
+  * code search     (``src/api/routers/search.py`` — symbols need ``code``,
+                     notes need ``metadata``; concealed paths dropped)
+  * generated docs  (``src/api/routers/docs.py`` — docs ARE the ``metadata``
+                     level; ``none`` refuses, concealed paths dropped)
   * REST endpoints  (``src/api/routers/access.py`` — read/CRUD of rules)
 
 Semantics (see :class:`src.db.models.RepoAccessRule`):
