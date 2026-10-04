@@ -2,7 +2,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
-  ChevronDownIcon, ExternalLinkIcon, GitPullRequestIcon, HelpCircleIcon,
+  ChevronDownIcon, ExternalLinkIcon, GitPullRequestIcon, HelpCircleIcon, HistoryIcon,
   RefreshCwIcon, SlidersHorizontalIcon, SparklesIcon, WrenchIcon,
 } from "lucide-react";
 import { useSession } from "next-auth/react";
@@ -35,6 +35,10 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { QueryState } from "@/components/ui/query-state";
 import { Switch } from "@/components/ui/switch";
 import { Select } from "@/components/ui/select";
+import {
+  SEVERITY_TEXT, SeverityBadge, StatusPill, toRunStatus, toSeverity,
+} from "@/components/ui/status";
+import { Textarea } from "@/components/ui/textarea";
 import { WorkspaceBadge } from "@/components/workspace-badge";
 import { useState } from "react";
 
@@ -71,6 +75,7 @@ export default function ReviewsPage() {
   return (
     <PageShell width="wide">
       <PageHeader
+        icon={<HistoryIcon className="h-6 w-6" />}
         title={t("reviews.title")}
         badge={<WorkspaceBadge />}
         description={t("reviews.subtitle")}
@@ -152,13 +157,13 @@ function AutoReviewPanel() {
       </CardHeader>
       <CardContent>
         {(repos.data?.length ?? 0) === 0 ? (
-          <div className="text-sm text-[var(--color-muted-foreground)] py-4 text-center">
+          <div className="rounded-lg border border-dashed border-[var(--color-border-strong)] px-3 py-5 text-center text-sm text-[var(--color-muted-foreground)]">
             {t("reviews.autoReviewEmpty")}
           </div>
         ) : (
-          <ul className="flex flex-col gap-2">
+          <ul className="-mx-2 flex flex-col">
             {(repos.data ?? []).map((repo) => (
-              <li key={repo.slug} className="flex min-h-11 items-center justify-between gap-3 sm:min-h-0">
+              <li key={repo.slug} className="flex min-h-11 items-center justify-between gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-[var(--color-accent)]/60 sm:min-h-0">
                 <div className="min-w-0">
                   <div className="text-sm font-medium truncate">{repo.full_name}</div>
                   <div className="text-xs text-[var(--color-muted-foreground)]">
@@ -344,17 +349,21 @@ function ApplyFixPanel() {
           </div>
           <div>
             <Label>{t("reviews.replacementLabel")}</Label>
-            <textarea
-              className="w-full rounded border border-[var(--color-border)] bg-transparent px-2 py-1 text-sm font-mono"
+            <Textarea
+              className="font-mono"
               rows={4}
               value={payload.replacement}
               onChange={(e) => setPayload({ ...payload, replacement: e.target.value })}
             />
           </div>
         </fieldset>
+        {/* Outline: the escape hatch is not this page's main action — the
+            review trigger above it is. */}
         <Button
           onClick={() => submit.mutate()}
-          disabled={submit.isPending || !payload.repo || !payload.file_path || !payload.head_sha}
+          disabled={!payload.repo || !payload.file_path || !payload.head_sha}
+          loading={submit.isPending}
+          variant="outline"
           size="sm"
         >
           {submit.isPending ? t("reviews.applying") : t("reviews.applyFixButton")}
@@ -365,19 +374,17 @@ function ApplyFixPanel() {
   );
 }
 
-// Lifecycle → badge tone + label key. The label goes through i18n (unlike
-// the raw verdict, which is provider vocabulary) because "partial" and
-// "skipped" are claims about what the reviewer did, not quotes from it.
-const STATUS_BADGES: Record<
-  string,
-  { variant: "success" | "warning" | "destructive" | "outline" | "default"; key: string }
-> = {
-  queued: { variant: "outline", key: "reviews.status.queued" },
-  running: { variant: "default", key: "reviews.status.running" },
-  complete: { variant: "success", key: "reviews.status.complete" },
-  partial: { variant: "warning", key: "reviews.status.partial" },
-  failed: { variant: "destructive", key: "reviews.status.failed" },
-  skipped: { variant: "outline", key: "reviews.status.skipped" },
+// Lifecycle → label key. The label goes through i18n (unlike the raw
+// verdict, which is provider vocabulary) because "partial" and "skipped"
+// are claims about what the reviewer did, not quotes from it. The colour is
+// the shared status scale (StatusPill), the same one the PR timeline uses.
+const STATUS_BADGES: Record<string, { key: string }> = {
+  queued: { key: "reviews.status.queued" },
+  running: { key: "reviews.status.running" },
+  complete: { key: "reviews.status.complete" },
+  partial: { key: "reviews.status.partial" },
+  failed: { key: "reviews.status.failed" },
+  skipped: { key: "reviews.status.skipped" },
 };
 
 function RunRow({ run, isAdmin }: { run: ReviewRunOut; isAdmin: boolean }) {
@@ -423,18 +430,18 @@ function RunRow({ run, isAdmin }: { run: ReviewRunOut; isAdmin: boolean }) {
       : run.verdict === "changes" || run.verdict === "request_changes"
         ? "destructive"
         : run.verdict === "comment"
-          ? "default"
+          ? "info"
           : "outline";
   return (
-    <div className="rounded-lg border border-[var(--color-border)] p-3 hover:bg-[var(--color-accent)]/30">
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] p-3 transition-colors hover:border-[var(--color-border-strong)]">
       <div className="flex flex-wrap items-start justify-between gap-2 sm:flex-nowrap sm:items-center sm:gap-3">
         <div className="w-full min-w-0 sm:w-auto sm:flex-1">
           {/* Refs are long and unbreakable — wrap them on a phone rather than
               letting the row set a min-content width the viewport can't hold. */}
-          <code className="block wrap-anywhere text-xs font-mono text-[var(--color-foreground)] sm:truncate">
+          <code className="block wrap-anywhere font-mono text-[13px] font-medium text-[var(--color-foreground)] sm:truncate">
             {run.pr_ref || t("reviews.unknownRef")}
           </code>
-          <div className="text-xs text-[var(--color-muted-foreground)] mt-0.5">
+          <div className="mt-0.5 text-xs tabular-nums text-[var(--color-muted-foreground)]">
             {formatDateTime(run.started_at)}
             {run.elapsed_seconds ? ` · ${Math.round(run.elapsed_seconds)}s` : ""}
             {run.posted ? ` · ${t("reviews.posted")}` : ""}
@@ -448,12 +455,11 @@ function RunRow({ run, isAdmin }: { run: ReviewRunOut; isAdmin: boolean }) {
           )}
           {statusBadge ? (
             <>
-              <Badge
-                variant={statusBadge.variant}
+              <StatusPill
+                status={toRunStatus(status)}
                 title={failedAgents ? t("reviews.agentsFailed", { agents: failedAgents }) : undefined}
-              >
-                {t(statusBadge.key)}
-              </Badge>
+                label={t(statusBadge.key)}
+              />
               {/* The verdict is only a claim a run that actually reviewed
                   something can make — for queued/running/failed/skipped the
                   serialiser folds status into `verdict`, and repeating it
@@ -478,9 +484,11 @@ function RunRow({ run, isAdmin }: { run: ReviewRunOut; isAdmin: boolean }) {
               onClick={() => setShowAdjustments((v) => !v)}
               aria-expanded={showAdjustments}
               title={t("reviews.adjustmentsHint")}
-              className="rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]"
+              className="rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
             >
-              <Badge variant="warning" className="cursor-pointer gap-1">
+              {/* Warm "attention", the same family as an Overridden pill:
+                  Celmis changed a setting on its own during this run. */}
+              <Badge variant="attention" className="cursor-pointer gap-1 hover:bg-[var(--color-attention)]/20">
                 <SlidersHorizontalIcon className="h-3 w-3" />
                 {adjCount === 1
                   ? t("reviews.adjustmentsBadgeOne")
@@ -492,16 +500,15 @@ function RunRow({ run, isAdmin }: { run: ReviewRunOut; isAdmin: boolean }) {
           {isAdmin && run.pr_ref && (
             <Button
               type="button"
-              size="sm"
+              size="xs"
               variant="outline"
               onClick={() => rerun.mutate()}
               // A run still in flight is already the re-run — queueing a
               // second copy from its own row only doubles the bill.
               disabled={rerun.isPending || status === "queued" || status === "running"}
               title={t("reviews.rerunReview")}
-              className="h-7 gap-1 px-2 text-xs"
             >
-              <RefreshCwIcon className={`h-3 w-3 ${rerun.isPending ? "animate-spin" : ""}`} />
+              <RefreshCwIcon className={`h-3.5 w-3.5 ${rerun.isPending ? "animate-spin" : ""}`} />
               {rerun.isPending ? t("reviews.queueing") : t("reviews.rerun")}
             </Button>
           )}
@@ -543,7 +550,7 @@ function RunRow({ run, isAdmin }: { run: ReviewRunOut; isAdmin: boolean }) {
         // ("draft", "all files filtered", "agents disabled") — burying it
         // behind the Summary toggle made "skipped" look like a verdict when
         // it is an explanation.
-        <div className="mt-2 rounded bg-[var(--color-secondary)] p-2 text-xs whitespace-pre-wrap wrap-anywhere text-[var(--color-muted-foreground)]">
+        <div className="mt-2 rounded-md bg-[var(--color-muted)] p-2.5 text-xs leading-relaxed whitespace-pre-wrap wrap-anywhere text-[var(--color-muted-foreground)]">
           {run.summary}
         </div>
       ) : run.summary ? (
@@ -551,7 +558,7 @@ function RunRow({ run, isAdmin }: { run: ReviewRunOut; isAdmin: boolean }) {
           <summary className="cursor-pointer text-xs text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]">
             {t("reviews.summaryToggle")}
           </summary>
-          <pre className="mt-2 text-xs whitespace-pre-wrap wrap-anywhere text-[var(--color-muted-foreground)] bg-[var(--color-secondary)] rounded p-2">
+          <pre className="mt-2 rounded-md bg-[var(--color-muted)] p-2.5 text-xs leading-relaxed whitespace-pre-wrap wrap-anywhere text-[var(--color-muted-foreground)]">
             {run.summary}
           </pre>
         </details>
@@ -568,8 +575,10 @@ function RunRow({ run, isAdmin }: { run: ReviewRunOut; isAdmin: boolean }) {
           <button
             type="button"
             onClick={() => setShowFindings((v) => !v)}
-            className="text-xs underline text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]"
+            aria-expanded={showFindings}
+            className="inline-flex items-center gap-1 rounded text-xs font-medium text-[var(--color-primary)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
           >
+            <ChevronDownIcon aria-hidden className={`h-3.5 w-3.5 transition-transform duration-200 ${showFindings ? "rotate-180" : ""}`} />
             {showFindings
               ? t("reviews.hideFindings", { count: run.findings_count ?? 0 })
               : t("reviews.showFindings", { count: run.findings_count ?? 0 })}
@@ -594,7 +603,7 @@ function FindingsPanel({ runId }: { runId: string }) {
     enabled: !!token,
   });
   if (q.isLoading) return <div className="text-xs mt-2">{t("reviews.loadingFindings")}</div>;
-  if (q.error) return <div className="text-xs mt-2 text-red-600">{(q.error as Error).message}</div>;
+  if (q.error) return <Callout tone="danger" className="mt-2">{(q.error as Error).message}</Callout>;
   const p = q.data;
   if (!p) return null;
   if (p.legacy) {
@@ -679,7 +688,7 @@ function DiffPanel({ runId, findings }: { runId: string; findings: FindingOut[] 
   let currentFile = "";
   let newLineNo = 0;
   return (
-    <div className="max-h-96 overflow-auto rounded border border-[var(--color-border)] bg-[var(--color-secondary)] font-mono text-[11px] leading-4">
+    <div className="max-h-96 overflow-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] py-1 font-mono text-xs leading-5">
       {lines.map((ln, i) => {
         let cls = "";
         let markable = false; // only added / context lines carry findings
@@ -695,15 +704,15 @@ function DiffPanel({ runId, findings }: { runId: string; findings: FindingOut[] 
         } else if (ln.startsWith("@@")) {
           const m = ln.match(/\+(\d+)/);
           if (m) newLineNo = parseInt(m[1], 10) - 1;
-          cls = "text-blue-600";
+          cls = "bg-[var(--color-info-soft)] text-[var(--color-info)]";
         } else if (ln.startsWith("+")) {
           newLineNo += 1;
           markable = true;
-          cls = "bg-emerald-500/10 text-emerald-700";
+          cls = "bg-[var(--color-success-soft)] text-[var(--color-success)]";
         } else if (ln.startsWith("-")) {
           // Removed line — belongs to the OLD file, has no new-file line
           // number, so it must not carry a finding marker.
-          cls = "bg-red-500/10 text-red-700";
+          cls = "bg-[var(--color-destructive-soft)] text-[var(--color-destructive)]";
         } else {
           // Context line.
           newLineNo += 1;
@@ -712,7 +721,7 @@ function DiffPanel({ runId, findings }: { runId: string; findings: FindingOut[] 
         const sev = markable ? markers.get(`${currentFile}:${newLineNo}`) : undefined;
         return (
           <div key={i}
-               className={`px-2 whitespace-pre ${cls} ${sev ? "outline outline-1 outline-amber-500" : ""}`}
+               className={`px-2 whitespace-pre ${cls} ${sev ? "outline outline-1 -outline-offset-1 outline-[var(--color-warning)]" : ""}`}
                title={sev ? t("reviews.findingMarker", { severity: sev }) : undefined}>
             {ln || " "}
           </div>
@@ -771,13 +780,6 @@ function FindingRow({
     },
     onError: (e) => toast.error((e as Error).message),
   });
-  const sevColor = {
-    critical: "text-red-700 font-semibold",
-    error: "text-orange-600 font-semibold",
-    warning: "text-amber-600",
-    info: "text-[var(--color-muted-foreground)]",
-  }[f.severity] || "text-[var(--color-muted-foreground)]";
-
   const canApply = Boolean(
     f.suggestion && pr.provider === "github" && pr.repo && pr.number
     && pr.head_sha && pr.head_ref,
@@ -824,19 +826,19 @@ function FindingRow({
   };
 
   return (
-    <div className="rounded border border-[var(--color-border)] p-2 text-xs">
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] p-3 text-xs">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <div className="wrap-anywhere">
-            <span className={sevColor}>[{f.severity}]</span>{" "}
-            <code>{f.file_path}:{f.line}</code>{" "}
-            <span className="text-[var(--color-muted-foreground)]">· {f.agent}</span>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 wrap-anywhere">
+            <SeverityBadge severity={toSeverity(f.severity)} label={f.severity} />
+            <code className="font-mono text-[var(--color-muted-foreground)]">{f.file_path}:{f.line}</code>
+            <span className="text-[var(--color-subtle-foreground)]">· {f.agent}</span>
           </div>
-          <div className="font-medium mt-0.5">{f.title}</div>
+          <div className="mt-1.5 text-sm font-medium">{f.title}</div>
           {f.suggestion && (
             <details className="mt-1">
               <summary className="cursor-pointer text-[var(--color-muted-foreground)]">{t("reviews.suggestionToggle")}</summary>
-              <pre className="mt-1 bg-[var(--color-secondary)] rounded p-2 overflow-x-auto">
+              <pre className="mt-1.5 overflow-x-auto rounded-md border border-[var(--color-border)] bg-[var(--color-muted)] p-2.5 font-mono leading-5">
                 {f.suggestion}
               </pre>
             </details>
@@ -854,7 +856,7 @@ function FindingRow({
             title={t("reviews.fbAcceptTitle")}
             className={
               verdict === "accepted"
-                ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                ? "border-[var(--color-success)]/50 bg-[var(--color-success-soft)] text-[var(--color-success)] hover:bg-[var(--color-success-soft)]"
                 : ""
             }
           >
@@ -869,7 +871,7 @@ function FindingRow({
             title={t("reviews.fbDismissTitle")}
             className={
               verdict === "dismissed"
-                ? "border-[var(--color-destructive)]/50 bg-[var(--color-destructive)]/15 text-[var(--color-destructive)]"
+                ? "border-[var(--color-destructive)]/50 bg-[var(--color-destructive-soft)] text-[var(--color-destructive)] hover:bg-[var(--color-destructive-soft)]"
                 : "text-[var(--color-destructive)]"
             }
           >
@@ -936,11 +938,11 @@ function FindingsBreakdown({ run }: { run: ReviewRunOut }) {
   return (
     <div className="flex flex-wrap items-center gap-1 text-xs">
       {run.critical > 0 && (
-        <span className="text-[var(--color-destructive)] font-semibold">{t("reviews.critCount", { count: run.critical })}</span>
+        <span className={`${SEVERITY_TEXT.critical} font-semibold`}>{t("reviews.critCount", { count: run.critical })}</span>
       )}
-      {run.error > 0 && <span className="text-orange-600 font-semibold">{t("reviews.errCount", { count: run.error })}</span>}
-      {run.warning > 0 && <span className="text-[var(--color-warning)]">{t("reviews.warnCount", { count: run.warning })}</span>}
-      {(run.info ?? 0) > 0 && <span className="text-[var(--color-muted-foreground)]">{t("reviews.infoCount", { count: run.info ?? 0 })}</span>}
+      {run.error > 0 && <span className={`${SEVERITY_TEXT.error} font-semibold`}>{t("reviews.errCount", { count: run.error })}</span>}
+      {run.warning > 0 && <span className={`${SEVERITY_TEXT.warning} font-medium`}>{t("reviews.warnCount", { count: run.warning })}</span>}
+      {(run.info ?? 0) > 0 && <span className={SEVERITY_TEXT.info}>{t("reviews.infoCount", { count: run.info ?? 0 })}</span>}
       {total === 0 && <span className="text-[var(--color-muted-foreground)]">{t("reviews.noFindingsShort")}</span>}
       {/* What the run hid before posting. Next to the counts it posted,
           because "3 findings" and "3 findings, 7 hidden" are different
@@ -1125,7 +1127,7 @@ function ManualTrigger() {
           >
             {manual ? t("reviews.mtBackToPicker") : t("reviews.mtManualLink")}
           </button>
-          <div className="flex items-center justify-between rounded-md border border-[var(--color-border)] p-2.5">
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-muted)]/40 p-3">
             <Label htmlFor="post-toggle" className="cursor-pointer">
               {t("reviews.postComments")}
               <span className="block text-xs text-[var(--color-muted-foreground)] font-normal">
@@ -1139,8 +1141,8 @@ function ManualTrigger() {
              
             />
           </div>
-          <Button type="submit" disabled={trigger.isPending || !ref}>
-            <SparklesIcon className="h-4 w-4" />
+          <Button type="submit" disabled={!ref} loading={trigger.isPending}>
+            <SparklesIcon />
             {trigger.isPending ? t("reviews.queueingReview") : t("reviews.runReview")}
           </Button>
         </form>

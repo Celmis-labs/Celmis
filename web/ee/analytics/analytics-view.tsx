@@ -35,7 +35,9 @@ import { WorkspaceBadge } from "@/components/workspace-badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { QueryState } from "@/components/ui/query-state";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SEVERITY_COLOR, SeverityIcon } from "@/components/ui/status";
 
 const WINDOWS = [7, 30, 90] as const;
 type Window = (typeof WINDOWS)[number];
@@ -72,30 +74,19 @@ export function AnalyticsView() {
         description={t("analytics.subtitle")}
         tabs={<SectionTabs set="review" />}
         actions={allowed ? (
-          <div role="radiogroup" aria-label={t("analytics.window")} className="flex gap-1">
-            {WINDOWS.map((d) => (
-              <button
-                key={d}
-                type="button"
-                role="radio"
-                aria-checked={days === d}
-                onClick={() => setDays(d)}
-                className={`rounded-md px-3 py-1.5 text-xs transition-colors ${
-                  days === d
-                    ? "bg-[var(--color-brand-muted)] font-medium text-[var(--color-brand)]"
-                    : "text-[var(--color-muted-foreground)] hover:bg-[var(--color-accent)]"
-                }`}
-              >
-                {t("analytics.days", { n: d })}
-              </button>
-            ))}
-          </div>
+          <SegmentedControl
+            label={t("analytics.window")}
+            size="sm"
+            value={String(days)}
+            onValueChange={(v) => setDays(Number(v) as Window)}
+            segments={WINDOWS.map((d) => ({ value: String(d), label: t("analytics.days", { n: d }) }))}
+          />
         ) : undefined}
       />
 
       {allowed === undefined && (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24" />)}
+          {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-28 rounded-xl" />)}
         </div>
       )}
 
@@ -122,11 +113,13 @@ export function AnalyticsView() {
 
 function Kpi({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <Card>
-      <CardContent className="pt-4">
-        <div className="text-xs text-[var(--color-muted-foreground)]">{label}</div>
-        <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
-        {hint && <div className="mt-1 text-xs text-[var(--color-muted-foreground)]">{hint}</div>}
+    <Card className="flex flex-col">
+      <CardContent className="flex flex-1 flex-col pt-5 sm:pt-5">
+        <div className="text-sm font-medium text-[var(--color-muted-foreground)]">{label}</div>
+        <div className="mt-2 text-3xl font-semibold tracking-tight tabular-nums">{value}</div>
+        {hint && (
+          <div className="mt-auto pt-2 text-xs leading-relaxed text-[var(--color-muted-foreground)]">{hint}</div>
+        )}
       </CardContent>
     </Card>
   );
@@ -222,9 +215,13 @@ function Dashboard({ s }: { s: AnalyticsSummary }) {
             <CardDescription>{t("analytics.bySeverityDesc", { n: totalFindings })}</CardDescription>
           </CardHeader>
           <CardContent>
+            {/* Each severity in its own colour, with its icon by the label:
+                the one chart here where hue carries meaning. */}
             <HBars
               rows={(["critical", "error", "warning", "info"] as const).map((k) => ({
                 label: t(`issues.severity.${k}`), value: sev[k],
+                color: SEVERITY_COLOR[k],
+                icon: <SeverityIcon severity={k} className="size-3.5" />,
               }))}
             />
           </CardContent>
@@ -261,10 +258,10 @@ function OutcomeBar({ s }: { s: AnalyticsSummary }) {
   const fixedOther = Math.max(0, oc.fixed_any - oc.fixed_in_next_commits);
   const segments = [
     { key: "fixedNext", value: oc.fixed_in_next_commits, color: "var(--color-success)" },
-    { key: "fixedOther", value: fixedOther, color: "color-mix(in oklab, var(--color-success) 55%, var(--color-card))" },
+    { key: "fixedOther", value: fixedOther, color: "color-mix(in oklab, var(--color-success) 50%, var(--color-card))" },
     { key: "openMerged", value: oc.open_on_merged_prs, color: "var(--color-destructive)" },
     { key: "openOther", value: openElsewhere, color: "var(--color-warning)" },
-    { key: "dismissed", value: oc.dismissed, color: "var(--color-muted-foreground)" },
+    { key: "dismissed", value: oc.dismissed, color: "var(--color-input)" },
   ];
   const total = segments.reduce((a, b) => a + b.value, 0);
   if (total === 0) {
@@ -273,24 +270,25 @@ function OutcomeBar({ s }: { s: AnalyticsSummary }) {
   return (
     <div className="space-y-3">
       <div
-        className="flex h-4 w-full gap-[2px] overflow-hidden rounded"
+        className="flex h-3 w-full gap-[2px] overflow-hidden rounded-full"
         role="img"
         aria-label={segments.map((g) => `${t(`analytics.outcome.${g.key}`)}: ${g.value}`).join(", ")}
       >
         {segments.filter((g) => g.value > 0).map((g) => (
           <div
             key={g.key}
+            className="transition-[width] duration-500 ease-out-quint first:rounded-l-full last:rounded-r-full"
             style={{ width: `${(100 * g.value) / total}%`, background: g.color }}
             title={`${t(`analytics.outcome.${g.key}`)}: ${g.value}`}
           />
         ))}
       </div>
-      <ul className="grid gap-1 text-xs sm:grid-cols-2 lg:grid-cols-5">
+      <ul className="grid gap-x-4 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-5">
         {segments.map((g) => (
           <li key={g.key} className="flex items-center gap-2">
-            <span aria-hidden className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: g.color }} />
+            <span aria-hidden className="inline-block size-2.5 shrink-0 rounded-full" style={{ background: g.color }} />
             <span className="text-[var(--color-muted-foreground)]">{t(`analytics.outcome.${g.key}`)}</span>
-            <span className="ml-auto font-medium tabular-nums sm:ml-0">{g.value}</span>
+            <span className="ml-auto font-semibold tabular-nums sm:ml-0">{g.value}</span>
           </li>
         ))}
       </ul>
@@ -316,7 +314,12 @@ function DailyBars({ s, field }: { s: AnalyticsSummary; field: "reviews" | "find
         aria-label={t(field === "reviews" ? "analytics.reviewsPerDay" : "analytics.findingsPerDay")}
         preserveAspectRatio="none"
       >
-        <line x1={0} x2={W} y1={H} y2={H} stroke="var(--color-border)" strokeWidth={1} />
+        {/* Quarter gridlines, faint: enough to read a height against. */}
+        {[0.25, 0.5, 0.75].map((r) => (
+          <line key={r} x1={0} x2={W} y1={H - r * (H - 8)} y2={H - r * (H - 8)}
+            stroke="var(--color-border)" strokeWidth={1} strokeDasharray="3 4" />
+        ))}
+        <line x1={0} x2={W} y1={H} y2={H} stroke="var(--color-border-strong)" strokeWidth={1} />
         {data.map((d, i) => {
           const h = (d[field] / max) * (H - 8);
           return (
@@ -332,7 +335,8 @@ function DailyBars({ s, field }: { s: AnalyticsSummary; field: "reviews" | "find
                   width={bw}
                   height={h}
                   rx={Math.min(3, bw / 2)}
-                  fill="var(--color-brand)"
+                  fill="var(--color-primary)"
+                  fillOpacity={0.85}
                   pointerEvents="none"
                 />
               )}
@@ -346,11 +350,11 @@ function DailyBars({ s, field }: { s: AnalyticsSummary; field: "reviews" | "find
           {formatDate(data[data.length - 1]?.date)}
         </text>
       </svg>
-      <div className="mt-1 text-xs text-[var(--color-muted-foreground)]">
+      <div className="mt-1 text-xs tabular-nums text-[var(--color-muted-foreground)]">
         {t("analytics.peak", { n: max === 1 && !data.some((d) => d[field]) ? 0 : max })}
       </div>
       <details className="mt-2 text-xs">
-        <summary className="cursor-pointer text-[var(--color-muted-foreground)]">
+        <summary className="w-fit cursor-pointer rounded text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]">
           {t("analytics.tableView")}
         </summary>
         <table className="mt-2 w-full">
@@ -370,20 +374,26 @@ function DailyBars({ s, field }: { s: AnalyticsSummary; field: "reviews" | "find
 
 /** Labelled horizontal bars — the label and the number are text, the bar is
  *  only the magnitude. */
-function HBars({ rows }: { rows: Array<{ label: string; value: number }> }) {
+function HBars({ rows }: {
+  rows: Array<{ label: string; value: number; color?: string; icon?: React.ReactNode }>;
+}) {
   const max = Math.max(1, ...rows.map((r) => r.value));
   return (
-    <ul className="space-y-2">
+    <ul className="space-y-2.5">
       {rows.map((r) => (
-        <li key={r.label} className="grid grid-cols-[8rem_1fr_3rem] items-center gap-2 text-xs">
-          <span className="truncate text-[var(--color-muted-foreground)]">{r.label}</span>
-          <span className="h-2.5 rounded bg-[var(--color-muted)]" title={`${r.label}: ${r.value}`}>
+        <li key={r.label} className="grid grid-cols-[8rem_1fr_3rem] items-center gap-3 text-sm">
+          <span className="flex min-w-0 items-center gap-1.5 text-[var(--color-muted-foreground)]"
+            style={r.color ? { color: r.color } : undefined}>
+            {r.icon}
+            <span className="truncate text-[var(--color-muted-foreground)]">{r.label}</span>
+          </span>
+          <span className="h-2 rounded-full bg-[var(--color-muted)]" title={`${r.label}: ${r.value}`}>
             <span
-              className="block h-full rounded bg-[var(--color-brand)]"
-              style={{ width: `${(100 * r.value) / max}%` }}
+              className="block h-full rounded-full transition-[width] duration-500 ease-out-quint"
+              style={{ width: `${(100 * r.value) / max}%`, background: r.color ?? "var(--color-primary)" }}
             />
           </span>
-          <span className="text-right font-medium tabular-nums">{r.value}</span>
+          <span className="text-right font-semibold tabular-nums">{r.value}</span>
         </li>
       ))}
     </ul>

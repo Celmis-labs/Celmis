@@ -190,6 +190,40 @@
   --color-attention-soft: oklch(0.29 0.055 50);
   --color-neutral-soft: oklch(0.27 0.009 210);
 
+  /* The aliases again. A custom property that points at another one is
+   * resolved on the element that declares it, so the copies in @theme
+   * (declared on :root) would keep the LIGHT values inside any `.dark`
+   * subtree that is not <html> itself. Re-declaring them here makes every
+   * `.dark` box resolve them against its own tokens. */
+  --color-card-foreground: var(--color-foreground);
+  --color-popover-foreground: var(--color-foreground);
+  --color-secondary-foreground: var(--color-foreground);
+  --color-accent-foreground: var(--color-foreground);
+  --color-selected-foreground: var(--color-foreground);
+  --color-brand: var(--color-primary);
+  --color-brand-foreground: var(--color-primary-foreground);
+  --color-brand-muted: var(--color-primary-soft);
+  --color-sev-critical: var(--color-destructive);
+  --color-sev-critical-soft: var(--color-destructive-soft);
+  --color-sev-error: var(--color-attention);
+  --color-sev-error-soft: var(--color-attention-soft);
+  --color-sev-warning: var(--color-warning);
+  --color-sev-warning-soft: var(--color-warning-soft);
+  --color-sev-info: var(--color-info);
+  --color-sev-info-soft: var(--color-info-soft);
+  --color-status-queued: var(--color-muted-foreground);
+  --color-status-queued-soft: var(--color-neutral-soft);
+  --color-status-running: var(--color-info);
+  --color-status-running-soft: var(--color-info-soft);
+  --color-status-success: var(--color-success);
+  --color-status-success-soft: var(--color-success-soft);
+  --color-status-partial: var(--color-warning);
+  --color-status-partial-soft: var(--color-warning-soft);
+  --color-status-skipped: var(--color-muted-foreground);
+  --color-status-skipped-soft: var(--color-neutral-soft);
+  --color-status-failed: var(--color-destructive);
+  --color-status-failed-soft: var(--color-destructive-soft);
+
   --shadow-xs: 0 1px 2px 0 oklch(0 0 0 / 0.35);
   --shadow-sm: 0 1px 3px 0 oklch(0 0 0 / 0.4), 0 1px 2px -1px oklch(0 0 0 / 0.4);
   --shadow-md: 0 4px 12px -2px oklch(0 0 0 / 0.5), 0 2px 6px -2px oklch(0 0 0 / 0.4);

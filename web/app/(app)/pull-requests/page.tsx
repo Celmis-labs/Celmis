@@ -11,8 +11,10 @@
 
 import { Fragment, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { AnimatePresence } from "motion/react";
+import * as m from "motion/react-m";
 import {
-  ChevronDownIcon, ChevronRightIcon, ExternalLinkIcon, GitPullRequestIcon,
+  ChevronRightIcon, ExternalLinkIcon, GitPullRequestIcon, SearchIcon,
 } from "lucide-react";
 
 import {
@@ -24,6 +26,7 @@ import { clampedOffset } from "@/lib/paging";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { formatDate, formatDateTime } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import { WorkspaceBadge } from "@/components/workspace-badge";
@@ -32,25 +35,23 @@ import { PullRequestReviews } from "@/components/review-timeline";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { QueryState } from "@/components/ui/query-state";
 import { Select } from "@/components/ui/select";
+import {
+  SEVERITIES, SeverityCounts, StatusPill, toRunStatus, type Severity,
+} from "@/components/ui/status";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
 
 const PAGE = 50;
 
-/** The last review's outcome as a badge: Success / Partial / Skipped / Failed. */
-const REVIEW_VARIANT: Record<string, "success" | "warning" | "default" | "destructive"> = {
-  complete: "success",
-  partial: "warning",
-  skipped: "default",
-  failed: "destructive",
-};
-
-const STATE_VARIANT: Record<string, "brand" | "success" | "outline"> = {
-  open: "brand",
+/** The PR's own state, as the provider reports it. Open is a state, so it
+ *  takes the info hue rather than the action colour. */
+const STATE_VARIANT: Record<string, "info" | "success" | "default"> = {
+  open: "info",
   merged: "success",
-  closed: "outline",
+  closed: "default",
 };
 
 export default function PullRequestsPage() {
@@ -99,12 +100,16 @@ export default function PullRequestsPage() {
       />
 
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        <Input
-          aria-label={t("prs.search")}
-          placeholder={t("prs.search")}
-          value={q}
-          onChange={(e) => pick(setQ)(e.target.value)}
-        />
+        <div className="relative">
+          <SearchIcon aria-hidden className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-subtle-foreground)]" />
+          <Input
+            aria-label={t("prs.search")}
+            placeholder={t("prs.search")}
+            value={q}
+            onChange={(e) => pick(setQ)(e.target.value)}
+            className="pl-9"
+          />
+        </div>
         <Select
           value={repo}
           onChange={pick(setRepo)}
@@ -130,24 +135,23 @@ export default function PullRequestsPage() {
       </div>
 
       <Card>
-        <CardContent className="pt-4">
+        <CardContent className="px-2 pt-2 sm:px-3 sm:pt-3">
           <QueryState query={list} skeleton={6}>
             {(data: ReviewedPullRequestList) =>
               data.items.length === 0 ? (
-                <div className="py-10 text-center">
-                  <GitPullRequestIcon className="mx-auto h-8 w-8 text-[var(--color-muted-foreground)]" />
-                  <div className="mt-2 text-sm font-medium">{t("prs.emptyTitle")}</div>
-                  <p className="mx-auto mt-1 max-w-md text-xs text-[var(--color-muted-foreground)]">
-                    {t("prs.emptyDesc")}
-                  </p>
+                <EmptyState
+                  icon={GitPullRequestIcon}
+                  title={t("prs.emptyTitle")}
+                  description={t("prs.emptyDesc")}
+                >
                   <NoReviewsYetHint />
-                </div>
+                </EmptyState>
               ) : (
                 <>
                   <Table>
                     <THead>
                       <TR>
-                        <TH className="w-6"><span className="sr-only">{t("prs.expand")}</span></TH>
+                        <TH className="w-8"><span className="sr-only">{t("prs.expand")}</span></TH>
                         <TH>{t("prs.col.number")}</TH>
                         <TH>{t("prs.col.title")}</TH>
                         <TH>{t("prs.col.repo")}</TH>
@@ -163,7 +167,7 @@ export default function PullRequestsPage() {
                       {data.items.map((p) => <PrRow key={p.id} pr={p} />)}
                     </TBody>
                   </Table>
-                  <div className="mt-3 flex items-center justify-between text-xs text-[var(--color-muted-foreground)]">
+                  <div className="mt-2 flex items-center justify-between gap-3 border-t border-[var(--color-border)] px-2.5 py-3 text-xs tabular-nums text-[var(--color-muted-foreground)]">
                     <span>
                       {t("issues.range", {
                         from: data.total ? data.offset + 1 : 0,
@@ -200,64 +204,78 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const sev = pr.by_severity ?? {};
-  const severityTitle = (["critical", "error", "warning", "info"] as const)
+  const severityTitle = SEVERITIES
     .map((s) => `${t(`issues.severity.${s}`)}: ${sev[s] ?? 0}`)
     .join(" · ");
+  const severityLabels = Object.fromEntries(
+    SEVERITIES.map((s) => [s, t(`issues.severity.${s}`)]),
+  ) as Record<Severity, string>;
   return (
     <Fragment>
-    <TR className={open ? "bg-[var(--color-accent)]/30" : undefined}>
-      <TD className="w-6">
+    <TR className={cn(open && "bg-[var(--color-accent)]/50")}>
+      <TD className="w-8 align-middle">
         <button
           type="button"
           aria-expanded={open}
           aria-label={open ? t("prs.collapse") : t("prs.expand")}
           onClick={() => setOpen((v) => !v)}
-          className="inline-flex h-7 w-7 items-center justify-center rounded hover:bg-[var(--color-accent)]"
+          className="inline-flex h-8 w-8 items-center justify-center rounded-md text-[var(--color-muted-foreground)] transition-colors hover:bg-[var(--color-selected)] hover:text-[var(--color-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]"
         >
-          {open ? <ChevronDownIcon className="h-4 w-4" /> : <ChevronRightIcon className="h-4 w-4" />}
+          <ChevronRightIcon className={cn(
+            "h-4 w-4 transition-transform duration-200 ease-out-quint",
+            open && "rotate-90",
+          )} />
         </button>
       </TD>
-      <TD className="whitespace-nowrap font-mono">
+      <TD className="whitespace-nowrap align-middle font-mono text-xs">
         {pr.url ? (
           <a href={pr.url} target="_blank" rel="noreferrer"
-            className="inline-flex items-center gap-1 hover:underline">
+            className="inline-flex items-center gap-1 text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)] hover:underline">
             #{pr.number} <ExternalLinkIcon className="h-3 w-3" />
           </a>
-        ) : <>#{pr.number}</>}
+        ) : <span className="text-[var(--color-muted-foreground)]">#{pr.number}</span>}
       </TD>
-      <TD className="min-w-[14rem]">
-        <span className="font-medium">{pr.title || "—"}</span>{" "}
-        <Badge variant={STATE_VARIANT[pr.state] ?? "outline"} className="ml-1 text-[10px]">
-          {t(`prs.state.${pr.state}`)}
-        </Badge>
+      <TD className="min-w-[14rem] align-middle">
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="font-medium">{pr.title || "—"}</span>
+          <Badge variant={STATE_VARIANT[pr.state] ?? "default"}>
+            {t(`prs.state.${pr.state}`)}
+          </Badge>
+        </span>
       </TD>
-      <TD className="whitespace-nowrap">{pr.repo}</TD>
-      <TD className="max-w-[14rem] truncate font-mono"
+      <TD className="whitespace-nowrap align-middle text-[var(--color-muted-foreground)]">{pr.repo}</TD>
+      <TD className="max-w-[14rem] truncate align-middle font-mono text-xs text-[var(--color-muted-foreground)]"
         title={`${pr.base_ref ?? "?"} ← ${pr.head_ref ?? "?"}`}>
         {pr.base_ref ? <>{pr.base_ref} ← </> : null}{pr.head_ref ?? "—"}
       </TD>
-      <TD className="whitespace-nowrap">{pr.author ?? "—"}</TD>
-      <TD className="whitespace-nowrap" title={formatDateTime(pr.opened_at)}>
+      <TD className="whitespace-nowrap align-middle">{pr.author ?? "—"}</TD>
+      <TD className="whitespace-nowrap align-middle text-[var(--color-muted-foreground)]" title={formatDateTime(pr.opened_at)}>
         {formatDate(pr.opened_at)}
       </TD>
-      <TD className="text-right tabular-nums">{pr.reviews_count}</TD>
-      <TD className="text-right tabular-nums" title={severityTitle}>
-        {pr.issues_total}
-        {pr.issues_open > 0 && pr.issues_open !== pr.issues_total && (
-          <span className="ml-1 text-[10px] text-[var(--color-muted-foreground)]">
-            ({t("prs.openCount", { n: pr.issues_open })})
-          </span>
-        )}
+      <TD className="text-right align-middle tabular-nums">{pr.reviews_count}</TD>
+      <TD className="align-middle" title={severityTitle}>
+        {/* The severity mix is on the row, not only in a tooltip: a
+            critical finding is the first thing a lead scans for. */}
+        <span className="flex flex-wrap items-center justify-end gap-1.5">
+          <SeverityCounts counts={sev} labels={severityLabels} />
+          <span className="font-medium tabular-nums">{pr.issues_total}</span>
+          {pr.issues_open > 0 && pr.issues_open !== pr.issues_total && (
+            <span className="text-xs text-[var(--color-muted-foreground)]">
+              ({t("prs.openCount", { n: pr.issues_open })})
+            </span>
+          )}
+        </span>
       </TD>
-      <TD className="max-w-[18rem]">
+      <TD className="max-w-[18rem] align-middle">
         {pr.last_review_status ? (
-          <div className="flex flex-col gap-0.5">
-            <Badge variant={REVIEW_VARIANT[pr.last_review_status] ?? "default"}
-              className="self-start">
-              {t(`prs.review.${pr.last_review_status}`)}
-            </Badge>
+          <div className="flex flex-col gap-1">
+            <StatusPill
+              status={toRunStatus(pr.last_review_status)}
+              label={t(`prs.review.${pr.last_review_status}`)}
+              className="self-start"
+            />
             {pr.last_review_reason && pr.last_review_status !== "complete" && (
-              <span className="line-clamp-2 text-[10px] text-[var(--color-muted-foreground)]"
+              <span className="line-clamp-2 text-xs leading-snug text-[var(--color-muted-foreground)]"
                 title={pr.last_review_reason}>
                 {pr.last_review_reason}
               </span>
@@ -266,13 +284,25 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
         ) : "—"}
       </TD>
     </TR>
-    {open && (
-      <TR className="hover:bg-transparent">
-        <TD colSpan={COLS} className="bg-[var(--color-muted)]/30 px-4 py-3">
-          <PullRequestReviews prId={pr.id} />
-        </TD>
-      </TR>
-    )}
+    <AnimatePresence initial={false}>
+      {open && (
+        <TR key="reviews" className="hover:bg-transparent">
+          <TD colSpan={COLS} className="p-0">
+            <m.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.28, ease: [0.23, 1, 0.32, 1] }}
+              className="overflow-hidden"
+            >
+              <div className="bg-[var(--color-muted)]/40 px-3 py-3 sm:pl-12 sm:pr-4">
+                <PullRequestReviews prId={pr.id} />
+              </div>
+            </m.div>
+          </TD>
+        </TR>
+      )}
+    </AnimatePresence>
     </Fragment>
   );
 }

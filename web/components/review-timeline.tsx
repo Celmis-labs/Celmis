@@ -4,13 +4,19 @@
  * A pull request's reviews, each expandable into its stages — the Kodus-style
  * timeline: "Review 2 · Skipped · Duration 3m 18s · 3 days ago", and under it
  * every stage with a status pill, its duration, when it started and why.
+ *
+ * Motion carries state, nothing else: a review opens by growing to its
+ * height, and its stages arrive top to bottom in a short cascade (capped, so
+ * a 20-stage run does not make anyone wait), which is the order they ran
+ * in. Under reduced motion both are a plain fade.
  */
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { AnimatePresence } from "motion/react";
+import * as m from "motion/react-m";
 import {
-  CheckCircle2Icon, ChevronDownIcon, ChevronRightIcon, CircleDashedIcon,
-  Loader2Icon, MinusCircleIcon, XCircleIcon,
+  CheckIcon, ChevronRightIcon, LoaderIcon, MinusIcon, XIcon,
 } from "lucide-react";
 
 import { pullRequestsApi, type ReviewRunOut } from "@/lib/api";
@@ -18,23 +24,26 @@ import { formatDateTime } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import {
   formatDuration, metaEntries, relativeTime, runDurationMs, stageLabel,
-  stagePillVariant, stageStatusWord, type ReviewStage,
+  stageStatusWord, type ReviewStage, type StageStatus,
 } from "@/lib/review-stages";
 import { useToken } from "@/lib/use-token";
-import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import { QueryState } from "@/components/ui/query-state";
+import { StatusPill, toRunStatus, type RunStatus } from "@/components/ui/status";
 
-/** A run's lifecycle word as a badge — the same map the PR row uses. */
-export const RUN_VARIANT: Record<string, "success" | "warning" | "default" | "destructive" | "brand"> = {
+/** A run's lifecycle word as a badge variant — for call sites still on
+ *  <Badge>. New code uses <StatusPill status={toRunStatus(word)} />. */
+export const RUN_VARIANT: Record<string, "success" | "warning" | "default" | "destructive" | "info"> = {
   complete: "success",
   partial: "warning",
   skipped: "default",
   failed: "destructive",
-  queued: "brand",
-  running: "brand",
+  queued: "default",
+  running: "info",
 };
 
 const ACTIVE = new Set(["queued", "running"]);
+const EASE = [0.23, 1, 0.32, 1] as const;
 
 export function PullRequestReviews({ prId }: { prId: string }) {
   const token = useToken();
@@ -51,7 +60,7 @@ export function PullRequestReviews({ prId }: { prId: string }) {
     <QueryState query={runs} skeleton={2}>
       {(data: { items: ReviewRunOut[] }) =>
         data.items.length === 0 ? (
-          <p className="py-2 text-xs text-[var(--color-muted-foreground)]">{t("prs.noRuns")}</p>
+          <p className="py-2 text-sm text-[var(--color-muted-foreground)]">{t("prs.noRuns")}</p>
         ) : (
           <ol className="flex flex-col gap-2">
             {data.items.map((run, idx) => (
@@ -72,51 +81,88 @@ function ReviewRunItem({ run, ordinal, defaultOpen }: {
   const [open, setOpen] = useState(defaultOpen);
   const status = run.status ?? run.verdict;
   const duration = runDurationMs(run);
+  const statusText = t(`prs.review.${status}`) === `prs.review.${status}`
+    ? status : t(`prs.review.${status}`);
   return (
-    <li className="rounded-md border border-[var(--color-border)] bg-[var(--color-card)]">
+    <li className={cn(
+      "overflow-hidden rounded-lg border bg-[var(--color-card)] transition-[border-color,box-shadow] duration-200",
+      open ? "border-[var(--color-border-strong)] shadow-[var(--shadow-sm)]" : "border-[var(--color-border)]",
+    )}>
       <button
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-left text-xs hover:bg-[var(--color-accent)]/40"
+        className="flex w-full flex-wrap items-center gap-x-2.5 gap-y-1 px-3 py-2.5 text-left text-sm transition-colors hover:bg-[var(--color-accent)]/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-ring)]"
       >
-        {open ? <ChevronDownIcon className="h-3.5 w-3.5 shrink-0" />
-          : <ChevronRightIcon className="h-3.5 w-3.5 shrink-0" />}
-        <span className="font-medium">{t("prs.runTitle", { n: ordinal })}</span>
-        <Badge variant={RUN_VARIANT[status] ?? "default"}>
-          {t(`prs.review.${status}`) === `prs.review.${status}` ? status : t(`prs.review.${status}`)}
-        </Badge>
-        <span className="text-[var(--color-muted-foreground)]">
+        <ChevronRightIcon aria-hidden className={cn(
+          "h-4 w-4 shrink-0 text-[var(--color-muted-foreground)] transition-transform duration-200 ease-out-quint",
+          open && "rotate-90",
+        )} />
+        <span className="font-semibold">{t("prs.runTitle", { n: ordinal })}</span>
+        <StatusPill status={toRunStatus(status)} label={statusText} />
+        <span className="text-xs tabular-nums text-[var(--color-muted-foreground)]">
           {t("prs.duration", { d: formatDuration(duration) })}
         </span>
-        <span className="text-[var(--color-muted-foreground)]" title={formatDateTime(run.started_at)}>
-          · {relativeTime(run.started_at, locale)}
+        <span className="text-xs text-[var(--color-subtle-foreground)]" title={formatDateTime(run.started_at)}>
+          {relativeTime(run.started_at, locale)}
         </span>
         {run.status_reason && (
-          <span className="basis-full pl-5 text-[var(--color-muted-foreground)]">
+          <span className="basis-full pl-6 text-xs leading-relaxed text-[var(--color-muted-foreground)]">
             {run.status_reason}
           </span>
         )}
       </button>
-      {open && (
-        <div className="border-t border-[var(--color-border)] px-3 py-3">
-          {run.stages && run.stages.length > 0
-            ? <StageTimeline stages={run.stages} />
-            : <p className="text-xs text-[var(--color-muted-foreground)]">{t("prs.noStages")}</p>}
-        </div>
-      )}
+      <AnimatePresence initial={false}>
+        {open && (
+          <m.div
+            key="stages"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.26, ease: EASE }}
+            className="overflow-hidden"
+          >
+            <div className="border-t border-[var(--color-border)] bg-[var(--color-muted)]/35 px-3 py-3.5 sm:px-4">
+              {run.stages && run.stages.length > 0
+                ? <StageTimeline stages={run.stages} />
+                : <p className="text-sm text-[var(--color-muted-foreground)]">{t("prs.noStages")}</p>}
+            </div>
+          </m.div>
+        )}
+      </AnimatePresence>
     </li>
   );
 }
 
-function StatusIcon({ status }: { status: string }) {
+const NODE_CLASS: Record<StageStatus, string> = {
+  success: "border-[var(--color-status-success)]/40 bg-[var(--color-status-success-soft)] text-[var(--color-status-success)]",
+  skipped: "border-[var(--color-border-strong)] bg-[var(--color-status-skipped-soft)] text-[var(--color-status-skipped)]",
+  running: "border-[var(--color-status-running)]/40 bg-[var(--color-status-running-soft)] text-[var(--color-status-running)]",
+  failed: "border-[var(--color-status-failed)]/45 bg-[var(--color-status-failed-soft)] text-[var(--color-status-failed)]",
+};
+
+/** The stage's mark on the rail: a check, a dash, a spinner or a cross in
+ *  a ring of its status colour. A stage with no status yet is a hollow ring. */
+function StageNode({ status }: { status: string | null | undefined }) {
+  if (!status) {
+    return (
+      <span aria-hidden className="grid size-5 place-items-center rounded-full border border-dashed border-[var(--color-input)] bg-[var(--color-card)]" />
+    );
+  }
   const word = stageStatusWord(status);
-  const cls = "h-4 w-4";
-  if (word === "success") return <CheckCircle2Icon className={`${cls} text-[var(--color-success)]`} />;
-  if (word === "skipped") return <MinusCircleIcon className={`${cls} text-[var(--color-muted-foreground)]`} />;
-  if (word === "running") return <Loader2Icon className={`${cls} animate-spin text-[var(--color-brand)]`} />;
-  return <XCircleIcon className={`${cls} text-[var(--color-destructive)]`} />;
+  const Icon = word === "success" ? CheckIcon
+    : word === "skipped" ? MinusIcon
+      : word === "running" ? LoaderIcon : XIcon;
+  return (
+    <span aria-hidden className={cn("grid size-5 place-items-center rounded-full border", NODE_CLASS[word])}>
+      <Icon strokeWidth={2.75} className={cn("size-3", word === "running" && "animate-spin motion-reduce:animate-none")} />
+    </span>
+  );
 }
+
+const STAGE_PILL: Record<StageStatus, RunStatus> = {
+  success: "success", skipped: "skipped", running: "running", failed: "failed",
+};
 
 export function StageTimeline({ stages }: { stages: ReviewStage[] }) {
   const { t } = useI18n();
@@ -130,41 +176,57 @@ export function StageTimeline({ stages }: { stages: ReviewStage[] }) {
     const text = t(`prs.meta.${k}`);
     return text === `prs.meta.${k}` ? k : text;
   };
+  // The cascade adds up to at most ~0.3s however many stages there are.
+  const step = Math.min(0.035, 0.3 / Math.max(1, stages.length));
   return (
-    <ol className="relative ml-2 border-l border-[var(--color-border)]">
+    <ol className="relative">
       {stages.map((s, i) => {
         const word = stageStatusWord(s.status);
+        const last = i === stages.length - 1;
+        const meta = metaEntries(s.meta);
         return (
-          <li key={`${s.key}-${i}`} className="relative pb-3 pl-5 last:pb-0">
-            <span className="absolute -left-2 top-0 rounded-full bg-[var(--color-card)]">
-              {s.status ? <StatusIcon status={s.status} /> : <CircleDashedIcon className="h-4 w-4" />}
-            </span>
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-              <span className="font-medium">{label(s)}</span>
-              <Badge variant={stagePillVariant(s.status)} className="text-[10px]">
-                {t(`prs.stageStatus.${word}`)}
-              </Badge>
-              <span className="tabular-nums text-[var(--color-muted-foreground)]">
-                {formatDuration(s.duration_ms)}
-              </span>
-              <span className="text-[var(--color-muted-foreground)]">
-                {formatDateTime(s.started_at)}
-              </span>
-            </div>
-            {s.reason && (
-              <p className="mt-0.5 text-xs text-[var(--color-muted-foreground)]">{s.reason}</p>
+          <m.li
+            key={`${s.key}-${i}`}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.22, delay: i * step, ease: EASE }}
+            className="relative grid grid-cols-[1.25rem_1fr] gap-x-3 pb-3.5 last:pb-0"
+          >
+            {/* The rail: a segment from under this node to the next one. */}
+            {!last && (
+              <span aria-hidden className="absolute left-[9.5px] top-5 bottom-0 w-px bg-[var(--color-input)]/55" />
             )}
-            {metaEntries(s.meta).length > 0 && (
-              <div className="mt-1 flex flex-wrap gap-1">
-                {metaEntries(s.meta).map(([k, v]) => (
-                  <span key={k}
-                    className="rounded border border-[var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--color-muted-foreground)]">
-                    {metaLabel(k)}: {v}
-                  </span>
-                ))}
+            <StageNode status={s.status} />
+            <div className="min-w-0 pt-px">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                <span className={cn("font-medium", word === "skipped" && "text-[var(--color-muted-foreground)]")}>
+                  {label(s)}
+                </span>
+                {s.status && (
+                  <StatusPill status={STAGE_PILL[word]} label={t(`prs.stageStatus.${word}`)}
+                    className="px-1.5 text-[11px]" />
+                )}
+                <span className="ml-auto flex items-center gap-2 text-xs tabular-nums text-[var(--color-subtle-foreground)]">
+                  <span>{formatDuration(s.duration_ms)}</span>
+                  <span className="hidden sm:inline">{formatDateTime(s.started_at)}</span>
+                </span>
               </div>
-            )}
-          </li>
+              {s.reason && (
+                <p className="mt-0.5 text-xs leading-relaxed text-[var(--color-muted-foreground)]">{s.reason}</p>
+              )}
+              {meta.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {meta.map(([k, v]) => (
+                    <span key={k}
+                      className="inline-flex items-baseline gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-card)] px-1.5 py-0.5 font-mono text-[11px] leading-4 text-[var(--color-muted-foreground)]">
+                      <span>{metaLabel(k)}</span>
+                      <span className="text-[var(--color-foreground)]">{v}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </m.li>
         );
       })}
     </ol>
