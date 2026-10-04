@@ -341,7 +341,8 @@ def test_a_rerun_replaces_the_previous_summary_with_the_placeholder_then_the_sum
 # ─── skips and failures finalize the comment ────────────────────────
 
 
-def test_a_skip_rewrites_an_existing_comment(env, monkeypatch):
+def test_a_skip_finalizes_a_stale_placeholder(env, monkeypatch):
+    """A killed run left "reviewing…" behind; the next (skipped) run ends it."""
     fake = _FakeGitHub()
     previous = fake.add_issue(f"{MARKER}\n{STATUS_IN_PROGRESS_MARK}\n## 🔄 reviewing…")
     orch = _orch(monkeypatch, agents=[_Agent()], client=_Client(GOOD_REPLY))
@@ -354,6 +355,52 @@ def test_a_skip_rewrites_an_existing_comment(env, monkeypatch):
     assert "⏭️ Skipped: the pull request is a draft" in comment["body"]
     assert STATUS_IN_PROGRESS_MARK not in comment["body"]
     assert MARKER in comment["body"]
+
+
+@pytest.mark.parametrize("pr_kw", [
+    pytest.param({"draft": True}, id="draft"),
+    pytest.param({"hunks": []}, id="no-hunks"),
+])
+def test_a_skip_leaves_a_finished_summary_alone(env, monkeypatch, pr_kw):
+    """A PR reviewed yesterday and turned into a draft today keeps yesterday's
+    review: a skip says nothing about the code, so it must not erase what a
+    finished review said about it."""
+    fake = _FakeGitHub()
+    finished = f"{MARKER}\n## 🤖 Code Review for PR #1\n\n✅ **APPROVED**"
+    previous = fake.add_issue(finished)
+    orch = _orch(monkeypatch, agents=[_Agent()], client=_Client(GOOD_REPLY))
+
+    result = _run(orch, _Provider(fake, _pr(**pr_kw)))
+
+    assert result.batch.verdict == ReviewVerdict.SKIPPED
+    assert [c["id"] for c in fake.issue] == [previous]
+    assert fake.issue[0]["body"] == finished
+
+
+def test_a_lost_github_summary_makes_the_run_partial(env, monkeypatch):
+    """Parity with Bitbucket: the review posted but the summary comment did
+    not, and the run record says so (post_error, PARTIAL)."""
+    from src.api.review_runs import completion_status, post_failure
+
+    fake = _FakeGitHub()
+
+    def _refuse_issue_comments(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and "/issues/" in request.url.path:
+            return httpx.Response(502, json={"message": "bad gateway"})
+        return fake(request)
+
+    provider = _Provider(fake, _pr())
+    _patch_client(provider, httpx.MockTransport(_refuse_issue_comments))
+    orch = _orch(monkeypatch, agents=[_Agent(findings=[_finding()])],
+                 client=_Client(GOOD_REPLY))
+
+    result = _run(orch, provider)
+
+    assert len(fake.reviews) == 1, "the review itself still went up"
+    assert fake.issue == []
+    assert "502" in result.provider_response["error"]
+    assert post_failure(result) == result.provider_response["error"]
+    assert completion_status(result.batch, post_failure(result)) == "partial"
 
 
 def test_a_skip_on_a_quiet_pr_starts_no_thread(env, monkeypatch):

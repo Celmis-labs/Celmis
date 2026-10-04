@@ -141,8 +141,10 @@ class _ReviewLifecycle:
 
     started  → "🔄 Celmis is reviewing this PR…" (creates or adopts the
                persistent summary comment)
-    skipped  → "⏭️ Skipped: <reason>" — only over a comment that already
-               exists; a skipped PR never gets a new thread
+    skipped  → "⏭️ Skipped: <reason>" — only over a comment that is still an
+               in-progress placeholder (this run's, or one a killed run left
+               behind). A finished summary of an earlier commit is never
+               overwritten, and a skipped PR never gets a new thread
     failed   → "❌ Review failed: <reason>" — only over a placeholder THIS run
                posted, so a crash never overwrites a previous good summary
     (success → `post_review` writes the final summary into the same comment)
@@ -162,14 +164,18 @@ class _ReviewLifecycle:
         self.provider = provider
         self.pr = pr
 
-    def _write(self, body: str, *, create: bool, what: str) -> int | None:
+    def _write(self, body: str, *, create: bool, what: str,
+               only_if_in_progress: bool = False) -> int | None:
         if not self.active or self.provider is None or self.pr is None:
             return None
         upsert = getattr(self.provider, "upsert_status_comment", None)
         if not callable(upsert):
             return None
         try:
-            cid = upsert(self.pr, body, create=create)
+            if only_if_in_progress:
+                cid = upsert(self.pr, body, create=create, only_if_in_progress=True)
+            else:
+                cid = upsert(self.pr, body, create=create)
         except Exception as exc:  # noqa: BLE001 — a status comment never fails a review
             logger.warning(
                 "review_status_comment_failed what=%s pr=%s err_type=%s err=%s",
@@ -198,7 +204,7 @@ class _ReviewLifecycle:
             return
         self._write(
             _format_status_comment(self.pr, outcome="skipped", reason=reason),
-            create=False, what="skipped",
+            create=False, what="skipped", only_if_in_progress=True,
         )
 
     def failed(self, reason: str) -> None:

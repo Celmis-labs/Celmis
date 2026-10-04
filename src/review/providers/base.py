@@ -71,6 +71,7 @@ class PullRequestProvider(ABC):
 
     def upsert_status_comment(
         self, pr: PullRequest, body: str, *, create: bool = True,
+        only_if_in_progress: bool = False,
     ) -> int | None:
         """Write `body` into the persistent, marked summary comment.
 
@@ -81,12 +82,51 @@ class PullRequestProvider(ABC):
         must rewrite a placeholder that exists and never start a thread on a
         pull request nobody is reviewing.
 
+        `only_if_in_progress` is the skip path's guard: the comment is
+        rewritten only when it is this instance's own placeholder or an
+        existing comment of ours that is STILL a placeholder (carries
+        `STATUS_IN_PROGRESS_MARK`, e.g. left by a killed run). A finished
+        summary of an earlier commit is never overwritten by a skip.
+
         Returns the comment id, or None when nothing was written. The default
         writes nothing, so a provider (or a test double) that has not
         implemented it keeps today's behaviour. Implementations may raise;
         the orchestrator treats every failure here as non-fatal.
         """
         return None
+
+    def _our_summary_comments(
+        self, pr: PullRequest, marker: str,
+    ) -> list[tuple[int, str]]:
+        """(id, body) of every top-level marked comment of OURS, oldest first.
+
+        Authorship as in `find_marked_comment_ids`. Defaults to nothing.
+        """
+        return []
+
+    def _status_target(
+        self, pr: PullRequest, marker: str, *, replace: bool, create: bool,
+        only_if_in_progress: bool,
+    ) -> tuple[bool, int | None]:
+        """(write?, id to update or None for a new comment) — shared by all
+        three `upsert_status_comment` implementations."""
+        if self._status_comment_id is not None:
+            return True, self._status_comment_id
+        if only_if_in_progress:
+            # Listed regardless of `replace_on_synchronize`: a placeholder a
+            # killed run left behind is stale in either mode. The newest one
+            # wins — with history kept, older finished summaries are records.
+            for cid, text in reversed(self._our_summary_comments(pr, marker)):
+                if STATUS_IN_PROGRESS_MARK in (text or ""):
+                    return True, cid
+            return False, None
+        existing = (
+            self.find_existing_review_comment(pr.repo, pr.number, marker)
+            if replace else None
+        )
+        if existing is None and not create:
+            return False, None
+        return True, existing
 
 
 def _with_marker(body: str, marker: str) -> str:

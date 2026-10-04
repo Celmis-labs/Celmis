@@ -419,16 +419,27 @@ class GitHubPRProvider(PullRequestProvider):
             "cleanup": cleanup,
         }
         if summary_id is None:
-            # The review itself is up (it carries the verdict), so this is
-            # not a delivery failure — but the full summary is missing, and
-            # the caller logs it rather than letting it pass as posted.
-            response["summary_error"] = "the summary comment could not be written"
+            # The review itself is up (it carries the verdict), but the full
+            # summary — findings, scope, and the placeholder it was meant to
+            # replace — is not. Same contract as Bitbucket and GitLab: `error`
+            # becomes the run's `post_error`, so the run reads PARTIAL instead
+            # of passing as delivered.
+            why = (
+                f"GitHub refused the summary comment (HTTP {self._last_summary_status})"
+                if self._last_summary_status else
+                "the GitHub summary comment could not be written"
+            )
+            logger.error("github_summary_not_delivered repo=%s pr=%d status=%s",
+                         pr.repo, pr.number, self._last_summary_status or "-")
+            response["summary_error"] = why
+            response["error"] = why
         return response
 
     # ─── Lifecycle comment ("🔄 reviewing…" → summary) ──────────
 
     def upsert_status_comment(
         self, pr: PullRequest, body: str, *, create: bool = True,
+        only_if_in_progress: bool = False,
     ) -> int | None:
         """See `PullRequestProvider.upsert_status_comment`."""
         if pr.provider != "github":
@@ -437,12 +448,12 @@ class GitHubPRProvider(PullRequestProvider):
             )
         settings = get_review_settings()
         owner, name = self._split_repo(pr.repo)
-        existing = self._status_comment_id
-        if existing is None and settings.replace_on_synchronize:
-            existing = self.find_existing_review_comment(
-                pr.repo, pr.number, settings.comment_marker,
-            )
-        if existing is None and not create:
+        write, existing = self._status_target(
+            pr, settings.comment_marker,
+            replace=settings.replace_on_synchronize, create=create,
+            only_if_in_progress=only_if_in_progress,
+        )
+        if not write:
             return None
         cid = self._upsert_summary(
             owner, name, pr.number,
@@ -451,6 +462,19 @@ class GitHubPRProvider(PullRequestProvider):
         if cid is not None:
             self._status_comment_id = cid
         return cid
+
+    def _our_summary_comments(
+        self, pr: PullRequest, marker: str,
+    ) -> list[tuple[int, str]]:
+        owner, name = self._split_repo(pr.repo)
+        comments, _ = self._list_all(self._issue_comments_url(owner, name, pr.number))
+        viewer = self._viewer_login()
+        if not viewer:
+            return []  # fail closed — see `_viewer_login`
+        return [
+            (c["id"], str(c.get("body") or "")) for c in comments
+            if self._is_ours(c, marker, viewer) and isinstance(c.get("id"), int)
+        ]
 
     # ─── Review body: pointer + proof of authorship ─────────────
 
@@ -956,6 +980,7 @@ class GitHubPRProvider(PullRequestProvider):
         existing_id: int | None,
     ) -> int | None:
         """PATCH the summary we already own, or POST the first one."""
+        self._last_summary_status = None
         if existing_id is not None:
             resp = self._http.patch(
                 f"{GITHUB_API_BASE}/repos/{owner}/{name}/issues/comments/{existing_id}",
@@ -974,8 +999,12 @@ class GitHubPRProvider(PullRequestProvider):
         if resp.status_code == 201:
             cid = resp.json().get("id")
             return cid if isinstance(cid, int) else None
+        self._last_summary_status = resp.status_code
         logger.warning("github_summary_post_failed status=%d", resp.status_code)
         return None
+
+    #: HTTP status of the last summary write that failed, for the run record.
+    _last_summary_status: int | None = None
 
     @staticmethod
     def _parse_link_next(link: str) -> str | None:

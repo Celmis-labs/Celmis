@@ -352,6 +352,7 @@ class BitbucketPRProvider(PullRequestProvider):
 
     def upsert_status_comment(
         self, pr: PullRequest, body: str, *, create: bool = True,
+        only_if_in_progress: bool = False,
     ) -> int | None:
         """See `PullRequestProvider.upsert_status_comment`."""
         if pr.provider != "bitbucket":
@@ -360,12 +361,12 @@ class BitbucketPRProvider(PullRequestProvider):
             )
         settings = get_review_settings()
         ws, name = self._split_repo(pr.repo)
-        existing = self._status_comment_id
-        if existing is None and settings.replace_on_synchronize:
-            existing = self.find_existing_review_comment(
-                pr.repo, pr.number, settings.comment_marker,
-            )
-        if existing is None and not create:
+        write, existing = self._status_target(
+            pr, settings.comment_marker,
+            replace=settings.replace_on_synchronize, create=create,
+            only_if_in_progress=only_if_in_progress,
+        )
+        if not write:
             return None
         cid = self._upsert_summary(
             ws, name, pr.number,
@@ -374,6 +375,25 @@ class BitbucketPRProvider(PullRequestProvider):
         if cid is not None:
             self._status_comment_id = cid
         return cid
+
+    def _our_summary_comments(
+        self, pr: PullRequest, marker: str,
+    ) -> list[tuple[int, str]]:
+        ws, name = self._split_repo(pr.repo)
+        comments, _ = self._list_comments(ws, name, pr.number)
+        viewer = self._viewer_ids()
+        if not viewer:
+            return []  # fail closed — see `_viewer_ids`
+        out: list[tuple[int, str]] = []
+        for comment in comments:
+            cid = comment.get("id")
+            if (comment.get("inline") or not isinstance(cid, int)
+                    or not self._is_ours(comment, marker, viewer)):
+                continue
+            content = comment.get("content")
+            raw = content.get("raw") if isinstance(content, dict) else ""
+            out.append((cid, str(raw or "")))
+        return out
 
     # ─── Idempotency: what a previous run left behind ────────────
 

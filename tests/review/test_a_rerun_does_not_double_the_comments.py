@@ -52,7 +52,7 @@ from src.review.models import (
 from src.review.providers import bitbucket as bitbucket_module
 from src.review.providers import github as github_module
 from src.review.providers import gitlab as gitlab_module
-from src.review.providers.base import _format_finding_body
+from src.review.providers.base import STATUS_IN_PROGRESS_MARK, _format_finding_body
 from src.review.providers.bitbucket import BitbucketPRProvider
 from src.review.providers.github import GitHubPRProvider
 from src.review.providers.gitlab import GitLabPRProvider
@@ -1985,3 +1985,110 @@ class TestTheStartedCommentBecomesTheSummary:
             provider_response = result
 
         assert post_failure(_Result()) == result["error"]
+
+    def test_gitlab_a_lost_summary_is_a_delivery_failure(self, settings) -> None:
+        fake = _FakeGitLab()
+
+        def _refuse_summary(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST" and str(request.url).split("?")[0].endswith("/notes"):
+                return httpx.Response(500, json={"message": "down"})
+            return fake(request)
+
+        provider = GitLabPRProvider(token="fake")
+        _patch_client(provider, httpx.MockTransport(_refuse_summary))
+        result = provider.post_review(_batch("gitlab", "g/p", 5, findings=1))
+        provider.close()
+
+        assert result["summary_note_id"] is None
+        assert "500" in result["summary_error"]
+        assert result["error"] == result["summary_error"]
+
+
+# ─── A skip only ever finalizes a placeholder, never a finished summary ──
+
+FINISHED = f"{MARKER}\n## 🤖 Code Review for PR\n\n✅ **APPROVED**"
+STALE = f"{MARKER}\n{STATUS_IN_PROGRESS_MARK}\n## 🔄 Celmis is reviewing this PR…"
+SKIPPED = "### ⏭️ Skipped: the pull request is a draft"
+
+
+class TestASkipOnlyFinalizesAPlaceholder:
+    def test_github_finished_summary_is_left_alone(self, settings) -> None:
+        fake = _FakeGitHub()
+        fake.add_issue(FINISHED)
+        provider = _github(fake)
+        pr = _batch("github", "o/r", 1).pull_request
+        assert provider.upsert_status_comment(
+            pr, SKIPPED, create=False, only_if_in_progress=True) is None
+        provider.close()
+        assert fake.bodies(fake.issue) == [FINISHED]
+
+    def test_github_stale_placeholder_is_finalized(self, settings) -> None:
+        fake = _FakeGitHub()
+        stale = fake.add_issue(STALE)
+        provider = _github(fake)
+        pr = _batch("github", "o/r", 1).pull_request
+        assert provider.upsert_status_comment(
+            pr, SKIPPED, create=False, only_if_in_progress=True) == stale
+        provider.close()
+        assert [c["id"] for c in fake.issue] == [stale]
+        assert SKIPPED in fake.issue[0]["body"]
+        assert STATUS_IN_PROGRESS_MARK not in fake.issue[0]["body"]
+
+    def test_github_a_humans_quote_of_a_placeholder_is_not_ours(self, settings) -> None:
+        fake = _FakeGitHub()
+        fake.add_issue(STALE, author=HUMAN)
+        provider = _github(fake)
+        pr = _batch("github", "o/r", 1).pull_request
+        assert provider.upsert_status_comment(
+            pr, SKIPPED, create=False, only_if_in_progress=True) is None
+        provider.close()
+        assert fake.bodies(fake.issue) == [STALE]
+
+    def test_github_stale_placeholder_is_found_with_history_kept(
+        self, settings_keep_history,
+    ) -> None:
+        fake = _FakeGitHub()
+        fake.add_issue(FINISHED)
+        stale = fake.add_issue(STALE)
+        provider = _github(fake)
+        pr = _batch("github", "o/r", 1).pull_request
+        assert provider.upsert_status_comment(
+            pr, SKIPPED, create=False, only_if_in_progress=True) == stale
+        provider.close()
+        assert fake.issue[0]["body"] == FINISHED
+
+    def test_gitlab_finished_left_alone_and_stale_finalized(self, settings) -> None:
+        fake = _FakeGitLab()
+        fake.add_note(FINISHED)
+        provider = _gitlab(fake)
+        pr = _batch("gitlab", "g/p", 5).pull_request
+        assert provider.upsert_status_comment(
+            pr, SKIPPED, create=False, only_if_in_progress=True) is None
+        assert fake.bodies() == [FINISHED]
+
+        fake2 = _FakeGitLab()
+        stale = fake2.add_note(STALE)
+        provider2 = _gitlab(fake2)
+        assert provider2.upsert_status_comment(
+            pr, SKIPPED, create=False, only_if_in_progress=True) == stale
+        provider.close()
+        provider2.close()
+        assert SKIPPED in fake2.notes[0]["body"]
+
+    def test_bitbucket_finished_left_alone_and_stale_finalized(self, settings) -> None:
+        fake = _FakeBitbucket()
+        fake.add_comment(FINISHED)
+        provider = _bitbucket(fake)
+        pr = _batch("bitbucket", "ws/r", 3).pull_request
+        assert provider.upsert_status_comment(
+            pr, SKIPPED, create=False, only_if_in_progress=True) is None
+        assert fake.bodies() == [FINISHED]
+
+        fake2 = _FakeBitbucket()
+        stale = fake2.add_comment(STALE)
+        provider2 = _bitbucket(fake2)
+        assert provider2.upsert_status_comment(
+            pr, SKIPPED, create=False, only_if_in_progress=True) == stale
+        provider.close()
+        provider2.close()
+        assert SKIPPED in fake2.comments[0]["content"]["raw"]
