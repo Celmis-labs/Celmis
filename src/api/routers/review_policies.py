@@ -5,7 +5,7 @@ Endpoints:
     GET    /api/review-policies/{slug}          — full detail (defaults if no row)
     PUT    /api/review-policies/{slug}          — upsert
     DELETE /api/review-policies/{slug}          — reset to default (delete row)
-    GET    /api/review-policies/{slug}/branches — discover branches from local clone
+    GET    /api/review-policies/{slug}/branches — branches (provider, else local clone)
     GET    /api/review-policies/{slug}/prompt-preview — effective prompt of one agent
     GET    /api/review-policies/overrides-summary — agent → repos overriding its prompt
 
@@ -887,17 +887,90 @@ def _prompt_source(agent: str, repo_overrides: dict, workspace_id: str) -> str:
     return "builtin"
 
 
+def _clone_branches(repo_path: Any) -> tuple[list[str], str | None]:
+    """Branch names the local clone knows, and its origin/HEAD.
+
+    The clone is `--single-branch`, so this is usually one name — the reason
+    the provider is asked first. Kept as the fallback for an install with no
+    token saved for the provider (a clone made from a public URL).
+    """
+    if not repo_path.exists() or not (repo_path / ".git").exists():
+        return [], None
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "for-each-ref",
+         "--format=%(refname:short)", "refs/heads/", "refs/remotes/origin/"],
+        capture_output=True, text=True, timeout=10,
+    )
+    names: set[str] = set()
+    for raw in result.stdout.splitlines():
+        b = raw.strip()
+        if not b:
+            continue
+        if b.startswith("origin/"):
+            b = b[len("origin/"):]
+        if b in ("HEAD",) or "/HEAD" in b:
+            continue
+        names.add(b)
+    default = None
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(repo_path), "symbolic-ref",
+             "refs/remotes/origin/HEAD", "--short"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if head.returncode == 0:
+            default = head.stdout.strip().removeprefix("origin/") or None
+    except Exception:  # noqa: BLE001
+        pass
+    ordered = sorted(names, key=str.lower)
+    if default in names:
+        ordered.remove(default)
+        ordered.insert(0, default)
+    return ordered, default
+
+
+def _provider_branches(registered: Any, user: User, q: str, limit: int) -> Any:
+    """A `BranchPage` from the provider, or None when there is no token or
+    the provider failed — the caller then falls back to the clone."""
+    from src.credentials import resolve_git_credential
+    from src.repos.branches import branch_page
+
+    try:
+        creds = resolve_git_credential(
+            registered.provider, user_id=user.id,
+            workspace_id=registered.workspace_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — an unreadable store is "no token"
+        logger.warning("branch_credential_unreadable repo=%s err=%s",
+                       registered.repo_slug, type(exc).__name__)
+        return None
+    if creds is None or not registered.full_name:
+        return None
+    email = str((creds.metadata or {}).get("atlassian_email") or "")
+    try:
+        return branch_page(registered.provider, registered.full_name,
+                           creds.secret, email, q=q, limit=limit)
+    except Exception as exc:  # noqa: BLE001 — never 500 a picker
+        logger.warning("branch_list_failed repo=%s provider=%s err=%s",
+                       registered.repo_slug, registered.provider,
+                       type(exc).__name__)
+        return None
+
+
 @router.get("/{repo_slug:path}/branches", response_model=RepoBranchesOut)
 async def list_branches(
     repo_slug: str,
     user: User = Depends(get_current_user),
     ws_id: str = Depends(current_workspace_id),
+    q: str = Query(default="", max_length=200),
+    limit: int = Query(default=100, ge=1, le=1000),
 ) -> RepoBranchesOut:
-    """Discover branches from the local clone. Used to populate the
-    'target branches' checkbox list in the UI.
+    """Branches for the 'target branches' picker.
 
-    Falls back to an empty list if the repo is not cloned yet (the user can
-    still type branch names by hand, or run `analyzer sync` to populate).
+    From the provider when the workspace has a token for it — every page,
+    searchable by `q`, at most `limit` names (src/repos/branches.py). Falls
+    back to the local clone, which is `--single-branch` and so usually knows
+    one branch; an empty list still lets the user type names by hand.
 
     Only for a repository registered to the caller's workspace (the same
     lookup the /api/repos/{slug}/* routes use). This route ran `git` in
@@ -913,6 +986,7 @@ async def list_branches(
     from src.api.auto_review import get_auto_review_store
     from src.config import get_settings, is_valid_repo_slug
     from src.deployment import is_multi_tenant
+    from src.repos.branches import normalize_query, search_names
 
     # Unknown, foreign and unaddressable slugs all get the same 404 the
     # /api/repos/{slug}/* routes give: no tenant learns another's repo exists.
@@ -926,46 +1000,31 @@ async def list_branches(
     if registered is None:
         raise not_found
 
-    settings = get_settings()
-    repo_path = settings.repo_path(repo_slug)
-    if not repo_path.exists() or not (repo_path / ".git").exists():
-        return RepoBranchesOut(repo_slug=repo_slug, branches=[], default_branch=None)
+    # Called directly (tests, internal callers) the Query() defaults arrive
+    # as FieldInfo objects, not values.
+    q = normalize_query(q if isinstance(q, str) else "")
+    limit = max(1, min(limit if isinstance(limit, int) else 100, 1000))
+
+    page = await asyncio.to_thread(_provider_branches, registered, user, q, limit)
+    if page is not None:
+        return RepoBranchesOut(
+            repo_slug=repo_slug, branches=page.branches,
+            default_branch=page.default_branch, total=page.total,
+            truncated=page.truncated, source="provider",
+        )
 
     try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_path), "for-each-ref",
-             "--format=%(refname:short)", "refs/heads/", "refs/remotes/origin/"],
-            capture_output=True, text=True, timeout=10,
-        )
-        raw = [b.strip() for b in result.stdout.splitlines() if b.strip()]
-        names: set[str] = set()
-        for b in raw:
-            if b.startswith("origin/"):
-                b = b[len("origin/"):]
-            if b in ("HEAD",) or "/HEAD" in b:
-                continue
-            names.add(b)
-
-        default = None
-        try:
-            head = subprocess.run(
-                ["git", "-C", str(repo_path), "symbolic-ref",
-                 "refs/remotes/origin/HEAD", "--short"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if head.returncode == 0:
-                default = head.stdout.strip().removeprefix("origin/") or None
-        except Exception:  # noqa: BLE001
-            pass
-
-        return RepoBranchesOut(
-            repo_slug=repo_slug,
-            branches=sorted(names),
-            default_branch=default,
-        )
+        names, default = await asyncio.to_thread(
+            _clone_branches, get_settings().repo_path(repo_slug))
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
         logger.warning("list_branches_failed repo=%s err=%s", repo_slug, exc)
-        return RepoBranchesOut(repo_slug=repo_slug, branches=[], default_branch=None)
+        names, default = [], None
+    matched = search_names(names, q, default)
+    return RepoBranchesOut(
+        repo_slug=repo_slug, branches=matched[:limit], default_branch=default,
+        total=len(matched), truncated=False,
+        source="clone" if names else "none",
+    )
 
 
 @router.get("/{repo_slug:path}", response_model=ReviewPolicyOut)

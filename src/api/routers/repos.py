@@ -34,6 +34,7 @@ from src.api.schemas import (
     AutoReviewToggle,
     PullRequestSummary,
     RepoAddRequest,
+    RepoBranchesOut,
     RepoBranchUpdate,
     RepoBrowseItem,
     RepoDeveloperItem,
@@ -1363,53 +1364,44 @@ def list_open_prs(
     return []
 
 
-@router.get("/{slug}/branches", response_model=list[str])
+@router.get("/{slug}/branches", response_model=RepoBranchesOut)
 def list_branches(
     slug: str,
+    q: str = Query(default="", max_length=200,
+                   description="Case-insensitive substring of the branch name"),
+    limit: int = Query(default=100, ge=1, le=1000),
     user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
-) -> list[str]:
-    """List target branches for a repo (for branch filter dropdown)."""
+) -> RepoBranchesOut:
+    """Branches of a registered repo, for the branch pickers.
+
+    Every page of the provider's listing (up to `BRANCH_CAP`), cached briefly
+    per credential — see src/repos/branches.py. It used to read one page of
+    100 and present it as the whole list.
+    """
+    from src.repos.branches import branch_page
+
     store = get_auto_review_store()
     cfg = store.get_in_workspace(workspace_id, slug)
     if cfg is None:
         raise HTTPException(status_code=404, detail="Repo not registered")
     creds = resolve_git_credential(cfg.provider, user_id=user.id, workspace_id=cfg.workspace_id)
     if creds is None:
-        return []
+        return RepoBranchesOut(repo_slug=slug, branches=[], default_branch=None,
+                               error="no_credential")
+    email = str((creds.metadata or {}).get("atlassian_email") or "")
     try:
-        if cfg.provider == "github":
-            r = _get(
-                f"https://api.github.com/repos/{cfg.full_name}/branches",
-                headers={"Authorization": f"Bearer {creds.secret}"},
-                params={"per_page": 100}, timeout=15.0,
-            )
-            r.raise_for_status()
-            return [str(b.get("name", "")) for b in r.json() if b.get("name")]
-        if cfg.provider == "gitlab":
-            import urllib.parse as _u
-            pid = _u.quote(cfg.full_name, safe="")
-            r = _get(
-                f"https://gitlab.com/api/v4/projects/{pid}/repository/branches",
-                headers={"PRIVATE-TOKEN": creds.secret},
-                params={"per_page": 100}, timeout=15.0,
-            )
-            r.raise_for_status()
-            return [str(b.get("name", "")) for b in r.json() if b.get("name")]
-        if cfg.provider == "bitbucket":
-            email = (creds.metadata or {}).get("atlassian_email") or ""
-            r = _get(
-                f"https://api.bitbucket.org/2.0/repositories/{cfg.full_name}/refs/branches",
-                auth=(str(email), creds.secret),
-                params={"pagelen": 100}, timeout=15.0,
-            )
-            r.raise_for_status()
-            return [
-                str(b.get("name", "")) for b in r.json().get("values", []) if b.get("name")
-            ]
-    except httpx.HTTPError:
-        return []
-    return []
+        page = branch_page(cfg.provider, cfg.full_name, creds.secret, email,
+                           q=q, limit=limit)
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("branch_list_failed repo=%s provider=%s err=%s",
+                       slug, cfg.provider, type(exc).__name__)
+        return RepoBranchesOut(repo_slug=slug, branches=[], default_branch=None,
+                               error="provider_error")
+    return RepoBranchesOut(
+        repo_slug=slug, branches=page.branches, default_branch=page.default_branch,
+        total=page.total, truncated=page.truncated, source="provider",
+    )
 
 
 # ─── Review webhook: install / status / remove ───────────────────────

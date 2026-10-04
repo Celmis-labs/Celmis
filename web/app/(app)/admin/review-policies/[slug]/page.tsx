@@ -54,6 +54,7 @@ import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
+import { BranchCombobox, toBranchResult } from "@/components/branch-combobox";
 
 /** Local tabs splitting the long form into digestible groups. The active one
  *  is mirrored to `?tab=` so other pages (AI Agents) can link straight to a
@@ -289,9 +290,11 @@ export default function ReviewPolicyEditPage() {
     enabled: !!token,
   });
 
+  // Only the default branch and where the list comes from: the names
+  // themselves are searched on demand by the picker below.
   const branches = useQuery({
-    queryKey: ["review-policies", "branches", slug],
-    queryFn: () => reviewPoliciesApi.branches(token!, slug),
+    queryKey: ["review-policies", "branches-meta", slug],
+    queryFn: () => reviewPoliciesApi.branches(token!, slug, "", 1),
     enabled: !!token,
   });
 
@@ -348,9 +351,6 @@ export default function ReviewPolicyEditPage() {
     window.history.replaceState(window.history.state, "", url.toString());
   };
   const [helpOpen, setHelpOpen] = useState(false);
-  /** Free-text branch entry — the discovered list is empty when the repo has
-   *  no local clone, so target branches must still be typeable by hand. */
-  const [branchDraft, setBranchDraft] = useState("");
 
   // Warn before closing/reloading the tab while there are unsaved edits.
   useEffect(() => {
@@ -568,20 +568,23 @@ export default function ReviewPolicyEditPage() {
     );
   };
 
-  /** Accepts "main, develop" / "main develop" and appends the new names.
-   *  Matching on the backend is exact, so names are kept verbatim. */
-  const addBranchDraft = () => {
-    const parsed = branchDraft
-      .split(/[\s,]+/)
-      .map((b) => b.trim())
-      .filter(Boolean);
+  /** A pick from the branch picker. A listed branch toggles; typed text
+   *  ("main, develop" / "main develop") appends every name in it — target
+   *  branches stay typeable by hand, for a branch that does not exist yet or
+   *  a repository whose branches cannot be listed. Matching on the backend
+   *  is exact, so names are kept verbatim. */
+  const pickBranch = (raw: string) => {
+    const parsed = raw.split(/[\s,]+/).map((b) => b.trim()).filter(Boolean);
     if (parsed.length === 0) return;
+    if (parsed.length === 1) {
+      toggleBranch(parsed[0]);
+      return;
+    }
     setTargetBranches((prev) => {
       const next = [...prev];
       for (const b of parsed) if (!next.includes(b)) next.push(b);
       return next;
     });
-    setBranchDraft("");
     setDirty(true);
   };
 
@@ -777,7 +780,7 @@ export default function ReviewPolicyEditPage() {
               {t("admin.reviewPolicies.detail.branchesLoading")}
             </p>
           )}
-          {branches.data && branches.data.branches.length === 0 && (
+          {branches.data?.source === "none" && (
             <p className="text-sm text-[var(--color-muted-foreground)]">
               {t("admin.reviewPolicies.detail.branchesNotClonedBefore")}{" "}
               <code className="px-1 rounded bg-[var(--color-muted)]">
@@ -786,83 +789,55 @@ export default function ReviewPolicyEditPage() {
               {t("admin.reviewPolicies.detail.branchesNotClonedAfter")}
             </p>
           )}
-          <div className="flex flex-wrap gap-2 mt-2">
-            {(branches.data?.branches ?? []).map((b) => {
-              const checked = targetBranches.includes(b);
-              return (
-                <button
-                  key={b}
-                  type="button"
-                  onClick={() => toggleBranch(b)}
-                  className={`text-xs rounded border px-2 py-1 transition-colors ${
-                    checked
-                      ? "bg-[var(--color-primary)] text-[var(--color-primary-foreground)] border-transparent"
-                      : "border-[var(--color-border)] hover:bg-[var(--color-accent)]"
-                  }`}
-                >
-                  {b}
-                  {branches.data?.default_branch === b && " ★"}
-                </button>
-              );
-            })}
+
+          {/* Searchable over the repository's whole branch list (the server
+              walks every provider page). It used to be a wall of chips built
+              from one page — or from the single-branch clone. */}
+          <div className="mt-4 space-y-1">
+            <Label htmlFor="branch-add">
+              {t("admin.reviewPolicies.detail.branchesPickLabel")}
+            </Label>
+            <BranchCombobox
+              id="branch-add"
+              value=""
+              onChange={pickBranch}
+              search={(q) => reviewPoliciesApi.branches(token!, slug, q).then(toBranchResult)}
+              queryKey={["review-policies", "branches", slug]}
+              selected={targetBranches}
+              keepOpenOnSelect
+              allowCustom
+              disabled={!token}
+              placeholder={t("admin.reviewPolicies.detail.branchesAddPlaceholder")}
+              className="w-full sm:max-w-md"
+            />
+            <p className="text-xs text-[var(--color-muted-foreground)]">
+              {t("admin.reviewPolicies.detail.branchesPickHint")}
+            </p>
           </div>
-          {/* Show any custom-typed branches not in the discovered list */}
-          {targetBranches.filter(
-            (b) => !(branches.data?.branches ?? []).includes(b),
-          ).length > 0 && (
+
+          {targetBranches.length > 0 && (
             <div className="mt-3">
               <p className="text-xs text-[var(--color-muted-foreground)] mb-1">
-                {t("admin.reviewPolicies.detail.branchesCustomLabel")}
+                {t("admin.reviewPolicies.detail.branchesSelectedLabel")}
               </p>
               <div className="flex flex-wrap gap-2">
-                {targetBranches
-                  .filter((b) => !(branches.data?.branches ?? []).includes(b))
-                  .map((b) => (
-                    <Badge key={b} variant="outline">
-                      {b}
-                      <button
-                        type="button"
-                        onClick={() => toggleBranch(b)}
-                        className="ml-1 text-[10px] opacity-70 hover:opacity-100"
-                      >
-                        ✕
-                      </button>
-                    </Badge>
-                  ))}
+                {targetBranches.map((b) => (
+                  <Badge key={b} variant="outline" className="font-mono">
+                    {b}
+                    {branches.data?.default_branch === b && " ★"}
+                    <button
+                      type="button"
+                      onClick={() => toggleBranch(b)}
+                      aria-label={t("common.remove")}
+                      className="ml-1 text-[10px] opacity-70 hover:opacity-100"
+                    >
+                      ✕
+                    </button>
+                  </Badge>
+                ))}
               </div>
             </div>
           )}
-
-          {/* Manual entry — the discovered list is empty until the repo is
-              cloned, and a target branch may not exist locally yet. */}
-          <div className="mt-4 space-y-1">
-            <Label htmlFor="branch-add">
-              {t("admin.reviewPolicies.detail.branchesAddLabel")}
-            </Label>
-            <div className="flex gap-2">
-              <Input
-                id="branch-add"
-                className="flex-1"
-                placeholder={t("admin.reviewPolicies.detail.branchesAddPlaceholder")}
-                value={branchDraft}
-                onChange={(e) => setBranchDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    addBranchDraft();
-                  }
-                }}
-              />
-              <Button
-                variant="outline"
-                onClick={addBranchDraft}
-                disabled={!branchDraft.trim()}
-              >
-                <PlusIcon className="h-4 w-4 mr-1" />
-                {t("admin.reviewPolicies.detail.branchesAddButton")}
-              </Button>
-            </div>
-          </div>
         </CardContent>
       </Card>
 

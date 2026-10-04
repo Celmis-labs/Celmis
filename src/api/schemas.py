@@ -780,8 +780,21 @@ class ReviewPolicyListItem(BaseModel):
 
 
 class RepoBranchesOut(BaseModel):
-    """Available branches in the cloned repo — used by the UI to populate checkboxes."""
+    """Branches of a repository for a picker — from the provider when the
+    workspace has a token for it, else from the local clone.
+
+    `branches` is at most `limit` names matching `q`; `total` counts every
+    match, so `total > len(branches)` means "refine the search". `truncated`
+    says the provider listing itself was cut at the server's cap, so a branch
+    may exist that no search here can find.
+    """
 
     repo_slug: str
     branches: list[str]
     default_branch: str | None
+    total: int = 0
+    truncated: bool = False
+    #: "provider", "clone" or "none" (nothing could be read).
+    source: str = "none"
+    #: Why the list is empty when it is: "no_credential", "provider_error".
+    error: str | None = None

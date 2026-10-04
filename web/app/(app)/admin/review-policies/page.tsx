@@ -442,12 +442,17 @@ function PolicyRow({
   );
 }
 
+/** Names shown in a collapsed row's branch panel. */
+const PANEL_BRANCHES = 40;
+
 function BranchesPanel({ slug }: { slug: string }) {
   const t = useT();
   const token = useToken();
+  // A glance, not a picker: the first PANEL_BRANCHES names and a count of
+  // the rest. Searching every branch is the policy page's job.
   const branches = useQuery({
-    queryKey: ["review-policies", "branches", slug],
-    queryFn: () => reviewPoliciesApi.branches(token!, slug),
+    queryKey: ["review-policies", "branches-panel", slug],
+    queryFn: () => reviewPoliciesApi.branches(token!, slug, "", PANEL_BRANCHES),
     enabled: !!token,
   });
 
@@ -464,6 +469,13 @@ function BranchesPanel({ slug }: { slug: string }) {
   }
 
   const targetSet = new Set(detail.data?.target_branches ?? []);
+  const listed = branches.data?.branches ?? [];
+  // Target branches first, even those past the first page of names.
+  const shown = [
+    ...[...targetSet].filter((b) => !listed.includes(b)),
+    ...listed,
+  ];
+  const hidden = Math.max(0, (branches.data?.total ?? 0) - listed.length);
 
   return (
     <div className="px-4 pb-3 pt-1 border-t border-[var(--color-border)]">
@@ -471,7 +483,7 @@ function BranchesPanel({ slug }: { slug: string }) {
         {t("admin.reviewPolicies.branchesHint")}
       </p>
       <div className="flex flex-wrap gap-2">
-        {(branches.data?.branches ?? []).map((b) => (
+        {shown.map((b) => (
           <span
             key={b}
             className={`text-xs rounded border px-2 py-1 ${
@@ -484,9 +496,14 @@ function BranchesPanel({ slug }: { slug: string }) {
             {branches.data?.default_branch === b && " ★"}
           </span>
         ))}
-        {(branches.data?.branches?.length ?? 0) === 0 && (
+        {shown.length === 0 && (
           <span className="text-xs text-[var(--color-muted-foreground)]">
             {t("admin.reviewPolicies.repoNotCloned")}
+          </span>
+        )}
+        {hidden > 0 && (
+          <span className="text-xs text-[var(--color-muted-foreground)] self-center">
+            {t("admin.reviewPolicies.branchesMore", { count: hidden })}
           </span>
         )}
       </div>

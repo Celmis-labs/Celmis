@@ -679,10 +679,33 @@ export type ReviewPolicyListItem = {
   updated_at: string;
 };
 
+/** GET /api/repos/{slug}/branches and /api/review-policies/{slug}/branches.
+ *  `branches` holds at most `limit` matches for `q`; `total` counts them all,
+ *  so `total > branches.length` means "refine the search". `truncated` says
+ *  the provider's own listing was cut at the server cap. */
 export type RepoBranches = {
   repo_slug: string;
   branches: string[];
   default_branch: string | null;
+  total: number;
+  truncated: boolean;
+  source: "provider" | "clone" | "none";
+  error?: "no_credential" | "provider_error" | null;
+};
+
+function branchQuery(q = "", limit = 50): string {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  if (q) qs.set("q", q);
+  return qs.toString();
+}
+
+export const branchesApi = {
+  /** Branches of a registered repository, read from its provider. */
+  forRepo: (token: string, slug: string, q = "", limit = 50) =>
+    api<RepoBranches>(
+      `/api/repos/${encodeURIComponent(slug)}/branches?${branchQuery(q, limit)}`,
+      { token },
+    ),
 };
 
 export const reviewPoliciesApi = {
@@ -710,8 +733,11 @@ export const reviewPoliciesApi = {
       token,
       method: "DELETE",
     }),
-  branches: (token: string, slug: string) =>
-    api<RepoBranches>(`/api/review-policies/${encodeURIComponent(slug)}/branches`, { token }),
+  branches: (token: string, slug: string, q = "", limit = 50) =>
+    api<RepoBranches>(
+      `/api/review-policies/${encodeURIComponent(slug)}/branches?${branchQuery(q, limit)}`,
+      { token },
+    ),
   promptPreview: (token: string, slug: string, agent: string) =>
     api<{
       agent: string; system_prompt: string; user_prompt_template: string;

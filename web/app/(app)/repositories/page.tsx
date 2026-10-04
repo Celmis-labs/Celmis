@@ -2,9 +2,10 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { CpuIcon, ExternalLinkIcon, FolderGit2Icon, GitBranchIcon, Loader2Icon, PlusIcon, RefreshCwIcon, SearchIcon, SparklesIcon, TrashIcon, UsersIcon, XIcon, ZapIcon } from "lucide-react";
+import { CpuIcon, ExternalLinkIcon, FolderGit2Icon, GitBranchIcon, Loader2Icon, PlusIcon, RefreshCwIcon, SearchIcon, SparklesIcon, TrashIcon, UsersIcon, ZapIcon } from "lucide-react";
 import {
   api,
+  branchesApi,
   intelApi,
   llmApi,
   type PullRequestSummary,
@@ -26,6 +27,7 @@ import { QueryState } from "@/components/ui/query-state";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select } from "@/components/ui/select";
+import { BranchCombobox, toBranchResult } from "@/components/branch-combobox";
 
 import { WorkspaceBadge } from "@/components/workspace-badge";
 import { RepoFreshness } from "@/components/repo-freshness";
@@ -577,20 +579,14 @@ function RepoRow({
  *
  * The branch list comes from the provider (GET /api/repos/{slug}/branches),
  * which is a real API round-trip per repo — so it is only fetched once the
- * user actually opens the editor, never for every row on page load.
+ * user actually opens the editor, never for every row on page load. The
+ * combobox searches the server's full listing, not just its first page.
  */
 function BranchPicker({ repo, onChange }: { repo: RepoOut; onChange: () => void }) {
   const token = useToken();
   const t = useT();
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
-
-  const branches = useQuery({
-    queryKey: ["branches", repo.slug],
-    queryFn: () => api<string[]>(`/api/repos/${repo.slug}/branches`, { token }),
-    enabled: !!token && editing,
-    staleTime: 5 * 60_000,
-  });
 
   const save = useMutation({
     mutationFn: async (branch: string) =>
@@ -634,46 +630,24 @@ function BranchPicker({ repo, onChange }: { repo: RepoOut; onChange: () => void 
     );
   }
 
-  // Keep the configured branch selectable even when the provider list failed
-  // to load (no token, API hiccup) — otherwise opening the editor could only
-  // ever reset the repo to its default branch.
-  const known = branches.data ?? [];
-  const options = [
-    { value: "", label: t("repositories.branchDefault") },
-    ...(repo.branch && !known.includes(repo.branch)
-      ? [{ value: repo.branch, label: repo.branch }]
-      : []),
-    ...known.map((b) => ({ value: b, label: b })),
-  ];
-
+  // The saved branch stays the shown value even when the provider list fails
+  // to load (no token, API hiccup) — opening the editor must never be able to
+  // reset the repo to its default branch on its own.
   return (
     <span className="inline-flex flex-wrap items-center gap-2">
-      <GitBranchIcon className="h-3 w-3" />
-      <Select
+      <BranchCombobox
         value={repo.branch ?? ""}
         onChange={(v) => save.mutate(v)}
-        options={options}
-        disabled={save.isPending}
-        className="h-9 rounded border-[var(--color-input)] px-2 text-sm sm:h-7 sm:text-xs"
+        search={(q) => branchesApi.forRepo(token!, repo.slug, q).then(toBranchResult)}
+        queryKey={["repo-branches", repo.slug]}
+        leadingOptions={[{ value: "", label: t("repositories.branchDefault") }]}
+        disabled={save.isPending || !token}
+        defaultOpen
+        onClose={() => { if (!save.isPending) setEditing(false); }}
+        ariaLabel={t("repositories.branchChangeTitle")}
+        className="h-9 max-w-[16rem] rounded border-[var(--color-input)] px-2 text-sm sm:h-7 sm:text-xs"
       />
-      {(branches.isLoading || save.isPending) && (
-        <Loader2Icon className="h-3 w-3 animate-spin" />
-      )}
-      {branches.isSuccess && known.length === 0 && (
-        <span className="text-[10px] text-[var(--color-muted-foreground)]">
-          {t("repositories.branchListUnavailable")}
-        </span>
-      )}
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        onClick={() => setEditing(false)}
-        title={t("common.cancel")}
-        className="size-9 shrink-0"
-      >
-        <XIcon className="h-4 w-4" />
-      </Button>
+      {save.isPending && <Loader2Icon className="h-3 w-3 animate-spin" />}
     </span>
   );
 }
@@ -684,12 +658,6 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
   const [branch, setBranch] = useState<string>("");
   const [sort, setSort] = useState<"newest" | "recently_updated" | "oldest">("newest");
 
-  const branches = useQuery({
-    queryKey: ["branches", slug],
-    queryFn: () => api<string[]>(`/api/repos/${slug}/branches`, { token }),
-    enabled: !!token,
-    staleTime: 5 * 60_000,
-  });
   const prs = useQuery({
     queryKey: ["pulls", slug, branch, sort],
     queryFn: () => {
@@ -724,14 +692,14 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
             {repo.provider === "gitlab" ? t("repositories.openMergeRequests") : t("repositories.openPullRequests")}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Select
+            <BranchCombobox
               value={branch}
-              onChange={(v) => setBranch(v)}
-              options={[
-                { value: "", label: t("repositories.allBranches") },
-                ...(branches.data ?? []).map((b) => ({ value: b, label: b })),
-              ]}
-              className="h-9 rounded border-[var(--color-input)] px-2 text-sm sm:h-7 sm:text-xs"
+              onChange={setBranch}
+              search={(q) => branchesApi.forRepo(token!, slug, q).then(toBranchResult)}
+              queryKey={["repo-branches", slug]}
+              leadingOptions={[{ value: "", label: t("repositories.allBranches") }]}
+              disabled={!token}
+              className="h-9 max-w-[16rem] rounded border-[var(--color-input)] px-2 text-sm sm:h-7 sm:text-xs"
             />
             <Select
               value={sort}

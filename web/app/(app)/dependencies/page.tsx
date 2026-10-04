@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 
 import {
-  api, API_BASE, depsApi, downloadWithAuth, projectsApi, requestHeaders,
+  api, API_BASE, branchesApi, depsApi, downloadWithAuth, projectsApi, requestHeaders,
   type DepFinding, type DepVuln, type HygieneItem as ApiHygieneItem,
   type ProjectOut, type RepoDeveloperItem, type RepoOut,
 } from "@/lib/api";
@@ -43,6 +43,7 @@ import {
 } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
 import { RepoBranchTable } from "@/components/repo-branch-table";
+import { BranchCombobox, type BranchSearchResult } from "@/components/branch-combobox";
 import { CountUp } from "@/components/ui/count-up";
 import { EmptyState } from "@/components/ui/empty-state";
 import { WorkspaceBadge } from "@/components/workspace-badge";
@@ -248,7 +249,6 @@ export default function DependenciesPage() {
   const [developerScope, setDeveloperScope] = useState<string[]>([]);
   // Escape hatch for a branch none of the scoped repos has. Off by default —
   // the list is built from the repos in scope, so it is normally complete.
-  const [typeBranch, setTypeBranch] = useState(false);
   const [repoScope, setRepoScope] = useState<Set<string>>(new Set());
   // Deliberately NOT persisted with the rest of the scope: a branch override
   // that survives a reload would keep auditing `hotfix/x` weeks later while
@@ -416,33 +416,50 @@ export default function DependenciesPage() {
   // union built from the first few repos already names every branch a team
   // uses. The count on each option says how many of the probed repos have it,
   // so a branch that exists in one repo of eight is visibly that.
+  //
+  // The search runs on the server, per repo, against each repo's FULL branch
+  // listing — it used to be the first API page of each, so a branch past the
+  // first hundred was neither offered nor findable.
   const probed = scopedRepos.slice(0, BRANCH_PROBE_REPOS);
-  const branchQueries = useQueries({
-    queries: probed.map((r) => ({
-      queryKey: ["repo-branches", r.slug],
-      queryFn: () => api<string[]>(`/api/repos/${r.slug}/branches`, { token }),
-      enabled: !!token,
-      staleTime: 5 * 60_000,
-      retry: false,
-    })),
-  });
-  const branchOptions = (() => {
+  const probedSlugs = probed.map((r) => r.slug);
+  const branchUnionKey = ["deps-branch-union", ...probedSlugs] as const;
+  const searchBranchUnion = async (q: string): Promise<BranchSearchResult> => {
+    const answers = await Promise.all(probedSlugs.map((slug) =>
+      branchesApi.forRepo(token!, slug, q, 50).catch(() => null)));
     const counts = new Map<string, number>();
-    for (const q of branchQueries) {
-      for (const b of q.data ?? []) counts.set(b, (counts.get(b) ?? 0) + 1);
+    let more = 0;
+    let truncated = false;
+    let failed = 0;
+    for (const a of answers) {
+      if (!a || a.error) { failed += 1; continue; }
+      for (const name of a.branches) counts.set(name, (counts.get(name) ?? 0) + 1);
+      more = Math.max(more, a.total - a.branches.length);
+      truncated ||= a.truncated;
     }
-    const probedCount = probed.length;
-    return [...counts.entries()]
+    const n = probedSlugs.length;
+    const options = [...counts.entries()]
       // Branches every probed repo shares come first: those are the ones an
       // override can be applied to without silently missing repos.
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .map(([name, n]) => ({
-        value: name,
-        label: name,
-        hint: n === probedCount ? undefined : `${n}/${probedCount}`,
-      }));
-  })();
-  const branchesLoading = branchQueries.some((q) => q.isLoading);
+      .sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))
+      .map(([name, c]) => ({ value: name, hint: c === n ? undefined : `${c}/${n}` }));
+    return {
+      options,
+      total: options.length + more,
+      truncated,
+      error: failed === n && n > 0 ? "provider_error" : null,
+    };
+  };
+  // Does the typed override exist in any probed repo? Asked of the server
+  // with the name as the search term, so it holds for branch #3000 too.
+  const overrideCheck = useQuery({
+    queryKey: [...branchUnionKey, branchOverride.trim()],
+    queryFn: () => searchBranchUnion(branchOverride.trim()),
+    enabled: !!token && !!branchOverride.trim() && probedSlugs.length > 0,
+    staleTime: 60_000,
+    retry: false,
+  });
+  const overrideUnknown = !!overrideCheck.data && !overrideCheck.data.error
+    && !overrideCheck.data.options.some((o) => o.value === branchOverride.trim());
 
   const start = useMutation({
     mutationFn: (opts: { force?: boolean } = {}) => {
@@ -917,44 +934,24 @@ export default function DependenciesPage() {
                   same value showed the branch twice and read as a duplicate —
                   which it was. The list comes from the repositories in scope,
                   so typing is only needed for a branch none of them has. */}
-              {branchOptions.length > 0 && !typeBranch ? (
-                <Select
-                  id="deps-branch-override"
-                  value={branchOptions.some((o) => o.value === branchForRun) ? branchForRun : ""}
-                  onChange={setBranchOverride}
-                  options={[
-                    { value: "", label: tf("deps.branchKeepEach", "Keep each repository's own branch") },
-                    ...branchOptions,
-                  ]}
-                  className="w-full"
-                  placeholder={tf("deps.branchPickPlaceholder", "Pick a branch…")}
-                />
-              ) : (
-                <Input id="deps-branch-override" value={branchOverride}
-                  onChange={(e) => setBranchOverride(e.target.value)}
-                  placeholder={tf("deps.branchOverridePlaceholder", "e.g. develop")}
-                  autoComplete="off" autoCapitalize="none" spellCheck={false} />
-              )}
-              {branchOptions.length > 0 && (
-                <button
-                  type="button"
-                  className="mt-1 text-xs underline opacity-70 hover:opacity-100"
-                  onClick={() => setTypeBranch((v) => !v)}
-                >
-                  {tf(typeBranch ? "deps.branchPickInstead" : "deps.branchTypeInstead",
-                    typeBranch ? "Pick from the list" : "Type a branch name")}
-                </button>
-              )}
-              {branchesLoading && (
-                <p className="mt-1 text-xs text-[var(--color-muted-foreground)]">
-                  {tf("deps.branchLoading", "Reading branches from the provider…")}
-                </p>
-              )}
+              <BranchCombobox
+                id="deps-branch-override"
+                value={branchForRun}
+                onChange={setBranchOverride}
+                search={searchBranchUnion}
+                queryKey={branchUnionKey}
+                leadingOptions={[
+                  { value: "", label: tf("deps.branchKeepEach", "Keep each repository's own branch") },
+                ]}
+                allowCustom
+                disabled={!token || probedSlugs.length === 0}
+                className="w-full"
+                placeholder={tf("deps.branchKeepEach", "Keep each repository's own branch")}
+              />
               {/* A branch nobody has is the quiet failure this warns about:
                   the run falls back to each repo's own ref and reads something
                   other than what the field says. */}
-              {branchForRun && branchOptions.length > 0
-                && !branchOptions.some((o) => o.value === branchForRun) && (
+              {branchForRun && overrideUnknown && (
                 <p className="mt-1 text-xs text-[var(--color-destructive)]">
                   {tf("deps.branchUnknown",
                     "No repository in this scope has a branch named “{branch}”.",
