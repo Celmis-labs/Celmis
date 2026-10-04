@@ -24,6 +24,7 @@ import { toast } from "sonner";
 import { RotateCcwIcon, SaveIcon, SlidersHorizontalIcon } from "lucide-react";
 
 import {
+  OFF_BY_DEFAULT_AGENTS,
   REVIEW_AGENTS,
   llmApi,
   reviewDefaultsApi,
@@ -33,6 +34,7 @@ import {
   type WorkspaceReviewDefaults,
   type WorkspaceReviewDefaultsUpdate,
 } from "@/lib/api";
+import { agentLabel } from "@/lib/review-categories";
 import { globError, globLines } from "@/lib/ignore-globs";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
@@ -277,7 +279,11 @@ export default function ReviewDefaultsPage() {
   });
 
   const disabledShown = draft?.disabledAgents ?? (install.disabled_agents as string[] | undefined) ?? [];
-  const finders = (data?.toggleable_agents ?? []).filter((a) => a !== "verifier");
+  // The off-by-default agents are opted IN, not switched off, so an
+  // "on unless disabled" switch would show them running when they are not.
+  const finders = (data?.toggleable_agents ?? []).filter(
+    (a) => a !== "verifier" && !(OFF_BY_DEFAULT_AGENTS as readonly string[]).includes(a),
+  );
   const verifierOn = draft?.verifier ?? Boolean(install.verifier_enabled);
   const summaryOn = draft?.summary ?? true;
   const startedOn = draft?.started ?? true;
@@ -365,7 +371,7 @@ export default function ReviewDefaultsPage() {
                 >
                   <div className="min-w-0">
                     <Label htmlFor={`ws-toggle-${agent}`} className="font-medium capitalize">
-                      {agent}
+                      {agentLabel(agent)}
                       {!on && (
                         <Badge variant="destructive" className="ml-2 text-[9px]">
                           {t("admin.reviewPolicies.detail.agentOffBadge")}

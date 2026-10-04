@@ -926,9 +926,16 @@ export type LLMSurface = "chat" | "review" | "embeddings" | "agent";
  *  includes `compliance`, which the repo policy shape never got a column for.
  */
 export const REVIEW_AGENTS = [
-  "defect", "contract", "security", "verifier", "compliance",
+  "defect", "contract", "security", "performance", "business_logic",
+  "verifier", "compliance",
 ] as const;
 export type ReviewAgent = (typeof REVIEW_AGENTS)[number];
+
+/** Agents that run only where a policy opts them in (`enabled_agents`).
+ *  Mirrors `ReviewOrchestrator.OFF_BY_DEFAULT` in src/review/orchestrator.py.
+ *  An on/off switch that reads "on unless disabled" would show these as
+ *  running when they are not, so the deny-list switches leave them out. */
+export const OFF_BY_DEFAULT_AGENTS = ["business_logic"] as const;
 
 /** One entry of the workspace blob's "agents" key. Every field is optional and
  *  absent means inherit: repo policy → this → the review surface profile →
