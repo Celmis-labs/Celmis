@@ -30,6 +30,12 @@ Required claims:
     scope — space-separated scopes (e.g. "read:graph read:groups")
     client_id — for traceability
 
+Workspace claim:
+    workspace_id — the workspace the token was minted in. The MCP server
+                   answers for that workspace only, and refuses the token
+                   once its holder is no longer a member there. Tokens without
+                   it are legacy: see src/mcp_server/identity.py.
+
 Local dev: `analyzer mcp issue-token --user default --duration 3600` →
 prints a JWT that can be used as a Bearer header.
 """
@@ -39,6 +45,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 import jwt
@@ -162,6 +169,56 @@ def issue_token(
     return token
 
 
+# ─── Workspace binding ───────────────────────────────────────────────
+
+#: Per-request slot for "why was this token refused". Set to a fresh dict by
+#: the HTTP wrapper (:class:`src.mcp_server.http_app._ExplainRefusal`) before
+#: the request enters the SDK; the verifier writes into it. A dict rather than
+#: a value so a context copied into a child task still shares it.
+_REFUSAL: ContextVar[dict | None] = ContextVar("mcp_token_refusal", default=None)
+
+
+def note_refusal(reason: str) -> None:
+    holder = _REFUSAL.get()
+    if holder is not None:
+        holder["reason"] = reason
+
+
+def _workspace_problem(payload: dict) -> str | None:
+    """Why a token that names a workspace may not be used there, or None.
+
+    A token without the claim (minted before it existed, or a
+    client_credentials token) is not judged here — the identity resolver
+    falls back to the old resolution for it. A token WITH the claim is
+    checked against the membership table now, not when it was minted.
+    """
+    from src.mcp_server.identity import token_workspace
+
+    claimed = token_workspace(payload)
+    if claimed is None:
+        return None
+    sub = str(payload.get("sub") or "")
+    if not sub or sub.startswith("client:"):
+        # Nobody to ask. Such a token is not minted with a claim; one that
+        # carries it anyway is refused rather than trusted.
+        from src.mcp_server.identity import refusal_message
+
+        return refusal_message(claimed)
+    user_id = sub.split(":", 1)[1] if sub.startswith("user:") else sub
+    try:
+        from src.mcp_server.identity import refusal_message, token_workspace_problem
+        from src.users import get_user_store
+
+        user = get_user_store().get_by_id(user_id)
+        if user is None or not getattr(user, "is_active", True):
+            return refusal_message(claimed)
+        return token_workspace_problem(user.id, bool(user.is_admin), claimed)
+    except Exception as exc:  # noqa: BLE001 — fail closed, the claim is the boundary
+        logger.warning("jwt_workspace_check_failed err=%s", exc)
+        return ("Could not confirm your membership of the workspace this MCP "
+                "token was issued for. Try again shortly.")
+
+
 # ─── TokenVerifier implementation ────────────────────────────────────
 
 
@@ -238,6 +295,16 @@ class JwtTokenVerifier(TokenVerifier):
             scopes = [str(s) for s in scope_str]
         else:
             scopes = []
+
+        problem = _workspace_problem(payload)
+        if problem:
+            # Authentic, unexpired, and no longer good for the workspace it
+            # names. Refused here, before any tool runs, and the reason is
+            # handed to the response rewriter so the client reads a sentence
+            # rather than "Authentication required".
+            logger.warning("jwt_workspace_refused sub=%s", payload.get("sub"))
+            note_refusal(problem)
+            return None
 
         client_id = str(payload.get("client_id") or payload.get("sub") or "unknown")
         expires_at = int(payload["exp"]) if "exp" in payload else None

@@ -286,6 +286,8 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         # Resolve the authenticated caller's tenant so the review uses THEIR
         # git token + LLM key/policy, not the shared default workspace.
         caller = resolve_caller()
+        if caller.refused:
+            return {"ok": False, "error": caller.refused}
 
         try:
             pr_provider = get_provider_for(
@@ -385,6 +387,8 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         from src.mcp_server.identity import resolve_caller
 
         caller = resolve_caller()
+        if caller.refused:
+            raise ActionError(caller.refused)
         if writing and caller.authenticated and not caller.workspace_resolved:
             # A client_credentials token whose owner cannot be resolved lands
             # on the "default" workspace by fallback. Reading there is

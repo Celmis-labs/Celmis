@@ -147,6 +147,64 @@ class _ExplainInvalidHost:
         await self.app(scope, receive, _send)
 
 
+class _ExplainRefusal:
+    """Turn the SDK's bare 401 into a 403 that says why, when we know why.
+
+    The token verifier refuses a token whose workspace its holder has left
+    (see :func:`src.mcp_server.auth._workspace_problem`). All the SDK can do
+    with that is answer "Authentication required", which sends people to look
+    for a typo in a token that is perfectly valid. The verifier leaves the
+    real reason in a per-request slot; this wrapper owns the slot and, only
+    when a reason is in it, replaces the 401 with a 403 carrying the sentence.
+    Every other response — including a 401 for a forged or expired token —
+    passes through untouched.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+
+        import json
+
+        from src.mcp_server.auth import _REFUSAL
+
+        holder: dict = {}
+        reset = _REFUSAL.set(holder)
+        replaced = False
+
+        async def _send(message):
+            nonlocal replaced
+            if (message["type"] == "http.response.start"
+                    and message["status"] == 401 and holder.get("reason")):
+                replaced = True
+                reason = str(holder["reason"])
+                body = json.dumps({"error": "access_denied",
+                                   "error_description": reason}).encode("utf-8")
+                header = 'Bearer error="access_denied", error_description="{}"'.format(
+                    reason.replace('"', "'"))
+                await send({
+                    "type": "http.response.start", "status": 403,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                        (b"www-authenticate", header.encode("latin-1", "replace")),
+                    ],
+                })
+                await send({"type": "http.response.body", "body": body})
+                return
+            if replaced and message["type"] == "http.response.body":
+                return
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        finally:
+            _REFUSAL.reset(reset)
+
+
 def _build_mcp() -> FastMCP:  # noqa: F821 — quoted for typing without an import when the package is absent
     """Build the FastMCP instance with project-aware + review tools.
 
@@ -706,6 +764,10 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
         from src.mcp_server.identity import resolve_caller
 
         caller = resolve_caller()
+        if caller.refused:
+            # The token names a workspace its holder has left. Neither a read
+            # nor a write may land anywhere else instead.
+            raise ActionError(caller.refused)
         if writing and caller.authenticated and not caller.workspace_resolved:
             # A client_credentials token whose owner cannot be resolved lands
             # on the "default" workspace by fallback. Reading there is
@@ -1698,7 +1760,7 @@ def mount_mcp(app: FastAPI, *, path: str = "/mcp") -> bool:
         # Read-only on some FastMCP builds; the mount below is what matters.
         with contextlib.suppress(Exception):
             mcp.settings.streamable_http_path = "/"
-        app.mount(path, _ExplainInvalidHost(sub_app))
+        app.mount(path, _ExplainInvalidHost(_ExplainRefusal(sub_app)))
         # Assert the endpoint is where we claim: a silent 404 here costs the
         # agent every mcp__celmis__* tool with no error anywhere.
         try:

@@ -1418,6 +1418,12 @@ def mcp_issue_token_cmd(
         "code-analyzer-cli", "--client-id",
         help="Client identifier for traceability",
     ),
+    workspace: str = typer.Option(
+        "", "--workspace", "-w",
+        help=("Workspace id the token answers for (the 'workspace_id' claim). "
+              "Without it the token is a legacy one and the MCP server picks "
+              "the subject's best-ranked membership."),
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Issue a JWT Bearer token for MCP HTTP transport (local dev / testing).
@@ -1444,6 +1450,7 @@ def mcp_issue_token_cmd(
         scopes=scopes.split(),
         client_id=client_id,
         expires_in=duration,
+        extra_claims={"workspace_id": workspace.strip()} if workspace.strip() else None,
     )
 
     # Print to stdout (parseable for $(...) shell interpolation)
