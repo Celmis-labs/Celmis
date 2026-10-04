@@ -210,9 +210,10 @@ FEATURES: tuple[Feature, ...] = (
             ("/repositories", "/connections")),
     Feature("code_review",
             ("/api/reviews", "/api/review-policies", "/api/review-defaults",
-             "/api/review-settings", "/api/agents", "/api/compliance"),
+             "/api/review-settings", "/api/review-rules", "/api/agents", "/api/compliance"),
             ("/reviews", "/admin/review-policies", "/admin/review-defaults",
-             "/admin/agents", "/admin/compliance", "/admin/deprecations")),
+             "/admin/review-rules", "/admin/agents", "/admin/compliance",
+             "/admin/deprecations")),
     # Findings followed across a PR's runs, the PRs themselves, and the
     # lead's view over both. Their own features rather than more prefixes on
     # `code_review`: a build without them still reviews.

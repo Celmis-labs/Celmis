@@ -1018,6 +1018,21 @@ async def prompt_preview(
     # First, before the policy row is loaded: a failure here rolls the
     # session back (see `_load_workspace_defaults`).
     ws_defaults = await _load_workspace_defaults(session, ws_id)
+    # The review rules of THIS workspace (/admin/review-rules), composed as a
+    # review composes them. Read in the caller's workspace only, so a foreign
+    # slug previews no rules rather than another tenant's. Read FIRST: a
+    # failure (a database the migration has not reached) is rolled back, and
+    # a rollback would expire the policy row loaded below.
+    try:
+        from src.review.rules_store import effective_rules_for
+
+        review_rules = await effective_rules_for(ws_id, repo_slug, session=session)
+    except Exception as exc:  # noqa: BLE001 — a preview without them beats a 500
+        logger.warning("prompt_preview_review_rules_unavailable ws=%s err=%s",
+                       ws_id, exc)
+        await session.rollback()
+        review_rules = []
+
     row = await session.get(RepoReviewPolicy, repo_slug)
     if row is not None and row.workspace_id != ws_id:
         row = None  # another tenant's policy — never disclose; preview defaults
@@ -1069,6 +1084,7 @@ async def prompt_preview(
         {
             "prompt_template": (row.prompt_template if row else "") or "",
             "folder_rules": list(row.folder_rules or []) if row else [],
+            "review_rules": review_rules,
         },
         None, match_files=False,
     )

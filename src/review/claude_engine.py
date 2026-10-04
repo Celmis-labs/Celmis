@@ -101,7 +101,8 @@ When done, output ONLY a JSON object in a ```json code block:
       "body": "explanation with reasoning (markdown)",
       "suggestion": "optional fix hint or null",
       "suggested_code": "exact replacement for lines line..suggested_end_line (whole lines, indentation kept) or null",
-      "suggested_end_line": null
+      "suggested_end_line": null,
+      "rule": "optional: the exact title of a review rule this violates"
     }}
   ]
 }}
@@ -445,6 +446,9 @@ async def _run(
                 agent="claude_code",
                 rule_id="claude_code.finding",
                 confidence=0.8,
+                # A cited review rule's title; validated by the orchestrator.
+                rule=(str(f.get("rule")).strip()[:200]
+                      if isinstance(f.get("rule"), str) else ""),
             ))
         except Exception:  # noqa: BLE001
             continue

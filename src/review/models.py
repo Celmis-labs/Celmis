@@ -257,6 +257,12 @@ class Finding:
     suggested_code: str | None = None
     #: Last new-file line the replacement covers; None means `line` alone.
     suggested_end_line: int | None = None
+    #: The title of the review rule (/admin/review-rules) this finding is a
+    #: violation of, as the agent cited it; "" when it cites none. The
+    #: orchestrator keeps it only when it names a rule in force for this
+    #: review (`_cite_review_rules`), so a free-form id an agent writes into
+    #: the same field never reads as a citation.
+    rule: str = ""
 
     @property
     def is_proven(self) -> bool:
@@ -394,6 +400,12 @@ class ReviewBatch:
     #: install default, REVIEW_MAX_INLINE_COMMENTS, which every provider
     #: passes to `inline_findings` as `cap`.
     max_inline_comments: int | None = None
+    #: When True, a finding that cites a review rule (`Finding.rule`) is
+    #: posted whatever the comment threshold says and does not count against
+    #: the inline cap — the policy's `apply_filters_to_rules` switched off. A
+    #: rule an operator wrote is an instruction to say something, and the
+    #: two filters exist to quiet the agents' own judgement, not that.
+    rules_bypass_filters: bool = False
     #: The Kodus-style summary comment: when True `_format_summary` renders
     #: Summary / Changes walkthrough / Findings sections instead of the compact
     #: form. Off by default so any caller that builds a batch by hand (tests,
@@ -441,10 +453,17 @@ class ReviewBatch:
         An unknown threshold word posts everything rather than nothing: a
         typo in a policy row must not silence a review.
         """
+        if self.bypasses_filters(finding):
+            return True
         floor = SEVERITY_RANK.get(severity_value(self.comment_min_severity))
         if floor is None:
             return True
         return SEVERITY_RANK.get(severity_value(finding.severity), 0) >= floor
+
+    def bypasses_filters(self, finding: Finding) -> bool:
+        """A rule-cited finding on a review whose policy exempts rules from
+        the threshold and the cap."""
+        return bool(self.rules_bypass_filters and getattr(finding, "rule", ""))
 
     @property
     def postable_findings(self) -> list[Finding]:
@@ -462,8 +481,22 @@ class ReviewBatch:
         One method so the three providers cannot apply the two filters in a
         different order — threshold first, so a nit never takes the place of
         an error under the cap.
+
+        A finding exempt from the filters (`bypasses_filters`) is posted in
+        its place in the order and takes no slot of the cap.
         """
-        return self.postable_findings[: self.inline_cap(cap)]
+        limit = self.inline_cap(cap)
+        if not self.rules_bypass_filters:
+            return self.postable_findings[:limit]
+        out: list[Finding] = []
+        used = 0
+        for f in self.postable_findings:
+            if self.bypasses_filters(f):
+                out.append(f)
+            elif used < limit:
+                out.append(f)
+                used += 1
+        return out
 
     def inline_cap(self, default: int) -> int:
         """The inline-comment cap in force: the repo's own, else `default`."""

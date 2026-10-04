@@ -123,6 +123,9 @@ const SURFACE_LABEL: Record<string, { label: string; hint: string }> = {
   vault: { label: "admin.usage.surfaceVault", hint: "admin.usage.surfaceVaultHint" },
   agent: { label: "admin.usage.surfaceAgent", hint: "admin.usage.surfaceAgentHint" },
   deps: { label: "admin.usage.surfaceDeps", hint: "admin.usage.surfaceDepsHint" },
+  rules_generate: {
+    label: "admin.usage.surfaceRulesGenerate", hint: "admin.usage.surfaceRulesGenerateHint",
+  },
   embeddings: {
     label: "admin.usage.surfaceEmbeddings", hint: "admin.usage.surfaceEmbeddingsHint",
   },

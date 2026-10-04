@@ -489,6 +489,81 @@ class WorkspaceReviewDefaults(Base, TimestampMixin):
 
 
 # ════════════════════════════════════════════════════════════════════
+# ReviewRule — the review rules library (workspace-wide or per repository)
+# ════════════════════════════════════════════════════════════════════
+class ReviewRule(Base, TimestampMixin):
+    """One review rule the agents are told to enforce.
+
+    `repo_slug` NULL = every repository of the workspace; a slug scopes the
+    rule to that repository, and a repository rule with the same title (case
+    folded) replaces the workspace one for that repository. Only `active`
+    rules reach a review (src/review/rules_store.py composes them,
+    src/review/policy_rules.py renders them). Everything a machine wrote —
+    `generated`, `imported`, `agent` — arrives `pending` for a person to
+    approve; `rejected` is kept so a re-import does not propose it again.
+
+    The legacy per-repo `RepoReviewPolicy.folder_rules` keep working beside
+    these and are not copied here (see migration a7b8c9d0e1f2).
+    """
+
+    __tablename__ = "review_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    repo_slug: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    #: What the agent is told, ≤ 2000 characters.
+    instructions: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Files the rule is about; NULL/empty = every changed file.
+    path_glob: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: info | warning | error | critical — the severity a violation reports at.
+    severity: Mapped[str] = mapped_column(Text, nullable=False, server_default="warning")
+    #: The LLM agents the rule is for; [] = every agent.
+    agents: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    examples_good: Mapped[str | None] = mapped_column(Text, nullable=True)
+    examples_bad: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Why a generated rule was proposed — shown to the person approving it.
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: active | pending | rejected
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    #: manual | library | generated | imported | agent
+    origin: Mapped[str] = mapped_column(Text, nullable=False, server_default="manual")
+    #: Library id, file path (#section) or job id the rule came from.
+    source_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_review_rules_scope", "workspace_id", "repo_slug", "status"),
+    )
+
+
+class ReviewRuleJob(Base, TimestampMixin):
+    """A "Generate rules" / "Import from repo files" run and its progress."""
+
+    __tablename__ = "review_rule_jobs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    repo_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    #: generate | import
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    #: queued | running | completed | failed
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
+    progress: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: {"created": [ids], "skipped": n, "note": "..."}
+    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_review_rule_jobs_ws", "workspace_id", "created_at"),
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
 # ComplianceCheck — first-class policy rules that hard-block APPROVE
 # (Stage 14). See src.review.compliance.ComplianceAgent for enforcement.
 # ════════════════════════════════════════════════════════════════════

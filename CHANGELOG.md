@@ -55,6 +55,25 @@ derives it from there.
   stays as typed.
 - Bitbucket Cloud renders a suggested change as a ```diff block: its "Suggest
   code" feature is editor-only and has no documented markdown for API comments.
+- **Review rules** (Code review → Review rules, `/admin/review-rules`,
+  `/api/review-rules`). Rules every review agent enforces, for the whole
+  workspace or for one repository — a repository rule with the same title
+  replaces the workspace one. Rules come from four places: written by hand,
+  copied from a built-in library of about forty (PHP, JS/TS, Vue, Python,
+  SQL, security, performance, general), generated for a repository by the
+  workspace's review model (booked as `rules_generate`), or imported from
+  the repository's own CONTRIBUTING / CLAUDE.md / AGENTS.md / Cursor and
+  Copilot instructions / .editorconfig / ESLint / PHPCS / Ruff files.
+  Everything a machine wrote arrives pending and reaches no review until it
+  is approved. Agents cite the rule a finding violates; the finding takes
+  the rule's severity and shows the rule's name on the pull request.
+  Migration `a7b8c9d0e1f2`.
+
+### Compatibility
+
+- A repository policy's existing per-folder rules (`folder_rules`) are not
+  converted and keep working exactly as before, edited where they always
+  were; the rules page lists them read-only beside the new rules.
 
 ## [2.2.4] — 2026-10-04
 

@@ -18,6 +18,15 @@ A rule addressed to some agents reaches ONLY their prompts. The untargeted
 rules (and the repo-level prompt template) stay one shared block, exactly as
 before, so a policy that uses none of the new fields renders byte-for-byte as
 it did.
+
+The review rules library (`review_rules`, src/review/rules_store.py) reaches
+the agents through this same renderer: the orchestrator puts the active rules
+of the review — workspace-wide ones, with a repository rule of the same title
+replacing the workspace one — on the policy as `review_rules`, and they are
+rendered after the folder rules and targeted the same way. Those blocks ask the
+agent to cite the rule by title (`"rule": "<title>"` on the finding), which is
+how a finding is tied back to the rule that produced it. A policy without
+`review_rules` renders exactly as before.
 """
 
 from __future__ import annotations
@@ -29,6 +38,19 @@ from dataclasses import dataclass, field
 SEVERITY_HINTS: tuple[str, ...] = ("info", "warning", "error", "critical")
 
 REPO_RULES_HEADING = "**Repo-level rules (from admin panel):**"
+
+#: Opens every group of review-rule blocks. The finding parsers read the `rule`
+#: field it asks for (src/review/agents/base.py, src/review/claude_engine.py)
+#: and the orchestrator keeps it only when it names a rule in force.
+REVIEW_RULES_PREAMBLE = (
+    "**Review rules (workspace and repository).** When a finding violates one "
+    "of the rules below, add `\"rule\": \"<the rule's exact title>\"` to that "
+    "finding and report it at the rule's severity. Do not cite a rule for a "
+    "finding that does not violate it."
+)
+
+#: The longest text one example of a review rule may put into a prompt.
+_EXAMPLE_PROMPT_CHARS = 600
 
 
 @dataclass
@@ -84,6 +106,136 @@ def _render_one(rule: dict, matched: list[str] | None) -> str | None:
     return f"{head}:\n{body}"
 
 
+# ─── Review-rule globs ───────────────────────────────────────────────
+
+
+def _expand_braces(pattern: str) -> list[str]:
+    """`*.{js,ts}` → [`*.js`, `*.ts`]; nested and repeated groups expand too.
+    An unbalanced brace is matched literally."""
+    start = pattern.find("{")
+    if start < 0:
+        return [pattern]
+    depth = 0
+    end = -1
+    for i in range(start, len(pattern)):
+        if pattern[i] == "{":
+            depth += 1
+        elif pattern[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end < 0:
+        return [pattern]
+    parts: list[str] = []
+    depth = 0
+    current = ""
+    for ch in pattern[start + 1:end]:
+        if ch == "," and depth == 0:
+            parts.append(current)
+            current = ""
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        current += ch
+    parts.append(current)
+    head, tail = pattern[:start], pattern[end + 1:]
+    out: list[str] = []
+    for part in parts:
+        out.extend(_expand_braces(head + part + tail))
+    return out
+
+
+def split_globs(pattern: str | None) -> list[str]:
+    """`"src/**, *.py"` → [`src/**`, `*.py`] — commas and whitespace outside
+    braces separate globs."""
+    out: list[str] = []
+    depth = 0
+    current = ""
+    for ch in pattern or "":
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        if depth == 0 and (ch == "," or ch.isspace()):
+            if current:
+                out.append(current)
+            current = ""
+            continue
+        current += ch
+    if current:
+        out.append(current)
+    return out
+
+
+def glob_matches(path: str, pattern: str | None) -> bool:
+    """Whether a review rule's `path_glob` covers `path`.
+
+    fnmatch, where `*` crosses directories, plus `{a,b}` alternatives and a
+    leading `**/` that matches at the root too (`**/*.py` covers `setup.py`).
+    Several globs may be given, separated by commas or spaces. An empty
+    pattern covers every path.
+    """
+    globs = split_globs(pattern)
+    if not globs:
+        return True
+    for one in globs:
+        for candidate in _expand_braces(one):
+            # `**/` may stand for no directory at all: `src/**/*.ts` covers
+            # `src/a.ts`, `**/*.py` covers `setup.py`.
+            zero_dirs = candidate.replace("/**/", "/")
+            if zero_dirs.startswith("**/"):
+                zero_dirs = zero_dirs[3:]
+            if fnmatch.fnmatch(path, candidate) or fnmatch.fnmatch(path, zero_dirs):
+                return True
+    return False
+
+
+# ─── Review rules ────────────────────────────────────────────────────
+
+
+def _fenced(text: str) -> str:
+    body = text.strip()
+    if len(body) > _EXAMPLE_PROMPT_CHARS:
+        body = body[:_EXAMPLE_PROMPT_CHARS].rstrip() + "\n…"
+    # A fence inside the example would close ours and turn the rest of the
+    # prompt into prose the model reads as instructions.
+    return "```\n" + body.replace("```", "'''") + "\n```"
+
+
+def render_review_rule(rule: dict, matched: list[str] | None) -> str | None:
+    """One review rule as a prompt block; None when it says nothing."""
+    title = str(rule.get("title") or "").strip()
+    instructions = str(rule.get("instructions") or "").strip()
+    if not title or not instructions:
+        return None
+    severity = str(rule.get("severity") or "").strip().lower()
+    if severity not in SEVERITY_HINTS:
+        severity = "warning"
+    glob = str(rule.get("path_glob") or "").strip()
+    where = f"files `{glob}`" if glob else "every changed file"
+    if matched and glob:
+        preview = ", ".join(matched[:3])
+        if len(matched) > 3:
+            preview += f", …(+{len(matched) - 3})"
+        where += f" (matches: {preview})"
+    lines = [f"**Review rule — {title}** (severity `{severity}`; {where}):",
+             instructions]
+    good = str(rule.get("examples_good") or "").strip()
+    bad = str(rule.get("examples_bad") or "").strip()
+    if good:
+        lines += ["Compliant example:", _fenced(good)]
+    if bad:
+        lines += ["Violating example:", _fenced(bad)]
+    return "\n".join(lines)
+
+
+def _with_preamble(blocks: list[str]) -> str:
+    return "\n\n".join([REVIEW_RULES_PREAMBLE, *blocks])
+
+
 def render_policy_rules(
     policy: dict | None,
     changed_files: list[str] | None,
@@ -132,6 +284,39 @@ def render_policy_rules(
             for agent in dict.fromkeys(targets):
                 per_agent.setdefault(agent, []).append(block)
 
+    # ── The review rules in force for this review. Absent → nothing below
+    # adds a byte, and the output is the folder-rules output above.
+    r_shared: list[str] = []
+    r_targeted: list[str] = []
+    r_per_agent: dict[str, list[str]] = {}
+    for rule in policy.get("review_rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        glob = str(rule.get("path_glob") or "").strip()
+        matched = None
+        if match_files:
+            matched = [f for f in changed if glob_matches(f, glob)]
+            if not matched:
+                continue
+        block = render_review_rule(rule, matched)
+        if block is None:
+            continue
+        targets = rule_agents(rule)
+        if not targets:
+            r_shared.append(block)
+        else:
+            r_targeted.append(block)
+            for agent in dict.fromkeys(targets):
+                r_per_agent.setdefault(agent, []).append(block)
+    if r_shared:
+        shared.append(_with_preamble(r_shared))
+    if r_targeted:
+        targeted.append(_with_preamble(r_targeted))
+    for agent, blocks in r_per_agent.items():
+        per_agent.setdefault(agent, []).append(_with_preamble(blocks))
+    if r_shared or r_targeted:
+        everything.append(_with_preamble([*r_shared, *r_targeted]))
+
     out.shared = "\n\n".join(shared)
     out.per_agent = {a: "\n\n".join(blocks) for a, blocks in per_agent.items()}
     out.targeted = "\n\n".join(targeted)
@@ -139,10 +324,46 @@ def render_policy_rules(
     return out
 
 
+# ─── Citations ───────────────────────────────────────────────────────
+
+
+def _title_key(raw: object) -> str:
+    text = " ".join(str(raw or "").split()).strip().strip("`\"'").rstrip(".")
+    return text.casefold()
+
+
+def rules_by_title(rules: list[dict] | None) -> dict[str, dict]:
+    """{title key: rule} for the review rules in force."""
+    out: dict[str, dict] = {}
+    for rule in rules or []:
+        if isinstance(rule, dict):
+            key = _title_key(rule.get("title"))
+            if key:
+                out.setdefault(key, rule)
+    return out
+
+
+def cited_rule(raw: object, titles: dict[str, dict]) -> dict | None:
+    """The rule a finding's `rule` field names, or None.
+
+    Matched loosely — case, surrounding quotes or backticks, a trailing
+    period — because a model copies a title, it does not type it. Anything
+    else (a free-form rule id some agents also write there) is not a citation.
+    """
+    key = _title_key(raw)
+    return titles.get(key) if key else None
+
+
 __all__ = [
     "REPO_RULES_HEADING",
+    "REVIEW_RULES_PREAMBLE",
     "RenderedRules",
     "SEVERITY_HINTS",
+    "cited_rule",
+    "glob_matches",
     "render_policy_rules",
+    "render_review_rule",
     "rule_agents",
+    "rules_by_title",
+    "split_globs",
 ]

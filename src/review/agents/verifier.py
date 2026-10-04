@@ -478,6 +478,8 @@ def _merge_cluster(cluster: list[Finding]) -> Finding:
         reasoning=first.reasoning,
         # A lookup agreed with by a model is still a lookup.
         evidence_kind="proven" if any(f.is_proven for f in cluster) else first.evidence_kind,
+        # A member that cited a review rule keeps the merged comment cited.
+        rule=next((f.rule for f in cluster if getattr(f, "rule", "")), ""),
     )
 
 
@@ -565,6 +567,7 @@ def _merge_same_line(group: list[Finding]) -> Finding:
         # allowed to veto. A database that agrees with itself four times is
         # not a judgement.
         evidence_kind="proven" if any(f.is_proven for f in group) else primary.evidence_kind,
+        rule=next((f.rule for f in group if getattr(f, "rule", "")), ""),
     )
 
 
