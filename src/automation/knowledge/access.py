@@ -204,26 +204,124 @@ filter for accounts with only a personal workspace.
         ),
         strong=("team", "teams", "команд", "visibility", "видимост", "deny"),
         body="""
+Two separate controls, and they do not imply each other: a team GRANT says
+what a team may DO with a repository, a research RULE says what it may
+EXPLORE in it. A grant does not open Q&A, and a rule needs no grant.
+
 [Teams](/admin/teams) ("Teams & access"): group people into teams and grant
-each team a permission on repositories — `read`, `review` or `admin`. A
-person's effective permission on a repository is the highest one earned
-through any of their teams; global admins bypass the checks.
+each team a permission on repositories — `read` (repository details and
+intel), `review` (start reviews, edit and reset the repository's review
+policy) or `admin` (also delete the repository). A person's effective
+permission is the highest one earned through any of their teams; global
+admins bypass the checks.
 1. "Create team": "Name", "Description", "Add".
-2. In the team add members (email or id, with a team label such as reviewer)
-   and press "Add".
+2. Under "Members" type the person's internal user id (the field mentions
+   email, but only the id is matched today — an email answers `Not a member
+   of this workspace`; the id is the `user_id` in
+   `GET /api/workspaces/<workspace id>/members`), pick a team label (a label
+   only, it grants nothing) and press "Add". Only people who are already
+   members of the workspace can join one of its teams.
 3. "Repository access": pick a repository and permission, press "Grant".
 Until a repository has any grant, single-tenant installations leave it open
-to everyone in the workspace.
+to everyone in the workspace; multi-tenant ones refuse (`No team is granted
+access to …`).
 
 [Code access](/admin/access) ("Research access"): what a team may explore in
-a repository through Q&A, graph, search and MCP.
+a repository through Ask the code (Q&A) and MCP.
 1. "Add / update rule" — "Repository", "Team", "Visibility" ("None (hidden)",
-   "Metadata only" = documentation and structure, "Full code").
+   "Metadata only" = documentation and structure, no source, "Full code").
 2. "Deny globs (always hidden)" — paths that are refused even at full code
    (presets "Credentials", "Crypto / algorithms", "DB connections");
-   "Allow globs (optional)" — an allow-list, deny still subtracts.
-3. "Save" ("Rule saved"). One rule per team and repository.
-Both pages need owner or admin of the workspace.
+   "Allow globs (optional)" — an exhaustive allow-list, deny still wins. A
+   pattern without wildcards covers the whole folder.
+3. "Save" ("Rule saved"). One rule per team and repository; saving again
+   overwrites it. Rules of several teams add up — the most open one wins.
+A repository with no rule at all is open in full on single-tenant and closed
+on multi-tenant. Once it has ANY rule, every team without one of its own sees
+nothing of it — so the first rule you add for one team hides the repository
+from everybody else who has no rule (global admins excepted).
+Code search and generated docs are not filtered by these rules.
+Anyone in the workspace can open both pages; only owner or admin can change
+them.
+""",
+    ),
+    Section(
+        id="neighbour-team-code",
+        title="Letting another (neighbouring) team explore your code",
+        keywords=(
+            "another team", "other team", "neighbour", "neighbor", "external",
+            "contractor", "outsider", "explore", "browse", "read-only",
+            "read only", "see the code", "look at the code", "team", "code",
+            "сусідн", "команд", "перегляд", "переглянут", "дослідж",
+            "код", "підрядник", "зовнішн", "лише читан",
+            "соседн", "просматрива", "исследова", "подрядчик", "внешн",
+        ),
+        strong=("another team", "other team", "neighbour", "neighbor",
+                "explore", "сусідн", "іншій команд", "іншої команд",
+                "інша команд", "дослідж", "перегляд", "соседн",
+                "другой команд", "другим команд", "исследова", "просматрива"),
+        body="""
+Yes — give them a team, a research rule per repository, and (for their
+editor) an MCP token. Two controls decide it, and both are on the Team &
+access pages: research RULES on [Code access](/admin/access) decide what a
+team may explore (Ask the code and MCP); team GRANTS on
+[Teams](/admin/teams) decide what it may do (`read`, `review`, `admin`).
+Exploring needs only a rule. Changing either page needs owner or admin of
+the workspace.
+
+1. Let them into the workspace: [Workspaces & members](/admin/workspaces) →
+   the workspace → "Invitations" → their address, role `viewer` (enough to
+   ask the code and use MCP; `member` if they should also change issue
+   statuses) → "Invite by email" or "Create link". Someone with an account
+   but no team workspace can instead send an
+   [Access request](/access-request), which the superadmin decides.
+2. Make their team: [Teams](/admin/teams) → "Create team" ("Name",
+   "Description", "Add"); under "Members" add each person by internal user
+   id and press "Add".
+3. Decide what they see, per repository: [Code access](/admin/access) →
+   "Add / update rule" → "Repository", "Team", "Visibility" — "Metadata only"
+   (documentation and structure, no source) or "Full code";
+   "Deny globs (always hidden)" with the presets "Credentials",
+   "Crypto / algorithms", "DB connections"; "Allow globs (optional)" to
+   show only part of a repository → "Save".
+4. Keep your own access: once a repository has any rule, a team without a
+   rule sees none of it. Add a "Full code" rule for your own team(s) on the
+   same repositories in the same go.
+5. A grant on [Teams](/admin/teams) only if they should do more than
+   explore: `read` for repository details and intel, `review` to run
+   reviews and edit that repository's review policy.
+
+How they explore:
+- In the browser: [Projects](/projects) → "New project" → "Select repos" →
+  "Create", then "New chat". Answers cite only what their rule allows and
+  say how many files were hidden; "Code display: off" explains without
+  quoting source.
+- From their IDE: [MCP](/settings/mcp) → "Generate a token" → "Copy token";
+  read-only scopes `read:graph`, `read:groups`, `read:reviews`, valid 30
+  days, shown once, issued as that person, so their rules apply to every
+  call. It cannot be revoked early — it expires. MCP answers from the
+  workspace where the person holds their HIGHEST role, which for most people
+  is their personal workspace (they own it), not yours — check with the
+  `get_my_access` tool; until then the browser is the reliable way.
+
+What they can and cannot see:
+- They can see the names of every repository of the workspace, every
+  project and chat in it (chats are shared: an answer quoted to a colleague
+  with full access stays readable to them), [Code search](/search) and the
+  generated [Docs](/docs) — neither is filtered by research rules — and
+  review policies (read-only).
+- They cannot change teams, rules, members, invitations, LLM keys or git
+  connections (owner/admin), prompts or review policies (editor and up), or
+  open analytics.
+
+single_tenant vs multi_tenant (the operator's `CELMIS_DEPLOYMENT_MODE`,
+`single_tenant` by default): single_tenant fails OPEN where nothing is
+configured — a repository with no research rule is full code to everybody,
+one with no team grant is open — and multi_tenant fails closed and also
+refuses any repository not registered in the caller's workspace. On
+single_tenant, put a rule on every repository they must not read in full.
+The strongest separation is a workspace of their own holding only the
+repositories they may see, with them invited there and nowhere else.
 """,
     ),
     Section(

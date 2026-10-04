@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import current_workspace_id, get_current_user
@@ -36,12 +36,24 @@ router = APIRouter(prefix="/api/automation", tags=["automation"])
 
 
 class PlanIn(BaseModel):
+    """A sentence, and which conversation it continues.
+
+    There is deliberately no history field. What the agent remembers of the
+    conversation is read from this conversation's own stored rows on the
+    server (`src.automation.memory`), so a client cannot post an "earlier
+    turn" — or label one as the agent's — that never happened. A `history`
+    key in the body is ignored like any other unknown key.
+    """
+
     message: str = Field(min_length=1, max_length=2000)
-    #: Which conversation this belongs to. Chosen by the client — the agent
-    #: reads every sentence on its own, so a session groups for reading back
-    #: rather than feeding context, and the browser is the only thing that
-    #: knows where one sitting ends and the next begins.
+    #: Which conversation this belongs to. Chosen by the client, which is the
+    #: only thing that knows where one sitting ends and the next begins ("New
+    #: chat", sign-out and switching workspace each start a new one). It
+    #: groups the turns for reading back AND bounds what the agent remembers:
+    #: earlier turns of this session, by this person, in this workspace.
     session_id: str | None = Field(default=None, max_length=64)
+
+    model_config = ConfigDict(extra="ignore")
 
 
 class StepOut(BaseModel):
@@ -50,6 +62,10 @@ class StepOut(BaseModel):
     note: str = ""
     resolved_repos: list[str] = Field(default_factory=list)
     blocked: str | None = None
+    #: The exact change a settings step will make — the rules as they will be
+    #: stored, a setting's value now and after — so what the Confirm button
+    #: approves is on screen, not only the verb. Empty for every other step.
+    preview: dict[str, Any] = Field(default_factory=dict)
 
 
 class RunOut(BaseModel):
@@ -144,12 +160,27 @@ async def plan(
     session.add(row)
     await session.commit()
 
+    # The conversation so far — this person's earlier turns of this session
+    # in this workspace, bounded. Read here, from the rows themselves, rather
+    # than taken from the request: see PlanIn. Memory is a courtesy, so a
+    # failure to read it costs the follow-up its context, never the reading.
+    try:
+        from src.automation.memory import load_history
+
+        history = await load_history(
+            session, workspace_id=workspace_id, user_id=user.id,
+            session_id=payload.session_id, exclude_id=row.id)
+    except Exception:  # noqa: BLE001
+        logger.exception("automation_memory_unavailable run=%s", row.id)
+        history = []
+
     job_id = enqueue(
         kind=KIND_AUTOMATION_PLAN,
         payload={
             "run_id": row.id, "message": payload.message,
             "workspace_id": workspace_id, "user_id": user.id,
             "user_email": user.email, "caller": caller,
+            "history": history,
         },
         # One attempt. A retry would charge for the same sentence twice and
         # the person is watching a spinner that has to end either way.

@@ -1537,11 +1537,12 @@ class AutomationRun(Base, TimestampMixin):
     #: The queue job doing the reading. Kept so the reading can be stopped:
     #: that is the whole reason it is a job rather than a background task.
     job_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    #: Which conversation this belongs to. The agent has no multi-turn memory
-    #: — each sentence is read on its own — so a session is a grouping for
-    #: READING BACK, not a context window: "the four things I asked on Tuesday
+    #: Which conversation this belongs to: "the four things I asked on Tuesday
     #: while setting up the release" is one thread to a person and four
-    #: unrelated rows to the database.
+    #: unrelated rows to the database. It is also the agent's memory — the
+    #: earlier settled rows of the same session, by the same person, in the
+    #: same workspace, go with each new sentence (src.automation.memory), so
+    #: "а для цього репо?" has something to refer to.
     session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     #: ISO 639-1 code of the language the question was written in, as the
     #: model reported it. The canned parts of the reply are shown in it — they

@@ -605,3 +605,518 @@ def list_repos(actor: Actor) -> dict[str, Any]:
         "documented": sum(1 for r in repos if r["documented"]),
         "auto_review_on": sum(1 for r in repos if r["auto_review"]),
     }
+
+
+# ─── review rules and settings ──────────────────────────────────────────
+#
+# Three verbs that change how a repository — or the whole workspace — is
+# REVIEWED rather than queue work over a set. They are here and not in the
+# chat for the reason everything else is: the permission check, the
+# validation and the write path must be the ones the HTTP API uses, so the
+# agent can never do what the person could not do on the page. Each one ends
+# in the same router function the page calls, with the same gates in front
+# of it; nothing here writes a policy row of its own.
+
+#: The settings a sentence may change. A whitelist, not "whatever the schema
+#: accepts": prompt templates, MCP sources and per-agent model overrides are
+#: forms with previews and validation of their own, and a chat that could set
+#: them would be a worse copy of those pages.
+#:
+#: Some of these may not exist in the installed schema yet — they are being
+#: added to the review settings separately. Which ones are live is read from
+#: the schema at run time (`review_setting_keys`), so a key the code does not
+#: know is refused by name rather than written somewhere nothing reads it.
+REVIEW_SETTING_KEYS: tuple[str, ...] = (
+    "run_on_drafts", "approve_when_clean", "request_changes_on_critical",
+    "committable_suggestions", "comment_min_severity", "max_inline_comments",
+    "summary_enabled", "review_language", "disabled_agents",
+)
+
+#: How many rules one sentence may add. A policy holds at most 20 (the
+#: schema's own bound), and a "rule" list longer than this is a paste of a
+#: style guide, which belongs in the prompt template on the policy page.
+MAX_RULES_PER_PROPOSAL = 10
+
+#: Spellings people use for a rule's severity, folded into the four a rule
+#: can carry (src.review.policy_rules.SEVERITY_HINTS).
+_SEVERITY_ALIASES = {
+    "low": "info", "minor": "info", "note": "info", "nit": "info",
+    "medium": "warning", "moderate": "warning", "warn": "warning",
+    "high": "error", "major": "error", "blocker": "critical",
+}
+
+_RULES_STORE = "src.review.rules_store"
+_RULES_GENERATE = "src.review.rules_generate"
+
+
+def _module_available(name: str) -> bool:
+    """Whether an optional module ships in this build — without importing it."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def rules_store_available() -> bool:
+    """True when proposals go to the review-rules store (as PENDING), False
+    when they are appended to the repository policy directly."""
+    return _module_available(_RULES_STORE)
+
+
+def rules_generation_available() -> bool:
+    return _module_available(_RULES_GENERATE)
+
+
+def review_setting_keys(scope: str) -> tuple[str, ...]:
+    """The whitelisted keys the installed schema for `scope` really has."""
+    from src.api.schemas import ReviewPolicyIn, WorkspaceReviewDefaultsIn
+
+    model = WorkspaceReviewDefaultsIn if scope == "workspace" else ReviewPolicyIn
+    return tuple(k for k in REVIEW_SETTING_KEYS if k in model.model_fields)
+
+
+def resolve_repo(actor: Actor, repo: str | None) -> str:
+    """The registered slug `repo` names in the actor's workspace, or refuse.
+
+    Either spelling a person uses — the slug or owner/name — is accepted, the
+    same two `_require_repo_in_workspace` accepts on the policy routes.
+    """
+    from src.api.auto_review import get_auto_review_store
+
+    wanted = (repo or "").strip()
+    if not wanted:
+        raise ActionError("Name the repository.")
+    for cfg in get_auto_review_store().list_for_workspace(actor.workspace_id):
+        if wanted in (cfg.repo_slug, cfg.full_name):
+            return cfg.repo_slug
+    raise ActionError(f"Not registered in this workspace: {wanted}")
+
+
+def normalise_review_rules(rules: Any) -> list[dict[str, Any]]:
+    """The rules as they will be stored, or a refusal naming the bad one.
+
+    Validated against the same `FolderRule` schema the policy page saves
+    through, so a rule the chat accepts is a rule the page can show.
+    """
+    from pydantic import ValidationError
+
+    from src.api.schemas import FolderRule
+    from src.review.policy_rules import SEVERITY_HINTS
+
+    if not isinstance(rules, list) or not rules:
+        raise ActionError("There are no rules to add.")
+    if len(rules) > MAX_RULES_PER_PROPOSAL:
+        raise ActionError(
+            f"That is {len(rules)} rules; at most {MAX_RULES_PER_PROPOSAL} "
+            "can be added at once.")
+
+    out: list[dict[str, Any]] = []
+    for idx, raw in enumerate(rules, start=1):
+        if not isinstance(raw, dict):
+            raise ActionError(f"Rule {idx} is not a rule.")
+        instructions = str(raw.get("instructions") or raw.get("prompt") or "").strip()
+        title = str(raw.get("title") or "").strip() or None
+        glob = str(raw.get("path_glob") or raw.get("pattern") or "").strip() or None
+        severity = str(raw.get("severity") or "").strip().lower() or None
+        if severity is not None:
+            severity = _SEVERITY_ALIASES.get(severity, severity)
+            if severity not in SEVERITY_HINTS:
+                raise ActionError(
+                    f"Rule {idx}: severity must be one of "
+                    f"{', '.join(SEVERITY_HINTS)}.")
+        agents_raw = raw.get("agents") or []
+        if not isinstance(agents_raw, list):
+            agents_raw = [agents_raw]
+        agents = [str(a).strip() for a in agents_raw if str(a).strip()]
+        if not instructions:
+            raise ActionError(f"Rule {idx} says nothing — it has no instructions.")
+        try:
+            FolderRule(pattern=glob or "**", prompt=instructions, title=title,
+                       severity_hint=severity, agents=agents)
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            where = ".".join(str(p) for p in first.get("loc", ()))
+            raise ActionError(f"Rule {idx}: {where}: {first.get('msg')}") from None
+        if agents:
+            from src.api.routers.review_policies import _rule_target_agents
+
+            known = _rule_target_agents()
+            unknown = [a for a in agents if a not in known]
+            if unknown:
+                raise ActionError(
+                    f"Rule {idx}: unknown agent(s) {', '.join(unknown)} — a rule "
+                    f"can target: {', '.join(known)}")
+        out.append({"title": title, "instructions": instructions,
+                    "path_glob": glob, "severity": severity,
+                    "agents": list(dict.fromkeys(agents)) or None})
+    return out
+
+
+def review_setting_value(scope: str, key: str, value: Any) -> Any:
+    """`value` as the schema for `scope` reads it, or a refusal.
+
+    Three refusals, in the order a person needs them: a key the agent may not
+    touch at all; a key it may touch but this installation's schema does not
+    have yet; and a value the schema rejects. The value is parsed by the very
+    model the HTTP route parses its body with, so "true", 1 and "yes" mean
+    what they mean on the page and nothing else.
+    """
+    from pydantic import ValidationError
+
+    from src.api.schemas import ReviewPolicyIn, WorkspaceReviewDefaultsIn
+
+    if scope not in ("workspace", "repo"):
+        raise ActionError("scope must be workspace or repo.")
+    if key not in REVIEW_SETTING_KEYS:
+        raise ActionError(
+            f"{key!r} cannot be changed from here. The settings I can change "
+            f"are: {', '.join(REVIEW_SETTING_KEYS)}.")
+    if key not in review_setting_keys(scope):
+        where = ("workspace review defaults" if scope == "workspace"
+                 else "repository review policies")
+        raise ActionError(
+            f"{key!r} is not a setting of the {where} in this version of "
+            "Celmis, so there is nothing to change.")
+    model = WorkspaceReviewDefaultsIn if scope == "workspace" else ReviewPolicyIn
+    if key == "disabled_agents" and isinstance(value, str):
+        value = [v.strip() for v in value.split(",") if v.strip()]
+    try:
+        parsed = model.model_validate({key: value})
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        raise ActionError(f"{key}: {first.get('msg')}") from None
+    parsed_value = getattr(parsed, key)
+    if key in ("comment_min_severity", "review_language"):
+        # The routes' own readers of these two, so the plan refuses exactly
+        # what the save would refuse — and says it in the same words.
+        from fastapi import HTTPException
+
+        from src.api.routers import review_policies as rp
+
+        reader = (rp._comment_min_severity_from_payload
+                  if key == "comment_min_severity"
+                  else rp._review_language_from_payload)
+        try:
+            parsed_value = reader(parsed_value)
+        except HTTPException as exc:
+            raise ActionError(str(exc.detail)) from None
+    if key == "disabled_agents" and parsed_value is not None:
+        from src.api.routers.review_policies import TOGGLEABLE_AGENTS
+
+        unknown = [a for a in parsed_value if a not in TOGGLEABLE_AGENTS]
+        if unknown:
+            raise ActionError(
+                f"disabled_agents: unknown agent(s) {', '.join(unknown)} — the "
+                f"switchable agents are: {', '.join(TOGGLEABLE_AGENTS)}")
+    return parsed_value
+
+
+def _user_for(actor: Actor):
+    """The person behind `actor`, as the HTTP dependencies would hand it."""
+    from src.users import get_user_store
+
+    user = get_user_store().get_by_id(actor.user_id) if actor.user_id else None
+    if user is None or not getattr(user, "is_active", True):
+        raise ActionError("Could not tell who is asking — sign in again.")
+    return user
+
+
+async def _as_action(coro: Any) -> Any:
+    """Await a router call, turning its HTTP refusal into an ActionError.
+
+    The 403 and 422 sentences the page shows are the ones the agent shows:
+    same gate, same words.
+    """
+    from fastapi import HTTPException
+
+    try:
+        return await coro
+    except HTTPException as exc:
+        raise ActionError(str(exc.detail)) from None
+
+
+#: Who may PROPOSE a rule or ask for generated ones: anybody who works on the
+#: code. A proposal is pending until an editor approves it, so the bar is the
+#: one `member` already clears for changing an issue's status.
+PROPOSER_ROLES = frozenset({"member", "editor", "admin", "owner"})
+
+
+async def _require_role(actor: Actor, user: Any, roles: frozenset[str],
+                        what: str) -> None:
+    """A workspace role in `roles`, or a global admin — the shape of every
+    role gate in src.api.deps."""
+    import asyncio
+
+    from src.api.deps import workspace_role
+
+    if getattr(user, "is_admin", False):
+        return
+    role = await asyncio.to_thread(workspace_role, user.id, actor.workspace_id)
+    if role not in roles:
+        raise ActionError(
+            f"{what} requires one of these roles on this workspace: "
+            f"{', '.join(sorted(roles))} (yours: {role or 'none'}).")
+
+
+async def _require_repo_review(actor: Actor, user: Any, slug: str) -> None:
+    """The team gate the policy routes put in front of a write: `review` on
+    the repository (fall-open where no team holds a grant, single-tenant)."""
+    from src.api.deps import enforce_repo_permission
+
+    await _as_action(enforce_repo_permission(slug, user, "review",
+                                             actor.workspace_id))
+
+
+async def _upsert_policy_fields(actor: Actor, session: Any, user: Any,
+                                slug: str, changes: dict[str, Any]) -> Any:
+    """Change some fields of one repository's policy through PUT's own code.
+
+    PUT is a full replace, so the body is the stored policy with `changes`
+    laid over it. Every field the stored row says nothing about is left out —
+    absent means "keep" on that route — and so is `agent_llm_overrides`,
+    which absent also keeps, and which re-sent would be re-validated against
+    models that may have moved since it was saved.
+    """
+    from pydantic import ValidationError
+
+    from src.api.routers.review_policies import (
+        _stored_folder_rules,
+        upsert_policy,
+    )
+    from src.api.schemas import ReviewPolicyIn
+    from src.db.models import RepoReviewPolicy
+
+    row = await session.get(RepoReviewPolicy, slug)
+    if row is not None and row.workspace_id != actor.workspace_id:
+        raise ActionError("Policy not found in this workspace")
+    body: dict[str, Any] = {}
+    if row is not None:
+        for name in ReviewPolicyIn.model_fields:
+            if name == "agent_llm_overrides" or name in changes:
+                continue
+            if name == "folder_rules":
+                body[name] = [r.model_dump(exclude_none=True)
+                              for r in _stored_folder_rules(row.folder_rules)]
+                continue
+            value = getattr(row, name, None)
+            if value is not None:
+                body[name] = value
+    body.update(changes)
+    try:
+        payload = ReviewPolicyIn.model_validate(body)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        where = ".".join(str(p) for p in first.get("loc", ()))
+        raise ActionError(f"{where}: {first.get('msg')}") from None
+    return await _as_action(upsert_policy(
+        repo_slug=slug, payload=payload, session=session, user=user,
+        _perm=user, ws_id=actor.workspace_id))
+
+
+def _rules_links(slug: str | None, *, pending: bool) -> list[dict[str, str]]:
+    """Where the person goes to see what was just added: the queue of
+    proposals waiting for an editor, and the repository's own Rules tab."""
+    links = []
+    if pending:
+        links.append({"label": "pending",
+                      "href": "/admin/review-rules?status=pending"})
+    if slug:
+        links.append({"label": "policy",
+                      "href": f"/admin/review-policies/{slug}?tab=rules"})
+    return links
+
+
+def _plain(value: Any) -> Any:
+    """Something a JSON column can hold, from whatever a store returned."""
+    import json
+
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        if isinstance(value, (list, tuple)):
+            return [_plain(v) for v in value]
+        if isinstance(value, dict):
+            return {str(k): _plain(v) for k, v in value.items()}
+        if hasattr(value, "model_dump"):
+            return _plain(value.model_dump())
+        if hasattr(value, "__dict__"):
+            return {k: _plain(v) for k, v in vars(value).items()
+                    if not k.startswith("_")}
+        return str(value)
+
+
+async def propose_review_rules(
+    actor: Actor,
+    session: Any,
+    *,
+    repo_slug: str | None,
+    rules: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Add review rules — as PENDING proposals when the rules store exists.
+
+    The store (`src.review.rules_store`) keeps rules an editor approves before
+    any review reads them, which is the right home for rules a model wrote
+    down from a sentence. Where this build has no store, the rules are
+    appended to the repository policy's custom rules through the policy
+    page's own save, behind the same gates that save has — and the plan the
+    person confirmed said so, because there they are live at once.
+    """
+    import importlib
+    import inspect
+
+    normalised = normalise_review_rules(rules)
+    user = _user_for(actor)
+    slug = resolve_repo(actor, repo_slug) if repo_slug else None
+
+    if rules_store_available():
+        await _require_role(actor, user, PROPOSER_ROLES, "Proposing review rules")
+        if slug:
+            await _require_repo_review(actor, user, slug)
+        store = importlib.import_module(_RULES_STORE)
+        result = store.propose_rules(actor.workspace_id, slug, normalised,
+                                     origin="agent", created_by=actor.email)
+        if inspect.isawaitable(result):
+            result = await result
+        logger.info("review_rules_proposed repo=%s n=%d ws=%s by=%s via=%s",
+                    slug or "*", len(normalised), actor.workspace_id,
+                    actor.email, actor.label)
+        return {"repo": slug, "rules": normalised, "status": "pending",
+                "count": len(normalised), "proposal": _plain(result),
+                "links": _rules_links(slug, pending=True)}
+
+    if not slug:
+        raise ActionError(
+            "Workspace-wide rules need the review-rules list, which this "
+            "installation does not have yet. Name a repository and they are "
+            "added to its review policy.")
+    from src.api.deps import require_prompt_editor
+
+    await _as_action(require_prompt_editor(user=user,
+                                           workspace_id=actor.workspace_id))
+    await _require_repo_review(actor, user, slug)
+
+    from src.api.routers.review_policies import _stored_folder_rules
+    from src.db.models import RepoReviewPolicy
+
+    row = await session.get(RepoReviewPolicy, slug)
+    existing = ([] if row is None or row.workspace_id != actor.workspace_id
+                else [r.model_dump(exclude_none=True)
+                      for r in _stored_folder_rules(row.folder_rules)])
+    added = [{k: v for k, v in {
+        "pattern": r["path_glob"] or "**", "prompt": r["instructions"],
+        "title": r["title"], "severity_hint": r["severity"],
+        "agents": r["agents"],
+    }.items() if v is not None} for r in normalised]
+    await _upsert_policy_fields(actor, session, user, slug,
+                                {"folder_rules": existing + added})
+    logger.info("review_rules_appended repo=%s n=%d ws=%s by=%s via=%s",
+                slug, len(added), actor.workspace_id, actor.email, actor.label)
+    return {"repo": slug, "rules": normalised, "status": "active",
+            "count": len(added), "links": _rules_links(slug, pending=False)}
+
+
+async def generate_review_rules(
+    actor: Actor, session: Any, *, repo_slug: str,
+) -> dict[str, Any]:
+    """Draft rules for a repository from its code, through the generator.
+
+    The generator (`src.review.rules_generate`) is optional in this build. It
+    spends model time and what it writes are proposals, so it sits behind the
+    proposer's gates; where it is absent the plan was already refused before
+    anybody pressed anything (see `chat.resolve_scope`).
+    """
+    import importlib
+    import inspect
+
+    if not rules_generation_available():
+        raise ActionError(RULES_GENERATION_MISSING)
+    user = _user_for(actor)
+    slug = resolve_repo(actor, repo_slug)
+    await _require_role(actor, user, PROPOSER_ROLES, "Generating review rules")
+    await _require_repo_review(actor, user, slug)
+
+    gen = importlib.import_module(_RULES_GENERATE)
+    result = gen.generate_rules(actor.workspace_id, slug, actor)
+    if inspect.isawaitable(result):
+        result = await result
+    logger.info("review_rules_generation_started repo=%s ws=%s by=%s via=%s",
+                slug, actor.workspace_id, actor.email, actor.label)
+    plain = _plain(result)
+    out: dict[str, Any] = {"repo": slug, "status": "pending", "result": plain,
+                           "links": _rules_links(slug, pending=True)}
+    if isinstance(plain, dict) and plain.get("job_id"):
+        out["queued"] = [{"repo": slug, "job_id": str(plain["job_id"])}]
+    else:
+        out["count"] = 1
+    return out
+
+
+#: What a person is told when the generator is not in this build — how to get
+#: the same result by hand, rather than only that it cannot be done.
+RULES_GENERATION_MISSING = (
+    "This installation cannot draft review rules automatically yet. Tell me "
+    "the rules in a sentence (\"add review rules for <repo>: …\") and I will "
+    "add them, or write them yourself on the repository's review policy, "
+    "Rules tab.")
+
+
+async def update_review_setting(
+    actor: Actor,
+    session: Any,
+    *,
+    scope: str,
+    key: str,
+    value: Any,
+    repo_slug: str | None = None,
+) -> dict[str, Any]:
+    """Change one review setting, for the workspace or for one repository.
+
+    Workspace: PUT /api/review-defaults's own function, behind its own gate
+    (owner or admin of the workspace, or a global admin). Repository: PUT
+    /api/review-policies/{slug}'s, behind its three (editor or above, the
+    repository is this workspace's, and `review` on it through the caller's
+    teams). The value is parsed by the route's own schema first.
+    """
+    import asyncio
+
+    parsed = review_setting_value(scope, key, value)
+    user = _user_for(actor)
+
+    if scope == "workspace":
+        from src.api.deps import is_workspace_admin
+        from src.api.routers.review_defaults import put_review_defaults
+        from src.api.schemas import WorkspaceReviewDefaultsIn
+
+        if not await asyncio.to_thread(is_workspace_admin, user,
+                                       actor.workspace_id):
+            raise ActionError("Requires owner/admin on this workspace")
+        out = await _as_action(put_review_defaults(
+            payload=WorkspaceReviewDefaultsIn.model_validate({key: parsed}),
+            request=None, session=session, user=user,
+            ws_id=actor.workspace_id))
+        effective = (getattr(out, "effective", None) or {}).get(key, parsed)
+        logger.info("review_setting_changed scope=workspace key=%s ws=%s by=%s "
+                    "via=%s", key, actor.workspace_id, actor.email, actor.label)
+        return {"scope": "workspace", "repo": None, "key": key,
+                "value": _plain(parsed), "effective": _plain(effective),
+                "count": 1,
+                "links": [{"label": "defaults", "href": "/admin/review-defaults"}]}
+
+    from src.api.deps import require_prompt_editor
+
+    slug = resolve_repo(actor, repo_slug)
+    await _as_action(require_prompt_editor(user=user,
+                                           workspace_id=actor.workspace_id))
+    await _require_repo_review(actor, user, slug)
+    out = await _upsert_policy_fields(actor, session, user, slug, {key: parsed})
+    effective = getattr(out, f"{key}_effective", parsed)
+    logger.info("review_setting_changed scope=repo repo=%s key=%s ws=%s by=%s "
+                "via=%s", slug, key, actor.workspace_id, actor.email, actor.label)
+    return {"scope": "repo", "repo": slug, "key": key,
+            "value": _plain(parsed), "effective": _plain(effective),
+            "count": 1,
+            "links": [{"label": "policy",
+                       "href": f"/admin/review-policies/{slug}"}]}
