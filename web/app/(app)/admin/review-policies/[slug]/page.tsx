@@ -2,26 +2,30 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ArrowLeftIcon,
+  CopyIcon,
   EyeIcon,
   HelpCircleIcon,
   PlusIcon,
   RotateCcwIcon,
   SaveIcon,
   Trash2Icon,
+  XIcon,
 } from "lucide-react";
 
 import {
+  agentsApi,
   llmApi,
   reviewPoliciesApi,
   type AgentLLMOverride,
   type FolderRule,
   type ModelCapabilities,
   type ReviewPolicy,
+  type RuleSeverityHint,
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
@@ -51,9 +55,84 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
 
-/** Local tabs splitting the long form into digestible groups. */
-type PolicyTab = "general" | "prompt" | "models" | "mcp" | "agents";
-const POLICY_TABS: PolicyTab[] = ["general", "prompt", "models", "mcp", "agents"];
+/** Local tabs splitting the long form into digestible groups. The active one
+ *  is mirrored to `?tab=` so other pages (AI Agents) can link straight to a
+ *  section. */
+type PolicyTab =
+  | "general" | "agents" | "rules" | "comments" | "ignore" | "models" | "mcp";
+const POLICY_TABS: PolicyTab[] = [
+  "general", "agents", "rules", "comments", "ignore", "models", "mcp",
+];
+
+/** Severity a custom rule may ask violations to be reported at. Mirrors
+ *  `SEVERITY_HINTS` in src/review/policy_rules.py; "" = the agent decides. */
+const RULE_SEVERITY_HINTS: Array<RuleSeverityHint | ""> = [
+  "", "info", "warning", "error", "critical",
+];
+
+/** Server bounds, repeated so a value is refused at the keyboard. */
+const MAX_RULES = 20;
+const MAX_INLINE_MIN = 1;
+const MAX_INLINE_MAX = 100;
+const SUMMARY_INSTRUCTIONS_MAX = 4000;
+
+/** The tab `?tab=` names, or null. */
+function tabFromUrl(): PolicyTab | null {
+  const wanted = new URLSearchParams(window.location.search).get("tab");
+  return wanted && (POLICY_TABS as string[]).includes(wanted) ? (wanted as PolicyTab) : null;
+}
+const noSubscribe = () => () => {};
+
+/** "" or an integer in [1, 100] — the only inline caps the API accepts. */
+function maxInlineError(text: string): boolean {
+  const v = text.trim();
+  if (!v) return false;
+  if (!/^\d+$/.test(v)) return true;
+  const n = Number(v);
+  return n < MAX_INLINE_MIN || n > MAX_INLINE_MAX;
+}
+
+/** A language code's own name ("uk" → "українська"), or the code itself
+ *  where the browser has no name for it. */
+function languageName(code: string): string {
+  try {
+    const name = new Intl.DisplayNames([code], { type: "language" }).of(code);
+    return name && name !== code ? `${name} (${code})` : code;
+  } catch {
+    return code;
+  }
+}
+
+/** "overridden here" vs "inherited" — the one badge every field uses. */
+function OriginBadge({ overridden, inheritedLabel }: {
+  overridden: boolean;
+  inheritedLabel?: string;
+}) {
+  const t = useT();
+  return overridden ? (
+    <Badge variant="brand" className="ml-2 text-[9px]">
+      {t("admin.reviewPolicies.detail.badgeOverridden")}
+    </Badge>
+  ) : (
+    <Badge variant="outline" className="ml-2 text-[9px] font-normal">
+      {inheritedLabel ?? t("admin.reviewPolicies.detail.badgeInherited")}
+    </Badge>
+  );
+}
+
+/** A small "reset to inherited" button, shown only while overriding. */
+function ResetToInherited({ onClick, disabled }: {
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  return (
+    <Button type="button" variant="ghost" size="sm" onClick={onClick} disabled={disabled}>
+      <RotateCcwIcon className="h-3.5 w-3.5 mr-1" />
+      {t("admin.reviewPolicies.detail.resetToInherited")}
+    </Button>
+  );
+}
 
 /** Agents the orchestrator dispatches per PR — these can be switched off.
  *  Mirrors `TOGGLEABLE_AGENTS` in src/api/routers/review_policies.py. The
@@ -227,27 +306,47 @@ export default function ReviewPolicyEditPage() {
   const [agentDrafts, setAgentDrafts] = useState<Record<PolicyAgent, AgentDraft>>(
     () => emptyAgentDrafts(),
   );
-  const [promptOverrides, setPromptOverrides] = useState<
-    Record<"defect" | "contract" | "security" | "verifier", string>
-  >({
-    defect: "", contract: "", security: "", verifier: "",
-  });
+  /** Per-agent system prompts for this repo, keyed by every agent the
+   *  server says may carry one (`overridable_agents`). */
+  const [promptOverrides, setPromptOverrides] = useState<Record<string, string>>({});
   const [previewAgent, setPreviewAgent] = useState<string | null>(null);
   const [disabledAgents, setDisabledAgents] = useState<string[]>([]);
   // The veto is a stage, not an agent, and it is OFF unless this repo
   // asks. Its own boolean rather than an entry in the agent deny-list:
   // squeezing a stage into that list is what made the default
   // un-invertible on the server.
-  const [verifierEnabled, setVerifierEnabled] = useState(false);
+  // Three states: null inherits the install default, true/false decides.
+  const [verifierChoice, setVerifierChoice] = useState<boolean | null>(null);
   const [ignoreGlobsText, setIgnoreGlobsText] = useState("");
   const [commentMinSeverity, setCommentMinSeverity] = useState<string>("");
+  /** null inherits the code default list; a list (even []) replaces it. */
+  const [suppressedRules, setSuppressedRules] = useState<string[] | null>(null);
+  const [suppressedDraft, setSuppressedDraft] = useState("");
+  const [maxInlineText, setMaxInlineText] = useState("");
+  const [summaryEnabled, setSummaryEnabled] = useState(true);
+  const [summaryInstructions, setSummaryInstructions] = useState("");
+  const [startedCommentEnabled, setStartedCommentEnabled] = useState(true);
+  /** "" inherits the workspace language. */
+  const [reviewLanguage, setReviewLanguage] = useState("");
   const [mcpSources, setMcpSources] = useState<Array<{
     name: string; url: string; auth_type: string;
     api_key_ref: string | null;
     allowed_tools: string[]; trigger_patterns: string[];
   }>>([]);
   const [dirty, setDirty] = useState(false);
-  const [activeTab, setActiveTab] = useState<PolicyTab>("general");
+  // `?tab=agents` opens that section. Read through useSyncExternalStore
+  // rather than useSearchParams (which would force a Suspense boundary for one
+  // string): the server snapshot is null, so hydration matches, and the
+  // client's first render already lands on the linked tab.
+  const urlTab = useSyncExternalStore(noSubscribe, tabFromUrl, () => null);
+  const [chosenTab, setChosenTab] = useState<PolicyTab | null>(null);
+  const activeTab: PolicyTab = chosenTab ?? urlTab ?? "general";
+  const setActiveTab = (tab: PolicyTab) => {
+    setChosenTab(tab);
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", tab);
+    window.history.replaceState(window.history.state, "", url.toString());
+  };
   const [helpOpen, setHelpOpen] = useState(false);
   /** Free-text branch entry — the discovered list is empty when the repo has
    *  no local clone, so target branches must still be typeable by hand. */
@@ -273,22 +372,29 @@ export default function ReviewPolicyEditPage() {
     setFolderRules(policy.data.folder_rules);
     setAgentDrafts(agentDraftsFrom(policy.data));
     const po = policy.data.agent_prompt_overrides ?? {};
-    setPromptOverrides({
-      defect: po.defect ?? "",
-      contract: po.contract ?? "",
-      security: po.security ?? "",
-      verifier: po.verifier ?? "",
-    });
+    setPromptOverrides(Object.fromEntries(
+      (policy.data.overridable_agents ?? Object.keys(po)).map(
+        (agent) => [agent, po[agent] ?? ""],
+      ),
+    ));
     setMcpSources(policy.data.mcp_sources ?? []);
     setDisabledAgents(policy.data.disabled_agents ?? []);
     // `verifier_enabled` is what THIS repo said; `_effective` is what a
     // review would do, deny-list and install default folded in. A switch
     // has to show the second — it is the answer the reader is checking.
-    setVerifierEnabled(
-      policy.data.verifier_enabled ?? policy.data.verifier_enabled_effective ?? false,
-    );
+    setVerifierChoice(policy.data.verifier_enabled ?? null);
     setIgnoreGlobsText((policy.data.ignore_globs ?? []).join("\n"));
     setCommentMinSeverity(policy.data.comment_min_severity ?? "");
+    setSuppressedRules(
+      policy.data.suppressed_rules == null ? null : [...policy.data.suppressed_rules],
+    );
+    setMaxInlineText(
+      policy.data.max_inline_comments == null ? "" : String(policy.data.max_inline_comments),
+    );
+    setSummaryEnabled(policy.data.summary_enabled !== false);
+    setSummaryInstructions(policy.data.summary_instructions ?? "");
+    setStartedCommentEnabled(policy.data.started_comment_enabled !== false);
+    setReviewLanguage(policy.data.review_language ?? "");
     setDirty(false);
   }, [policy.data]);
 
@@ -304,6 +410,26 @@ export default function ReviewPolicyEditPage() {
     queryFn: () => llmApi.getConfig(token!),
     enabled: !!token,
   });
+
+  // The workspace prompts (/admin/agents) — what an empty prompt box here
+  // inherits, and the text "start from inherited" copies in.
+  const wsAgents = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => agentsApi.list(token!),
+    enabled: !!token,
+  });
+  const wsAgentByName = Object.fromEntries(
+    (wsAgents.data ?? []).map((a) => [a.name, a]),
+  );
+  const promptAgents = policy.data?.overridable_agents
+    ?? Object.keys(promptOverrides);
+  const ruleTargets = policy.data?.rule_target_agents ?? [];
+  /** What the verifier does when this repo says nothing: the deny-list's old
+   *  spelling of off still wins, then the install default. */
+  const verifierInherited = disabledAgents.includes("verifier")
+    ? false
+    : policy.data?.verifier_enabled_default ?? false;
+  const verifierOn = verifierChoice ?? verifierInherited;
 
   // The model each agent will actually call once this draft is saved: the
   // override typed here, else whatever the workspace resolved. Handed to the
@@ -328,7 +454,8 @@ export default function ReviewPolicyEditPage() {
   const agentLLMBlocked = maxOutErrors.some((e) => e !== null);
   const ignoreGlobs = globLines(ignoreGlobsText);
   const ignoreGlobsError = globError(ignoreGlobs);
-  const saveBlocked = agentLLMBlocked || ignoreGlobsError !== null;
+  const maxInlineBad = maxInlineError(maxInlineText);
+  const saveBlocked = agentLLMBlocked || ignoreGlobsError !== null || maxInlineBad;
 
   /** Rows about to save a reasoning value the operator can neither see nor
    *  edit, because their capabilities lookup gave no answer and will not.
@@ -348,7 +475,15 @@ export default function ReviewPolicyEditPage() {
         enabled,
         prompt_template: promptTemplate,
         target_branches: targetBranches,
-        folder_rules: folderRules,
+        // Optional fields only when they say something: a rule using none of
+        // them is saved exactly as `{pattern, prompt}`, as it always was.
+        folder_rules: folderRules.map((r) => ({
+          pattern: r.pattern,
+          prompt: r.prompt,
+          ...(r.title?.trim() ? { title: r.title.trim() } : {}),
+          ...(r.severity_hint ? { severity_hint: r.severity_hint } : {}),
+          ...(r.agents && r.agents.length ? { agents: r.agents } : {}),
+        })),
         department: department || null,
         // Column names predate the restructure — see POLICY_AGENT_MODEL_FIELD.
         architect_model: agentDrafts.contract.model.trim() || null,
@@ -379,10 +514,10 @@ export default function ReviewPolicyEditPage() {
         // Turning the veto on has to clear the OLD spelling of off as
         // well, or the deny-list keeps winning and the switch looks
         // broken to whoever just flipped it.
-        disabled_agents: verifierEnabled
+        disabled_agents: verifierChoice === true
           ? disabledAgents.filter((a) => a !== "verifier")
           : disabledAgents,
-        verifier_enabled: verifierEnabled,
+        verifier_enabled: verifierChoice,
         // Only once the policy has loaded, for the reason the overrides above
         // wait: an unloaded form would send "no globs" and "inherit" over
         // whatever is stored. Omitted keys keep the stored values.
@@ -391,6 +526,14 @@ export default function ReviewPolicyEditPage() {
               ignore_globs: ignoreGlobs,
               comment_min_severity:
                 (commentMinSeverity || null) as ReviewPolicy["comment_min_severity"],
+              suppressed_rules: suppressedRules,
+              summary_enabled: summaryEnabled,
+              summary_instructions: summaryInstructions.trim() || null,
+              started_comment_enabled: startedCommentEnabled,
+              review_language: reviewLanguage || null,
+              max_inline_comments: maxInlineText.trim()
+                ? Number(maxInlineText.trim())
+                : null,
             }
           : {}),
       }),
@@ -451,7 +594,37 @@ export default function ReviewPolicyEditPage() {
 
   const addFolderRule = () => {
     setDirty(true);
-    setFolderRules((prev) => [...prev, { pattern: "", prompt: "" }]);
+    setFolderRules((prev) => (
+      prev.length >= MAX_RULES
+        ? prev
+        : [...prev, { pattern: "", prompt: "", title: "", severity_hint: null, agents: [] }]
+    ));
+  };
+
+  const toggleRuleAgent = (idx: number, agent: string) => {
+    setDirty(true);
+    setFolderRules((prev) => prev.map((r, i) => {
+      if (i !== idx) return r;
+      const cur = r.agents ?? [];
+      return {
+        ...r,
+        agents: cur.includes(agent) ? cur.filter((a) => a !== agent) : [...cur, agent],
+      };
+    }));
+  };
+
+  /** "a.b, c.d" or one per line → appended to the repo's own list. A token
+   *  with whitespace inside cannot be a rule id and never gets this far. */
+  const addSuppressed = () => {
+    const parsed = suppressedDraft.split(/[\s,]+/).map((r) => r.trim()).filter(Boolean);
+    if (!parsed.length) return;
+    setSuppressedRules((prev) => {
+      const next = [...(prev ?? policy.data?.suppressed_rules_effective ?? [])];
+      for (const r of parsed) if (!next.includes(r)) next.push(r);
+      return next;
+    });
+    setSuppressedDraft("");
+    setDirty(true);
   };
 
   const removeFolderRule = (idx: number) => {
@@ -693,16 +866,26 @@ export default function ReviewPolicyEditPage() {
         </CardContent>
       </Card>
 
+      </>)}
+
+      {/* ─── Comments & summary ─────────────────────────────────── */}
+      {activeTab === "comments" && (<>
       <Card>
         <CardHeader>
-          <CardTitle>{t("review.settings.outputTitle")}</CardTitle>
-          <CardDescription>{t("review.settings.outputDesc")}</CardDescription>
+          <CardTitle>{t("admin.reviewPolicies.detail.commentsTitle")}</CardTitle>
+          <CardDescription>{t("admin.reviewPolicies.detail.commentsDesc")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
           <div className="space-y-1">
-            <Label htmlFor="comment-min-severity">
-              {t("review.settings.thresholdLabel")}
-            </Label>
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="comment-min-severity">
+                {t("review.settings.thresholdLabel")}
+                <OriginBadge overridden={!!commentMinSeverity} />
+              </Label>
+              {commentMinSeverity && (
+                <ResetToInherited onClick={() => { setCommentMinSeverity(""); setDirty(true); }} />
+              )}
+            </div>
             <Select
               id="comment-min-severity"
               className="w-full sm:w-80"
@@ -722,36 +905,191 @@ export default function ReviewPolicyEditPage() {
           </div>
 
           <div className="space-y-1">
-            <Label htmlFor="ignore-globs">{t("review.settings.globsLabel")}</Label>
-            <Textarea
-              id="ignore-globs"
-              rows={5}
-              spellCheck={false}
-              className="font-mono text-xs"
-              placeholder={"docs/**\n*.snap\nmigrations/*.py"}
-              value={ignoreGlobsText}
-              aria-invalid={ignoreGlobsError ? true : undefined}
-              aria-describedby="ignore-globs-hint"
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="max-inline">
+                {t("admin.reviewPolicies.detail.maxInlineLabel")}
+                <OriginBadge overridden={!!maxInlineText.trim()} />
+              </Label>
+              {maxInlineText.trim() && (
+                <ResetToInherited onClick={() => { setMaxInlineText(""); setDirty(true); }} />
+              )}
+            </div>
+            <Input
+              id="max-inline"
+              type="number"
+              inputMode="numeric"
+              min={MAX_INLINE_MIN}
+              max={MAX_INLINE_MAX}
+              className="w-full sm:w-40"
+              placeholder={String(policy.data?.max_inline_comments_effective ?? "")}
+              value={maxInlineText}
+              aria-invalid={maxInlineBad ? true : undefined}
+              aria-describedby="max-inline-hint"
               onChange={(e) => {
-                setIgnoreGlobsText(e.target.value);
+                setMaxInlineText(e.target.value);
                 setDirty(true);
               }}
             />
-            {ignoreGlobsError ? (
-              <p id="ignore-globs-hint" role="alert" className="text-xs text-red-600 dark:text-red-400">
-                {t(ignoreGlobsError.key, { line: ignoreGlobsError.line })}
+            {maxInlineBad ? (
+              <p id="max-inline-hint" role="alert" className="text-xs text-red-600 dark:text-red-400">
+                {t("admin.reviewPolicies.detail.maxInlineInvalid")}
               </p>
             ) : (
-              <p id="ignore-globs-hint" className="text-xs text-[var(--color-muted-foreground)]">
-                {t("review.settings.globsHint")}
+              <p id="max-inline-hint" className="text-xs text-[var(--color-muted-foreground)]">
+                {t("admin.reviewPolicies.detail.maxInlineHint")}
               </p>
             )}
+          </div>
+
+          <div className="space-y-1">
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="review-language">
+                {t("admin.reviewPolicies.detail.languageLabel")}
+                <OriginBadge overridden={!!reviewLanguage} />
+              </Label>
+              {reviewLanguage && (
+                <ResetToInherited onClick={() => { setReviewLanguage(""); setDirty(true); }} />
+              )}
+            </div>
+            <Select
+              id="review-language"
+              className="w-full sm:w-80"
+              value={reviewLanguage}
+              onChange={(v) => {
+                setReviewLanguage(v);
+                setDirty(true);
+              }}
+              options={[
+                {
+                  value: "",
+                  label: t("admin.reviewPolicies.detail.languageInherit", {
+                    // The workspace's language — what "" resolves to.
+                    lang: languageName(
+                      wsConfig.data?.review_language
+                      ?? (policy.data?.review_language ? "en" : policy.data?.review_language_effective)
+                      ?? "en",
+                    ),
+                  }),
+                },
+                ...(policy.data?.review_languages ?? []).map((code) => ({
+                  value: code, label: languageName(code),
+                })),
+              ]}
+            />
+            <p className="text-xs text-[var(--color-muted-foreground)]">
+              {t("admin.reviewPolicies.detail.languageHint")}
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t("admin.reviewPolicies.detail.summaryTitle")}</CardTitle>
+          <CardDescription>{t("admin.reviewPolicies.detail.summaryDesc")}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <Label htmlFor="summary-enabled" className="font-medium">
+                {t("admin.reviewPolicies.detail.summaryEnabledLabel")}
+                <OriginBadge
+                  overridden={!summaryEnabled}
+                  inheritedLabel={t("admin.reviewPolicies.detail.badgeDefault")}
+                />
+              </Label>
+              <p className="text-xs text-[var(--color-muted-foreground)]">
+                {t("admin.reviewPolicies.detail.summaryEnabledHint")}
+              </p>
+            </div>
+            <Switch
+              id="summary-enabled"
+              checked={summaryEnabled}
+              onCheckedChange={(v) => { setSummaryEnabled(v); setDirty(true); }}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="summary-instructions">
+              {t("admin.reviewPolicies.detail.summaryInstructionsLabel")}
+            </Label>
+            <Textarea
+              id="summary-instructions"
+              rows={4}
+              maxLength={SUMMARY_INSTRUCTIONS_MAX}
+              disabled={!summaryEnabled}
+              placeholder={t("admin.reviewPolicies.detail.summaryInstructionsPlaceholder")}
+              value={summaryInstructions}
+              onChange={(e) => { setSummaryInstructions(e.target.value); setDirty(true); }}
+            />
+            <p className="text-xs text-[var(--color-muted-foreground)]">
+              {t("admin.reviewPolicies.detail.summaryInstructionsHint", {
+                count: summaryInstructions.length, max: SUMMARY_INSTRUCTIONS_MAX,
+              })}
+            </p>
+          </div>
+          <div className="flex items-start justify-between gap-4 border-t border-[var(--color-border)] pt-4">
+            <div>
+              <Label htmlFor="started-comment" className="font-medium">
+                {t("admin.reviewPolicies.detail.startedCommentLabel")}
+                <OriginBadge
+                  overridden={!startedCommentEnabled}
+                  inheritedLabel={t("admin.reviewPolicies.detail.badgeDefault")}
+                />
+              </Label>
+              <p className="text-xs text-[var(--color-muted-foreground)]">
+                {t("admin.reviewPolicies.detail.startedCommentHint")}
+              </p>
+            </div>
+            <Switch
+              id="started-comment"
+              checked={startedCommentEnabled}
+              onCheckedChange={(v) => { setStartedCommentEnabled(v); setDirty(true); }}
+            />
           </div>
         </CardContent>
       </Card>
       </>)}
 
-      {activeTab === "prompt" && (<>
+      {/* ─── Ignore paths ───────────────────────────────────────── */}
+      {activeTab === "ignore" && (
+      <Card>
+        <CardHeader>
+          <CardTitle>
+            {t("admin.reviewPolicies.detail.ignoreTitle")}
+            <OriginBadge overridden={ignoreGlobs.length > 0} />
+          </CardTitle>
+          <CardDescription>{t("admin.reviewPolicies.detail.ignoreDesc")}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-1">
+          <Label htmlFor="ignore-globs">{t("review.settings.globsLabel")}</Label>
+          <Textarea
+            id="ignore-globs"
+            rows={8}
+            spellCheck={false}
+            className="font-mono text-xs"
+            placeholder={"docs/**\n*.snap\nmigrations/*.py"}
+            value={ignoreGlobsText}
+            aria-invalid={ignoreGlobsError ? true : undefined}
+            aria-describedby="ignore-globs-hint"
+            onChange={(e) => {
+              setIgnoreGlobsText(e.target.value);
+              setDirty(true);
+            }}
+          />
+          {ignoreGlobsError ? (
+            <p id="ignore-globs-hint" role="alert" className="text-xs text-red-600 dark:text-red-400">
+              {t(ignoreGlobsError.key, { line: ignoreGlobsError.line })}
+            </p>
+          ) : (
+            <p id="ignore-globs-hint" className="text-xs text-[var(--color-muted-foreground)]">
+              {t("review.settings.globsHint")}
+            </p>
+          )}
+        </CardContent>
+      </Card>
+      )}
+
+      {activeTab === "rules" && (<>
       <Card>
         <CardHeader>
           <CardTitle>{t("admin.reviewPolicies.detail.promptTemplateTitle")}</CardTitle>
@@ -790,40 +1128,213 @@ export default function ReviewPolicyEditPage() {
               {t("admin.reviewPolicies.detail.folderRulesEmpty")}
             </p>
           )}
-          {folderRules.map((fr, idx) => (
-            <div
-              key={idx}
-              className="rounded-lg border border-[var(--color-border)] p-3 space-y-2"
-            >
-              <div className="flex items-center gap-2">
-                <Input
-                  placeholder="src/api/**/*.py"
-                  value={fr.pattern}
-                  onChange={(e) =>
-                    updateFolderRule(idx, { pattern: e.target.value })
-                  }
-                  className="flex-1"
+          {folderRules.map((fr, idx) => {
+            const targets = fr.agents ?? [];
+            return (
+              <div
+                key={idx}
+                className="rounded-lg border border-[var(--color-border)] p-3 space-y-3"
+              >
+                <div className="flex items-start gap-2">
+                  <div className="grid flex-1 gap-2 sm:grid-cols-2">
+                    <div className="space-y-1">
+                      <Label htmlFor={`rule-title-${idx}`} className="text-xs">
+                        {t("admin.reviewPolicies.detail.ruleTitleLabel")}
+                      </Label>
+                      <Input
+                        id={`rule-title-${idx}`}
+                        maxLength={200}
+                        placeholder={t("admin.reviewPolicies.detail.ruleTitlePlaceholder")}
+                        value={fr.title ?? ""}
+                        onChange={(e) => updateFolderRule(idx, { title: e.target.value })}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor={`rule-pattern-${idx}`} className="text-xs">
+                        {t("admin.reviewPolicies.detail.rulePatternLabel")}
+                      </Label>
+                      <Input
+                        id={`rule-pattern-${idx}`}
+                        className="font-mono text-xs"
+                        placeholder="src/api/**/*.py"
+                        value={fr.pattern}
+                        onChange={(e) =>
+                          updateFolderRule(idx, { pattern: e.target.value })
+                        }
+                      />
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => removeFolderRule(idx)}
+                    title={t("admin.reviewPolicies.detail.removeRuleTitle")}
+                    aria-label={t("admin.reviewPolicies.detail.removeRuleTitle")}
+                  >
+                    <Trash2Icon className="h-4 w-4" />
+                  </Button>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-[14rem_1fr]">
+                  <div className="space-y-1">
+                    <Label htmlFor={`rule-severity-${idx}`} className="text-xs">
+                      {t("admin.reviewPolicies.detail.ruleSeverityLabel")}
+                    </Label>
+                    <Select
+                      id={`rule-severity-${idx}`}
+                      className="w-full"
+                      value={fr.severity_hint ?? ""}
+                      onChange={(v) => updateFolderRule(idx, {
+                        severity_hint: (v || null) as RuleSeverityHint | null,
+                      })}
+                      options={RULE_SEVERITY_HINTS.map((level) => ({
+                        value: level,
+                        label: t(`admin.reviewPolicies.detail.ruleSeverity.${level || "none"}`),
+                      }))}
+                    />
+                  </div>
+                  <fieldset className="space-y-1">
+                    <legend className="text-xs font-medium">
+                      {t("admin.reviewPolicies.detail.ruleAgentsLabel")}
+                    </legend>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {ruleTargets.map((agent) => {
+                        const on = targets.includes(agent);
+                        return (
+                          <button
+                            key={agent}
+                            type="button"
+                            aria-pressed={on}
+                            onClick={() => toggleRuleAgent(idx, agent)}
+                            className={`text-xs rounded border px-2 py-1 capitalize transition-colors ${
+                              on
+                                ? "bg-[var(--color-primary)] text-[var(--color-primary-foreground)] border-transparent"
+                                : "border-[var(--color-border)] hover:bg-[var(--color-accent)]"
+                            }`}
+                          >
+                            {agent}
+                          </button>
+                        );
+                      })}
+                      <span className="text-xs text-[var(--color-muted-foreground)]">
+                        {targets.length === 0
+                          ? t("admin.reviewPolicies.detail.ruleAgentsAll")
+                          : t("admin.reviewPolicies.detail.ruleAgentsSome")}
+                      </span>
+                    </div>
+                  </fieldset>
+                </div>
+                <Textarea
+                  rows={3}
+                  aria-label={t("admin.reviewPolicies.detail.rulePromptLabel")}
+                  placeholder={t("admin.reviewPolicies.detail.folderRulePromptPlaceholder")}
+                  value={fr.prompt}
+                  onChange={(e) => updateFolderRule(idx, { prompt: e.target.value })}
                 />
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => removeFolderRule(idx)}
-                  title={t("admin.reviewPolicies.detail.removeRuleTitle")}
-                >
-                  <Trash2Icon className="h-4 w-4" />
-                </Button>
               </div>
-              <Textarea
-                rows={3}
-                placeholder={t("admin.reviewPolicies.detail.folderRulePromptPlaceholder")}
-                value={fr.prompt}
-                onChange={(e) => updateFolderRule(idx, { prompt: e.target.value })}
-              />
+            );
+          })}
+          <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              onClick={addFolderRule}
+              disabled={folderRules.length >= MAX_RULES}
+            >
+              <PlusIcon className="h-4 w-4 mr-1" /> {t("admin.reviewPolicies.detail.addFolderRule")}
+            </Button>
+            <span className="text-xs text-[var(--color-muted-foreground)]">
+              {t("admin.reviewPolicies.detail.ruleLimit", { count: folderRules.length, max: MAX_RULES })}
+            </span>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <CardTitle>
+                {t("admin.reviewPolicies.detail.suppressedTitle")}
+                <OriginBadge overridden={suppressedRules !== null} />
+              </CardTitle>
+              <CardDescription>{t("admin.reviewPolicies.detail.suppressedDesc")}</CardDescription>
             </div>
-          ))}
-          <Button variant="outline" onClick={addFolderRule}>
-            <PlusIcon className="h-4 w-4 mr-1" /> {t("admin.reviewPolicies.detail.addFolderRule")}
-          </Button>
+            {suppressedRules !== null && (
+              <ResetToInherited onClick={() => { setSuppressedRules(null); setDirty(true); }} />
+            )}
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {suppressedRules === null ? (
+            <>
+              <p className="text-xs text-[var(--color-muted-foreground)]">
+                {t("admin.reviewPolicies.detail.suppressedInheritedNote", {
+                  count: policy.data?.suppressed_rules_effective?.length ?? 0,
+                })}
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {(policy.data?.suppressed_rules_effective ?? []).map((rule) => (
+                  <Badge key={rule} variant="outline" className="font-mono text-[10px] font-normal">
+                    {rule}
+                  </Badge>
+                ))}
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setSuppressedRules([...(policy.data?.suppressed_rules_effective ?? [])]);
+                  setDirty(true);
+                }}
+              >
+                {t("admin.reviewPolicies.detail.suppressedOverride")}
+              </Button>
+            </>
+          ) : (
+            <>
+              {suppressedRules.length === 0 && (
+                <p className="text-xs text-[var(--color-muted-foreground)]">
+                  {t("admin.reviewPolicies.detail.suppressedEmpty")}
+                </p>
+              )}
+              <div className="flex flex-wrap gap-1.5">
+                {suppressedRules.map((rule) => (
+                  <Badge key={rule} variant="outline" className="font-mono text-[10px] font-normal">
+                    {rule}
+                    <button
+                      type="button"
+                      className="ml-1 opacity-70 hover:opacity-100"
+                      aria-label={t("admin.reviewPolicies.detail.removeItem", { item: rule })}
+                      onClick={() => {
+                        setSuppressedRules((prev) => (prev ?? []).filter((r) => r !== rule));
+                        setDirty(true);
+                      }}
+                    >
+                      <XIcon className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+            </>
+          )}
+          <div className="flex gap-2">
+            <Input
+              aria-label={t("admin.reviewPolicies.detail.suppressedAddLabel")}
+              className="flex-1 font-mono text-xs"
+              placeholder="quality.todo"
+              value={suppressedDraft}
+              onChange={(e) => setSuppressedDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addSuppressed();
+                }
+              }}
+            />
+            <Button variant="outline" onClick={addSuppressed} disabled={!suppressedDraft.trim()}>
+              <PlusIcon className="h-4 w-4 mr-1" />
+              {t("admin.reviewPolicies.detail.suppressedAdd")}
+            </Button>
+          </div>
         </CardContent>
       </Card>
       </>)}
@@ -1066,22 +1577,29 @@ export default function ReviewPolicyEditPage() {
             <div className="min-w-0">
               <Label htmlFor="toggle-verifier" className="font-medium capitalize">
                 verifier
-                {!verifierEnabled && (
+                {!verifierOn && (
                   <Badge variant="destructive" className="ml-2 text-[9px]">
                     {t("admin.reviewPolicies.detail.agentOffBadge")}
                   </Badge>
                 )}
+                <OriginBadge
+                  overridden={verifierChoice !== null}
+                  inheritedLabel={t("admin.reviewPolicies.detail.badgeInstallDefault")}
+                />
               </Label>
               <p className="mt-0.5 text-xs text-[var(--color-muted-foreground)]">
                 {t("admin.reviewPolicies.detail.verifierOptIn")}
               </p>
+              {verifierChoice !== null && (
+                <ResetToInherited onClick={() => { setVerifierChoice(null); setDirty(true); }} />
+              )}
             </div>
             <Switch
               id="toggle-verifier"
-              checked={verifierEnabled}
+              checked={verifierOn}
               onCheckedChange={(v) => {
                 setDirty(true);
-                setVerifierEnabled(v);
+                setVerifierChoice(v);
               }}
             />
           </div>
@@ -1097,43 +1615,84 @@ export default function ReviewPolicyEditPage() {
             {" "}{t("admin.reviewPolicies.detail.agentPromptsDesc2")}
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {(["defect", "contract", "security"] as const).map((agent) => (
-            <div key={agent} className="space-y-1">
-              <div className="flex items-center justify-between">
-                <Label htmlFor={`prompt-${agent}`} className="font-medium capitalize">
-                  {agent}
-                  {promptOverrides[agent].trim() && (
-                    <Badge variant="brand" className="ml-2 text-[9px]">
-                      {t("admin.reviewPolicies.detail.overrideActive")}
-                    </Badge>
-                  )}
-                  {disabledAgents.includes(agent) && (
-                    <Badge variant="destructive" className="ml-2 text-[9px]">
-                      {t("admin.reviewPolicies.detail.agentOffBadge")}
-                    </Badge>
-                  )}
-                </Label>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={() => setPreviewAgent(agent)}
-                >
-                  <EyeIcon className="h-3.5 w-3.5 mr-1" /> {t("admin.reviewPolicies.detail.preview")}
-                </Button>
+        <CardContent className="space-y-5">
+          <Callout tone="info">{t("admin.reviewPolicies.detail.promptPrecedence")}</Callout>
+          {promptAgents.map((agent) => {
+            const own = (promptOverrides[agent] ?? "").trim() !== "";
+            const ws = wsAgentByName[agent];
+            const inheritedLabel = ws?.has_override
+              ? t("admin.reviewPolicies.detail.badgeInheritedWorkspacePrompt")
+              : t("admin.reviewPolicies.detail.badgeInheritedBuiltin");
+            return (
+              <div key={agent} className="space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Label htmlFor={`prompt-${agent}`} className="font-medium capitalize">
+                    {agent}
+                    <OriginBadge overridden={own} inheritedLabel={inheritedLabel} />
+                    {(agent === "verifier" ? !verifierOn : disabledAgents.includes(agent)) && (
+                      <Badge variant="destructive" className="ml-2 text-[9px]">
+                        {t("admin.reviewPolicies.detail.agentOffBadge")}
+                      </Badge>
+                    )}
+                  </Label>
+                  <div className="flex flex-wrap items-center gap-1">
+                    {own ? (
+                      <ResetToInherited
+                        onClick={() => {
+                          setDirty(true);
+                          setPromptOverrides((prev) => ({ ...prev, [agent]: "" }));
+                        }}
+                      />
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={!ws}
+                        onClick={() => {
+                          setDirty(true);
+                          setPromptOverrides((prev) => ({ ...prev, [agent]: ws?.system_prompt ?? "" }));
+                        }}
+                      >
+                        <CopyIcon className="h-3.5 w-3.5 mr-1" />
+                        {t("admin.reviewPolicies.detail.startFromInherited")}
+                      </Button>
+                    )}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setPreviewAgent(agent)}
+                    >
+                      <EyeIcon className="h-3.5 w-3.5 mr-1" /> {t("admin.reviewPolicies.detail.preview")}
+                    </Button>
+                  </div>
+                </div>
+                <Textarea
+                  id={`prompt-${agent}`}
+                  rows={own ? 8 : 3}
+                  className={own ? "font-mono text-xs" : undefined}
+                  placeholder={
+                    ws?.has_override
+                      ? t("admin.reviewPolicies.detail.inheritsWorkspacePrompt")
+                      : t("admin.reviewPolicies.detail.inheritsBuiltinPrompt")
+                  }
+                  value={promptOverrides[agent] ?? ""}
+                  onChange={(e) => {
+                    setDirty(true);
+                    setPromptOverrides((prev) => ({ ...prev, [agent]: e.target.value }));
+                  }}
+                />
+                {!own && (
+                  <p className="text-xs text-[var(--color-muted-foreground)]">
+                    <Link className="underline" href={`/admin/agents/${agent}`}>
+                      {t("admin.reviewPolicies.detail.editWorkspacePrompt")}
+                    </Link>
+                  </p>
+                )}
               </div>
-              <Textarea
-                id={`prompt-${agent}`}
-                rows={4}
-                placeholder={t("admin.reviewPolicies.detail.inheritPlaceholder")}
-                value={promptOverrides[agent]}
-                onChange={(e) => {
-                  setDirty(true);
-                  setPromptOverrides((prev) => ({ ...prev, [agent]: e.target.value }));
-                }}
-              />
-            </div>
-          ))}
+            );
+          })}
         </CardContent>
       </Card>
       </>)}
@@ -1158,6 +1717,7 @@ export default function ReviewPolicyEditPage() {
               ["helpBranchesTitle", "helpBranchesBody"],
               ["helpPromptTitle", "helpPromptBody"],
               ["helpFolderRulesTitle", "helpFolderRulesBody"],
+              ["helpCommentsTitle", "helpCommentsBody"],
               ["helpModelsTitle", "helpModelsBody"],
               ["helpAgentPromptsTitle", "helpAgentPromptsBody"],
               ["helpAgentToggleTitle", "helpAgentToggleBody"],
@@ -1231,6 +1791,11 @@ export default function ReviewPolicyEditPage() {
               {t("review.settings.saveBlockedGlobs")}
             </span>
           )}
+          {!agentLLMBlocked && !ignoreGlobsError && maxInlineBad && (
+            <span className="text-xs text-red-600 dark:text-red-400">
+              {t("admin.reviewPolicies.detail.saveBlockedInline")}
+            </span>
+          )}
           <Button
             onClick={() => save.mutate()}
             disabled={!canEdit || save.isPending || !dirty || saveBlocked}
@@ -1300,6 +1865,11 @@ function PromptPreviewDrawer({
         )}
         {preview.data && (
           <>
+            {preview.data.prompt_source && (
+              <Callout tone="info">
+                {t(`admin.reviewPolicies.detail.promptSource.${preview.data.prompt_source}`)}
+              </Callout>
+            )}
             <div>
               <h3 className="text-xs uppercase tracking-wide text-[var(--color-muted-foreground)] mb-1">
                 system_instruction
@@ -1308,6 +1878,7 @@ function PromptPreviewDrawer({
                 {preview.data.system_prompt}
               </pre>
             </div>
+            {preview.data.user_prompt_template && (
             <div>
               <h3 className="text-xs uppercase tracking-wide text-[var(--color-muted-foreground)] mb-1">
                 user_prompt_template
@@ -1316,6 +1887,7 @@ function PromptPreviewDrawer({
                 {preview.data.user_prompt_template}
               </pre>
             </div>
+            )}
           </>
         )}
       </div>

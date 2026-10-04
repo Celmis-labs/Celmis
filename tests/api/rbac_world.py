@@ -271,7 +271,11 @@ async def _seed(factory, users, ws_ids) -> dict[str, str]:
             expires_at=now + timedelta(days=3), created_by="admin-b@acme-corp.io"))
         s.add(RepoReviewPolicy(repo_slug=B_REPO, workspace_id=b,
                                prompt_template=f"{B_SECRET} prompt rules",
-                               target_branches=[], folder_rules=[]))
+                               target_branches=[], folder_rules=[],
+                               agent_prompt_overrides={
+                                   "security": f"{B_SECRET} repo security prompt",
+                                   "verifier": f"{B_SECRET} repo verifier prompt",
+                               }))
         s.add(ReviewIssue(
             id=ids["issue_b"], workspace_id=b, repo_slug=B_REPO, fingerprint="fpb",
             file_path=f"{B_SECRET}.py", line=1, agent="defect", rule_id="defect.x",

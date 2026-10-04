@@ -537,7 +537,18 @@ export const askUrl = (chatId: string) =>
 
 // ─── Review policies (Stage 10) ─────────────────────────────────────
 
-export type FolderRule = { pattern: string; prompt: string };
+/** A custom rule. `{pattern, prompt}` is every rule saved before the other
+ *  three existed; they stay optional so such a rule round-trips unchanged.
+ *  `agents` empty = every agent; otherwise the rule reaches only their
+ *  prompts (`rule_target_agents` on the policy lists who may be named). */
+export type RuleSeverityHint = "info" | "warning" | "error" | "critical";
+export type FolderRule = {
+  pattern: string;
+  prompt: string;
+  title?: string | null;
+  severity_hint?: RuleSeverityHint | null;
+  agents?: string[];
+};
 
 export type ReviewPolicy = {
   repo_slug: string;
@@ -599,13 +610,50 @@ export type ReviewPolicy = {
   // What a review starting now would actually do — the answer above, or the
   // install default it inherits. Read-only; the PUT body drops it.
   verifier_enabled_effective?: boolean;
+  // What null inherits: the install default. Read-only.
+  verifier_enabled_default?: boolean;
   // Gitignore-ish globs for paths this repo's review never reads.
   ignore_globs?: string[];
   // Lowest severity posted as an inline comment; null inherits (= all).
   comment_min_severity?: "critical" | "error" | "warning" | "info" | null;
   // What a review would apply — read-only, the PUT body drops it.
   comment_min_severity_effective?: string;
+  // Rule ids the prefilter hides here. null inherits the code default
+  // (`suppressed_rules_effective`), a list — [] included — replaces it.
+  suppressed_rules?: string[] | null;
+  suppressed_rules_effective?: string[];
+  // Review output. Absent keys in a PUT keep what is stored.
+  summary_enabled?: boolean | null;
+  summary_instructions?: string | null;
+  started_comment_enabled?: boolean | null;
+  /** Output language code; null inherits the workspace language. */
+  review_language?: string | null;
+  review_language_effective?: string;
+  /** 1..100; null inherits REVIEW_MAX_INLINE_COMMENTS. */
+  max_inline_comments?: number | null;
+  max_inline_comments_effective?: number;
+  // Read-only roster the page renders its per-agent controls from.
+  overridable_agents?: string[];
+  rule_target_agents?: string[];
+  review_languages?: string[];
 };
+
+/** Fields the server computes; a PUT carrying them is a 422 (extra=forbid). */
+type ReviewPolicyReadOnly =
+  | "repo_slug" | "created_at" | "updated_at" | "updated_by"
+  | "agent_llm_overrides" | "agents_effective"
+  | "verifier_enabled_effective" | "comment_min_severity_effective"
+  | "suppressed_rules_effective" | "review_language_effective"
+  | "max_inline_comments_effective" | "overridable_agents"
+  | "rule_target_agents" | "review_languages" | "verifier_enabled_default";
+
+/** GET /api/review-policies/overrides-summary. */
+export type AgentOverridesSummary = {
+  prompt_overrides: Record<string, Array<{ repo_slug: string; updated_at: string | null }>>;
+};
+
+/** Which layer an agent's base system prompt comes from. */
+export type PromptSource = "repo" | "workspace" | "builtin";
 
 /** The PUT body. Not `Omit<ReviewPolicy, …>` alone, for two reasons that both
  *  end in a 422: the payload model is `extra="forbid"`, so `agents_effective`
@@ -616,12 +664,7 @@ export type ReviewPolicy = {
  *  The three states, in the server's words: omitted or null keeps the stored
  *  map (which is what makes a client that cannot render these controls
  *  harmless), `{}` clears every override, and `{agent: null}` clears one. */
-export type ReviewPolicyUpdate = Omit<
-  ReviewPolicy,
-  "repo_slug" | "created_at" | "updated_at" | "updated_by"
-  | "agent_llm_overrides" | "agents_effective"
-  | "verifier_enabled_effective" | "comment_min_severity_effective"
-> & {
+export type ReviewPolicyUpdate = Omit<ReviewPolicy, ReviewPolicyReadOnly> & {
   agent_llm_overrides?: Record<string, AgentLLMOverride | null> | null;
 };
 
@@ -670,10 +713,17 @@ export const reviewPoliciesApi = {
   branches: (token: string, slug: string) =>
     api<RepoBranches>(`/api/review-policies/${encodeURIComponent(slug)}/branches`, { token }),
   promptPreview: (token: string, slug: string, agent: string) =>
-    api<{ agent: string; system_prompt: string; user_prompt_template: string }>(
-      `/api/review-policies/${encodeURIComponent(slug)}/prompt-preview?agent=${agent}`,
+    api<{
+      agent: string; system_prompt: string; user_prompt_template: string;
+      prompt_source?: PromptSource;
+    }>(
+      `/api/review-policies/${encodeURIComponent(slug)}/prompt-preview?agent=${encodeURIComponent(agent)}`,
       { token },
     ),
+  /** agent → the repos (of the active workspace, that the caller may read)
+   *  overriding its system prompt. */
+  overridesSummary: (token: string) =>
+    api<AgentOverridesSummary>("/api/review-policies/overrides-summary", { token }),
 };
 
 

@@ -711,7 +711,7 @@ class VerifierAgent:
                     mode="qa",
                     operation="review_verifier",
                     repo=context.pull_request.repo_slug,
-                    system_instruction=_VERIFIER_SYSTEM,
+                    system_instruction=verifier_system_prompt(context),
                     temperature=llm.temperature,
                     max_output_tokens=llm.max_output_tokens,
                     reasoning=llm.reasoning,
@@ -740,7 +740,7 @@ class VerifierAgent:
                     mode="qa",
                     operation="review_verifier",
                     repo=context.pull_request.repo_slug,
-                    system_instruction=_VERIFIER_SYSTEM,
+                    system_instruction=verifier_system_prompt(context),
                     temperature=llm.temperature,
                     max_output_tokens=llm.max_output_tokens,
                     reasoning=llm.reasoning,
@@ -906,3 +906,28 @@ sentence, drop it.
 
 Return JSON: {"keep": [<indices keep>], "reasons": {"<dropped_idx>": "<why>"}}
 """
+
+
+#: What /admin/agents reads as the verifier's built-in prompt
+#: (`src.api.routers.agents._default_system_prompt` looks for `_SYSTEM`).
+_SYSTEM = _VERIFIER_SYSTEM
+
+
+def verifier_system_prompt(context: AgentContext) -> str:
+    """The verifier's system prompt for this review.
+
+    The same precedence the finders use (`_compose_effective_system_prompt`):
+    this repository's override, else the workspace's /admin/agents override,
+    else the built-in. Nothing is appended — the verifier answers
+    `{"keep": [...]}` and reads no repo rules, so the finder's output contract
+    and rule blocks would only confuse it. An override that stops asking for
+    that shape fails open (every finding kept), never closed.
+    """
+    repo_override = ((context.repo_agent_prompts or {}).get("verifier") or "").strip()
+    if repo_override:
+        return repo_override
+    try:
+        from src.api.routers.agents import get_effective_system_prompt
+        return get_effective_system_prompt("verifier", context.workspace_id) or _VERIFIER_SYSTEM
+    except Exception:  # noqa: BLE001
+        return _VERIFIER_SYSTEM
