@@ -43,6 +43,7 @@ from src.review.providers.base import (
     _format_finding_body,
     _format_summary,
     _snap_to_span,
+    _with_marker,
 )
 from src.review.settings import get_review_settings
 
@@ -246,6 +247,10 @@ class BitbucketPRProvider(PullRequestProvider):
         keep_summary_id = next(
             (cid for kind, cid in stale if kind == _SUMMARY_COMMENT), None,
         )
+        # The lifecycle comment this run already posted ("🔄 reviewing…") is
+        # the summary — rewritten in place, never joined by a second one.
+        if self._status_comment_id is not None:
+            keep_summary_id = self._status_comment_id
 
         # 2. Inline comments (capped)
         #
@@ -304,8 +309,9 @@ class BitbucketPRProvider(PullRequestProvider):
             _format_summary(batch, marker=settings.comment_marker),
             keep_summary_id,
         )
+        self._status_comment_id = None
 
-        return {
+        response: dict[str, Any] = {
             "summary_comment_id": summary_id,
             "inline_posted": posted,
             "inline_failed": failed,
@@ -314,6 +320,80 @@ class BitbucketPRProvider(PullRequestProvider):
             # half-done cleanup look like a finished one.
             "cleanup": cleanup,
         }
+        # Every write above is per comment and only LOGGED on failure, so a
+        # run could come back "posted" with nothing on the pull request. The
+        # summary is the one comment that carries the verdict here (Bitbucket
+        # has no review object), so its loss is a delivery failure: `error`
+        # is what the run record's `post_error` reads.
+        if summary_id is None:
+            why = (
+                f"Bitbucket refused the summary comment (HTTP {self._last_summary_status})"
+                if self._last_summary_status else
+                "the Bitbucket summary comment could not be written"
+            )
+            logger.error(
+                "bitbucket_summary_not_delivered repo=%s pr=%d inline_posted=%d "
+                "inline_failed=%d status=%s",
+                pr.repo, pr.number, posted, failed, self._last_summary_status or "-",
+            )
+            response["summary_error"] = why
+            response["error"] = why
+        if failed:
+            response["inline_error"] = (
+                f"{failed} of {posted + failed} inline comment(s) were refused"
+            )
+            logger.warning(
+                "bitbucket_inline_partial repo=%s pr=%d posted=%d failed=%d",
+                pr.repo, pr.number, posted, failed,
+            )
+        return response
+
+    # ─── Lifecycle comment ("🔄 reviewing…" → summary) ──────────
+
+    def upsert_status_comment(
+        self, pr: PullRequest, body: str, *, create: bool = True,
+        only_if_in_progress: bool = False,
+    ) -> int | None:
+        """See `PullRequestProvider.upsert_status_comment`."""
+        if pr.provider != "bitbucket":
+            raise PullRequestProviderError(
+                f"Bitbucket provider received non-bitbucket PR: {pr.provider}"
+            )
+        settings = get_review_settings()
+        ws, name = self._split_repo(pr.repo)
+        write, existing = self._status_target(
+            pr, settings.comment_marker,
+            replace=settings.replace_on_synchronize, create=create,
+            only_if_in_progress=only_if_in_progress,
+        )
+        if not write:
+            return None
+        cid = self._upsert_summary(
+            ws, name, pr.number,
+            _with_marker(body, settings.comment_marker), existing,
+        )
+        if cid is not None:
+            self._status_comment_id = cid
+        return cid
+
+    def _our_summary_comments(
+        self, pr: PullRequest, marker: str,
+    ) -> list[tuple[int, str]]:
+        ws, name = self._split_repo(pr.repo)
+        comments, _ = self._list_comments(ws, name, pr.number)
+        viewer = self._viewer_ids()
+        if not viewer:
+            return []  # fail closed — see `_viewer_ids`
+        out: list[tuple[int, str]] = []
+        for comment in comments:
+            cid = comment.get("id")
+            if (comment.get("inline") or not isinstance(cid, int)
+                    or not self._is_ours(comment, marker, viewer)):
+                continue
+            content = comment.get("content")
+            raw = content.get("raw") if isinstance(content, dict) else ""
+            out.append((cid, str(raw or "")))
+        return out
 
     # ─── Idempotency: what a previous run left behind ────────────
 
@@ -513,6 +593,7 @@ class BitbucketPRProvider(PullRequestProvider):
             f"/pullrequests/{pr_number}/comments"
         )
         payload = {"content": {"raw": body}}
+        self._last_summary_status = None
         if existing_id is not None:
             resp = self._http.put(f"{url_base}/{existing_id}", json=payload)
             if resp.status_code in (200, 201):
@@ -525,8 +606,12 @@ class BitbucketPRProvider(PullRequestProvider):
         if resp.status_code in (200, 201):
             cid = resp.json().get("id")
             return cid if isinstance(cid, int) else None
+        self._last_summary_status = resp.status_code
         logger.warning("bitbucket_summary_post_failed status=%d", resp.status_code)
         return None
+
+    #: HTTP status of the last summary write that failed, for the run record.
+    _last_summary_status: int | None = None
 
     def _viewer_ids(self) -> frozenset[str]:
         """The stable ids this token posts as, cached for the provider's life.

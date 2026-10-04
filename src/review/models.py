@@ -344,6 +344,19 @@ class ReviewBatch:
     #: install default, REVIEW_MAX_INLINE_COMMENTS, which every provider
     #: passes to `inline_findings` as `cap`.
     max_inline_comments: int | None = None
+    #: The Kodus-style summary comment: when True `_format_summary` renders
+    #: Summary / Changes walkthrough / Findings sections instead of the compact
+    #: form. Off by default so any caller that builds a batch by hand (tests,
+    #: the CLI) keeps today's comment byte for byte; the orchestrator turns it
+    #: on from the repo policy's `summary_enabled`.
+    rich_summary: bool = False
+    #: 2-5 sentences on what the pull request changes, written by ONE cheap
+    #: LLM call over the diff digest (src/review/pr_summary.py). "" when that
+    #: call was not made or failed — the section is then simply not rendered.
+    pr_overview: str = ""
+    #: changed file path -> one-line description of its change, from the same
+    #: call. Empty on failure, and the walkthrough table is then omitted.
+    walkthrough: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.started_at:

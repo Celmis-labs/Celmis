@@ -67,6 +67,7 @@ from src.review.providers.base import (
     _format_review_pointer,
     _format_summary,
     _snap_to_span,
+    _with_marker,
 )
 from src.review.settings import get_review_settings
 
@@ -335,6 +336,13 @@ class GitHubPRProvider(PullRequestProvider):
         keep_summary_id = next(
             (cid for kind, cid in stale if kind == _ISSUE_COMMENT), None,
         )
+        # The lifecycle comment this run already posted ("🔄 reviewing…") IS
+        # the summary: the final body goes into it, whatever its age. With
+        # re-runs replacing it is the oldest marked comment anyway (the
+        # placeholder was upserted into that one); with history kept it is the
+        # only way the placeholder is replaced instead of joined.
+        if self._status_comment_id is not None:
+            keep_summary_id = self._status_comment_id
         if keep_summary_id is not None and pr.url:
             review_payload["body"] = self._review_body(
                 batch, settings.comment_marker,
@@ -392,9 +400,11 @@ class GitHubPRProvider(PullRequestProvider):
         summary_id = self._upsert_summary(
             owner, name, pr.number, summary_body, keep_summary_id,
         )
+        # Consumed: the next review on this instance starts its own lifecycle.
+        self._status_comment_id = None
 
         result = review_resp.json()
-        return {
+        response: dict[str, Any] = {
             "review_id": result.get("id"),
             "summary_comment_id": summary_id,
             "html_url": result.get("html_url"),
@@ -408,6 +418,63 @@ class GitHubPRProvider(PullRequestProvider):
             # half-done cleanup look like a finished one.
             "cleanup": cleanup,
         }
+        if summary_id is None:
+            # The review itself is up (it carries the verdict), but the full
+            # summary — findings, scope, and the placeholder it was meant to
+            # replace — is not. Same contract as Bitbucket and GitLab: `error`
+            # becomes the run's `post_error`, so the run reads PARTIAL instead
+            # of passing as delivered.
+            why = (
+                f"GitHub refused the summary comment (HTTP {self._last_summary_status})"
+                if self._last_summary_status else
+                "the GitHub summary comment could not be written"
+            )
+            logger.error("github_summary_not_delivered repo=%s pr=%d status=%s",
+                         pr.repo, pr.number, self._last_summary_status or "-")
+            response["summary_error"] = why
+            response["error"] = why
+        return response
+
+    # ─── Lifecycle comment ("🔄 reviewing…" → summary) ──────────
+
+    def upsert_status_comment(
+        self, pr: PullRequest, body: str, *, create: bool = True,
+        only_if_in_progress: bool = False,
+    ) -> int | None:
+        """See `PullRequestProvider.upsert_status_comment`."""
+        if pr.provider != "github":
+            raise PullRequestProviderError(
+                f"GitHub provider received non-github PR: {pr.provider}"
+            )
+        settings = get_review_settings()
+        owner, name = self._split_repo(pr.repo)
+        write, existing = self._status_target(
+            pr, settings.comment_marker,
+            replace=settings.replace_on_synchronize, create=create,
+            only_if_in_progress=only_if_in_progress,
+        )
+        if not write:
+            return None
+        cid = self._upsert_summary(
+            owner, name, pr.number,
+            _with_marker(body, settings.comment_marker), existing,
+        )
+        if cid is not None:
+            self._status_comment_id = cid
+        return cid
+
+    def _our_summary_comments(
+        self, pr: PullRequest, marker: str,
+    ) -> list[tuple[int, str]]:
+        owner, name = self._split_repo(pr.repo)
+        comments, _ = self._list_all(self._issue_comments_url(owner, name, pr.number))
+        viewer = self._viewer_login()
+        if not viewer:
+            return []  # fail closed — see `_viewer_login`
+        return [
+            (c["id"], str(c.get("body") or "")) for c in comments
+            if self._is_ours(c, marker, viewer) and isinstance(c.get("id"), int)
+        ]
 
     # ─── Review body: pointer + proof of authorship ─────────────
 
@@ -913,6 +980,7 @@ class GitHubPRProvider(PullRequestProvider):
         existing_id: int | None,
     ) -> int | None:
         """PATCH the summary we already own, or POST the first one."""
+        self._last_summary_status = None
         if existing_id is not None:
             resp = self._http.patch(
                 f"{GITHUB_API_BASE}/repos/{owner}/{name}/issues/comments/{existing_id}",
@@ -931,8 +999,12 @@ class GitHubPRProvider(PullRequestProvider):
         if resp.status_code == 201:
             cid = resp.json().get("id")
             return cid if isinstance(cid, int) else None
+        self._last_summary_status = resp.status_code
         logger.warning("github_summary_post_failed status=%d", resp.status_code)
         return None
+
+    #: HTTP status of the last summary write that failed, for the run record.
+    _last_summary_status: int | None = None
 
     @staticmethod
     def _parse_link_next(link: str) -> str | None:

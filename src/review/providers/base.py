@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from src.review.models import Finding, PullRequest, ReviewBatch, ReviewVerdict
+from src.review.models import (
+    Finding,
+    HunkSide,
+    PullRequest,
+    ReviewBatch,
+    ReviewVerdict,
+)
 
 
 class PullRequestProviderError(Exception):
@@ -55,6 +61,83 @@ class PullRequestProvider(ABC):
         things.
         """
         return []
+
+    #: The id of the lifecycle comment this provider instance posted or
+    #: adopted for the current review — "🔄 reviewing…" first, the final
+    #: summary later. `post_review` rewrites THIS comment instead of picking
+    #: one by age, so the placeholder and the summary are one comment even
+    #: when `replace_on_synchronize` is off and nothing else is upserted.
+    _status_comment_id: int | None = None
+
+    def upsert_status_comment(
+        self, pr: PullRequest, body: str, *, create: bool = True,
+        only_if_in_progress: bool = False,
+    ) -> int | None:
+        """Write `body` into the persistent, marked summary comment.
+
+        The same comment `post_review` later fills with the final summary:
+        the one this instance already wrote, else (when re-runs replace) the
+        oldest marked top-level comment of ours, else — only when `create` —
+        a new one. `create=False` is for the skip and failure paths, which
+        must rewrite a placeholder that exists and never start a thread on a
+        pull request nobody is reviewing.
+
+        `only_if_in_progress` is the skip path's guard: the comment is
+        rewritten only when it is this instance's own placeholder or an
+        existing comment of ours that is STILL a placeholder (carries
+        `STATUS_IN_PROGRESS_MARK`, e.g. left by a killed run). A finished
+        summary of an earlier commit is never overwritten by a skip.
+
+        Returns the comment id, or None when nothing was written. The default
+        writes nothing, so a provider (or a test double) that has not
+        implemented it keeps today's behaviour. Implementations may raise;
+        the orchestrator treats every failure here as non-fatal.
+        """
+        return None
+
+    def _our_summary_comments(
+        self, pr: PullRequest, marker: str,
+    ) -> list[tuple[int, str]]:
+        """(id, body) of every top-level marked comment of OURS, oldest first.
+
+        Authorship as in `find_marked_comment_ids`. Defaults to nothing.
+        """
+        return []
+
+    def _status_target(
+        self, pr: PullRequest, marker: str, *, replace: bool, create: bool,
+        only_if_in_progress: bool,
+    ) -> tuple[bool, int | None]:
+        """(write?, id to update or None for a new comment) — shared by all
+        three `upsert_status_comment` implementations."""
+        if self._status_comment_id is not None:
+            return True, self._status_comment_id
+        if only_if_in_progress:
+            # Listed regardless of `replace_on_synchronize`: a placeholder a
+            # killed run left behind is stale in either mode. The newest one
+            # wins — with history kept, older finished summaries are records.
+            for cid, text in reversed(self._our_summary_comments(pr, marker)):
+                if STATUS_IN_PROGRESS_MARK in (text or ""):
+                    return True, cid
+            return False, None
+        existing = (
+            self.find_existing_review_comment(pr.repo, pr.number, marker)
+            if replace else None
+        )
+        if existing is None and not create:
+            return False, None
+        return True, existing
+
+
+def _with_marker(body: str, marker: str) -> str:
+    """`body` carrying `marker` on its first line — added only when missing.
+
+    The marker is what every later run finds the persistent comment by, so a
+    lifecycle body without it would be a comment no re-run can ever replace.
+    """
+    if not marker or marker in body:
+        return body
+    return f"{marker}\n{body}"
 
 
 # ─── Factory ─────────────────────────────────────────────────────
@@ -280,7 +363,17 @@ def _files(n: int) -> str:
 
 
 def _format_summary(batch: ReviewBatch, marker: str) -> str:
-    """Top-level summary comment markdown — universal for all 3 providers."""
+    """Top-level summary comment markdown — universal for all 3 providers.
+
+    Two shapes. The compact one is what every comment looked like before the
+    lifecycle work and stays the default for a hand-built batch. The rich one
+    (`batch.rich_summary`, switched on by the orchestrator from the repo
+    policy's `summary_enabled`) is Kodus-shaped: a natural-language summary,
+    a per-file walkthrough table, findings by severity and by source with the
+    top ones listed, and the scope/telemetry folded into <details>.
+    """
+    if getattr(batch, "rich_summary", False):
+        return _format_rich_summary(batch, marker)
     pr = batch.pull_request
     lines: list[str] = []
     lines.append(marker)
@@ -309,14 +402,7 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
     if batch.findings:
         lines.append("### Findings")
         lines.append("")
-        if batch.critical_count:
-            lines.append(f"- 🔴 **Critical:** {batch.critical_count}")
-        if batch.error_count:
-            lines.append(f"- 🟠 **Error:** {batch.error_count}")
-        if batch.warning_count:
-            lines.append(f"- 🟡 **Warning:** {batch.warning_count}")
-        if batch.info_count:
-            lines.append(f"- 💡 **Info:** {batch.info_count}")
+        lines.extend(_severity_count_lines(batch))
         lines.append("")
         posting = _posting_line(batch)
         if posting:
@@ -334,8 +420,40 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
 
     # PR scope
     lines.append("### Scope")
-    lines.append(f"- Files changed: **{len(pr.changed_files)}**")
-    lines.append(f"- Lines: **+{pr.total_added_lines} / -{pr.total_removed_lines}**")
+    lines.extend(_scope_lines(batch))
+    lines.append("")
+
+    # Telemetry
+    perf = _performance_line(batch)
+    if perf:
+        lines.append("### Performance")
+        lines.append(perf)
+        lines.append("")
+
+    lines.append("---")
+    lines.append(f"<sub>Powered by Code Analyzer · {_provenance(batch)}</sub>")
+    return "\n".join(lines)
+
+
+def _severity_count_lines(batch: ReviewBatch) -> list[str]:
+    lines: list[str] = []
+    if batch.critical_count:
+        lines.append(f"- 🔴 **Critical:** {batch.critical_count}")
+    if batch.error_count:
+        lines.append(f"- 🟠 **Error:** {batch.error_count}")
+    if batch.warning_count:
+        lines.append(f"- 🟡 **Warning:** {batch.warning_count}")
+    if batch.info_count:
+        lines.append(f"- 💡 **Info:** {batch.info_count}")
+    return lines
+
+
+def _scope_lines(batch: ReviewBatch) -> list[str]:
+    pr = batch.pull_request
+    lines = [
+        f"- Files changed: **{len(pr.changed_files)}**",
+        f"- Lines: **+{pr.total_added_lines} / -{pr.total_removed_lines}**",
+    ]
     if batch.cross_repo_callers:
         lines.append(
             f"- Cross-repo callers: **{batch.cross_repo_callers}** "
@@ -353,29 +471,295 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
         if by_glob:
             lines.append(
                 f"- Ignored by this repository's ignore globs: {by_glob} {_files(by_glob)}")
+    return lines
+
+
+def _performance_line(batch: ReviewBatch) -> str:
+    if not batch.elapsed_seconds:
+        return ""
+    parts = [
+        f"Analysis time: **{batch.elapsed_seconds:.1f}s**",
+        # "agents: none" and not "agents: " — this line is reachable for
+        # skipped/failed runs now that they post a real comment.
+        f"agents: {', '.join(batch.agents_run) or 'none'}",
+    ]
+    # Only when there are any. The Claude Code engine bills by
+    # subscription and never populates these, so every review it produced
+    # printed "tokens: 0/0" beside a real $0.21 — a number that reads as a
+    # measurement and is an absent field. A missing line is honest; a zero
+    # is not.
+    if batch.tokens_in or batch.tokens_out:
+        parts.append(f"tokens: {batch.tokens_in:,}/{batch.tokens_out:,}")
+    return "- " + " · ".join(parts)
+
+
+# ─── The Kodus-style summary ─────────────────────────────────────────
+
+#: Rows in the walkthrough table before the rest collapse into "+N more".
+WALKTHROUGH_MAX_FILES = 30
+#: Findings listed by title under the counts; the inline comments carry the rest.
+TOP_FINDINGS_MAX = 10
+
+_SEVERITY_LABEL = {
+    "critical": "Critical", "error": "Error", "warning": "Warning", "info": "Info",
+}
+
+
+def _md_cell(text: str, limit: int = 200) -> str:
+    """One table cell / one line: whitespace collapsed, pipes escaped, capped."""
+    flat = " ".join(str(text or "").split())
+    if len(flat) > limit:
+        flat = flat[: limit - 1].rstrip() + "…"
+    return flat.replace("|", "\\|")
+
+
+def _file_stats(pr: PullRequest) -> dict[str, tuple[int, int]]:
+    stats: dict[str, tuple[int, int]] = {}
+    for h in pr.hunks:
+        added, removed = stats.get(h.file_path, (0, 0))
+        stats[h.file_path] = (added + h.added_lines, removed + h.removed_lines)
+    return stats
+
+
+def _blob_link(pr: PullRequest, path: str, line: int) -> str | None:
+    """A link to `path` at `line` in the head commit, when the URL shape is known.
+
+    Built from the pull request's own web URL, so it never points at a host the
+    review did not come from: GitHub `/blob/<sha>/<path>#L<n>`, GitLab
+    `/-/blob/<sha>/<path>#L<n>`, Bitbucket `/src/<sha>/<path>#lines-<n>`.
+    None when the URL or the head sha is missing — the caller prints plain
+    text, which is the "where the provider supports it" half of the rule.
+    """
+    url = (pr.url or "").strip()
+    sha = (pr.head_sha or "").strip()
+    if not url or not sha or not path or line <= 0:
+        return None
+    from urllib.parse import quote
+
+    safe_path = quote(path, safe="/")
+    if pr.provider == "github" and "/pull/" in url:
+        base = url.split("/pull/", 1)[0]
+        return f"{base}/blob/{sha}/{safe_path}#L{line}"
+    if pr.provider == "gitlab" and "/-/merge_requests/" in url:
+        base = url.split("/-/merge_requests/", 1)[0]
+        return f"{base}/-/blob/{sha}/{safe_path}#L{line}"
+    if pr.provider == "bitbucket" and "/pull-requests/" in url:
+        base = url.split("/pull-requests/", 1)[0]
+        return f"{base}/src/{sha}/{safe_path}#lines-{line}"
+    return None
+
+
+def _finding_location(pr: PullRequest, finding: Finding) -> str:
+    label = f"`{finding.file_path}:{finding.line}`"
+    # A LEFT-side finding sits on a line that no longer exists in the head
+    # commit, so a link to the head blob would land on the wrong code.
+    if getattr(finding, "side", HunkSide.RIGHT) != HunkSide.RIGHT:
+        return label
+    link = _blob_link(pr, finding.file_path, finding.line)
+    return f"[{label}]({link})" if link else label
+
+
+def _category_of(finding: Finding) -> str:
+    if finding.agent:
+        return finding.agent
+    rule = finding.rule_id or ""
+    return rule.split(".", 1)[0] if rule else "other"
+
+
+def _walkthrough_lines(batch: ReviewBatch) -> list[str]:
+    pr = batch.pull_request
+    walkthrough = getattr(batch, "walkthrough", None) or {}
+    if not walkthrough:
+        return []
+    stats = _file_stats(pr)
+    files = pr.changed_files
+    shown = files[:WALKTHROUGH_MAX_FILES]
+    lines = [
+        "### Changes walkthrough",
+        "",
+        "| File | +/- | Change summary |",
+        "|---|---|---|",
+    ]
+    for path in shown:
+        added, removed = stats.get(path, (0, 0))
+        lines.append(
+            f"| `{_md_cell(path, 120)}` | +{added} / -{removed} | "
+            f"{_md_cell(walkthrough.get(path) or '—')} |"
+        )
+    more = len(files) - len(shown)
+    if more > 0:
+        lines.append(f"| _+{more} more {_files(more)}_ | | |")
+    lines.append("")
+    return lines
+
+
+def _rich_findings_lines(batch: ReviewBatch) -> list[str]:
+    pr = batch.pull_request
+    lines = ["### Findings", ""]
+    if not batch.findings:
+        if batch.agents_run:
+            lines.append("_No issues detected._")
+            lines.append("")
+            return lines
+        # Same rule as the compact form: "no issues" is a claim that
+        # something looked. Nothing did, and the banner above says why.
+        return []
+
+    sev = [
+        f"{_severity_emoji(level)} {_SEVERITY_LABEL[level]}: **{count}**"
+        for level, count in (
+            ("critical", batch.critical_count), ("error", batch.error_count),
+            ("warning", batch.warning_count), ("info", batch.info_count),
+        )
+        if count
+    ]
+    lines.append("**By severity:** " + " · ".join(sev))
+    by_cat: dict[str, int] = {}
+    for f in batch.findings:
+        cat = _category_of(f)
+        by_cat[cat] = by_cat.get(cat, 0) + 1
+    lines.append("")
+    lines.append("**By source:** " + " · ".join(
+        f"{cat}: **{n}**"
+        for cat, n in sorted(by_cat.items(), key=lambda kv: (-kv[1], kv[0]))
+    ))
     lines.append("")
 
-    # Telemetry
-    if batch.elapsed_seconds:
-        lines.append("### Performance")
-        parts = [
-            f"Analysis time: **{batch.elapsed_seconds:.1f}s**",
-            # "agents: none" and not "agents: " — this line is reachable for
-            # skipped/failed runs now that they post a real comment.
-            f"agents: {', '.join(batch.agents_run) or 'none'}",
-        ]
-        # Only when there are any. The Claude Code engine bills by
-        # subscription and never populates these, so every review it produced
-        # printed "tokens: 0/0" beside a real $0.21 — a number that reads as a
-        # measurement and is an absent field. A missing line is honest; a zero
-        # is not.
-        if batch.tokens_in or batch.tokens_out:
-            parts.append(f"tokens: {batch.tokens_in:,}/{batch.tokens_out:,}")
-        lines.append("- " + " · ".join(parts))
+    postable = batch.postable_findings
+    top = postable[:TOP_FINDINGS_MAX]
+    if top:
+        lines.append("**Top findings:**")
         lines.append("")
+        for i, f in enumerate(top, 1):
+            title = _md_cell(f.title or f.severity.value.upper(), 160)
+            lines.append(
+                f"{i}. {_severity_emoji(f.severity.value)} **{title}** — "
+                f"{_finding_location(pr, f)}"
+            )
+        rest = len(postable) - len(top)
+        if rest > 0:
+            lines.append("")
+            lines.append(f"_…and {rest} more in the inline comments._")
+        lines.append("")
+    posting = _posting_line(batch)
+    if posting:
+        lines.append(posting)
+        lines.append("")
+    return lines
+
+
+def _failure_headline(batch: ReviewBatch) -> str:
+    """'❌ Review failed: <reason>' for a run in which no stage completed.
+
+    The reason comes from `agent_errors`, which holds curated sentences only
+    (see the orchestrator: never a provider's raw message), so nothing secret
+    can reach the pull request through it.
+    """
+    reasons = sorted({r for a, r in batch.agent_errors.items()
+                      if a in batch.agents_failed and r})
+    if reasons:
+        reason = "; ".join(reasons)
+    elif batch.agents_failed:
+        reason = f"no review stage completed ({', '.join(batch.agents_failed)})"
+    else:
+        reason = "no review stage completed"
+    return f"### ❌ Review failed: {_md_cell(reason, 300)}"
+
+
+def _format_rich_summary(batch: ReviewBatch, marker: str) -> str:
+    from src.review.models import ReviewRunStatus
+
+    pr = batch.pull_request
+    lines: list[str] = [marker, f"## 🤖 Code Review for PR #{pr.number}", ""]
+
+    if batch.run_status == ReviewRunStatus.FAILED:
+        lines.append(_failure_headline(batch))
+        lines.append("")
+    banner = batch.partial_banner
+    if banner:
+        lines.append(banner.strip())
+        lines.append("")
+    lines.append(_verdict_line(batch))
+    lines.append("")
+
+    overview = (getattr(batch, "pr_overview", "") or "").strip()
+    if overview:
+        lines.append("### Summary")
+        lines.append("")
+        lines.append(overview)
+        lines.append("")
+
+    lines.extend(_walkthrough_lines(batch))
+    lines.extend(_rich_findings_lines(batch))
+
+    details = ["**Scope**", "", *_scope_lines(batch)]
+    perf = _performance_line(batch)
+    if perf:
+        details += ["", "**Performance**", "", perf]
+    lines.append("<details>")
+    lines.append("<summary>Scope &amp; performance</summary>")
+    lines.append("")
+    lines.extend(details)
+    lines.append("")
+    lines.append("</details>")
+    lines.append("")
 
     lines.append("---")
     lines.append(f"<sub>Powered by Code Analyzer · {_provenance(batch)}</sub>")
+    return "\n".join(lines)
+
+
+# ─── Lifecycle comments: started / skipped / failed ──────────────────
+
+#: Present only in the placeholder, so a later reader (or a test) can tell
+#: "still running" from a finished summary without parsing prose.
+STATUS_IN_PROGRESS_MARK = "<!-- celmis:review-status:in-progress -->"
+
+
+def _format_started_comment(
+    pr: PullRequest, *, agents: list[str], started_at: str, marker: str = "",
+) -> str:
+    """The "🔄 reviewing…" placeholder posted as soon as a review begins."""
+    sha = (pr.head_sha or "")[:7] or "unknown"
+    files = len(pr.changed_files)
+    roster = ", ".join(f"`{a}`" for a in agents) if agents else "_none_"
+    lines = [marker] if marker else []
+    lines += [
+        STATUS_IN_PROGRESS_MARK,
+        "## 🔄 Celmis is reviewing this PR…",
+        "",
+        f"- Commit: `{sha}`",
+        f"- Agents: {roster}",
+        f"- Files to review: **{files}**",
+        f"- Started: {started_at}",
+        "",
+        "_The results will replace this comment when the review finishes._",
+    ]
+    return "\n".join(lines)
+
+
+def _format_status_comment(
+    pr: PullRequest, *, outcome: str, reason: str, marker: str = "",
+) -> str:
+    """A terminal state that is not a review: `outcome` is 'skipped' or 'failed'."""
+    sha = (pr.head_sha or "")[:7] or "unknown"
+    if outcome == "skipped":
+        head = f"### ⏭️ Skipped: {_md_cell(reason, 400)}"
+        tail = "_Nothing was reviewed for this commit._"
+    else:
+        head = f"### ❌ Review failed: {_md_cell(reason, 300)}"
+        tail = ("_No review was delivered for this commit. Re-run it once the "
+                "cause is fixed._")
+    lines = [marker] if marker else []
+    lines += [
+        f"## 🤖 Code Review for PR #{pr.number}",
+        "",
+        head,
+        "",
+        f"- Commit: `{sha}`",
+        "",
+        tail,
+    ]
     return "\n".join(lines)
 
 

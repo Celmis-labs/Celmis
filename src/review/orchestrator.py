@@ -87,6 +87,197 @@ def _drop_ignored(findings: list[Finding], globs: list[str]) -> list[Finding]:
     return [f for f in findings if not path_ignored(f.file_path, globs)]
 
 
+def _policy_value(policy, name: str, default):
+    """A policy setting, or `default` when the policy does not decide it.
+
+    The policy is the dict `_load_policy` builds, but test doubles and older
+    callers hand in objects too, so both shapes are read. None — no policy, no
+    key, a NULL column — always means "inherit", never "off".
+    """
+    if policy is None:
+        return default
+    value = (
+        policy.get(name) if isinstance(policy, dict) else getattr(policy, name, None)
+    )
+    return default if value is None else value
+
+
+def _display_time(iso: str) -> str:
+    """'2026-10-04T12:03:11.5+00:00' -> '2026-10-04 12:03 UTC'."""
+    from datetime import UTC, datetime
+
+    try:
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(UTC)
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError):
+        return datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _safe_failure_reason(exc: BaseException) -> str:
+    """A sentence about a failure that is safe to print on a pull request.
+
+    Never the exception's message: provider errors quote response bodies,
+    URLs and occasionally credentials. The curated sentence for a classified
+    LLM failure when there is one, otherwise the exception's type alone —
+    the full message stays in the log and the run record.
+    """
+    try:
+        from src.llm.errors import classify, curated_reason
+
+        reason = curated_reason(classify(exc).code)
+        if reason:
+            return reason
+    except Exception:  # noqa: BLE001
+        pass
+    if isinstance(exc, PullRequestProviderError):
+        return "the git provider refused a request (see the review run for details)"
+    return f"internal error ({type(exc).__name__}) — see the review run for details"
+
+
+class _ReviewLifecycle:
+    """The PR-side lifecycle comment of one review.
+
+    started  → "🔄 Celmis is reviewing this PR…" (creates or adopts the
+               persistent summary comment)
+    skipped  → "⏭️ Skipped: <reason>" — only over a comment that is still an
+               in-progress placeholder (this run's, or one a killed run left
+               behind). A finished summary of an earlier commit is never
+               overwritten, and a skipped PR never gets a new thread
+    failed   → "❌ Review failed: <reason>" — only over a placeholder THIS run
+               posted, so a crash never overwrites a previous good summary
+    (success → `post_review` writes the final summary into the same comment)
+
+    Every write is best-effort: a failure is logged and the review goes on.
+    Inactive (`post_comments=False` or a dry run) it writes nothing at all.
+    """
+
+    def __init__(self, *, active: bool) -> None:
+        self.active = active
+        self.provider = None
+        self.pr: PullRequest | None = None
+        #: The placeholder this run wrote, if any.
+        self.started_id: int | None = None
+
+    def bind(self, provider, pr: PullRequest) -> None:
+        self.provider = provider
+        self.pr = pr
+
+    def _write(self, body: str, *, create: bool, what: str,
+               only_if_in_progress: bool = False) -> int | None:
+        if not self.active or self.provider is None or self.pr is None:
+            return None
+        upsert = getattr(self.provider, "upsert_status_comment", None)
+        if not callable(upsert):
+            return None
+        try:
+            if only_if_in_progress:
+                cid = upsert(self.pr, body, create=create, only_if_in_progress=True)
+            else:
+                cid = upsert(self.pr, body, create=create)
+        except Exception as exc:  # noqa: BLE001 — a status comment never fails a review
+            logger.warning(
+                "review_status_comment_failed what=%s pr=%s err_type=%s err=%s",
+                what, self.pr.number, type(exc).__name__, str(exc)[:200],
+            )
+            return None
+        cid = cid if isinstance(cid, int) and not isinstance(cid, bool) else None
+        logger.info("review_status_comment what=%s pr=%s id=%s",
+                    what, self.pr.number, cid)
+        return cid
+
+    def started(self, agents: list[str], *, started_at: str) -> None:
+        from src.review.providers.base import _format_started_comment
+
+        if self.pr is None:
+            return
+        self.started_id = self._write(
+            _format_started_comment(self.pr, agents=agents, started_at=started_at),
+            create=True, what="started",
+        )
+
+    def skipped(self, reason: str) -> None:
+        from src.review.providers.base import _format_status_comment
+
+        if self.pr is None:
+            return
+        self._write(
+            _format_status_comment(self.pr, outcome="skipped", reason=reason),
+            create=False, what="skipped", only_if_in_progress=True,
+        )
+
+    def failed(self, reason: str) -> None:
+        from src.review.providers.base import _format_status_comment
+
+        if self.pr is None or self.started_id is None:
+            return
+        self._write(
+            _format_status_comment(self.pr, outcome="failed", reason=reason),
+            create=False, what="failed",
+        )
+        self.started_id = None
+
+
+class _PRSummaryJob:
+    """The overview/walkthrough LLM call, run beside the engine.
+
+    One worker thread, one call, a deadline on the join. `apply_to` never
+    raises and never blocks past the deadline: the summary is decoration and
+    the review it decorates is already finished when it is read.
+    """
+
+    def __init__(self, executor, future) -> None:
+        self._executor = executor
+        self._future = future
+
+    @classmethod
+    def start(cls, pr: PullRequest, context, *, language, instructions) -> _PRSummaryJob | None:
+        try:
+            from src.review.agents.base import agent_llm_settings
+            from src.review.pr_summary import generate_pr_summary
+
+            client = getattr(context, "llm_client", None)
+            if client is None:
+                logger.info("review_summary_skipped reason=no_llm_client pr=%s", pr.number)
+                return None
+            agent_llm = agent_llm_settings(context, "verifier")
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pr-summary")
+            future = executor.submit(
+                generate_pr_summary, pr, llm_client=client, agent_llm=agent_llm,
+                language=language, instructions=instructions,
+            )
+            return cls(executor, future)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("review_summary_not_started err_type=%s err=%s",
+                           type(exc).__name__, str(exc)[:200])
+            return None
+
+    def apply_to(self, batch: ReviewBatch) -> None:
+        from src.review.pr_summary import SUMMARY_TIMEOUT_SECONDS
+
+        try:
+            res = self._future.result(timeout=SUMMARY_TIMEOUT_SECONDS + 5)
+        except Exception as exc:  # noqa: BLE001 — includes the join's own timeout
+            logger.warning("review_summary_unavailable pr=%s err_type=%s",
+                           batch.pull_request.number, type(exc).__name__)
+            return
+        finally:
+            self._executor.shutdown(wait=False)
+        batch.pr_overview = res.overview
+        batch.walkthrough = dict(res.walkthrough)
+        # Its tokens are this review's tokens; the ledger already booked the
+        # money under `review_summary`. The run's own total takes the cost
+        # only when both sides are known — an unknown never poisons a known.
+        batch.tokens_in += res.tokens_in
+        batch.tokens_out += res.tokens_out
+        if res.cost_usd is not None and batch.cost_usd is not None:
+            batch.cost_usd = round(batch.cost_usd + res.cost_usd, 6)
+        if res.error:
+            logger.info("review_summary_degraded pr=%s reason=%s",
+                        batch.pull_request.number, res.error)
+
+
 class ReviewOrchestrator:
     """End-to-end PR review."""
 
@@ -157,12 +348,22 @@ class ReviewOrchestrator:
         # at this moment is exactly what capacity docs need.
         from src.ops.telemetry import review_finished, review_started
         review_started()
+        # The PR-side lifecycle comment ("🔄 reviewing…" → summary). Owned
+        # here, outside `_review_impl`, so an exception anywhere inside it
+        # still rewrites a placeholder this run posted into "❌ Review
+        # failed" instead of leaving the pull request saying "reviewing…"
+        # forever.
+        lifecycle = _ReviewLifecycle(active=post_comments and not dry_run)
         try:
             return self._review_impl(
                 provider_name, repo, pr_number, dry_run=dry_run,
                 post_comments=post_comments, provider=provider,
                 user_id=user_id, workspace_id=workspace_id, t0=t0,
+                lifecycle=lifecycle,
             )
+        except Exception as exc:
+            lifecycle.failed(_safe_failure_reason(exc))
+            raise
         finally:
             review_finished()
 
@@ -170,7 +371,10 @@ class ReviewOrchestrator:
         self, provider_name: str, repo: str, pr_number: int, *,
         dry_run: bool, post_comments: bool, provider,
         user_id: str, workspace_id: str, t0: float,
+        lifecycle: _ReviewLifecycle | None = None,
     ) -> ReviewRunResult:
+        if lifecycle is None:
+            lifecycle = _ReviewLifecycle(active=False)
         if provider is None:
             provider = get_provider_for(
                 provider_name, user_id=user_id, workspace_id=workspace_id,
@@ -183,6 +387,8 @@ class ReviewOrchestrator:
         finally:
             pass  # provider closed by caller
 
+        lifecycle.bind(provider, pr)
+
         # ── Load per-repo policy (Stage 10) ──
         policy = self._load_policy(pr.local_slug)
 
@@ -191,6 +397,10 @@ class ReviewOrchestrator:
         # The repo's own inline-comment cap; None leaves the providers on
         # REVIEW_MAX_INLINE_COMMENTS.
         batch.max_inline_comments = (policy or {}).get("max_inline_comments")
+        # The Kodus-style summary is the default; a repository can keep the
+        # compact one. Read with defaults because the columns are newer than
+        # most policy rows (and than the code that may have loaded them).
+        batch.rich_summary = bool(_policy_value(policy, "summary_enabled", True))
 
         # ── Per-repo ignore globs. The diff was parsed inside the provider,
         # before any policy existed, so the repository's own exclusions can
@@ -267,6 +477,7 @@ class ReviewOrchestrator:
             batch.summary = "PR is draft — review skipped."
             batch.verdict = ReviewVerdict.SKIPPED
             batch.mark_complete()
+            lifecycle.skipped("the pull request is a draft")
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
 
         # A diff too large to review, refused as a refusal rather than
@@ -294,6 +505,11 @@ class ReviewOrchestrator:
             batch.summary = reason
             batch.verdict = ReviewVerdict.SKIPPED
             batch.mark_complete()
+            lifecycle.skipped(
+                f"the diff is {raw_len:,} bytes, over the {cap:,}-byte limit "
+                f"for a single review — split the pull request or raise "
+                f"REVIEW_MAX_DIFF_SIZE_BYTES"
+            )
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
 
         if not pr.hunks:
@@ -321,6 +537,18 @@ class ReviewOrchestrator:
             batch.summary = reason
             batch.verdict = ReviewVerdict.SKIPPED
             batch.mark_complete()
+            if not pr.raw_diff or not pr.raw_diff.strip():
+                short = "the pull request has no diff content"
+            elif pr.skipped_files:
+                short = (
+                    f"all {len(pr.skipped_files)} changed "
+                    f"{'file was' if len(pr.skipped_files) == 1 else 'files were'} "
+                    f"filtered out (lockfiles, binaries, generated files or this "
+                    f"repository's ignore globs)"
+                )
+            else:
+                short = "the diff could not be parsed"
+            lifecycle.skipped(short)
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
 
         # ── Engine selection (workspace setting): the platform around the
@@ -335,6 +563,35 @@ class ReviewOrchestrator:
             engine = str(_load_workspace_config(workspace_id).get("review_engine") or "api")
         except Exception:  # noqa: BLE001
             pass
+
+        disabled_agents = {
+            str(a).strip().lower()
+            for a in ((policy or {}).get("disabled_agents") or [])
+        }
+
+        # ── "🔄 Celmis is reviewing this PR…" — posted now, after every skip
+        # gate (a skipped PR gets no placeholder to take back) and before the
+        # engine spends anything, so the author sees the review has begun.
+        # Rewritten in place by the final summary: same comment, same id.
+        if _policy_value(policy, "started_comment_enabled", True):
+            if engine == "claude_code":
+                roster = ["claude_code"]
+            else:
+                roster = [a.name for a in self.agents if a.name not in disabled_agents]
+                if self._verifier_enabled(policy, disabled_agents)[0]:
+                    roster.append("verifier")
+            lifecycle.started(roster, started_at=_display_time(batch.started_at))
+
+        # ── The PR overview + walkthrough: one cheap LLM call, started now so
+        # it runs alongside the engine instead of after it. Only when the
+        # comment will actually be posted — a dry run has no reader for it.
+        summary_job = None
+        if batch.rich_summary and post_comments and not dry_run:
+            summary_job = _PRSummaryJob.start(
+                agent_pr, context,
+                language=_policy_value(policy, "review_language", None),
+                instructions=_policy_value(policy, "summary_instructions", None),
+            )
 
         if engine == "claude_code":
             # DRIFT REACHES THIS ENGINE TOO, and it did not.
@@ -413,13 +670,11 @@ class ReviewOrchestrator:
                 batch, pr, provider, provider_name,
                 dry_run=dry_run, post_comments=post_comments,
                 user_id=user_id, workspace_id=workspace_id, t0=t0,
+                lifecycle=lifecycle, summary_job=summary_job,
             )
 
-        # ── Run agents in parallel (minus the ones the policy switched off) ──
-        disabled_agents = {
-            str(a).strip().lower()
-            for a in ((policy or {}).get("disabled_agents") or [])
-        }
+        # ── Run agents in parallel (minus the ones the policy switched off;
+        # `disabled_agents` was read above, before the started comment) ──
         # A name that no longer names an agent is SAID, not silently ignored.
         # Policies written before the restructure may still carry "architect",
         # "quality" or "tests"; matching them against nothing would quietly
@@ -717,15 +972,23 @@ class ReviewOrchestrator:
             batch, pr, provider, provider_name,
             dry_run=dry_run, post_comments=post_comments,
             user_id=user_id, workspace_id=workspace_id, t0=t0,
+            lifecycle=lifecycle, summary_job=summary_job,
         )
 
     def _finish_review(
         self, batch: ReviewBatch, pr: PullRequest, provider, provider_name: str,
         *, dry_run: bool, post_comments: bool, user_id: str, workspace_id: str,
         t0: float,
+        lifecycle: _ReviewLifecycle | None = None,
+        summary_job: _PRSummaryJob | None = None,
     ) -> ReviewRunResult:
         """Shared tail for every engine: reviewer assignment, notifications,
         comment posting. The brain differs; the plumbing doesn't."""
+        # ── The overview + walkthrough the summary comment renders. Joined
+        # here, after the engine, with its own short deadline; whatever went
+        # wrong, the comment is rendered without the two sections.
+        if summary_job is not None:
+            summary_job.apply_to(batch)
         # ── Auto-reviewer assignment (Stage 16) — via ownership snapshot.
         # Only fires for real posted reviews (not dry-run) so we don't
         # spam @-mentions during test runs.
@@ -774,6 +1037,27 @@ class ReviewOrchestrator:
             except PullRequestProviderError as exc:
                 logger.error("review_post_failed err=%s", exc)
                 provider_response = {"error": str(exc)}
+                # The placeholder this run posted would otherwise go on
+                # saying "reviewing…" over a review that never arrived. The
+                # provider's own words stay in the run record (above); the
+                # pull request gets a sentence without them.
+                if lifecycle is not None:
+                    lifecycle.failed(
+                        "the review could not be posted to the pull request "
+                        "(the provider refused it)"
+                    )
+            # A summary that did not arrive is said out loud — Bitbucket and
+            # GitLab write per comment and used to report "posted" with the
+            # verdict-carrying summary missing.
+            summary_error = (
+                provider_response.get("summary_error")
+                if isinstance(provider_response, dict) else None
+            )
+            if summary_error:
+                logger.error(
+                    "review_summary_not_delivered provider=%s pr=%d err=%s",
+                    provider_name, pr.number, summary_error,
+                )
 
         return ReviewRunResult(batch=batch, posted=posted, provider_response=provider_response)
 
