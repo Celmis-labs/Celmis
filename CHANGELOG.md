@@ -20,23 +20,57 @@ derives it from there.
 
 ## [Unreleased]
 
-### Changed
+## [2.3.0] — 2026-10-05
 
-- **A GitHub review no longer approves or requests changes on its own.** The
-  review event used to follow the verdict, so every clean review was an
-  APPROVE and every blocking one a REQUEST_CHANGES. It is now COMMENT unless
-  the repository turns on `approve_when_clean` or `request_changes_on_critical`
-  (both off by default). Approvals left by earlier versions are not touched.
-- **A fix hint is no longer rendered as a committable block.** `suggestion`
-  (often prose, e.g. "=== / !==") is shown as a plain block; only the new
-  exact replacement, `suggested_code`, can become a GitHub ```suggestion /
-  GitLab ```suggestion:-0+N block, and only with `committable_suggestions` on.
-- **A skipped review says so.** With `status_feedback` (on by default) a draft,
-  oversized, empty or off-target pull request with no placeholder to rewrite
-  gets one brief marked note, rewritten in place on later skips.
+Code review reaches parity with Kodus and goes past it: one settings page for
+the workspace and every repository, pull-request actions, new review
+categories, a rules library, a visible review pipeline, a chat assistant that
+remembers and acts, and a refreshed visual system. Three new migrations run on
+start (`f1a2b3c4d5e6`, `a7b8c9d0e1f2`); no repository reviews differently right
+after the upgrade except where noted under Changed.
 
 ### Added
 
+- **One settings page for code review** (`/review-settings`): "Global"
+  (workspace defaults) and "Per repository" with search and an
+  "Overridden N" count per repository; sections General, Review categories,
+  Filters, Prompts, PR summary, Rules, Messages, Advanced. Every field says
+  whether it is overridden here, inherited from Global or the built-in, and can
+  be reset to what it inherits. The old Review defaults, Review policies and AI
+  Agents pages redirect to the matching section. Resolution everywhere is
+  repository → workspace → install → built-in.
+- **New settings at both levels**: run on draft pull requests, approve when
+  clean, request changes on critical findings, status feedback on skips,
+  committable suggestions, apply filters to rules, summary placement and
+  behaviour, base instruction, custom messages, opt-in agents
+  (`enabled_agents`). `GET /api/review-settings/overview`.
+- **Target branches take patterns**: globs (`release/*`) and exclusions
+  (`!master`); an exclusion wins, a list of exclusions only means "every other
+  branch". The skip reason names the pattern that decided.
+- **Review categories Performance (on) and Business logic (opt-in)** next to
+  Bug, Contract and Security; findings are grouped "By category" in the summary.
+  Business logic checks the change against the PR description and its
+  acceptance criteria and skips quietly without one. A **base instruction**
+  (up to 2,000 characters) tells every agent how to write its comments.
+- **The review pipeline is visible**: every run records its stages (received,
+  settings, each gate, each agent with model and tokens, summary, publish,
+  issues) with status, duration and reason; skips at the webhook and duplicate
+  requests are recorded too. The Pull requests page expands a PR into its
+  reviews and a review into its stage timeline.
+- **Manual review of every open pull request** on GitHub, GitLab and
+  Bitbucket: all target branches, every page, search, branch filter, "Review"
+  and "Review all open PRs" (up to 25, through the queue).
+- **The Celmis agent remembers the conversation** (last 8 exchanges, per chat)
+  and can propose review rules, generate them for a repository, or change a
+  review setting — each only after you confirm, with the same permissions as
+  the settings page. It knows how to give another team access to explore code.
+- **Visual system**: a teal primary (green now means only success), a warm
+  "changed from default" tone, severity and status colour scales used
+  everywhere with an icon beside every colour, WCAG AA contrast in both themes,
+  option cards, segmented controls, slider, skeletons, empty states, motion that
+  respects reduced-motion; the review pages (pull requests, issues, rules,
+  analytics, history) are rebuilt on it. Code review tabs: Review history, Pull
+  requests, Issues, Review rules, Settings, Analytics, More.
 - **Pull-request actions on GitHub, GitLab and Bitbucket.**
   `approve_when_clean` approves a complete review with nothing to post and
   takes the approval back on a later run that is not clean (GitHub dismissal,
@@ -68,6 +102,38 @@ derives it from there.
   is approved. Agents cite the rule a finding violates; the finding takes
   the rule's severity and shows the rule's name on the pull request.
   Migration `a7b8c9d0e1f2`.
+
+### Fixed
+
+- **Bitbucket pull-request lists work with access tokens** (Bearer); they
+  failed with 401 and showed only the first 50 pull requests on every provider.
+- **A queued review whose provider credential was missing no longer stays
+  "running" forever**; it ends as failed with the reason.
+- **Access rules now cover every way into the code**: code search, generated
+  documentation and the MCP graph tools apply the team's research rules (also
+  on single-tenant installs); free Cypher is refused where a rule restricts the
+  repository; every MCP tool re-checks a refused caller.
+- **An MCP token answers for the workspace it was generated in**, not the
+  user's highest-ranked one, and stops working when they leave it.
+- **A team member can be added by email** or picked from the workspace's
+  members; the field used to accept only an internal id it never showed.
+- **The theme toggle drives dark mode**; `dark:` styles followed the operating
+  system before.
+
+### Changed
+
+- **A GitHub review no longer approves or requests changes on its own.** The
+  review event used to follow the verdict, so every clean review was an
+  APPROVE and every blocking one a REQUEST_CHANGES. It is now COMMENT unless
+  the repository turns on `approve_when_clean` or `request_changes_on_critical`
+  (both off by default). Approvals left by earlier versions are not touched.
+- **A fix hint is no longer rendered as a committable block.** `suggestion`
+  (often prose, e.g. "=== / !==") is shown as a plain block; only the new
+  exact replacement, `suggested_code`, can become a GitHub ```suggestion /
+  GitLab ```suggestion:-0+N block, and only with `committable_suggestions` on.
+- **A skipped review says so.** With `status_feedback` (on by default) a draft,
+  oversized, empty or off-target pull request with no placeholder to rewrite
+  gets one brief marked note, rewritten in place on later skips.
 
 ### Compatibility
 
