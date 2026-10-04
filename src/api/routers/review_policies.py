@@ -503,6 +503,7 @@ def _catalog_fields(workspace_language: str) -> dict[str, Any]:
         "review_languages": list(_language_codes()),
         "max_inline_comments_effective": _max_inline_default(),
         "review_language_effective": workspace_language,
+        "verifier_enabled_default": _verifier_default(),
     }
 
 

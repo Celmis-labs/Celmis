@@ -694,6 +694,9 @@ class ReviewPolicyOut(BaseModel):
     # reason `suppressed_rules_effective` is: the layer that wins has to show
     # what it is winning over.
     verifier_enabled_effective: bool = False
+    # What "inherit" resolves to (REVIEW_VERIFIER_ENABLED), so a reset
+    # control can say what it resets to.
+    verifier_enabled_default: bool = False
     ignore_globs: list[str] = Field(default_factory=list)
     # What THIS policy says (None = inherit) and what a review would apply.
     comment_min_severity: str | None = None

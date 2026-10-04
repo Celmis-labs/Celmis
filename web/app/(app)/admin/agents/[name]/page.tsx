@@ -7,7 +7,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ArrowLeftIcon, RotateCcwIcon, SaveIcon } from "lucide-react";
 
-import { agentsApi } from "@/lib/api";
+import { agentsApi, reviewPoliciesApi } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { useCanEditPrompts } from "@/lib/use-analytics-access";
@@ -38,6 +38,13 @@ export default function AgentEditPage() {
     queryFn: () => agentsApi.get(token!, name),
     enabled: !!token,
   });
+
+  const repoOverrides = useQuery({
+    queryKey: ["review-policies", "overrides-summary"],
+    queryFn: () => reviewPoliciesApi.overridesSummary(token!),
+    enabled: !!token,
+  });
+  const overridingRepos = repoOverrides.data?.prompt_overrides?.[name] ?? [];
 
   const [prompt, setPrompt] = useState("");
   const [dirty, setDirty] = useState(false);
@@ -158,6 +165,9 @@ export default function AgentEditPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
+          <Callout tone="info" className="mb-3">
+            {t("admin.agents.precedenceBody")}
+          </Callout>
           <Textarea
             rows={22}
             value={prompt}
@@ -171,6 +181,44 @@ export default function AgentEditPage() {
             {t("admin.agents.detail.charCount", { count: prompt.length, original: a.system_prompt.length })}
             {a.has_override && t("admin.agents.detail.currentlyOverridden")}
           </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>
+            {t("admin.agents.detail.repoOverridesTitle")}
+            {overridingRepos.length > 0 && (
+              <Badge variant="brand" className="ml-2 text-[10px]">
+                {t("admin.agents.overriddenInRepos", { count: overridingRepos.length })}
+              </Badge>
+            )}
+          </CardTitle>
+          <CardDescription>{t("admin.agents.detail.repoOverridesDesc")}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {repoOverrides.isError ? (
+            <p className="text-sm text-[var(--color-muted-foreground)]">{t("common.loadError")}</p>
+          ) : !repoOverrides.data ? (
+            <Skeleton className="h-6 w-48" />
+          ) : overridingRepos.length === 0 ? (
+            <p className="text-sm text-[var(--color-muted-foreground)]">
+              {t("admin.agents.detail.repoOverridesEmpty")}
+            </p>
+          ) : (
+            <ul className="space-y-1 text-sm">
+              {overridingRepos.map((r) => (
+                <li key={r.repo_slug}>
+                  <Link
+                    className="underline font-mono"
+                    href={`/admin/review-policies/${encodeURIComponent(r.repo_slug)}?tab=agents`}
+                  >
+                    {r.repo_slug}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
         </CardContent>
       </Card>
 
