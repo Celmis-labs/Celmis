@@ -703,7 +703,8 @@ def _open_pr(row, workspace, pushed: dict) -> dict | None:
     from src.sync.git_providers import parse_repo_url
 
     try:
-        parsed = parse_repo_url(workspace.clean_url)
+        gitlab_base = getattr(workspace, "gitlab_base", None)
+        parsed = parse_repo_url(workspace.clean_url, gitlab_base_url=gitlab_base)
         provider = parsed.provider.value
         creds = resolve_git_credential(provider, workspace_id=row.workspace_id)
         if creds is None:
@@ -712,7 +713,15 @@ def _open_pr(row, workspace, pushed: dict) -> dict | None:
         branch = pushed["branch"]
         base = workspace.default_branch or "main"
         full = f"{parsed.owner}/{parsed.name}"
-        with build_client(timeout=20.0) as client:
+        client_kwargs: dict = {}
+        gitlab_api = ""
+        if provider == "gitlab":
+            from src.sync.gitlab_instance import instance_for_credential
+
+            instance = instance_for_credential(creds)
+            client_kwargs = instance.http_kwargs()
+            gitlab_api = instance.api_base
+        with build_client(timeout=20.0, **client_kwargs) as client:
             if provider == "github":
                 r = client.post(
                     f"https://api.github.com/repos/{full}/pulls",
@@ -727,7 +736,7 @@ def _open_pr(row, workspace, pushed: dict) -> dict | None:
                 import urllib.parse
                 proj = urllib.parse.quote(full, safe="")
                 r = client.post(
-                    f"https://gitlab.com/api/v4/projects/{proj}/merge_requests",
+                    f"{gitlab_api}/projects/{proj}/merge_requests",
                     headers={"PRIVATE-TOKEN": creds.secret},
                     json={"source_branch": branch, "target_branch": base,
                           "title": title},

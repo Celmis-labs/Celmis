@@ -10,6 +10,15 @@ Auth pipeline (priority high→low):
     3. Per-provider env vars (BITBUCKET_TOKEN, GITHUB_TOKEN, GITLAB_TOKEN)
     4. Anonymous clone (for public repos)
     5. Git credential helper (Keychain/etc.) — git picks it up itself
+
+GitLab (gitlab.com and self-hosted) is cloned with the PLAIN https URL; the
+token reaches git through a one-shot credential helper that reads it from the
+environment (the helper list is cleared first, so a keychain helper cannot
+answer instead). The token is therefore never in argv, never in
+`.git/config`, never in a log line. A pull of an older clone whose origin
+still carries a token scrubs it. A self-hosted instance is address-checked
+again before every clone/fetch and the validated address is pinned
+(`http.curloptResolve`); GITLAB_CA_BUNDLE is added as `http.sslCAInfo`.
 """
 
 from __future__ import annotations
@@ -38,6 +47,55 @@ from src.sync.git_providers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+#: The credential helper that answers from the environment (see module doc).
+#: Same text as src/repos/freshness.py and src/agent/workspace.py.
+_ENV_CREDENTIAL_HELPER = ('!f() { echo "username=$CELMIS_GIT_USER"; '
+                          'echo "password=$CELMIS_GIT_PW"; }; f')
+
+
+def _git_config_env(pairs: list[tuple[str, str]]) -> dict[str, str]:
+    """`GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` — config for one git process
+    without putting it in argv (git >= 2.31)."""
+    env = {"GIT_CONFIG_COUNT": str(len(pairs))}
+    for i, (k, v) in enumerate(pairs):
+        env[f"GIT_CONFIG_KEY_{i}"] = k
+        env[f"GIT_CONFIG_VALUE_{i}"] = v
+    return env
+
+
+def gitlab_git_env(instance, user: str | None, password: str | None) -> dict[str, str]:
+    """Environment for a git process talking to a GitLab instance.
+
+    Credentials (if any) via the env credential helper; the instance's own
+    pin/CA config (self-hosted only). Raises
+    :class:`src.sync.gitlab_instance.UnsafeGitLabURL` when the host no longer
+    passes the address rules.
+    """
+    pairs: list[tuple[str, str]] = []
+    if user and password:
+        # Cleared first: `credential.helper` APPENDS, and a helper configured
+        # elsewhere (osxkeychain) would otherwise answer before ours.
+        pairs += [("credential.helper", ""), ("credential.helper", _ENV_CREDENTIAL_HELPER)]
+    pairs += instance.git_config()
+    env = dict(_GIT_NO_PROMPT_ENV)
+    env.update(_git_config_env(pairs))
+    if user and password:
+        env["CELMIS_GIT_USER"] = user
+        env["CELMIS_GIT_PW"] = password
+    return env
+
+
+def _without_userinfo(url: str) -> str:
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    netloc = parts.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 # Prevents git from silently hanging on a credential prompt in a subprocess
@@ -326,6 +384,7 @@ class RepoSync:
         api_token: str | None = None,
         user_id: str = "default",
         progress_callback: Callable[[str], None] | None = None,
+        gitlab_base_url: str | None = None,
     ) -> SyncResult:
         """Clones the repo if it is not there yet, otherwise does a pull.
 
@@ -342,9 +401,11 @@ class RepoSync:
             username/password: legacy basic auth (Bitbucket app password etc.)
             api_token: scoped API token (Bitbucket API token, GitHub PAT, GitLab PAT)
             progress_callback: callable(msg: str) — for UI updates
+            gitlab_base_url: the workspace's self-hosted GitLab (from its
+                GitLab connection). None → gitlab.com.
         """
         # Parse identifier → ParsedRepo
-        repo = parse_repo_url(repo_identifier)
+        repo = parse_repo_url(repo_identifier, gitlab_base_url=gitlab_base_url)
 
         # If the URL was browser-form with a branch hint — and the CLI did not
         # set an explicit branch → take it from the URL. If the CLI set a
@@ -363,14 +424,24 @@ class RepoSync:
             branch = repo.branch_hint
 
         target = self.settings.repo_path(repo.slug)
-        url, auth_mode = _build_url_for_clone(
-            repo,
-            self.settings,
-            override_username=username,
-            override_password=password,
-            api_token=api_token,
-            user_id=user_id,
-        )
+        git_env: dict[str, str] | None = None
+        clean_url: str | None = None
+        gitlab_base: str | None = None
+        if repo.provider == GitProvider.GITLAB:
+            url, auth_mode, git_env, gitlab_base = self._gitlab_plan(
+                repo, gitlab_base_url, username=username, password=password,
+                api_token=api_token, user_id=user_id,
+            )
+            clean_url = url
+        else:
+            url, auth_mode = _build_url_for_clone(
+                repo,
+                self.settings,
+                override_username=username,
+                override_password=password,
+                api_token=api_token,
+                user_id=user_id,
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
 
         logger.info(
@@ -384,7 +455,9 @@ class RepoSync:
         # gives without a TTY.
         # If the API is unavailable (None) — skip it, let git fail on its own.
         if auth_mode == "anonymous" and not target.exists():
-            public_status = is_repo_public(repo)
+            public_status = (is_repo_public(repo, gitlab_base_url=gitlab_base)
+                             if repo.provider == GitProvider.GITLAB
+                             else is_repo_public(repo))
             if public_status is False:
                 raise CloneError(
                     f"Repository {repo.full_path} ({repo.provider.value}) "
@@ -399,9 +472,11 @@ class RepoSync:
             os.environ[k] = v
 
         if target.exists() and (target / ".git").exists():
-            result = self._pull(target, branch, progress_callback)
+            result = self._pull(target, branch, progress_callback,
+                                git_env=git_env, clean_url=clean_url)
         else:
-            result = self._clone(url, target, branch, progress_callback)
+            result = self._clone(url, target, branch, progress_callback,
+                                 git_env=git_env)
 
         # Read-only lock
         _chmod_readonly(target)
@@ -418,19 +493,70 @@ class RepoSync:
             provider=repo.provider,
         )
 
+    def _gitlab_plan(
+        self, repo: ParsedRepo, gitlab_base_url: str | None, *,
+        username: str | None, password: str | None, api_token: str | None,
+        user_id: str,
+    ) -> tuple[str, str, dict[str, str], str]:
+        """(plain clone URL, auth label, git env, instance base) for GitLab.
+
+        The URL carries no credential; the env does (see module doc). The
+        clone host must pass the egress allowlist — gitlab.com is on the
+        shipped list; a self-hosted host is allowed only as the one extra host
+        of the workspace whose connection named it.
+        """
+        from src.http import allowed_hosts
+        from src.security.egress import EgressBlockedError, assert_url_allowed
+        from src.sync.gitlab_instance import (
+            UnsafeGitLabURL,
+            instance_from_metadata,
+            instance_of,
+        )
+
+        user: str | None = None
+        secret: str | None = None
+        meta: dict = {}
+        if username and (password or api_token):
+            user, secret = username, password or api_token
+        elif api_token:
+            user, secret = "oauth2", api_token
+        elif username and password:
+            user, secret = username, password
+        else:
+            token, meta = _resolve_token_with_meta(
+                GitProvider.GITLAB, self.settings, user_id=user_id)
+            if token:
+                user, secret = "oauth2", token
+        try:
+            if gitlab_base_url or repo.base_url:
+                instance = instance_of(gitlab_base_url or repo.base_url)
+            else:
+                # A token resolved here belongs to the instance its own row names.
+                instance = instance_from_metadata(meta)
+            url = build_clone_url(repo, gitlab_base_url=instance.base_url)
+            extra = () if instance.is_default else (instance.host,)
+            assert_url_allowed(url, allowed_hosts(extra))
+            env = gitlab_git_env(instance, user, secret)
+        except (UnsafeGitLabURL, EgressBlockedError) as exc:
+            raise CloneError(f"GitLab clone refused: {exc}") from exc
+        label = "gitlab:credential-helper" if user and secret else "anonymous"
+        return url, label, env, instance.base_url
+
     def _clone(
         self,
         url: str,
         target: Path,
         branch: str | None,
         progress_callback: Callable[[str], None] | None,
+        *,
+        git_env: dict[str, str] | None = None,
     ) -> SyncResult:
         # Pre-flight branch existence check — a quick ls-remote instead of
         # parsing GitPython error messages (they are not captured consistently
         # with --progress).
         # If the given branch does not exist — fall back to the default branch
         # (= None) without cloning into a failed state.
-        if branch is not None and not _remote_branch_exists(url, branch):
+        if branch is not None and not _remote_branch_exists(url, branch, env_extra=git_env):
             logger.info(
                 "remote_branch_missing url=%s branch=%s — falling back to default",
                 strip_credentials(url), branch,
@@ -458,6 +584,8 @@ class RepoSync:
             }
             if branch is not None:
                 clone_kwargs["branch"] = branch
+            if git_env:
+                clone_kwargs["env"] = git_env
             repo = Repo.clone_from(**clone_kwargs)
         except GitCommandError as exc:
             stderr = strip_credentials(_combine_git_errors(progress, exc))
@@ -472,6 +600,9 @@ class RepoSync:
         target: Path,
         branch: str | None,
         progress_callback: Callable[[str], None] | None,
+        *,
+        git_env: dict[str, str] | None = None,
+        clean_url: str | None = None,
     ) -> SyncResult:
         logger.info("pulling %s (branch=%s)", target, branch)
         if progress_callback:
@@ -480,6 +611,25 @@ class RepoSync:
         progress = _ProgressHandler(progress_callback)
         try:
             repo = Repo(str(target))
+            if clean_url:
+                _scrub_origin(repo, clean_url)
+            with (repo.git.custom_environment(**git_env) if git_env
+                  else contextlib.nullcontext()):
+                return self._pull_in(repo, target, branch, progress, progress_callback)
+        except GitCommandError as exc:
+            stderr = strip_credentials(_combine_git_errors(progress, exc))
+            logger.error("pull_failed: %s", stderr[:500])
+            raise CloneError(stderr, original=exc) from exc
+
+    def _pull_in(
+        self,
+        repo,
+        target: Path,
+        branch: str | None,
+        progress: _ProgressHandler,
+        progress_callback: Callable[[str], None] | None,
+    ) -> SyncResult:
+        try:
             prev_sha = repo.head.commit.hexsha
             origin = repo.remotes.origin
             origin.fetch(progress=progress)
@@ -572,7 +722,26 @@ class RepoSync:
             return False
 
 
-def _remote_branch_exists(url: str, branch: str, *, timeout: float = 15.0) -> bool:
+def _scrub_origin(repo, clean_url: str) -> None:
+    """Replace an origin URL that carries a credential with `clean_url`.
+
+    Only when the two name the same repository once the userinfo is dropped —
+    a clone made before GitLab used the credential helper kept its token in
+    `.git/config`; one pointing somewhere else is left alone.
+    """
+    try:
+        current = repo.remotes.origin.url
+    except Exception:  # noqa: BLE001 — no origin: nothing to scrub
+        return
+    if current == clean_url or "@" not in current.split("//", 1)[-1].split("/", 1)[0]:
+        return
+    if _without_userinfo(current).removesuffix(".git") == clean_url.removesuffix(".git"):
+        repo.remotes.origin.set_url(clean_url)
+        logger.info("origin_credentials_scrubbed path=%s", repo.working_dir)
+
+
+def _remote_branch_exists(url: str, branch: str, *, timeout: float = 15.0,
+                          env_extra: dict[str, str] | None = None) -> bool:
     """Quick pre-flight check via `git ls-remote --heads URL branch`.
 
     Avoids having to parse GitPython error messages (which do not consistently
@@ -586,7 +755,7 @@ def _remote_branch_exists(url: str, branch: str, *, timeout: float = 15.0) -> bo
                 clone, let git itself fail with the real error if the network
                 is down
     """
-    env = {**os.environ, **_GIT_NO_PROMPT_ENV}
+    env = {**os.environ, **_GIT_NO_PROMPT_ENV, **(env_extra or {})}
     try:
         result = subprocess.run(
             ["git", "ls-remote", "--heads", url, branch],
@@ -660,6 +829,7 @@ def clone_or_update(
     password: str | None = None,
     api_token: str | None = None,
     progress_callback: Callable[[str], None] | None = None,
+    gitlab_base_url: str | None = None,
 ) -> SyncResult:
     return RepoSync().clone_or_update(
         repo_identifier,
@@ -668,6 +838,7 @@ def clone_or_update(
         password=password,
         api_token=api_token,
         progress_callback=progress_callback,
+        gitlab_base_url=gitlab_base_url,
     )
 
 

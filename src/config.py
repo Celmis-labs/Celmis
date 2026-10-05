@@ -364,6 +364,21 @@ class Settings(BaseSettings):
     # CGNAT / ULA — never link-local, multicast or unspecified. Empty = strict.
     # Deliberately NOT implied by egress_allow_private_network.
     litellm_proxy_allowed_hosts: list[str] = Field(default_factory=list)
+    # A workspace's self-hosted GitLab (src/sync/gitlab_instance.py) is set per
+    # workspace on the Connections page and must resolve to public addresses.
+    # Same escape hatch as above for an instance on the LAN / VPN: list its
+    # host here (exact host or subdomain). A listed host may resolve to
+    # private / loopback / CGNAT / ULA — never link-local, multicast or
+    # unspecified. Not implied by egress_allow_private_network.
+    gitlab_allowed_hosts: list[str] = Field(default_factory=list)
+    # Hosts whose GitLab may be reached over plain http:// (exact host match).
+    # Empty = https only. The token then crosses the network in clear text.
+    gitlab_http_allowed_hosts: list[str] = Field(default_factory=list)
+    # PEM bundle with the private CA that signed a self-hosted GitLab's
+    # certificate. Added to (not replacing) the public roots, for self-hosted
+    # GitLab API calls and git clones only. There is no switch to turn TLS
+    # verification off.
+    gitlab_ca_bundle: str = ""
     audit_log_file: Path | None = None  # will be computed in a property
     audit_retention_days: int = 90
     redaction_fail_closed: bool = True

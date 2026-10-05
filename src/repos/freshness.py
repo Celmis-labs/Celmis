@@ -200,6 +200,21 @@ def remote_head(repo_slug: str, *, workspace_id: str, user_id: str = "default") 
     creds = resolve_git_credential(cfg.provider, user_id=user_id, workspace_id=workspace_id)
     if creds is not None:
         env_extra = _basic_auth(cfg.provider, creds)
+    if cfg.provider == "gitlab":
+        # The workspace's own instance: its clone URL, its pinned address and
+        # CA bundle — and the egress check, so a self-hosted host is reachable
+        # only for the workspace whose connection names it.
+        from src.http import allowed_hosts
+        from src.security.egress import assert_url_allowed
+        from src.sync.clone import _git_config_env
+        from src.sync.gitlab_instance import DEFAULT_INSTANCE, instance_for_credential
+
+        instance = instance_for_credential(creds) if creds is not None else DEFAULT_INSTANCE
+        url = build_clone_url(parsed, gitlab_base_url=instance.base_url)
+        assert_url_allowed(url, allowed_hosts(() if instance.is_default else (instance.host,)))
+        pairs = instance.git_config()
+        if pairs:
+            env_extra = {**(env_extra or {}), **_git_config_env(pairs)}
     return _run_ls_remote(url, ref, env_extra)
 
 

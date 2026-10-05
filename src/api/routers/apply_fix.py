@@ -602,14 +602,28 @@ def apply_replacement_on_default_branch_gitlab(
 ) -> dict[str, Any]:
     """Same shape as the GitHub variant, GitLab REST v4."""
     import urllib.parse
-    token = _load_provider_token("gitlab", user_id, workspace_id)
+
+    from src.credentials import resolve_git_credential
+    from src.credentials.store import CredentialStoreError
+    from src.sync.gitlab_instance import UnsafeGitLabURL, instance_for_credential
+
+    try:
+        row = resolve_git_credential("gitlab", user_id=user_id, workspace_id=workspace_id)
+    except CredentialStoreError:
+        row = None
+    token = row.secret if row else None
     if not token:
         return {"status": "skipped", "reason": "no gitlab token"}
+    try:
+        instance = instance_for_credential(row)
+        client_kwargs = instance.http_kwargs()
+    except UnsafeGitLabURL as exc:
+        return {"status": "skipped", "reason": f"gitlab url: {exc}"}
     headers = {"PRIVATE-TOKEN": token}
     proj = urllib.parse.quote_plus(repo_slug)
-    api = f"https://gitlab.com/api/v4/projects/{proj}"
+    api = f"{instance.api_base}/projects/{proj}"
 
-    with build_client(timeout=15.0) as http:
+    with build_client(timeout=15.0, **client_kwargs) as http:
         info = http.get(api, headers=headers)
         if info.status_code != 200:
             return {"status": "skipped",

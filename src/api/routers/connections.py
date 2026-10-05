@@ -3,6 +3,13 @@
 Each user can save tokens for any of the three providers. Tokens are stored
 encrypted via CredentialStore. The verify step calls the provider's /user
 endpoint to confirm the token works.
+
+GitLab may be self-hosted: the body's ``base_url`` names the instance. It is
+validated (src/sync/gitlab_instance.py — https, public address unless the
+operator allowlisted the host) BEFORE the token is sent to it, verified with
+GET /api/v4/user, and stored in the credential row's metadata next to the
+token. The two only ever change together: the endpoint requires the token on
+every save, so nobody can re-point a stored token at a host they control.
 """
 
 from __future__ import annotations
@@ -111,12 +118,22 @@ def upsert_connection(
         raise HTTPException(status_code=400, detail=f"Unknown provider {provider!r}")
     if req.provider != provider:
         raise HTTPException(status_code=400, detail="Body/path provider mismatch")
+    if provider != "gitlab" and (req.base_url or "").strip():
+        raise HTTPException(status_code=400,
+                            detail="A custom URL is only supported for GitLab")
 
     verify = _verify_token(provider, req)
     if not verify.ok:
         return verify  # don't save if verification failed
 
     metadata: dict[str, object] = {"username": verify.username or ""}
+    if provider == "gitlab":
+        from src.sync.gitlab_instance import DEFAULT_BASE_URL, METADATA_KEY
+
+        # Only a self-hosted instance is written: a row without the key IS a
+        # gitlab.com row, exactly as every row saved before this existed.
+        if verify.base_url and verify.base_url != DEFAULT_BASE_URL:
+            metadata[METADATA_KEY] = verify.base_url
     if provider == "bitbucket" and req.email:
         metadata["atlassian_email"] = req.email
     if provider == "bitbucket" and req.workspace:
@@ -147,7 +164,8 @@ def upsert_connection(
         action="connection.saved", actor=user.email, actor_id=user.id,
         workspace_id=workspace_id, target=f"{provider}:{req.account_label or 'default'}",
         ip=client_ip(request),
-        detail={"provider": provider, "username": verify.username, "slot": slot},
+        detail={"provider": provider, "username": verify.username, "slot": slot,
+                **({"gitlab_url": verify.base_url} if provider == "gitlab" else {})},
     )
     return verify
 
@@ -197,6 +215,11 @@ def verify_existing(
         stored.metadata.get("bitbucket_workspace")
         if isinstance(stored.metadata, dict) else None
     )
+    base_url = None
+    if provider == "gitlab" and isinstance(stored.metadata, dict):
+        from src.sync.gitlab_instance import METADATA_KEY
+
+        base_url = stored.metadata.get(METADATA_KEY) or None
     return _verify_token(
         provider,
         ConnectionUpsert(
@@ -204,6 +227,7 @@ def verify_existing(
             token=stored.secret,
             email=str(email) if email else None,
             workspace=str(workspace) if workspace else None,
+            base_url=str(base_url) if base_url else None,
         ),
     )
 
@@ -236,18 +260,7 @@ def _verify_token(provider: str, req: ConnectionUpsert) -> ConnectionVerifyResul
             )
 
         if provider == "gitlab":
-            with build_client(timeout=10.0) as http:
-                resp = http.get(
-                    "https://gitlab.com/api/v4/user",
-                    headers={"PRIVATE-TOKEN": req.token},
-                )
-            if resp.status_code == 200:
-                username = resp.json().get("username")
-                return ConnectionVerifyResult(ok=True, provider=provider, username=username)
-            return ConnectionVerifyResult(
-                ok=False, provider=provider,
-                error=f"GitLab /user returned {resp.status_code}",
-            )
+            return _verify_gitlab(req)
 
         if provider == "bitbucket":
             if not req.email:
@@ -320,6 +333,85 @@ def _verify_token(provider: str, req: ConnectionUpsert) -> ConnectionVerifyResul
         return ConnectionVerifyResult(ok=False, provider=provider, error=str(exc))
 
     return ConnectionVerifyResult(ok=False, provider=provider, error="Unknown provider")
+
+
+def _verify_gitlab(req: ConnectionUpsert) -> ConnectionVerifyResult:
+    """URL rules → address rules → GET /api/v4/user with the token.
+
+    Nothing reaches the network before the URL passed both rule sets, and no
+    message carries the token: they are built from the host and the status
+    code only.
+    """
+    import ssl
+
+    import httpx
+
+    from src.security.egress import EgressBlockedError
+    from src.sync.gitlab_instance import (
+        DEFAULT_BASE_URL,
+        UnsafeGitLabURL,
+        build_gitlab_client,
+        validate_base_url,
+    )
+
+    provider = "gitlab"
+    try:
+        instance = validate_base_url((req.base_url or "").strip() or DEFAULT_BASE_URL)
+    except UnsafeGitLabURL as exc:
+        return ConnectionVerifyResult(ok=False, provider=provider, error=str(exc))
+    where = "GitLab" if instance.is_default else f"GitLab at {instance.host}"
+    try:
+        with build_gitlab_client(instance, token=req.token, timeout=10.0) as http:
+            resp = http.get(f"{instance.api_base}/user")
+    except UnsafeGitLabURL as exc:
+        return ConnectionVerifyResult(ok=False, provider=provider, error=str(exc))
+    except EgressBlockedError:
+        return ConnectionVerifyResult(
+            ok=False, provider=provider,
+            error=f"{where}: outbound connections to this host are blocked by "
+                  "the server's egress policy")
+    except FileNotFoundError:
+        return ConnectionVerifyResult(
+            ok=False, provider=provider,
+            error="GITLAB_CA_BUNDLE points at a file that does not exist on the "
+                  "Celmis server")
+    except (ssl.SSLError, httpx.ConnectError) as exc:
+        cert = "CERTIFICATE" in str(exc).upper()
+        hint = (" — the certificate is not trusted; a private CA needs "
+                "GITLAB_CA_BUNDLE set by the server operator") if cert else (
+                " — the Celmis server cannot reach this host; an internal-only "
+                "GitLab needs a network route (VPN/peering) from the server")
+        return ConnectionVerifyResult(
+            ok=False, provider=provider,
+            error=f"{where}: could not connect{hint}")
+    except httpx.HTTPError as exc:
+        return ConnectionVerifyResult(
+            ok=False, provider=provider,
+            error=f"{where}: request failed ({type(exc).__name__})")
+    if 300 <= resp.status_code < 400:
+        return ConnectionVerifyResult(
+            ok=False, provider=provider,
+            error=f"{where} answered a redirect ({resp.status_code}); redirects "
+                  "are not followed — enter the final instance URL")
+    if resp.status_code == 200:
+        try:
+            username = (resp.json() or {}).get("username")
+        except ValueError:
+            username = None
+        if not username:
+            return ConnectionVerifyResult(
+                ok=False, provider=provider,
+                error=f"{where}: /api/v4/user did not answer like GitLab — check the URL")
+        return ConnectionVerifyResult(ok=True, provider=provider, username=str(username),
+                                      base_url=instance.base_url)
+    if resp.status_code in (401, 403):
+        return ConnectionVerifyResult(
+            ok=False, provider=provider,
+            error=f"{where} rejected the token ({resp.status_code}) — it needs the "
+                  "`api` scope (or `read_api`)")
+    return ConnectionVerifyResult(
+        ok=False, provider=provider,
+        error=f"{where}: /api/v4/user returned {resp.status_code}")
 
 
 def _verify_llm_token(provider: str, token: str) -> ConnectionVerifyResult:

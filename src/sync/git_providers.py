@@ -7,6 +7,11 @@ public-repo detection.
 Supported providers: Bitbucket, GitHub, GitLab. For unknown hosts — a
 'generic' fallback with minimal handling (clone URL as-is).
 
+Self-hosted GitLab: a workspace's GitLab connection may name its own instance
+(src/sync/gitlab_instance.py). Parsing and URL building take that instance's
+base URL as ``gitlab_base_url`` — a URL on that host (sub-path included) is
+GitLab, and clone/API URLs are built against it. Without it, gitlab.com.
+
 Slug format: '{provider}_{owner}-{name}' — avoids collisions between providers
 (pallets/click on GitHub vs a same-named one on another host). GitLab subgroups
 are flattened with '-' (group/subgroup/repo → group-subgroup-repo).
@@ -16,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from urllib.parse import quote, urlparse
 
@@ -34,8 +39,9 @@ class GitProvider(StrEnum):
     GENERIC = "generic"
 
 
-# Hostname → provider; we do not do subdomain matching — gitlab.com self-hosted
-# instances are out of scope (decision recorded May 2026).
+# Hostname → provider; no subdomain matching. A self-hosted GitLab is not in
+# this table: it is recognised only through the `gitlab_base_url` a caller
+# passes in, taken from the calling workspace's own GitLab connection.
 _PROVIDER_HOSTS: dict[str, GitProvider] = {
     "bitbucket.org": GitProvider.BITBUCKET,
     "github.com": GitProvider.GITHUB,
@@ -52,6 +58,9 @@ class ParsedRepo:
     owner: str  # 'acme' | 'pallets' | for GitLab a subgroup-path 'group/subgroup'
     name: str  # 'frontend' | 'click'
     branch_hint: str | None = None  # from browser URL (.../tree/main/...) if any
+    #: Self-hosted GitLab instance root the URL was parsed against (None =
+    #: gitlab.com). Not part of the identity — the slug is the same either way.
+    base_url: str | None = field(default=None, compare=False)
 
     @property
     def slug(self) -> str:
@@ -77,10 +86,32 @@ class ParsedRepo:
         return f"{self.owner}/{self.name}"
 
 
+# ─── self-hosted GitLab ─────────────────────────────────────────────
+
+
+def _gitlab_instance(gitlab_base_url: str | None):
+    """The non-default instance named by ``gitlab_base_url``, else None."""
+    if not gitlab_base_url:
+        return None
+    from src.sync.gitlab_instance import instance_of
+
+    inst = instance_of(gitlab_base_url)
+    return None if inst.is_default else inst
+
+
+def _ssh_host(s: str) -> str:
+    if s.startswith("git@"):
+        m = re.match(r"^git@([^:]+):", s)
+        return m.group(1).lower() if m else ""
+    if s.startswith("ssh://"):
+        return (urlparse(s).hostname or "").lower()
+    return ""
+
+
 # ─── detection ──────────────────────────────────────────────────────
 
 
-def detect_provider(url_or_slug: str) -> GitProvider:
+def detect_provider(url_or_slug: str, *, gitlab_base_url: str | None = None) -> GitProvider:
     """Determine the provider by the host in the URL or an explicit prefix in
     the slug.
 
@@ -89,8 +120,17 @@ def detect_provider(url_or_slug: str) -> GitProvider:
         'git@gitlab.com:foo/bar.git'    → GITLAB
         'github:foo/bar'                → GITHUB (explicit prefix)
         'acme/frontend'             → BITBUCKET (legacy default — backward compat)
+
+    `gitlab_base_url` — the workspace's self-hosted GitLab: a URL on that
+    instance (host, port and sub-path) is GITLAB.
     """
     s = url_or_slug.strip()
+    inst = _gitlab_instance(gitlab_base_url)
+    if inst is not None:
+        if s.startswith(("http://", "https://")) and inst.owns_url(s):
+            return GitProvider.GITLAB
+        if s.startswith(("git@", "ssh://")) and _ssh_host(s) == inst.host:
+            return GitProvider.GITLAB
 
     # Explicit provider prefix in slug form: 'github:owner/repo'
     if ":" in s and not s.startswith(("http://", "https://", "git@", "ssh://")):
@@ -123,7 +163,7 @@ def detect_provider(url_or_slug: str) -> GitProvider:
 # ─── parse ──────────────────────────────────────────────────────────
 
 
-def parse_repo_url(url_or_slug: str) -> ParsedRepo:
+def parse_repo_url(url_or_slug: str, *, gitlab_base_url: str | None = None) -> ParsedRepo:
     """Parse any form of URL/slug → ParsedRepo.
 
     Supports:
@@ -132,9 +172,16 @@ def parse_repo_url(url_or_slug: str) -> ParsedRepo:
         SSH URLs (git@host:owner/repo.git, ssh://git@host/...)
         Slug form 'owner/repo' (Bitbucket default)
         Explicit-prefixed 'github:owner/repo' / 'gitlab:group/subgroup/repo'
+        Self-hosted GitLab URLs, when `gitlab_base_url` names that instance
+        (https://host[/sub-path]/group/sub/project[/-/merge_requests/N])
     """
     s = url_or_slug.strip()
-    provider = detect_provider(s)
+    provider = detect_provider(s, gitlab_base_url=gitlab_base_url)
+    inst = _gitlab_instance(gitlab_base_url)
+    if inst is not None and provider == GitProvider.GITLAB:
+        parsed = _parse_on_instance(s, inst)
+        if parsed is not None:
+            return parsed
 
     # Explicit provider prefix
     if ":" in s and not s.startswith(("http://", "https://", "git@", "ssh://")):
@@ -160,6 +207,29 @@ def parse_repo_url(url_or_slug: str) -> ParsedRepo:
 
     # Slug form
     return _parse_slug(s, provider)
+
+
+def _parse_on_instance(s: str, inst) -> ParsedRepo | None:
+    """A URL on a self-hosted instance → ParsedRepo carrying its base URL."""
+    if s.startswith(("http://", "https://")):
+        rel = inst.relative_path(s)
+        if rel is None:
+            return None
+        # Re-rooted on a bare host so the sub-path never becomes a group.
+        parsed = _parse_https(f"https://{inst.host}/{rel}", GitProvider.GITLAB)
+    elif s.startswith("git@"):
+        m = re.match(r"^git@[^:]+:(.+?)(?:\.git)?/?$", s)
+        if not m:
+            raise ValueError(f"cannot parse SSH URL: {s}")
+        parsed = _parse_slug(m.group(1), GitProvider.GITLAB)
+    elif s.startswith("ssh://"):
+        path = urlparse(s).path.lstrip("/").removesuffix(".git").rstrip("/")
+        parsed = _parse_slug(path, GitProvider.GITLAB)
+    else:
+        return None
+    return ParsedRepo(provider=parsed.provider, owner=parsed.owner,
+                      name=parsed.name, branch_hint=parsed.branch_hint,
+                      base_url=inst.base_url)
 
 
 def _parse_slug(slug: str, provider: GitProvider) -> ParsedRepo:
@@ -237,14 +307,24 @@ def _parse_https(url: str, provider: GitProvider) -> ParsedRepo:
 # ─── URL building ───────────────────────────────────────────────────
 
 
-def build_clone_url(repo: ParsedRepo) -> str:
-    """Without auth — anonymous/public clone form."""
+def _gitlab_base(repo: ParsedRepo, gitlab_base_url: str | None) -> str:
+    from src.sync.gitlab_instance import DEFAULT_BASE_URL, instance_of
+
+    return instance_of(gitlab_base_url or repo.base_url or DEFAULT_BASE_URL).base_url
+
+
+def build_clone_url(repo: ParsedRepo, *, gitlab_base_url: str | None = None) -> str:
+    """Without auth — anonymous/public clone form.
+
+    GitLab: against `gitlab_base_url` (or the instance the repo was parsed
+    against), gitlab.com otherwise.
+    """
     if repo.provider == GitProvider.BITBUCKET:
         return f"https://bitbucket.org/{repo.owner}/{repo.name}.git"
     if repo.provider == GitProvider.GITHUB:
         return f"https://github.com/{repo.owner}/{repo.name}.git"
     if repo.provider == GitProvider.GITLAB:
-        return f"https://gitlab.com/{repo.owner}/{repo.name}.git"
+        return f"{_gitlab_base(repo, gitlab_base_url)}/{repo.owner}/{repo.name}.git"
     raise ValueError(f"cannot build clone URL for generic provider: {repo}")
 
 
@@ -254,8 +334,13 @@ def build_authenticated_url(
     username: str | None = None,
     password: str | None = None,
     token: str | None = None,
+    gitlab_base_url: str | None = None,
 ) -> str:
     """Authenticated clone URL — for private repos.
+
+    Prefer NOT to hand this URL to git: it puts the credential in argv and, for
+    a clone, in .git/config. `src/sync/clone.py` clones GitLab with the plain
+    URL and a credential helper instead.
 
     Per-provider auth pattern (May 2026):
         Bitbucket: x-bitbucket-api-token-auth:TOKEN@... (new API token, recommended)
@@ -289,13 +374,15 @@ def build_authenticated_url(
         return build_clone_url(repo)
 
     if repo.provider == GitProvider.GITLAB:
+        base = _gitlab_base(repo, gitlab_base_url)
+        scheme, _, rest = base.partition("://")
         if token:
             t = quote(token, safe="")
-            return f"https://oauth2:{t}@gitlab.com/{repo.owner}/{repo.name}.git"
+            return f"{scheme}://oauth2:{t}@{rest}/{repo.owner}/{repo.name}.git"
         if username and password:
             u, p = quote(username, safe=""), quote(password, safe="")
-            return f"https://{u}:{p}@gitlab.com/{repo.owner}/{repo.name}.git"
-        return build_clone_url(repo)
+            return f"{scheme}://{u}:{p}@{rest}/{repo.owner}/{repo.name}.git"
+        return build_clone_url(repo, gitlab_base_url=gitlab_base_url)
 
     # Generic — no auth
     raise ValueError(f"cannot build authenticated URL for generic provider: {repo}")
@@ -312,7 +399,8 @@ _PUBLIC_API_ENDPOINTS: dict[GitProvider, str] = {
 }
 
 
-def is_repo_public(repo: ParsedRepo, *, timeout: float = 10.0) -> bool | None:
+def is_repo_public(repo: ParsedRepo, *, timeout: float = 10.0,
+                   gitlab_base_url: str | None = None) -> bool | None:
     """Fast public check via an unauthenticated API call.
 
     Returns:
@@ -324,14 +412,28 @@ def is_repo_public(repo: ParsedRepo, *, timeout: float = 10.0) -> bool | None:
     if endpoint_template is None:
         return None
 
+    client_kwargs: dict = {}
+    follow = True
     if repo.provider == GitProvider.GITLAB:
         slug = quote(f"{repo.owner}/{repo.name}", safe="")
-        url = endpoint_template.format(slug=slug)
+        from src.sync.gitlab_instance import UnsafeGitLabURL, instance_of
+
+        try:
+            inst = instance_of(gitlab_base_url or repo.base_url)
+            url = f"{inst.api_base}/projects/{slug}"
+            client_kwargs = inst.http_kwargs()
+        except UnsafeGitLabURL as exc:
+            logger.warning("is_repo_public gitlab_url_refused err=%s", exc)
+            return None
+        # A self-hosted instance is pinned to its validated address; a
+        # redirect would leave that pin, so it is not followed there.
+        follow = inst.is_default
     else:
         url = endpoint_template.format(owner=repo.owner, name=repo.name)
 
     try:
-        with build_client(timeout=timeout, follow_redirects=True) as client:
+        with build_client(timeout=timeout, follow_redirects=follow,
+                          **client_kwargs) as client:
             r = client.get(url, headers={"User-Agent": "code-analyzer/0.1"})
     except httpx.HTTPError as e:
         logger.warning("is_repo_public http_error url=%s err=%s", url, e)

@@ -33,7 +33,7 @@ the discussions endpoint decides which notes a human reply protects.
 from __future__ import annotations
 
 import logging
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 import httpx
 
@@ -61,6 +61,14 @@ from src.review.providers.base import (
     _with_marker,
 )
 from src.review.settings import get_review_settings
+from src.sync.gitlab_instance import (
+    API_SUFFIX,
+    DEFAULT_INSTANCE,
+    GitLabInstance,
+    UnsafeGitLabURL,
+    instance_for_credential,
+    instance_of,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +94,11 @@ class GitLabPRProvider(PullRequestProvider):
         account_label: str = "default",
         user_id: str = "default",
         workspace_id: str = "default",
-        api_base: str = GITLAB_API_BASE,
+        api_base: str | None = None,
+        instance: GitLabInstance | None = None,
         timeout: float = 30.0,
     ) -> None:
+        stored = None
         if token is None:
             stored = resolve_git_credential(
                 "gitlab", user_id=user_id, account_label=account_label,
@@ -101,19 +111,34 @@ class GitLabPRProvider(PullRequestProvider):
                 )
             token = stored.secret
         self.token = token
-        self.api_base = api_base.rstrip("/")
+        # Which GitLab: explicit instance > explicit api_base > the instance
+        # the workspace's credential row names > gitlab.com. The token and the
+        # host come from the SAME row, so a self-hosted token can only ever
+        # go to its own instance.
+        try:
+            if instance is None:
+                if api_base:
+                    instance = instance_of(api_base.rstrip("/").removesuffix(API_SUFFIX))
+                elif stored is not None:
+                    instance = instance_for_credential(stored)
+                else:
+                    instance = DEFAULT_INSTANCE
+            http_kwargs = instance.http_kwargs()
+        except UnsafeGitLabURL as exc:
+            raise PullRequestProviderError(
+                f"The workspace's GitLab URL cannot be used: {exc}") from exc
+        self.instance = instance
+        self.api_base = instance.api_base
         #: Who this token posts as. Looked up once, on the first cleanup that
         #: needs it; "" means the lookup failed and nothing may be deleted.
         self._viewer_cache: str | None = None
         # Guarded egress (src/http.py), not a raw httpx.Client. gitlab.com is
-        # already on the shipped public allowlist; the host exception matters
-        # only for a self-hosted `api_base`, and it is derived from that
-        # configured value — never from request data — the same way
-        # GitHubPRProvider derives _api_host() from its constant.
-        api_host = urlsplit(self.api_base).hostname or ""
+        # already on the shipped public allowlist; a self-hosted instance is
+        # the client's one extra host, pinned to the address validated just
+        # now (src/sync/gitlab_instance.py) — never derived from request data.
         self._http = build_client(
             timeout=timeout,
-            extra_allowed_hosts=(api_host,) if api_host else (),
+            **http_kwargs,
             headers={
                 "PRIVATE-TOKEN": token,
                 "Accept": "application/json",

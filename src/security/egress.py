@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 import socket
+import ssl
 from collections.abc import Iterable, Mapping
 from typing import Any
 from urllib.parse import urlparse
@@ -111,6 +113,31 @@ def host_is_allowed(
     if any(host.endswith("." + a) for a in allowed):
         return True
     return allow_private_network and is_private_destination(host)
+
+
+def ca_bundle_context(ca_bundle: str | os.PathLike[str]) -> ssl.SSLContext:
+    """A verifying TLS context that trusts the public roots AND `ca_bundle`.
+
+    For an operator's private CA (a self-hosted GitLab behind an internal
+    certificate authority). The bundle is ADDED to certifi's roots rather than
+    replacing them, and verification stays on — hostname check included. There
+    is deliberately no way to build a non-verifying context through this
+    module: "turn TLS off" is how a pinned, allowlisted host becomes whoever
+    answers on its address.
+
+    Raises :class:`FileNotFoundError` / :class:`ssl.SSLError` for a missing or
+    unreadable bundle — an operator mistake that must surface, not degrade.
+    """
+    import certifi
+
+    path = os.fspath(ca_bundle)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"CA bundle not found: {path}")
+    ctx = ssl.create_default_context(cafile=certifi.where())
+    ctx.load_verify_locations(cafile=path)
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    return ctx
 
 
 class _WhitelistPolicy:
@@ -221,6 +248,7 @@ def build_http_client(
     *,
     allow_private_network: bool = False,
     pinned_addresses: Mapping[str, str] | None = None,
+    ca_bundle: str | os.PathLike[str] | None = None,
     **client_kwargs,
 ) -> httpx.Client:
     """Create an httpx Client with the whitelist transport.
@@ -252,9 +280,12 @@ def build_http_client(
     guard test counts both.
     """
     _refuse_kwargs_that_route_around_the_whitelist("build_http_client", client_kwargs)
+    transport_kwargs: dict[str, Any] = {}
+    if ca_bundle:
+        transport_kwargs["verify"] = ca_bundle_context(ca_bundle)
     transport = WhitelistTransport(
         allowed_hosts=allowed_hosts, allow_private_network=allow_private_network,
-        pinned_addresses=pinned_addresses,
+        pinned_addresses=pinned_addresses, **transport_kwargs,
     )
     return httpx.Client(transport=transport, timeout=timeout, **client_kwargs)
 
@@ -265,6 +296,7 @@ def build_async_http_client(
     *,
     allow_private_network: bool = False,
     pinned_addresses: Mapping[str, str] | None = None,
+    ca_bundle: str | os.PathLike[str] | None = None,
     **client_kwargs,
 ) -> httpx.AsyncClient:
     """:func:`build_http_client` for `await`ing call sites.
@@ -284,9 +316,12 @@ def build_async_http_client(
     it never agreed to own.
     """
     _refuse_kwargs_that_route_around_the_whitelist("build_async_http_client", client_kwargs)
+    transport_kwargs: dict[str, Any] = {}
+    if ca_bundle:
+        transport_kwargs["verify"] = ca_bundle_context(ca_bundle)
     transport = AsyncWhitelistTransport(
         allowed_hosts=allowed_hosts, allow_private_network=allow_private_network,
-        pinned_addresses=pinned_addresses,
+        pinned_addresses=pinned_addresses, **transport_kwargs,
     )
     return httpx.AsyncClient(transport=transport, timeout=timeout, **client_kwargs)
 

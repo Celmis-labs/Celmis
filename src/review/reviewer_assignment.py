@@ -187,9 +187,16 @@ def _assign_gitlab(
         return {"status": "skipped", "reason": "no gitlab token"}
     headers = {"PRIVATE-TOKEN": cred.secret}
     proj = urllib.parse.quote_plus(repo)
-    api = "https://gitlab.com/api/v4"
+    from src.sync.gitlab_instance import UnsafeGitLabURL, instance_for_credential
 
-    with build_client(timeout=10.0) as http:
+    try:
+        instance = instance_for_credential(cred)
+        client_kwargs = instance.http_kwargs()
+    except UnsafeGitLabURL as exc:
+        return {"status": "skipped", "reason": f"gitlab url: {exc}"}
+    api = instance.api_base
+
+    with build_client(timeout=10.0, **client_kwargs) as http:
         picked_ids: list[int] = []
         picked_names: list[str] = []
         for ident, _w in candidates:

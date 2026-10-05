@@ -88,8 +88,13 @@ class GroupIndexer:
         api_token: str | None = None,
         git_username: str | None = None,
         branch: str | None = None,
+        gitlab_base_url: str | None = None,
     ) -> None:
         self.group = group
+        # The workspace's self-hosted GitLab (None → gitlab.com). Comes from
+        # the same credential row as `api_token`, so the token only ever goes
+        # to the instance it was saved for.
+        self.gitlab_base_url = gitlab_base_url
         self.settings = settings or get_settings()
         self.sync = RepoSync(self.settings)
         self.user_id = user_id
@@ -202,6 +207,7 @@ class GroupIndexer:
                 username=self.git_username,
                 password=self.api_token if self.git_username else None,
                 progress_callback=progress_callback,
+                gitlab_base_url=self.gitlab_base_url,
             )
         except CloneError:
             raise

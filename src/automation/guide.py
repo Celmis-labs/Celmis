@@ -53,6 +53,13 @@ comments.
 - GitLab: a personal access token (avatar → Edit profile → Access tokens) with
   the `api` scope; `read_api` is not enough. gitlab.com requires an expiry
   (at most 400 days). The value starts with `glpat-` and is shown once.
+  Self-hosted GitLab: enter the instance address in "GitLab URL" on the same
+  card (e.g. https://gitlab.example.com or https://example.com/gitlab) and
+  create the token on that instance. The Celmis server must be able to reach
+  it — an internal-only GitLab (office network, VPN) is not reachable from a
+  cloud server unless networking is arranged; a private CA or a private
+  address needs the operator settings GITLAB_CA_BUNDLE / GITLAB_ALLOWED_HOSTS.
+  Installing webhooks needs the Maintainer role.
 - Bitbucket: an Atlassian API token (Atlassian → Security → Create API token),
   workspace-scoped, with Repositories Admin/Write and Pull requests Write. You
   also enter the workspace slug (bitbucket.org/<workspace>/) and the Atlassian

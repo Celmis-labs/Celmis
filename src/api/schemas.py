@@ -108,6 +108,11 @@ class ConnectionUpsert(BaseModel):
     email: str | None = None
     workspace: str | None = None  # Bitbucket only
     account_label: str = "default"
+    # GitLab only: the instance root (https://gitlab.example.com, or
+    # https://host/gitlab under a sub-path). Empty = https://gitlab.com.
+    # Validated (https, public address or operator allowlist) before the token
+    # is sent anywhere — see src/sync/gitlab_instance.py.
+    base_url: str | None = Field(default=None, max_length=2048)
 
 
 class ConnectionVerifyResult(BaseModel):
@@ -115,6 +120,8 @@ class ConnectionVerifyResult(BaseModel):
     provider: str
     username: str | None = None
     error: str | None = None
+    # GitLab: the normalised instance the token was verified against.
+    base_url: str | None = None
     # Token scopes/permissions when the provider exposes them (GitHub classic
     # PATs report them in a header). Empty when unknown (fine-grained PATs,
     # GitLab, Bitbucket) — the caller shows "could not read scopes".

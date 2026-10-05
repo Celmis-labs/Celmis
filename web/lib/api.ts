@@ -140,6 +140,8 @@ export interface ConnectionVerifyResult {
   username?: string | null;
   error?: string | null;
   scopes?: string[];
+  /** GitLab: the normalised instance root the token was verified against. */
+  base_url?: string | null;
 }
 
 /** What a call did about a repository's code graph.

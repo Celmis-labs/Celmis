@@ -90,7 +90,10 @@ PERMISSION_HINTS: dict[str, str] = {
     ),
     "gitlab": (
         "The GitLab token needs the `api` scope, and its account needs the "
-        "Maintainer (or Owner) role on the project."
+        "Maintainer (or Owner) role on the project. A self-hosted GitLab must "
+        "also be able to reach this Celmis address (PUBLIC_BASE_URL); if Celmis "
+        "is on a private network, a GitLab admin may have to allow it under "
+        "Admin → Settings → Network → Outbound requests."
     ),
     "bitbucket": (
         "The Bitbucket token needs webhook permission — Atlassian API token "
@@ -220,11 +223,30 @@ def ensure_secret(provider: str, workspace_id: str) -> str:
 # ─── HTTP seam ───────────────────────────────────────────────────
 
 
+def _gitlab_api(credential: Any) -> str:
+    """REST base of the GitLab instance the credential row names.
+
+    Raises WebhookInstallError for a stored URL that no longer passes the
+    rules — never falls back to gitlab.com with a self-hosted token.
+    """
+    from src.sync.gitlab_instance import UnsafeGitLabURL, instance_for_credential
+
+    try:
+        return instance_for_credential(credential).api_base
+    except UnsafeGitLabURL as exc:
+        raise WebhookInstallError(
+            "gitlab_url", f"The workspace's GitLab URL cannot be used: {exc}",
+            hint="Re-save the GitLab connection on the Connections page.",
+        ) from None
+
+
 def _client(provider: str, credential: Any) -> httpx.Client:
     """A guarded client authenticated as the stored credential.
 
     The one place tests replace to mock the provider. Egress goes through
-    src/http.py — all three API hosts are on the shipped allowlist.
+    src/http.py — all three API hosts are on the shipped allowlist; a
+    self-hosted GitLab is this client's one extra host, pinned to its
+    validated address (src/sync/gitlab_instance.py).
     """
     from src.http import build_client
 
@@ -235,8 +257,17 @@ def _client(provider: str, credential: Any) -> httpx.Client:
         headers["X-GitHub-Api-Version"] = "2022-11-28"
         return build_client(timeout=20.0, headers=headers)
     if provider == "gitlab":
+        from src.sync.gitlab_instance import UnsafeGitLabURL, instance_for_credential
+
         headers["PRIVATE-TOKEN"] = token
-        return build_client(timeout=20.0, headers=headers)
+        try:
+            extra = instance_for_credential(credential).http_kwargs()
+        except UnsafeGitLabURL as exc:
+            raise WebhookInstallError(
+                "gitlab_url", f"The workspace's GitLab URL cannot be used: {exc}",
+                hint="Re-save the GitLab connection on the Connections page.",
+            ) from None
+        return build_client(timeout=20.0, headers=headers, **extra)
     email = (credential.metadata or {}).get("atlassian_email") if isinstance(
         credential.metadata, dict) else None
     if email:
@@ -322,14 +353,15 @@ def _bb_repo(full_name: str) -> str:
     return f"{urllib.parse.quote(ws, safe='')}/{urllib.parse.quote(slug, safe='')}"
 
 
-def _canonical(c: httpx.Client, provider: str, full_name: str, secret: str | None) -> str:
+def _canonical(c: httpx.Client, provider: str, full_name: str, secret: str | None,
+               *, gl_api: str = GITLAB_API) -> str:
     """The repo's name as the provider spells it — what payloads will carry."""
     if provider == "github":
         r = c.get(f"{GITHUB_API}/repos/{_gh_repo(full_name)}")
         _check(r, provider, "read the repository", secret)
         return str(r.json().get("full_name") or full_name)
     if provider == "gitlab":
-        r = c.get(f"{GITLAB_API}/projects/{_gl_project(full_name)}")
+        r = c.get(f"{gl_api}/projects/{_gl_project(full_name)}")
         _check(r, provider, "read the project", secret)
         return str(r.json().get("path_with_namespace") or full_name)
     r = c.get(f"{BITBUCKET_API}/repositories/{_bb_repo(full_name)}")
@@ -350,14 +382,14 @@ def _hook_id(provider: str, hook: dict[str, Any]) -> str:
 
 
 def _list_hooks(c: httpx.Client, provider: str, full_name: str,
-                secret: str | None) -> list[dict[str, Any]]:
+                secret: str | None, *, gl_api: str = GITLAB_API) -> list[dict[str, Any]]:
     if provider == "github":
         r = c.get(f"{GITHUB_API}/repos/{_gh_repo(full_name)}/hooks",
                   params={"per_page": 100})
         _check(r, provider, "list repository webhooks", secret)
         return list(r.json() or [])
     if provider == "gitlab":
-        r = c.get(f"{GITLAB_API}/projects/{_gl_project(full_name)}/hooks",
+        r = c.get(f"{gl_api}/projects/{_gl_project(full_name)}/hooks",
                   params={"per_page": 100})
         _check(r, provider, "list project hooks", secret)
         return list(r.json() or [])
@@ -376,9 +408,9 @@ def _list_hooks(c: httpx.Client, provider: str, full_name: str,
 
 
 def _find(c: httpx.Client, provider: str, full_name: str, url: str,
-          secret: str | None) -> _Found:
-    canonical = _canonical(c, provider, full_name, secret)
-    for hook in _list_hooks(c, provider, canonical, secret):
+          secret: str | None, *, gl_api: str = GITLAB_API) -> _Found:
+    canonical = _canonical(c, provider, full_name, secret, gl_api=gl_api)
+    for hook in _list_hooks(c, provider, canonical, secret, gl_api=gl_api):
         if _same_url(_hook_url(provider, hook), url):
             return _Found(canonical, hook)
     return _Found(canonical, None)
@@ -413,7 +445,8 @@ def _body(provider: str, url: str, secret: str) -> dict[str, Any]:
 
 
 def _write(c: httpx.Client, provider: str, full_name: str, url: str, secret: str,
-           existing: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
+           existing: dict[str, Any] | None, *,
+           gl_api: str = GITLAB_API) -> tuple[str, dict[str, Any]]:
     """Create, or update in place. Returns (action, hook)."""
     body = _body(provider, url, secret)
     if provider == "github":
@@ -427,7 +460,7 @@ def _write(c: httpx.Client, provider: str, full_name: str, url: str, secret: str
         _check(r, provider, "create the webhook", secret)
         return "created", r.json()
     if provider == "gitlab":
-        base = f"{GITLAB_API}/projects/{_gl_project(full_name)}/hooks"
+        base = f"{gl_api}/projects/{_gl_project(full_name)}/hooks"
         if existing:
             r = c.put(f"{base}/{_hook_id(provider, existing)}", json=body)
             _check(r, provider, "update the project hook", secret)
@@ -446,12 +479,13 @@ def _write(c: httpx.Client, provider: str, full_name: str, url: str, secret: str
     return "created", r.json()
 
 
-def _delete(c: httpx.Client, provider: str, full_name: str, hook: dict[str, Any]) -> None:
+def _delete(c: httpx.Client, provider: str, full_name: str, hook: dict[str, Any],
+            *, gl_api: str = GITLAB_API) -> None:
     hid = urllib.parse.quote(_hook_id(provider, hook), safe="")
     if provider == "github":
         r = c.delete(f"{GITHUB_API}/repos/{_gh_repo(full_name)}/hooks/{hid}")
     elif provider == "gitlab":
-        r = c.delete(f"{GITLAB_API}/projects/{_gl_project(full_name)}/hooks/{hid}")
+        r = c.delete(f"{gl_api}/projects/{_gl_project(full_name)}/hooks/{hid}")
     else:
         r = c.delete(f"{BITBUCKET_API}/repositories/{_bb_repo(full_name)}/hooks/{hid}")
     if r.status_code != 404:  # already gone is the outcome we wanted
@@ -519,11 +553,12 @@ def install(cfg: Any, *, user_id: str, base: str) -> WebhookStatus:
     secret: str | None = None
     try:
         cred = _credential(provider, user_id, cfg.workspace_id)
+        gl_api = _gitlab_api(cred) if provider == "gitlab" else GITLAB_API
         secret = ensure_secret(provider, cfg.workspace_id)
         with _client(provider, cred) as c:
-            found = _find(c, provider, cfg.full_name, url, secret)
+            found = _find(c, provider, cfg.full_name, url, secret, gl_api=gl_api)
             action, hook = _write(c, provider, found.canonical_full_name, url,
-                                  secret, found.hook)
+                                  secret, found.hook, gl_api=gl_api)
     except WebhookInstallError as exc:
         logger.warning("webhook_install_failed provider=%s repo=%s ws=%s code=%s",
                        provider, cfg.full_name, cfg.workspace_id, exc.code)
@@ -557,10 +592,12 @@ def uninstall(cfg: Any, *, user_id: str, base: str) -> WebhookStatus:
     url = webhook_url(base, provider, cfg.workspace_id)
     try:
         cred = _credential(provider, user_id, cfg.workspace_id)
+        gl_api = _gitlab_api(cred) if provider == "gitlab" else GITLAB_API
         with _client(provider, cred) as c:
-            found = _find(c, provider, cfg.full_name, url, None)
+            found = _find(c, provider, cfg.full_name, url, None, gl_api=gl_api)
             if found.hook is not None:
-                _delete(c, provider, found.canonical_full_name, found.hook)
+                _delete(c, provider, found.canonical_full_name, found.hook,
+                        gl_api=gl_api)
     except WebhookInstallError as exc:
         return _failed(provider, url, exc)
     except httpx.HTTPError as exc:
@@ -582,8 +619,9 @@ def status(cfg: Any, *, user_id: str, base: str) -> WebhookStatus:
     url = webhook_url(base, provider, cfg.workspace_id)
     try:
         cred = _credential(provider, user_id, cfg.workspace_id)
+        gl_api = _gitlab_api(cred) if provider == "gitlab" else GITLAB_API
         with _client(provider, cred) as c:
-            found = _find(c, provider, cfg.full_name, url, None)
+            found = _find(c, provider, cfg.full_name, url, None, gl_api=gl_api)
     except WebhookInstallError as exc:
         st = _failed(provider, url, exc)
         st.status = "unknown"

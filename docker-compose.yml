@@ -428,6 +428,13 @@ services:
       # `[]`, not empty — pydantic cannot parse "" as a list and the API
       # would not start.
       LITELLM_PROXY_ALLOWED_HOSTS: '${LITELLM_PROXY_ALLOWED_HOSTS:-[]}'
+      # A workspace's self-hosted GitLab (src/sync/gitlab_instance.py): hosts
+      # that may resolve to private addresses / be reached over http, and a
+      # PEM bundle for a private CA (path inside this container — mount it).
+      # JSON lists default to `[]` for the same reason as above.
+      GITLAB_ALLOWED_HOSTS: '${GITLAB_ALLOWED_HOSTS:-[]}'
+      GITLAB_HTTP_ALLOWED_HOSTS: '${GITLAB_HTTP_ALLOWED_HOSTS:-[]}'
+      GITLAB_CA_BUNDLE: "${GITLAB_CA_BUNDLE:-}"
       # Path overrides — у container працюємо з mount points
       WORKSPACE_DIR: /workspace/data
       # One-time DB reset switch. Set RESET_ONCE=<any token> in .env to wipe all

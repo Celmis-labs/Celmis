@@ -987,7 +987,7 @@ function AddByUrl({ onAdded, onIndexStart }: {
           required
         />
         <p className="text-xs text-[var(--color-muted-foreground)] mt-1">
-          {t("repositories.urlHint")}
+          {t("repositories.urlHint")} {t("repositories.urlHintSelfHosted")}
         </p>
       </div>
       {/* Free text, not a Select: the repo does not exist for us yet, so

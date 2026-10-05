@@ -717,6 +717,10 @@ def _clone_for_audit(cfg, workspace_id: str, *, branch: str | None = None) -> No
     if creds is not None:
         from src.credentials.git_auth import git_auth_kwargs
         kwargs = git_auth_kwargs(cfg.provider, creds.secret, creds.metadata)
+        if cfg.provider == "gitlab":
+            from src.sync.gitlab_instance import instance_for_credential
+
+            kwargs["gitlab_base_url"] = instance_for_credential(creds).base_url
 
     # Audit the branch the repo is configured for — otherwise the manifest
     # scan reads the default branch while everything else indexes `dev`. A
