@@ -180,6 +180,9 @@ async def api(*, role: str | None, is_admin: bool = False, monkeypatch,
         await s.commit()
 
     monkeypatch.setattr(deps_module, "workspace_role", lambda uid, ws: role)
+    monkeypatch.setattr(
+        deps_module, "is_workspace_admin",
+        lambda u, ws: bool(getattr(u, "is_admin", False)) or role in ("owner", "admin"))
     monkeypatch.setattr(analytics_router, "_load_runs", lambda ws, since: list(RUNS))
 
     trust_test_key(monkeypatch)
@@ -216,6 +219,11 @@ async def test_analytics_access(role, admin, code, monkeypatch) -> None:
             body = r.json()
             assert body["reviews"]["total"] == 4
             assert body["outcomes"]["found"] == 6, "another workspace leaked in"
+            # What reviews cost is the payer's: owner/admin/global admin only.
+            if role == "editor":
+                assert "cost_usd" not in body and "cost_basis" not in body
+            else:
+                assert body["cost_usd"]["total"] == pytest.approx(0.6)
 
 
 async def test_analytics_refuses_an_unknown_window(monkeypatch) -> None:

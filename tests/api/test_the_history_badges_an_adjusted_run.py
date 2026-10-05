@@ -62,7 +62,9 @@ def store(tmp_path, monkeypatch) -> ReviewRunStore:
 
 
 @pytest.fixture
-def client(store) -> TestClient:
+def client(store, monkeypatch) -> TestClient:
+    # Not about who may see the price: an ordinary member, no database.
+    monkeypatch.setattr("src.api.deps.is_workspace_admin", lambda _u, _ws: False)
     app = FastAPI()
     app.include_router(reviews_router.router)
     app.dependency_overrides[get_current_user] = lambda: User(

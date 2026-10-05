@@ -164,15 +164,20 @@ function Dashboard({ s }: { s: AnalyticsSummary }) {
             p90: seconds(s.review_time_seconds.p90),
           })}
         />
-        <Kpi
-          label={t("analytics.kpi.cost")}
-          // No run with a known price: "$0.00" would read as free.
-          value={s.cost_usd.runs_with_cost ? money(s.cost_usd.total) : "—"}
-          hint={t("analytics.kpi.costHint", {
-            avg: money(s.cost_usd.avg_per_review),
-            unknown: s.cost_usd.runs_with_unknown_cost,
-          })}
-        />
+        {/* What reviews cost is the payer's: the API leaves `cost_usd` out for
+            anyone below owner/admin, and an absent figure is hidden, never
+            drawn as $0. */}
+        {s.cost_usd && (
+          <Kpi
+            label={t("analytics.kpi.cost")}
+            // No run with a known price: "$0.00" would read as free.
+            value={s.cost_usd.runs_with_cost ? money(s.cost_usd.total) : "—"}
+            hint={t("analytics.kpi.costHint", {
+              avg: money(s.cost_usd.avg_per_review),
+              unknown: s.cost_usd.runs_with_unknown_cost,
+            })}
+          />
+        )}
         <Kpi
           label={t("analytics.kpi.fixRate")}
           value={oc.fix_rate_pct === null ? "—" : `${oc.fix_rate_pct}%`}
@@ -241,9 +246,11 @@ function Dashboard({ s }: { s: AnalyticsSummary }) {
         </Card>
       </div>
 
-      <p className="text-xs text-[var(--color-muted-foreground)]">
-        {t("analytics.costBasis")}
-      </p>
+      {s.cost_usd && (
+        <p className="text-xs text-[var(--color-muted-foreground)]">
+          {t("analytics.costBasis")}
+        </p>
+      )}
     </div>
   );
 }

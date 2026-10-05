@@ -90,6 +90,7 @@ async def api(tmp_path, monkeypatch):
             opened_at=NOW, updated_at=NOW))
         await s.commit()
 
+    monkeypatch.setattr("src.api.deps.is_workspace_admin", lambda _u, _ws: False)
     app = FastAPI()
     app.include_router(prs_router.router)
 

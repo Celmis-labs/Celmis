@@ -252,6 +252,42 @@ def repo_grant_candidates(value: str, workspace_id: str | None) -> list[str]:
     return seen
 
 
+def _repo_registered_in(repo_slug: str, workspace_id: str) -> bool:
+    """Is `repo_slug` (either spelling) one of `workspace_id`'s own repositories?
+    Blocking. An unreadable registry says no."""
+    try:
+        from src.api.auto_review import get_auto_review_store
+
+        return any(repo_slug in (c.repo_slug, c.full_name)
+                   for c in get_auto_review_store().list_for_workspace(workspace_id))
+    except Exception as exc:  # noqa: BLE001 — refuse rather than grant
+        logger.warning("repo_registry_unreadable ws=%s err=%s", workspace_id, exc)
+        return False
+
+
+async def _is_workspace_admin_over_repo(
+    user: User, repo_slug: str, workspace_id: str | None,
+) -> bool:
+    """Owner/admin of the workspace that OWNS this repository: full access to
+    it, whatever the teams say. Strictly the repository's own workspace — an
+    owner of workspace B holds nothing in A, so the repository must be
+    registered in `workspace_id` and the caller an owner/admin of that same
+    workspace. Team grants stay the rule for everybody below admin.
+    """
+    if not workspace_id:
+        return False
+    import asyncio
+
+    from src.users.roles import WORKSPACE_ADMIN_ROLES
+
+    def _check() -> bool:
+        if workspace_role(user.id, workspace_id) not in WORKSPACE_ADMIN_ROLES:
+            return False
+        return _repo_registered_in(repo_slug, workspace_id)
+
+    return await asyncio.to_thread(_check)
+
+
 async def _effective_repo_permission(
     repo_slug: str, user: User, workspace_id: str | None = None,
 ) -> tuple[str | None, bool]:
@@ -260,6 +296,8 @@ async def _effective_repo_permission(
     granted on this repo (used to decide fall-open vs default-deny).
     """
     if user.is_admin:
+        return "admin", True
+    if await _is_workspace_admin_over_repo(user, repo_slug, workspace_id):
         return "admin", True
     from sqlalchemy import select
 
@@ -465,6 +503,16 @@ async def require_workspace_admin(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Requires owner/admin on this workspace",
     )
+
+
+def can_see_review_cost(user: User, workspace_id: str) -> bool:
+    """May this person see what reviews COST (cost_usd, cost totals)?
+
+    Owner/admin of the workspace and global admins — the people who pay for
+    it, as `/api/spend/*`. Everyone below sees runs without a price. Blocking.
+    The single answer for the review routes, analytics, the agent and MCP.
+    """
+    return bool(is_workspace_admin(user, workspace_id))
 
 
 #: Workspace roles that may read review analytics: the people who answer for

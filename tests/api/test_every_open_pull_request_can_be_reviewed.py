@@ -478,6 +478,7 @@ def test_a_bitbucket_review_triggered_by_hand_runs_end_to_end(monkeypatch, tmp_p
 
     monkeypatch.setattr(deps_module, "_effective_repo_permission", _perm)
     app = FastAPI()
+    monkeypatch.setattr("src.api.deps.is_workspace_admin", lambda _u, _ws: False)
     app.include_router(reviews_router.router)
     app.dependency_overrides[get_current_user] = lambda: User(id="u-1", email="r@x.io")
     app.dependency_overrides[current_workspace_id] = lambda: WS

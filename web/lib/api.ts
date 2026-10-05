@@ -2605,13 +2605,15 @@ export const openPullsApi = {
 export type AnalyticsSummary = {
   days: number;
   since: string;
-  /** Where the money figures come from — `review_runs.cost_usd`. */
-  cost_basis: string;
+  /** Where the money figures come from — `review_runs.cost_usd`. Absent
+   *  (with `cost_usd`) unless the caller is a workspace owner/admin: what
+   *  reviews cost is the payer's to see. Never draw a missing figure as $0. */
+  cost_basis?: string;
   reviews: { total: number; by_status: Record<string, number> };
   review_time_seconds: {
     avg: number | null; p50: number | null; p90: number | null; samples: number;
   };
-  cost_usd: {
+  cost_usd?: {
     total: number; avg_per_review: number | null;
     runs_with_cost: number; runs_with_unknown_cost: number;
   };

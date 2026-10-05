@@ -506,7 +506,8 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
         description=(
             "Fetch the latest review run for a PR reference like "
             "`gitlab:owner/repo#42` or a full URL. Returns verdict, "
-            "findings (severity, agent, file:line, suggestion), and cost. "
+            "findings (severity, agent, file:line, suggestion), and — for the "
+            "workspace owner or admin only — cost. "
             "Use to see whether a PR passed, or to trigger a fresh run."
         ),
     )
@@ -1674,14 +1675,31 @@ def _get_review_impl(pr_ref: str) -> dict[str, Any]:
         "verdict": row["verdict"],
         "tokens_input": row["tokens_input"],
         "tokens_output": row["tokens_output"],
-        "cost_usd": row["cost_usd"],
         "started_at": row["started_at"],
         "findings": findings[:20],
         "findings_total": len(findings),
     }
     if hidden:
         out["hidden_finding_count"] = hidden
+    if _caller_sees_review_cost():
+        out["cost_usd"] = row["cost_usd"]
     return out
+
+
+def _caller_sees_review_cost() -> bool:
+    """What a review cost: the token owner's role in the token's workspace —
+    owner/admin, or a global admin; the same answer as the review routes."""
+    from src.mcp_server.identity import resolve_caller
+
+    caller = resolve_caller()
+    if caller.refused:
+        return False
+    if caller.is_admin:
+        return True
+    from src.api.deps import workspace_role
+    from src.users.roles import WORKSPACE_ADMIN_ROLES
+
+    return workspace_role(caller.user_id, caller.workspace_id) in WORKSPACE_ADMIN_ROLES
 
 
 def _migrate_consumers_impl(

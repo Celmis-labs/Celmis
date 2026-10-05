@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import current_workspace_id, require_analytics_access
+from src.api.deps import can_see_review_cost, current_workspace_id, require_analytics_access
 from src.api.review_runs import get_review_run_store
 from src.db.models import ReviewIssue, ReviewPullRequest
 from src.db.session import get_async_session
@@ -93,6 +93,9 @@ async def analytics_summary(
     _user: User = Depends(require_analytics_access),
     ws: str = Depends(current_workspace_id),
 ) -> dict[str, Any]:
+    """Editors read the review figures; what the reviews COST is the payer's
+    (owner/admin, global admin): for everyone else `cost_usd` and
+    `cost_basis` are left out of the answer."""
     if days not in ALLOWED_WINDOWS:
         raise HTTPException(
             status_code=422,
@@ -102,4 +105,8 @@ async def analytics_summary(
     since = now - timedelta(days=days)
     runs = await asyncio.to_thread(_load_runs, ws, since)
     issues = await _load_issues(session, ws, since)
-    return summarize(runs, issues, days=days, now=now)
+    out = summarize(runs, issues, days=days, now=now)
+    if not await asyncio.to_thread(can_see_review_cost, _user, ws):
+        out.pop("cost_usd", None)
+        out.pop("cost_basis", None)
+    return out

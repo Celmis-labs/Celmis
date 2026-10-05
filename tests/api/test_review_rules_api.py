@@ -67,11 +67,15 @@ async def test_a_repo_rule_needs_the_repo_and_review_on_it(tmp_path, monkeypatch
         # Not this workspace's repository: 404, nothing written.
         r = await _create(w, "admin_a", repo_slug="github_nobody-here", title="x")
         assert r.status_code == 404
-        # admin2_a is an admin of A but in no team granted `review` on A_REPO.
+        # admin2_a is in no team granted `review` on A_REPO, but an admin of the
+        # workspace holds every repository of it (user decision) — allowed.
         r = await _create(w, "admin2_a", repo_slug=A_REPO, title="y")
-        assert r.status_code == 403, r.text
+        assert r.status_code == 201, r.text
+        # An admin of ANOTHER workspace holds nothing here.
+        r = await _create(w, "admin_b", repo_slug=A_REPO, title="z")
+        assert r.status_code in (403, 404), r.text
         body = await _list(w, repo=A_REPO)
-        assert [x["title"] for x in body["rules"]] == ["Do not ignore exceptions"]
+        assert sorted(x["title"] for x in body["rules"]) == ["Do not ignore exceptions", "y"]
 
 
 @pytest.mark.parametrize("body, field", [

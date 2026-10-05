@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from src.api.deps import (
+    can_see_review_cost,
     current_workspace_id,
     enforce_repo_permission,
     get_current_user,
@@ -39,7 +40,8 @@ router = APIRouter(prefix="/api/reviews", tags=["reviews"])
 
 
 def _run_to_out(run: ReviewRun, *, with_adjustments: bool = True,
-                with_stages: bool | None = None) -> ReviewRunOut:
+                with_stages: bool | None = None,
+                show_cost: bool = False) -> ReviewRunOut:
     """The wire row for a run.
 
     `with_adjustments=False` is the history list's shape: the count travels,
@@ -78,8 +80,10 @@ def _run_to_out(run: ReviewRun, *, with_adjustments: bool = True,
         # is FAILED with no error_message — the explanation is the banner in
         # `summary`, and the bare swap blanked it.
         summary=(run.error_message or run.summary) if run.status == "failed" else run.summary,
-        cost_usd=run.cost_usd,
-        cost_source=run.cost_source,
+        # What a review cost is for whoever pays for the workspace; everyone
+        # else gets the run without a price (None, not 0 — "free" is a claim).
+        cost_usd=run.cost_usd if show_cost else None,
+        cost_source=run.cost_source if show_cost else None,
         tokens_input=run.tokens_input,
         tokens_output=run.tokens_output,
         cleanup=run.cleanup,
@@ -138,6 +142,7 @@ async def trigger_review(
         pr_ref=req.pr_ref, post_comments=req.post_comments,
         run_id=run_id, user_id=user.id, workspace_id=workspace_id,
     )
+    # A run that was just queued has no cost yet: nothing to show or hide.
     return _run_to_out(run)
 
 
@@ -196,7 +201,8 @@ def history(
     runs = get_review_run_store().list_for_workspace(
         workspace_id, user_id=user.id, limit=limit)
     # The count only — see `_run_to_out`.
-    return [_run_to_out(r, with_adjustments=False) for r in runs]
+    show_cost = can_see_review_cost(user, workspace_id)
+    return [_run_to_out(r, with_adjustments=False, show_cost=show_cost) for r in runs]
 
 
 @router.get("/{run_id}", response_model=ReviewRunOut)
@@ -208,7 +214,7 @@ def get_run(
     run = get_review_run_store().get(run_id)
     if run is None or not _can_see(run, user, workspace_id):
         raise HTTPException(status_code=404, detail="Run not found")
-    return _run_to_out(run)
+    return _run_to_out(run, show_cost=can_see_review_cost(user, workspace_id))
 
 
 @router.get("/{run_id}/diff")

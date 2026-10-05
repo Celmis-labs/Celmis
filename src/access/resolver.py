@@ -262,6 +262,35 @@ def _build_decision(repo_slug: str, my_rules: list) -> RepoAccessDecision:
     )
 
 
+def _owned_by_workspace_admin(session, user_id: str, workspace_id: str,
+                              repos: list[str]) -> set[str]:
+    """The `repos` that are registered in `workspace_id` when `user_id` is an
+    owner/admin of it; nothing otherwise."""
+    from sqlalchemy import select
+
+    from src.db.models import WorkspaceMember
+    from src.users.roles import WORKSPACE_ADMIN_ROLES
+
+    members = session.execute(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == user_id,
+        )
+    ).scalars().all()
+    if not any(m.role in WORKSPACE_ADMIN_ROLES for m in members):
+        return set()
+    try:
+        from src.api.auto_review import get_auto_review_store
+
+        names: set[str] = set()
+        for cfg in get_auto_review_store().list_for_workspace(workspace_id):
+            names.update((cfg.repo_slug, cfg.full_name))
+    except Exception as exc:  # noqa: BLE001 — refuse rather than grant
+        logger.warning("repo_registry_unreadable ws=%s err=%s", workspace_id, exc)
+        return set()
+    return {r for r in repos if r in names}
+
+
 def resolve_access_sync(
     session,
     *,
@@ -283,10 +312,16 @@ def resolve_access_sync(
     if is_admin:
         return {r: RepoAccessDecision.full(r) for r in repos}
 
+    # Owner/admin of the workspace see all of ITS repositories at `code`:
+    # the same bypass as `_effective_repo_permission`, one rule for both
+    # authorities. Strictly this workspace's own repos.
+    owned = _owned_by_workspace_admin(session, user_id, workspace_id, repos)
+    repos_ruled = [r for r in repos if r not in owned]
+
     rules = session.execute(
         select(RepoAccessRule).where(
             RepoAccessRule.workspace_id == workspace_id,
-            RepoAccessRule.repo_slug.in_(repos),
+            RepoAccessRule.repo_slug.in_(repos_ruled),
         )
     ).scalars().all()
 
@@ -301,8 +336,8 @@ def resolve_access_sync(
     for r in rules:
         by_repo.setdefault(r.repo_slug, []).append(r)
 
-    out: dict[str, RepoAccessDecision] = {}
-    for repo in repos:
+    out: dict[str, RepoAccessDecision] = {r: RepoAccessDecision.full(r) for r in owned}
+    for repo in repos_ruled:
         repo_rules = by_repo.get(repo)
         if not repo_rules:
             from src.deployment import fall_open_allowed

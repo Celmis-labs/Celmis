@@ -72,6 +72,7 @@ ASKERS = {
     "viewer+grant": Asker("viewer_g", "viewer", grant=True),
     "member+grant": Asker("member_g", "member", grant=True),
     "other-ws member": Asker("member_b", None),
+    "other-ws admin": Asker("admin_b", None),     # admin of workspace B: nothing in A
     "no membership": Asker("loner", None),
     "global admin": Asker("gadmin", None, is_admin=True),
     "superadmin": Asker("su", None, is_admin=True),
@@ -84,7 +85,8 @@ class Row:
 
     roles   workspace roles the ROUTE admits (no membership: never)
     grant   team permission needed on the repository: "" none, "read",
-            "review", or "never" (a repository only a global admin may read)
+            "review", or "never" (no team of the asker grants it: only workspace
+            owner/admin and global admin may read it)
     route   the gate on the equivalent route — file:line
     action  where the action enforces it — file
     note    `stricter` = the action asks for more than the page; `route-open`
@@ -109,7 +111,9 @@ def _allowed(row: Row, who: Asker) -> bool:
     if who.is_admin:
         return True
     if row.grant == "never":
-        return False
+        # Nobody's team grants it: only owners/admins of the workspace (who
+        # have full access to every repository of it) may.
+        return who.role in ("admin", "owner") and who.role in row.roles
     if who.role is None or who.role not in row.roles:
         return False
     return not row.grant or who.grant

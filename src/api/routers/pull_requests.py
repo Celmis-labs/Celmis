@@ -586,7 +586,11 @@ async def pull_request_runs(
         get_review_run_store().list_for_pr, ws, row.provider, row.repo,
         int(row.number), user_id=user.id, limit=limit,
     )
+    from src.api.deps import can_see_review_cost
+
+    show_cost = await asyncio.to_thread(can_see_review_cost, user, ws)
     return PullRequestRuns(
         pr_id=pr_id,
-        items=[_run_to_out(r, with_adjustments=False, with_stages=True) for r in runs],
+        items=[_run_to_out(r, with_adjustments=False, with_stages=True,
+                           show_cost=show_cost) for r in runs],
     )
