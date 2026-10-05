@@ -630,7 +630,16 @@ REVIEW_SETTING_KEYS: tuple[str, ...] = (
     "run_on_drafts", "approve_when_clean", "request_changes_on_critical",
     "committable_suggestions", "comment_min_severity", "max_inline_comments",
     "summary_enabled", "review_language", "disabled_agents",
+    "agent_prompt_guidelines",
 )
+
+#: Not a column of the workspace review defaults, but a setting of both
+#: scopes all the same: the team guidelines ADDED to an agent's prompt
+#: (src/review/prompt_guidelines.py), stored per repository on the policy and
+#: per workspace beside the agent prompts (src/api/routers/agents.py).
+#: Replacing an agent's prompt is deliberately NOT a key here: that is the
+#: advanced mode, with a warning and a preview on the page.
+_GUIDELINES_KEY = "agent_prompt_guidelines"
 
 #: The section of /review-settings that edits each of them — where a link
 #: after a change sends the person to see it (web/components/review-settings/
@@ -640,7 +649,7 @@ REVIEW_SETTING_SECTION: dict[str, str] = {
     "request_changes_on_critical": "general", "committable_suggestions": "general",
     "review_language": "general", "comment_min_severity": "filters",
     "max_inline_comments": "filters", "summary_enabled": "summary",
-    "disabled_agents": "categories",
+    "disabled_agents": "categories", "agent_prompt_guidelines": "prompts",
 }
 
 
@@ -696,7 +705,45 @@ def review_setting_keys(scope: str) -> tuple[str, ...]:
     from src.api.schemas import ReviewPolicyIn, WorkspaceReviewDefaultsIn
 
     model = WorkspaceReviewDefaultsIn if scope == "workspace" else ReviewPolicyIn
-    return tuple(k for k in REVIEW_SETTING_KEYS if k in model.model_fields)
+    return tuple(k for k in REVIEW_SETTING_KEYS
+                 if k in model.model_fields or k == _GUIDELINES_KEY)
+
+
+def _normalise_guidelines(value: Any) -> dict[str, str]:
+    """{agent: text} as it will be written, or a refusal naming the problem.
+
+    A JSON object of agent → guidelines; "" (or null) for an agent removes
+    its guidelines at that scope. The agents and the 2000-character cap are
+    the API's own.
+    """
+    import json as _json
+
+    from src.api.routers.review_policies import _OVERRIDABLE_AGENT_ORDER
+    from src.review.prompt_guidelines import GUIDELINES_MAX_CHARS
+
+    shape = ('agent_prompt_guidelines: give an object of agent → guidelines, '
+             'e.g. {"security": "- Flag …"}.')
+    if isinstance(value, str):
+        try:
+            value = _json.loads(value)
+        except ValueError:
+            raise ActionError(shape) from None
+    if not isinstance(value, dict) or not value:
+        raise ActionError(shape)
+    out: dict[str, str] = {}
+    for agent, text in value.items():
+        name = str(agent).strip()
+        if name not in _OVERRIDABLE_AGENT_ORDER:
+            raise ActionError(
+                f"agent_prompt_guidelines: unknown agent {name!r} — the agents "
+                f"are: {', '.join(_OVERRIDABLE_AGENT_ORDER)}")
+        body = "" if text is None else str(text).strip()
+        if len(body) > GUIDELINES_MAX_CHARS:
+            raise ActionError(
+                f"agent_prompt_guidelines.{name}: at most {GUIDELINES_MAX_CHARS} "
+                f"characters ({len(body)} given).")
+        out[name] = body
+    return out
 
 
 def resolve_repo(actor: Actor, repo: str | None) -> str:
@@ -801,6 +848,8 @@ def review_setting_value(scope: str, key: str, value: Any) -> Any:
         raise ActionError(
             f"{key!r} is not a setting of the {where} in this version of "
             "Celmis, so there is nothing to change.")
+    if key == _GUIDELINES_KEY:
+        return _normalise_guidelines(value)
     model = WorkspaceReviewDefaultsIn if scope == "workspace" else ReviewPolicyIn
     if key == "disabled_agents" and isinstance(value, str):
         value = [v.strip() for v in value.split(",") if v.strip()]
@@ -833,6 +882,66 @@ def review_setting_value(scope: str, key: str, value: Any) -> Any:
                 f"disabled_agents: unknown agent(s) {', '.join(unknown)} — the "
                 f"switchable agents are: {', '.join(TOGGLEABLE_AGENTS)}")
     return parsed_value
+
+
+async def _update_guidelines(actor: Actor, session: Any, user: Any, scope: str,
+                             changes: dict[str, str],
+                             repo_slug: str | None) -> dict[str, Any]:
+    """Set (or clear, with "") the team guidelines of the named agents.
+
+    Per agent, merged into what the scope already holds — "add guidelines
+    for security" must not wipe the defect agent's. Workspace: the same
+    store and the same gate (`require_prompt_editor`) as PUT
+    /api/agents/{name}/guidelines. Repository: PUT /api/review-policies'
+    own function, with the stored map laid under the change.
+    """
+    import asyncio
+
+    from src.api.deps import require_prompt_editor
+
+    await _as_action(require_prompt_editor(user=user,
+                                           workspace_id=actor.workspace_id))
+    slug: str | None = None
+    if scope == "workspace":
+        from src.api.routers import agents as agents_router
+
+        unknown = [a for a in changes if a not in agents_router._AGENTS]
+        if unknown:
+            raise ActionError(f"No workspace prompt for agent(s): {', '.join(unknown)}")
+
+        def _write() -> None:
+            for agent, text in changes.items():
+                if text:
+                    agents_router._save_guidelines(
+                        agent, text, updated_by=actor.email,
+                        workspace_id=actor.workspace_id)
+                else:
+                    agents_router._delete_guidelines(agent, actor.workspace_id)
+
+        await asyncio.to_thread(_write)
+    else:
+        from src.db.models import RepoReviewPolicy
+
+        slug = resolve_repo(actor, repo_slug)
+        await _require_repo_review(actor, user, slug)
+        row = await session.get(RepoReviewPolicy, slug)
+        merged = dict(getattr(row, "agent_prompt_guidelines", None) or {}) if row else {}
+        for agent, text in changes.items():
+            if text:
+                merged[agent] = text
+            else:
+                merged.pop(agent, None)
+        await _upsert_policy_fields(actor, session, user, slug,
+                                    {_GUIDELINES_KEY: merged})
+    logger.info("review_setting_changed scope=%s repo=%s key=%s agents=%s ws=%s "
+                "by=%s via=%s", scope, slug, _GUIDELINES_KEY,
+                ",".join(sorted(changes)), actor.workspace_id, actor.email,
+                actor.label)
+    return {"scope": scope, "repo": slug, "key": _GUIDELINES_KEY,
+            "value": _plain(changes), "effective": _plain(changes),
+            "count": len(changes),
+            "links": [{"label": "policy" if slug else "defaults",
+                       "href": _settings_href(slug, "prompts")}]}
 
 
 def _user_for(actor: Actor):
@@ -1107,6 +1216,9 @@ async def update_review_setting(
 
     parsed = review_setting_value(scope, key, value)
     user = _user_for(actor)
+
+    if key == _GUIDELINES_KEY:
+        return await _update_guidelines(actor, session, user, scope, parsed, repo_slug)
 
     if scope == "workspace":
         from src.api.deps import is_workspace_admin

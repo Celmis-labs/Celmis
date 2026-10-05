@@ -36,6 +36,7 @@ from src.review.agents.base import (
     ReviewAgent,
     base_instruction_block,
     clamp_base_instruction,
+    claude_engine_guidelines,
 )
 from src.review.branch_patterns import branch_targeted
 from src.review.branch_patterns import pass_sentence as branch_pass_sentence
@@ -1020,6 +1021,17 @@ class ReviewOrchestrator:
                     # The team's base instruction first, as every API-engine
                     # agent carries it right after its own prompt.
                     base_instruction_block(getattr(context, "base_instruction", "")),
+                    # Then every finder's team guidelines, each in its own
+                    # delimited block — the same text the API engine's agents
+                    # carry after their prompts. Replacement prompts do not
+                    # reach this engine (it has one prompt of its own); the
+                    # guidelines, which only add, do.
+                    claude_engine_guidelines(context, [
+                        a.name for a in self.agents
+                        if isinstance(a, LLMReviewAgent)
+                        and a.name not in disabled_agents
+                        and a.name not in dormant_agents
+                    ]),
                     context.custom_rules,
                     render_policy_rules(policy, engine_pr.changed_files).targeted,
                 ) if p),
@@ -1703,6 +1715,8 @@ class ReviewOrchestrator:
             llm_client=llm_client,
             agent_llm=agent_llm,
             repo_agent_prompts=dict((policy or {}).get("agent_prompt_overrides") or {}),
+            repo_agent_guidelines=dict((policy or {}).get("agent_prompt_guidelines") or {}),
+            repo_guidelines_extend=list((policy or {}).get("agent_guidelines_extend") or []),
             agent_custom_rules=agent_custom_rules,
             review_language=((policy or {}).get("review_language") or None),
             # How every suggestion is written — the team's base instruction,
@@ -1902,6 +1916,13 @@ class ReviewOrchestrator:
                         "verifier_model": row.verifier_model,
                         # Stage 12 — per-repo per-agent system_prompt overrides.
                         "agent_prompt_overrides": dict(row.agent_prompt_overrides or {}),
+                        # 2.3.1 — per-repo per-agent team guidelines (ADDED
+                        # to the prompt) and the agents whose guidelines add
+                        # to the workspace's instead of replacing them.
+                        "agent_prompt_guidelines": dict(
+                            getattr(row, "agent_prompt_guidelines", None) or {}),
+                        "agent_guidelines_extend": list(
+                            getattr(row, "agent_guidelines_extend", None) or []),
                         # Per-repo per-agent LLM knobs — {architect:
                         # {max_output_tokens?, reasoning?}, …}, the top layer
                         # of `resolve_agent_llm`. No `model` key: the model of

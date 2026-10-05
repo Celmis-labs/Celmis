@@ -611,8 +611,13 @@ export type ReviewPolicy = {
     reasoning?: string | number | null;
     temperature?: number | null;
   }>;
-  // Stage 12 — per-repo per-agent system_prompt overrides.
+  // Stage 12 — per-repo per-agent system_prompt REPLACEMENTS (advanced).
   agent_prompt_overrides?: Record<string, string>;
+  // 2.3.1 — per-repo per-agent team guidelines, ADDED to the agent's prompt
+  // (at most 2000 characters each; empty inherits the workspace's), and the
+  // agents whose guidelines here add to the workspace's instead of replacing.
+  agent_prompt_guidelines?: Record<string, string>;
+  agent_guidelines_extend?: string[];
   // Per-repo MCP evidence sources.
   mcp_sources?: Array<{
     name: string; url: string; auth_type: string;
@@ -730,10 +735,32 @@ type ReviewPolicyReadOnly =
 /** GET /api/review-policies/overrides-summary. */
 export type AgentOverridesSummary = {
   prompt_overrides: Record<string, Array<{ repo_slug: string; updated_at: string | null }>>;
+  /** agent → the repos with team guidelines of their own for it. */
+  guideline_overrides?: Record<string, Array<{ repo_slug: string; updated_at: string | null }>>;
 };
 
 /** Which layer an agent's base system prompt comes from. */
 export type PromptSource = "repo" | "workspace" | "builtin";
+
+/** One block of a composed system prompt: the agent's own prompt ("base")
+ *  and the blocks appended to it, in the order sent. */
+export type PromptPart = {
+  kind: "base" | "guidelines" | "base_instruction" | "workspace_rules" | "rules"
+    | "language" | "output_format" | "rider";
+  source: string;
+  text: string;
+};
+
+/** GET …/prompt-preview — the composed prompt of one agent. */
+export type PromptPreview = {
+  agent: string;
+  system_prompt: string;
+  user_prompt_template: string;
+  prompt_source?: PromptSource;
+  /** "none" | "workspace" | "repository" | "workspace+repository". */
+  guidelines_source?: string;
+  parts?: PromptPart[];
+};
 
 /** The PUT body. Not `Omit<ReviewPolicy, …>` alone, for two reasons that both
  *  end in a 422: the payload model is `extra="forbid"`, so `agents_effective`
@@ -819,11 +846,14 @@ export const reviewPoliciesApi = {
       { token },
     ),
   promptPreview: (token: string, slug: string, agent: string) =>
-    api<{
-      agent: string; system_prompt: string; user_prompt_template: string;
-      prompt_source?: PromptSource;
-    }>(
+    api<PromptPreview>(
       `/api/review-policies/${encodeURIComponent(slug)}/prompt-preview?agent=${encodeURIComponent(agent)}`,
+      { token },
+    ),
+  /** The prompt a repository with no settings of its own would send. */
+  workspacePromptPreview: (token: string, agent: string) =>
+    api<PromptPreview>(
+      `/api/review-policies/prompt-preview?agent=${encodeURIComponent(agent)}`,
       { token },
     ),
   /** agent → the repos (of the active workspace, that the caller may read)
@@ -1126,9 +1156,17 @@ export type AgentInfo = {
   default_severity: string;
   verdict_impact: string;
   settings_model_field: string;
+  /** The prompt the agent starts from here: the replacement, else the built-in. */
   system_prompt: string;
   user_prompt_template: string;
+  /** The workspace REPLACES the built-in prompt (advanced mode). */
   has_override: boolean;
+  /** The workspace's team guidelines — ADDED to the prompt. "" = none. */
+  guidelines?: string;
+  has_guidelines?: boolean;
+  guidelines_max?: number;
+  /** What the agent already looks for — the guidelines box's help text. */
+  guidelines_hint?: string;
 };
 
 export const agentsApi = {
@@ -1143,6 +1181,17 @@ export const agentsApi = {
     }),
   resetPrompt: (token: string, name: string) =>
     api<AgentInfo>(`/api/agents/${name}/prompt`, {
+      token,
+      method: "DELETE",
+    }),
+  setGuidelines: (token: string, name: string, guidelines: string) =>
+    api<AgentInfo>(`/api/agents/${name}/guidelines`, {
+      token,
+      method: "PUT",
+      json: { guidelines },
+    }),
+  resetGuidelines: (token: string, name: string) =>
+    api<AgentInfo>(`/api/agents/${name}/guidelines`, {
       token,
       method: "DELETE",
     }),

@@ -7,7 +7,15 @@ Endpoints:
     DELETE /api/review-policies/{slug}          — reset to default (delete row)
     GET    /api/review-policies/{slug}/branches — branches (provider, else local clone)
     GET    /api/review-policies/{slug}/prompt-preview — effective prompt of one agent
-    GET    /api/review-policies/overrides-summary — agent → repos overriding its prompt
+    GET    /api/review-policies/prompt-preview  — the same for a repo with no settings
+    GET    /api/review-policies/overrides-summary — agent → repos overriding its
+                                                 prompt / with guidelines of their own
+
+Per-agent prompts come in two kinds (src/review/prompt_guidelines.py):
+`agent_prompt_guidelines` are ADDED to the agent's prompt (the default
+customisation, at most 2000 characters, the repository's replacing the
+workspace's unless the agent is listed in `agent_guidelines_extend`), and
+`agent_prompt_overrides` REPLACE it (the advanced mode).
 
 Every setting the workspace review defaults also carry (/api/review-defaults:
 agent participation, verifier, comment threshold, inline cap, summary,
@@ -828,6 +836,8 @@ def _row_to_out(
         performance_model=getattr(row, "performance_model", None),
         business_logic_model=getattr(row, "business_logic_model", None),
         agent_prompt_overrides=dict(row.agent_prompt_overrides or {}),
+        agent_prompt_guidelines=dict(getattr(row, "agent_prompt_guidelines", None) or {}),
+        agent_guidelines_extend=list(getattr(row, "agent_guidelines_extend", None) or []),
         # NULL for every row written before the column existed, and NULL is
         # exactly "inherit" — the same thing an absent key means at every
         # other layer of this chain.
@@ -880,6 +890,8 @@ def _default_out(
         tests_model=None,
         verifier_model=None,
         agent_prompt_overrides={},
+        agent_prompt_guidelines={},
+        agent_guidelines_extend=[],
         agent_llm_overrides={},
         agents_effective=dict(agents_effective or {}),
         mcp_sources=[],
@@ -980,13 +992,21 @@ async def overrides_summary(
     out: dict[str, list[AgentPromptOverrideRepo]] = {
         agent: [] for agent in _OVERRIDABLE_AGENT_ORDER
     }
+    guidelines_out: dict[str, list[AgentPromptOverrideRepo]] = {
+        agent: [] for agent in _OVERRIDABLE_AGENT_ORDER
+    }
     readable: dict[str, bool] = {}
-    for row in rows:
-        overrides = {
-            k for k, v in (row.agent_prompt_overrides or {}).items()
+
+    def _own(mapping: Any) -> set[str]:
+        return {
+            k for k, v in (mapping or {}).items()
             if k in _OVERRIDABLE_AGENTS and isinstance(v, str) and v.strip()
         }
-        if not overrides:
+
+    for row in rows:
+        overrides = _own(row.agent_prompt_overrides)
+        guidelines = _own(getattr(row, "agent_prompt_guidelines", None))
+        if not overrides and not guidelines:
             continue
         if row.repo_slug not in readable:
             try:
@@ -997,11 +1017,39 @@ async def overrides_summary(
         if not readable[row.repo_slug]:
             continue
         for agent in _OVERRIDABLE_AGENT_ORDER:
+            entry = AgentPromptOverrideRepo(
+                repo_slug=row.repo_slug, updated_at=row.updated_at)
             if agent in overrides:
-                out[agent].append(AgentPromptOverrideRepo(
-                    repo_slug=row.repo_slug, updated_at=row.updated_at,
-                ))
-    return AgentOverridesSummary(prompt_overrides=out)
+                out[agent].append(entry)
+            if agent in guidelines:
+                guidelines_out[agent].append(entry)
+    return AgentOverridesSummary(prompt_overrides=out,
+                                 guideline_overrides=guidelines_out)
+
+
+@router.get("/prompt-preview")
+async def workspace_prompt_preview(
+    agent: str = Query(default="defect", pattern=_PREVIEWABLE_PATTERN),
+    session: AsyncSession = Depends(get_async_session),
+    _user: User = Depends(get_current_user),
+    ws_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """Dry-run of the prompt a repository with no settings of its own would
+    send for `agent`: the workspace's replacement or the built-in, the
+    workspace's guidelines, the workspace base instruction and the
+    workspace-wide review rules. The Global scope's "Preview"."""
+    ws_defaults = await _load_workspace_defaults(session, ws_id)
+    try:
+        from src.review.rules_store import effective_rules_for
+
+        review_rules = await effective_rules_for(ws_id, None, session=session)
+    except Exception as exc:  # noqa: BLE001 — a preview without them beats a 500
+        logger.warning("prompt_preview_review_rules_unavailable ws=%s err=%s",
+                       ws_id, exc)
+        await session.rollback()
+        review_rules = []
+    return await asyncio.to_thread(
+        _compose_preview, agent, ws_id, None, None, ws_defaults, review_rules)
 
 
 @router.get("/{repo_slug:path}/prompt-preview")
@@ -1017,22 +1065,18 @@ async def prompt_preview(
     session: AsyncSession = Depends(get_async_session),
     _user: User = Depends(get_current_user),
     ws_id: str = Depends(current_workspace_id),
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Dry-run: compose the effective system_prompt + user_prompt_template
     for `agent` on `repo_slug`, exactly as the review runtime would build it.
 
     Uses a mock PR context (empty diff, no changed files) so no LLM call is
     made and the response is deterministic — useful for debugging why a
     prompt looks the way it does after all the layers stack up.
-    """
-    from src.review.agents.base import (
-        AgentContext,
-        LLMReviewAgent,
-        _compose_effective_system_prompt,
-    )
-    from src.review.orchestrator import ReviewOrchestrator
-    from src.review.policy_rules import render_policy_rules
 
+    Besides the joined text, `parts` lists the blocks in order — the agent's
+    own prompt ("base") and every block appended to it — so the page can fold
+    the long built-in part and highlight what the team added.
+    """
     # First, before the policy row is loaded: a failure here rolls the
     # session back (see `_load_workspace_defaults`).
     ws_defaults = await _load_workspace_defaults(session, ws_id)
@@ -1054,28 +1098,63 @@ async def prompt_preview(
     row = await session.get(RepoReviewPolicy, repo_slug)
     if row is not None and row.workspace_id != ws_id:
         row = None  # another tenant's policy — never disclose; preview defaults
+    return await asyncio.to_thread(
+        _compose_preview, agent, ws_id, repo_slug, row, ws_defaults, review_rules)
+
+
+def _compose_preview(
+    agent: str, ws_id: str, repo_slug: str | None, row: Any,
+    ws_defaults: dict[str, Any] | None, review_rules: list,
+) -> dict[str, Any]:
+    """Both previews' body — blocking (the workspace prompt layers live in
+    the credential store). `row` None previews the workspace defaults."""
+    from src.review.agents.base import (
+        AgentContext,
+        LLMReviewAgent,
+        compose_system_prompt_parts,
+        team_guidelines_entries,
+    )
+    from src.review.orchestrator import ReviewOrchestrator
+    from src.review.policy_rules import render_policy_rules
+    from src.review.prompt_guidelines import guidelines_source
+
     agent_overrides = dict(row.agent_prompt_overrides or {}) if row else {}
+    agent_guidelines = dict(getattr(row, "agent_prompt_guidelines", None) or {}) if row else {}
+    guidelines_extend = list(getattr(row, "agent_guidelines_extend", None) or []) if row else []
     review_language = getattr(row, "review_language", None) if row else None
     base_instruction = _preview_base_instruction(row, ws_defaults)
-    source = await asyncio.to_thread(_prompt_source, agent, agent_overrides, ws_id)
+    source = _prompt_source(agent, agent_overrides, ws_id)
+    preview_pr = _preview_pr(repo_slug or "(workspace)")
+
+    def _out(parts: list, user_template: str, ctx: AgentContext,
+             system_prompt: str) -> dict[str, Any]:
+        return {
+            "agent": agent,
+            "system_prompt": system_prompt,
+            "user_prompt_template": user_template,
+            "prompt_source": source,
+            "guidelines_source": guidelines_source(team_guidelines_entries(ctx, agent)),
+            "parts": [{"kind": p.kind, "source": p.source, "text": p.text} for p in parts],
+        }
 
     if agent == "verifier":
         # The verifier reads no repo rules and is handed the findings, not a
         # diff template — its prompt is the system prompt and nothing else.
-        from src.review.agents.verifier import verifier_system_prompt
+        from src.review.agents.verifier import (
+            verifier_system_prompt,
+            verifier_system_prompt_parts,
+        )
 
         ctx = AgentContext(
-            pull_request=_preview_pr(repo_slug),
+            pull_request=preview_pr,
             repo_agent_prompts=agent_overrides,
+            repo_agent_guidelines=agent_guidelines,
+            repo_guidelines_extend=guidelines_extend,
             workspace_id=ws_id,
             base_instruction=base_instruction,
         )
-        return {
-            "agent": agent,
-            "system_prompt": verifier_system_prompt(ctx),
-            "user_prompt_template": "",
-            "prompt_source": source,
-        }
+        return _out(verifier_system_prompt_parts(ctx), "", ctx,
+                    verifier_system_prompt(ctx))
 
     # ASKED OF THE ORCHESTRATOR, not restated. The previous version listed
     # four agent classes by name, so a renamed roster left this endpoint
@@ -1107,25 +1186,23 @@ async def prompt_preview(
         None, match_files=False,
     )
     ctx = AgentContext(
-        pull_request=_preview_pr(repo_slug),
+        pull_request=preview_pr,
         custom_rules=rendered.shared,
         agent_custom_rules=rendered.per_agent,
         repo_agent_prompts=agent_overrides,
+        repo_agent_guidelines=agent_guidelines,
+        repo_guidelines_extend=guidelines_extend,
         workspace_id=ws_id,
         review_language=review_language,
         base_instruction=base_instruction,
     )
-    effective_system = _compose_effective_system_prompt(
+    parts = compose_system_prompt_parts(
         agent_name=agent,
         default_system=a.system_prompt,
         context=ctx,
     )
-    return {
-        "agent": agent,
-        "system_prompt": effective_system,
-        "user_prompt_template": a.user_prompt_template,
-        "prompt_source": source,
-    }
+    return _out(parts, a.user_prompt_template, ctx,
+                "\n\n".join(p.text for p in parts))
 
 
 def _preview_base_instruction(row: Any, ws_defaults: dict[str, Any] | None) -> str:
@@ -1431,6 +1508,18 @@ async def upsert_policy(
         if k in _OVERRIDABLE_AGENTS
         and isinstance(v, str) and v.strip()
     }
+    # Team guidelines (ADDED to the prompt). Absent keeps what is stored; a
+    # map replaces it whole. Length was refused by the schema (422).
+    if payload.agent_prompt_guidelines is not None:
+        row.agent_prompt_guidelines = {
+            k: v.strip() for k, v in payload.agent_prompt_guidelines.items()
+            if k in _OVERRIDABLE_AGENTS and isinstance(v, str) and v.strip()
+        }
+    if payload.agent_guidelines_extend is not None:
+        row.agent_guidelines_extend = [
+            a for a in dict.fromkeys(payload.agent_guidelines_extend)
+            if a in _OVERRIDABLE_AGENTS
+        ]
     row.agent_llm_overrides = agent_llm_overrides
     # Sanitize MCP source entries — drop anything missing name/url.
     row.mcp_sources = [

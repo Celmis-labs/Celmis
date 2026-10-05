@@ -14,7 +14,7 @@ from src.automation.knowledge._base import Section
 SECTIONS = (
     Section(
         id="agent-prompts",
-        title="Agent prompts: workspace-wide and per repository, and which wins",
+        title="Agent prompts and guidelines: workspace-wide and per repository, and which wins",
         keywords=(
             "prompt", "system prompt", "agent", "agents", "override",
             "instruction", "global", "workspace-wide", "per repo",
@@ -22,6 +22,8 @@ SECTIONS = (
             "defect", "contract", "security", "verifier", "reset", "default",
             "performance", "business logic", "business_logic",
             "base instruction", "базова інструкц", "базовая инструкц",
+            "guideline", "guidelines", "replace", "настанов", "рекомендац",
+            "доповн", "додати до промпт", "дополн",
             "промпт", "агент", "інструкц", "глобальн", "кожн", "окрем",
             "репозитор", "репо", "перевизнач", "скинут", "типов",
             "инструкц", "глобальн", "кажд", "отдельн", "переопредел",
@@ -34,55 +36,72 @@ Yes — agent prompts can be changed for the whole workspace AND per
 repository, for every agent that has a prompt (defect, contract, security,
 performance, business_logic and the verifier). Both live on one page,
 [Code review settings](/review-settings) (Code review → "Settings"), section
-"Custom prompts":
+"Custom prompts". Each agent offers two kinds of customisation:
+
+- "Guidelines (added to the built-in prompt)" — the normal way. Up to 2,000
+  characters of what this team wants the agent to look for or how to word
+  it. They are ADDED after the agent's own prompt in a block headed
+  `Team guidelines for <agent>`, which tells the model they refine focus and
+  wording but never override the prompt's scope (changed lines only),
+  evidence, severity and output rules. The box shows what the agent already
+  checks, so write only what you add.
+- "Advanced: replace the built-in prompt" — the whole system prompt is
+  swapped for your text (with a warning: the built-in severity calibration,
+  scope rules and avoid-list are lost). Guidelines are still added to it.
+  Since 2.3.1 an old per-agent prompt that was a short list (no output
+  format, no `You are …` opening) was turned into guidelines automatically; long
+  prompts stayed replacements.
 
 A. Workspace-wide — scope "Global" (the default), section "Custom prompts"
    (link: `/review-settings?section=prompts`; `&agent=security` opens one):
-1. Under "Agent prompts" each agent shows its full system prompt, badged
-   "Custom" or "Default". Edit the text and press "Save settings" at the
-   top. Every repository without its own prompt for that agent uses it.
-2. "Reset to default" restores the built-in prompt on save ("Keep custom"
-   undoes the reset before saving). "Preview" shows what the agent checks,
-   the context it gets, the system prompt and the user prompt template.
-3. A line "Own prompt in repositories: {count}" lists the repositories that
-   override it — their reviews ignore the workspace prompt; each name links
-   to that repository's prompt.
+1. Each agent card has the guidelines box (badge "Custom" or "Not set")
+   and, folded, "Advanced: replace the built-in prompt". Press "Save
+   settings" at the top. Every repository without its own value uses them.
+2. "Reset" clears the guidelines; "Reset to default" restores the built-in
+   prompt on save ("Keep custom" undoes it). "Preview" shows the composed
+   prompt: the agent's own prompt folded, the added blocks highlighted.
+3. A line under the card lists the repositories with their own guidelines
+   or their own prompt for that agent — each name links to it.
 
 B. Per repository — pick the repository under "Per repository" on the left
    (search box; the orange number is how many settings it overrides), then
    "Custom prompts" (link: `/review-settings?repo=<repo>&section=prompts`):
-1. Under "Agent prompts" one box per agent, the verifier included. A badge
-   says "Custom" or "Inherits the workspace prompt" /
-   "Inherits the built-in prompt"; an empty box inherits. "Start from inherited" copies the
-   inherited text in to edit, "Use inherited" clears the override, "Preview"
-   shows the composed prompt exactly as the reviewer will send it (saved
-   settings only).
-2. "Repository instructions": extra context for this repository added to
+1. One card per agent, the verifier included. The guidelines box is badged
+   "Custom" or "Inherited" (from the workspace); an empty box inherits.
+   "Also keep the workspace guidelines" adds this repository's to the
+   workspace's instead of replacing them (repository wins a disagreement).
+2. "Advanced: replace the built-in prompt" holds this repository's
+   replacement; empty inherits the workspace's prompt, else the built-in.
+3. "Repository instructions": extra context for this repository added to
    every agent's prompt (up to 20,000 characters).
-3. Press "Save settings". It applies from the next review of that
-   repository.
+4. "Preview" shows the composed prompt exactly as the reviewer sends it
+   (saved settings only). Press "Save settings"; it applies from the next
+   review of that repository.
 
-Which prompt an agent uses (the base, highest priority first):
-1. The repository's override ("Per repository" → "Custom prompts").
-2. The workspace override ("Global" → "Custom prompts").
+Which prompt an agent starts from (highest priority first):
+1. The repository's override (its "Advanced: replace the built-in prompt" box).
+2. The workspace override (Global, same box).
 3. The built-in prompt.
-Then, always appended on top of whichever base won: the "Base instruction"
-(same section, at most 2,000 characters; set at Global or overridden per
-repository; it reaches every agent and the verifier and goes first, straight
-after the agent's prompt), the workspace-wide rules from
-[LLM Setup](/settings/llm), the "Repository instructions", the rules from
-the rules library that apply, and a language instruction when the review
-language is not English. "Preview" shows them in place. So a repository
-override replaces the workspace prompt for that repository only; rules add
-to the prompt rather than replace it.
+Which guidelines it gets: the repository's, else the workspace's (both when
+"Also keep the workspace guidelines" is on).
+The order sent: the prompt, the team guidelines, the "Base instruction"
+(same section, at most 2,000 characters; set at Global or per repository —
+it governs how every suggestion is written), the workspace-wide rules from
+[LLM Setup](/settings/llm), the "Repository instructions", the rules from the
+rules library that apply, a language instruction when the review language is
+not English, and the output format last. The Claude Code engine gets every
+agent's guidelines too (a replaced prompt does not reach it).
+
+The chat assistant can set guidelines too — `add to the security agent's
+guidelines for repo X: …` (key `agent_prompt_guidelines`); it never
+replaces a prompt.
 
 Who: the editor, admin or owner role in the workspace (or a global admin)
-edits prompts; at Global an editor may change the agent prompts while the
-other workspace defaults stay with owners and admins — the page says why
-when something is read-only. Repository settings additionally need review
-permission on that repository when team grants are configured. Careful: a
-broken prompt can silently produce zero findings — use "Preview", and
-"Use inherited" or "Reset to default" to recover.
+edits prompts and guidelines; at Global an editor may change them while the
+other workspace defaults stay with owners and admins. Repository settings
+additionally need review permission on that repository when team grants are
+configured. Careful: a replaced prompt can silently produce zero findings —
+prefer guidelines, use "Preview", and "Reset to default" to recover.
 """,
     ),
     Section(

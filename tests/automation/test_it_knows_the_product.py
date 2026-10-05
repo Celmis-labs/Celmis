@@ -209,9 +209,21 @@ def test_the_precedence_matches_the_code():
     """If the resolution order in the review agents changes, this fails
     rather than the agent describing the old order."""
     src = (_REPO / "src" / "review" / "agents" / "base.py").read_text()
-    block = src[src.index("Resolution order"):][:600]
-    assert block.index("Per-repo per-agent override") < block.index(
-        "Global per-agent override") < block.index("built-in default")
+    block = src[src.index("Resolution order"):][:900]
+    assert block.index("Per-repo per-agent REPLACEMENT") < block.index(
+        "Workspace per-agent replacement") < block.index("built-in default")
+    # And the guidelines: appended, the repository's else the workspace's.
+    assert block.index("built-in default") < block.index("team guidelines")
+
+
+def test_the_knowledge_says_guidelines_are_added_not_replacing():
+    from src.automation.knowledge import BY_ID
+
+    body = BY_ID["agent-prompts"].body
+    assert "ADDED" in body and "2,000" in body
+    assert '"Advanced: replace the built-in prompt"' in body
+    assert '"Also keep the workspace guidelines"' in body
+    assert "agent_prompt_guidelines" in body
 
 
 def test_the_roles_section_is_written_from_roles_py():

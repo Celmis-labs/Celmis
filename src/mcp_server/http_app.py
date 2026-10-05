@@ -1722,6 +1722,12 @@ def _get_review_policy_impl(repo_slug: str) -> dict[str, Any]:
             "tests_model": row.tests_model,
             "verifier_model": row.verifier_model,
             "agent_prompt_overrides": dict(row.agent_prompt_overrides or {}),
+            # Team guidelines — ADDED to each agent's prompt, unlike the
+            # overrides above, which replace it.
+            "agent_prompt_guidelines": dict(
+                getattr(row, "agent_prompt_guidelines", None) or {}),
+            "agent_guidelines_extend": list(
+                getattr(row, "agent_guidelines_extend", None) or []),
         }
 
 

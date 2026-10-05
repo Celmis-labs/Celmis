@@ -56,6 +56,13 @@ def _jsonb_as_json_on_sqlite(type_, compiler, **kw) -> str:  # pragma: no cover
     return "JSON"
 
 
+def _server_default(c):
+    """The model column's server default, carried into the legacy table: a
+    NOT NULL column a later migration added with a default (the agent
+    guidelines, c5d6e7f8a9b0) must not refuse the legacy insert below."""
+    return c.server_default.arg if c.server_default is not None else None
+
+
 def _migration():
     """The revision module, loaded from the file Alembic itself would run."""
     spec = importlib.util.spec_from_file_location(f"migration_{REVISION}", MIGRATION)
@@ -77,7 +84,8 @@ def _table_before_the_migration() -> sa.Table:
         RepoReviewPolicy.__tablename__,
         sa.MetaData(),
         *[
-            sa.Column(c.name, c.type, primary_key=c.primary_key, nullable=c.nullable)
+            sa.Column(c.name, c.type, primary_key=c.primary_key, nullable=c.nullable,
+                      server_default=_server_default(c))
             for c in RepoReviewPolicy.__table__.columns
             if c.name != COLUMN
         ],

@@ -20,6 +20,41 @@ derives it from there.
 
 ## [Unreleased]
 
+### Changed
+
+- **Agent prompts are customised with guidelines that are ADDED, not swapped
+  in.** Each agent in Code review settings → Custom prompts (Global and per
+  repository) now has "Guidelines (added to the built-in prompt)": up to
+  2,000 characters, appended after the agent's own prompt in a delimited
+  `Team guidelines for <agent>` block that says they refine focus and
+  wording but never override the prompt's scope, evidence, severity and
+  output rules. A repository's guidelines replace the workspace's for that
+  agent (as in Kodus, Qodo and Bito) unless "Also keep the workspace
+  guidelines" is switched on (as CodeRabbit's `inheritance: true`), in
+  which case both apply and the repository's win a disagreement. Replacing
+  the whole prompt moved to "Advanced: replace the built-in prompt", with a
+  warning; guidelines are still added to a replaced prompt. The preview
+  folds the agent's own prompt and highlights the blocks added to it. The
+  Claude Code engine gets every running agent's guidelines; the chat
+  assistant can set them (`agent_prompt_guidelines`); the API accepts
+  `agent_prompt_guidelines` / `agent_guidelines_extend` on repository
+  policies and `PUT/DELETE /api/agents/{name}/guidelines` for the workspace.
+
+### Migration
+
+- **`c5d6e7f8a9b0` sorts the existing per-agent prompts.** Until now every
+  per-agent prompt REPLACED the built-in one, so a short list pasted into
+  "Defect" or "Security" silently dropped the tuned prompt. Each stored
+  repository override is now classified: at most 2,000 characters, no
+  output contract (no JSON, no `"reasoning"`/`"severity"`/`"file"` field,
+  no "reply with"/"output format") and no `You are …` opening → moved to
+  guidelines; anything else stays a replacement and behaves as before. Each
+  conversion is logged by repository and agent (never the text). The
+  workspace prompts (credential store) are sorted by the same rule once, at
+  the first API start, and logged the same way. Downgrade restores every
+  converted repository entry; `python -m src.review.prompt_guidelines_cli
+  revert` does the same for the workspace prompts.
+
 ## [2.3.0] — 2026-10-05
 
 Code review reaches parity with Kodus and goes past it: one settings page for

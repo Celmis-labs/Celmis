@@ -672,6 +672,19 @@ def build_app() -> FastAPI:
         get_user_store()
         logger.info("celmis_api_started cors=%s", cors_origins)
 
+        # 2.3.1: the workspace agent prompts written before guidelines
+        # existed are sorted once — a short list becomes guidelines ADDED to
+        # the built-in prompt, a real prompt stays a replacement. The
+        # repository layer is Alembic migration c5d6e7f8a9b0; this layer lives
+        # in the credential store. Marked when done, so it never runs twice.
+        try:
+            import asyncio as _asyncio
+
+            from src.api.routers.agents import migrate_workspace_prompt_overrides
+            await _asyncio.to_thread(migrate_workspace_prompt_overrides)
+        except Exception as exc:  # noqa: BLE001 — never block the API on it
+            logger.warning("agent_prompt_migration_failed err=%s", exc)
+
         # Start polling background task if not disabled
         if os.environ.get("CELMIS_DISABLE_POLLER", "").strip() != "1":
             try:

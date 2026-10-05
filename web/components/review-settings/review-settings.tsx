@@ -55,7 +55,7 @@ import {
   SettingsContext, type AgentLLMState, type SettingsContextValue,
 } from "@/components/review-settings/context";
 import {
-  POLICY_LLM_AGENTS, WORKSPACE_PROMPT_MIN, canonicalOwn, changedSections, defaultsPayload,
+  GUIDELINES_MAX, POLICY_LLM_AGENTS, WORKSPACE_PROMPT_MIN, canonicalOwn, changedSections, defaultsPayload,
   draftFromDefaults, draftFromPolicy, emptyDraft, inheritanceForDefaults, inheritanceForPolicy,
   overriddenBySection, policyPayload, sameValue,
   type Draft, type InheritableKey, type Scope,
@@ -215,6 +215,9 @@ export function ReviewSettings() {
     && p.text.trim().length < WORKSPACE_PROMPT_MIN)) {
     blockers.push(t("reviewSettings.save.blockedPrompt", { min: WORKSPACE_PROMPT_MIN }));
   }
+  if (Object.values(draft.agentGuidelines).some((g) => g.trim().length > GUIDELINES_MAX)) {
+    blockers.push(t("reviewSettings.save.blockedGuidelines", { max: GUIDELINES_MAX }));
+  }
 
   // ── saving ──
   const invalidate = () => {
@@ -247,6 +250,13 @@ export function ReviewSettings() {
           if (!p) continue;
           if (p.reset) await agentsApi.resetPrompt(token!, a.name);
           else if (p.text !== a.system_prompt) await agentsApi.overridePrompt(token!, a.name, p.text);
+        }
+        // Guidelines: what is ADDED to each prompt. Blank removes them.
+        for (const a of wsAgents.data ?? []) {
+          const next = (draft.agentGuidelines[a.name] ?? "").trim();
+          if (next === (a.guidelines ?? "").trim()) continue;
+          if (next) await agentsApi.setGuidelines(token!, a.name, next);
+          else await agentsApi.resetGuidelines(token!, a.name);
         }
       }
     },

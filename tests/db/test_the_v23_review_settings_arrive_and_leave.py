@@ -39,6 +39,13 @@ def _jsonb_as_json_on_sqlite(type_, compiler, **kw) -> str:  # pragma: no cover
     return "JSON"
 
 
+def _server_default(c):
+    """The model column's server default, carried into the legacy table: a
+    NOT NULL column a later migration added with a default (the agent
+    guidelines, c5d6e7f8a9b0) must not refuse the legacy insert below."""
+    return c.server_default.arg if c.server_default is not None else None
+
+
 def _migration():
     spec = importlib.util.spec_from_file_location(f"migration_{REVISION}", MIGRATION)
     assert spec and spec.loader, f"cannot load {MIGRATION}"
@@ -54,7 +61,8 @@ def _legacy(table: str) -> list[sa.Column]:
     model = {"repo_review_policies": RepoReviewPolicy,
              "workspace_review_defaults": WorkspaceReviewDefaults}[table]
     return [
-        sa.Column(c.name, c.type, primary_key=c.primary_key, nullable=c.nullable)
+        sa.Column(c.name, c.type, primary_key=c.primary_key, nullable=c.nullable,
+                  server_default=_server_default(c))
         for c in model.__table__.columns
         if c.name not in (*V23_FIELDS, *MODEL_COLUMNS)
     ]

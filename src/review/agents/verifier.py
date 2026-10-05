@@ -934,31 +934,53 @@ _BASE_INSTRUCTION_RIDER = (
 )
 
 
-def verifier_system_prompt(context: AgentContext) -> str:
-    """The verifier's system prompt for this review.
+def verifier_system_prompt_parts(context: AgentContext) -> list:
+    """The blocks of the verifier's system prompt, in the order sent.
 
-    The same precedence the finders use (`_compose_effective_system_prompt`):
-    this repository's override, else the workspace's /admin/agents override,
-    else the built-in. One thing is appended, and only one: the policy's base
-    instruction, the team's rules for how every suggestion is written. The
-    verifier answers `{"keep": [...]}` and reads no repo rules, so the
-    finder's output contract and rule blocks would only confuse it. An
-    override that stops asking for that shape fails open (every finding
-    kept), never closed.
+    The same precedence the finders use (`compose_system_prompt_parts`):
+    this repository's replacement, else the workspace's, else the built-in.
+    Then two things may be appended, and only these: the team guidelines for
+    the verifier (what this team wants kept or left out — in the same
+    delimited block the finders get, worded for a filter: they never let a
+    finding that fails the checks survive, and never change the reply shape),
+    and the policy's base instruction with its rider. The verifier answers
+    `{"keep": [...]}` and reads no repo rules, so the finder's output
+    contract and rule blocks would only confuse it. An override that stops
+    asking for that shape fails open (every finding kept), never closed.
     """
-    base = _verifier_base_prompt(context)
+    from src.review.agents.base import PromptPart, team_guidelines_part
+
+    base, source = _verifier_base_prompt(context)
+    # The base as written: alone, it is the whole prompt, byte for byte.
+    parts = [PromptPart("base", base, source)]
+    guidelines = team_guidelines_part(context, "verifier")
+    if guidelines is not None:
+        parts.append(guidelines)
     block = base_instruction_block(getattr(context, "base_instruction", ""))
-    if not block:
-        return base
-    return f"{base.rstrip()}\n\n{block}\n\n{_BASE_INSTRUCTION_RIDER}"
+    if block:
+        parts.append(PromptPart("base_instruction", block))
+        parts.append(PromptPart("rider", _BASE_INSTRUCTION_RIDER))
+    return parts
 
 
-def _verifier_base_prompt(context: AgentContext) -> str:
+def verifier_system_prompt(context: AgentContext) -> str:
+    """The verifier's system prompt for this review — the blocks of
+    `verifier_system_prompt_parts`, joined."""
+    parts = verifier_system_prompt_parts(context)
+    if len(parts) == 1:
+        return parts[0].text
+    return "\n\n".join(p.text.rstrip() for p in parts)
+
+
+def _verifier_base_prompt(context: AgentContext) -> tuple[str, str]:
     repo_override = ((context.repo_agent_prompts or {}).get("verifier") or "").strip()
     if repo_override:
-        return repo_override
+        return repo_override, "repo"
     try:
         from src.api.routers.agents import get_effective_system_prompt
-        return get_effective_system_prompt("verifier", context.workspace_id) or _VERIFIER_SYSTEM
+        base = get_effective_system_prompt("verifier", context.workspace_id)
     except Exception:  # noqa: BLE001
-        return _VERIFIER_SYSTEM
+        base = ""
+    if base and base.strip() != _VERIFIER_SYSTEM.strip():
+        return base, "workspace"
+    return _VERIFIER_SYSTEM, "builtin"

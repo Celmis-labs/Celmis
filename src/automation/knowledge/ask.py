@@ -157,6 +157,12 @@ and nothing is written until you press "Run it" ("Cancel" leaves it).
   repository that repository's settings (editor or higher, plus `review` on
   the repository) — the same checks as saving that page, so the agent can
   never do what you could not do there.
+- Set an agent's guidelines: «додай до security агента для репо X:
+  перевіряй …» — key `agent_prompt_guidelines`, value {agent: text}, at
+  most 2,000 characters each, "" removes them. Guidelines are ADDED to the
+  agent's built-in prompt; the agent never replaces a prompt (that is
+  "Advanced: replace the built-in prompt" on the page). Editor or higher at
+  both scopes, like editing prompts on the page.
 Follow-ups work: after «add rules for billing-api: …», «і для payments
 теж» proposes the same rules for payments.
 """,
