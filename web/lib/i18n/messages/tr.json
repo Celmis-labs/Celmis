@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "Paylaşılan slot, abonelik jetonu değil bir Anthropic API anahtarı (sk-ant-api…) alır. Kullanım anahtarın sahibine faturalanır — Anthropic'in koşulları buna izin verir; abonelik tek bir kişiye aittir, bu yüzden her üye kendi aboneliğini bağlar.",
   "common.add": "Ekle",
   "common.adminOnly": "Bu sayfa global yönetici gerektirir.",
+  "common.spendAdminOnly": "Harcama ve bütçe yalnızca çalışma alanının sahipleri ve yöneticileri tarafından görülebilir.",
   "common.cancel": "İptal",
   "common.confirm": "Onayla",
   "common.create": "Oluştur",

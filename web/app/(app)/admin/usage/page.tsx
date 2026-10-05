@@ -296,11 +296,12 @@ export default function UsagePage() {
   // breakdown. That made a repository ranked 51st unreachable by any amount
   // of clicking — this is the way past it.
   const [showAll, setShowAll] = useState(false);
-  // Reading what a workspace spent is its members' business — it is their
-  // workspace's money. Setting the cap is a control over everyone else's
-  // work, and follows the same rule as choosing the models: owner or admin
-  // of THIS workspace, not a global admin somewhere.
+  // What a workspace spent, and its budget, are for the people who pay for it:
+  // owner or admin of THIS workspace (or a global admin). The API refuses
+  // everyone else, so the queries stay off and the page says so, instead of
+  // drawing three 403s.
   const canManage = useCanManageWorkspace();
+  const canReadSpend = canManage === true;
 
   // ── the view lives in the URL ──────────────────────────────────────
   //
@@ -365,17 +366,17 @@ export default function UsagePage() {
   const summary = useQuery({
     queryKey: ["spend", "summary", query],
     queryFn: () => spendApi.summary(token!, query),
-    enabled: !!token,
+    enabled: !!token && canReadSpend,
   });
   const series = useQuery({
     queryKey: ["spend", "daily", query, bucket],
     queryFn: () => spendApi.daily(token!, query, bucket),
-    enabled: !!token,
+    enabled: !!token && canReadSpend,
   });
   const budget = useQuery({
     queryKey: ["spend", "budget"],
     queryFn: () => spendApi.getBudget(token!),
-    enabled: !!token,
+    enabled: !!token && canReadSpend,
   });
 
   const pickPreset = useCallback((p: RangePreset) => {
@@ -413,6 +414,23 @@ export default function UsagePage() {
   const s = summary.data;
   const activeFilters = FILTER_KEYS.filter((k) => filters[k]);
   const dimRows = s ? dim.rows(s) : [];
+
+  if (canManage === false) {
+    return (
+      <PageShell width="wide">
+        <PageHeader
+          icon={<GaugeIcon className="h-6 w-6" />}
+          title={t("admin.usage.title")}
+          description={t("admin.usage.description")}
+        />
+        <Card>
+          <CardContent className="py-6 text-sm text-[var(--color-muted-foreground)]">
+            {t("common.spendAdminOnly")}
+          </CardContent>
+        </Card>
+      </PageShell>
+    );
+  }
 
   return (
     <PageShell width="wide">

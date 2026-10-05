@@ -963,7 +963,7 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
         from src.automation.actions import ActionError, list_repos
 
         try:
-            return {"ok": True, **list_repos(_actor("mcp"))}
+            return {"ok": True, **(await list_repos(_actor("mcp")))}
         except ActionError as exc:
             return {"ok": False, "error": str(exc)}
 

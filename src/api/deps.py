@@ -330,6 +330,33 @@ async def enforce_repo_permission(
         )
 
 
+async def readable_repo_slugs(
+    user: User, workspace_id: str, slugs: list[str],
+) -> set[str]:
+    """Which of `slugs` this person may SEE in a list of the workspace's repos.
+
+    One rule for every listing (the repos page, the agent's `list_repos`, MCP
+    `list_workspace_repos`, counts in the review-settings snapshot): owners and
+    admins of the workspace and global admins see all of it; everyone else sees
+    the repositories a team of theirs grants `read` on — exactly
+    `enforce_repo_permission(slug, user, "read", workspace_id)`, including its
+    fall-open in single_tenant. A repository they may not read is not named and
+    not counted.
+    """
+    import asyncio
+
+    if await asyncio.to_thread(is_workspace_admin, user, workspace_id):
+        return set(slugs)
+    allowed: set[str] = set()
+    for slug in dict.fromkeys(slugs):
+        try:
+            await enforce_repo_permission(slug, user, "read", workspace_id)
+        except HTTPException:
+            continue
+        allowed.add(slug)
+    return allowed
+
+
 async def current_workspace_id(
     request: Request,
     user: User = Depends(get_current_user),

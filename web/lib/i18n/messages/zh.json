@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "共享槽位接受 Anthropic API 密钥（sk-ant-api…），而不是订阅令牌。用量计入密钥所有者的账单，这是 Anthropic 条款允许的；订阅属于个人，因此每位成员各自连接自己的订阅。",
   "common.add": "添加",
   "common.adminOnly": "此页面需要全局管理员权限。",
+  "common.spendAdminOnly": "支出和预算仅工作区所有者和管理员可见。",
   "common.cancel": "取消",
   "common.confirm": "确认",
   "common.create": "创建",

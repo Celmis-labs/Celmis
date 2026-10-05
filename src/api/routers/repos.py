@@ -74,12 +74,24 @@ def _graph_exists(slug: str) -> bool:
 
 
 @router.get("", response_model=list[RepoOut])
-def list_repos(
+async def list_repos(
     user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> list[RepoOut]:
-    """Repos registered in the ACTIVE workspace — every member sees the
-    same list regardless of who registered each repo."""
+    """Repos registered in the ACTIVE workspace that the caller may read:
+    owners, admins and global admins see all of them, everyone else the ones a
+    team of theirs grants `read` on (`readable_repo_slugs`). A repository they
+    may not read is not listed."""
+    import asyncio
+
+    from src.api.deps import readable_repo_slugs
+
+    everything = await asyncio.to_thread(_workspace_repos, workspace_id)
+    allowed = await readable_repo_slugs(user, workspace_id, [r.slug for r in everything])
+    return [r for r in everything if r.slug in allowed]
+
+
+def _workspace_repos(workspace_id: str) -> list[RepoOut]:
     from src.repos.index_state import read_index_states
 
     store = get_auto_review_store()

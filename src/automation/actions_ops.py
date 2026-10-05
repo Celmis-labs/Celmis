@@ -14,7 +14,7 @@ other; only its helpers (`Actor`, `ActionError`, `_user_for`, `_as_action`,
 
 Gates, in one place
 -------------------
-    get_spend / get_budget   any member (the routes take get_current_user)
+    get_spend / get_budget   owner/admin of the workspace (require_workspace_admin)
     set_budget               owner/admin of the workspace
     get_usage                owner/admin/editor (require_analytics_access)
     list_alerts / ack_alert  any member (as the routes)
@@ -109,16 +109,25 @@ def _absolute(path: str) -> str:
 # ─── spend, usage, budget ────────────────────────────────────────────
 
 
+async def _require_spend_reader(actor: Actor, user: Any) -> None:
+    """Spend and budget are for whoever pays: owner/admin of the workspace (or
+    a global admin) — the gate of `/api/spend/*` (`require_workspace_admin`)."""
+    from src.api.deps import require_workspace_admin
+
+    await _as_action(require_workspace_admin(user=user, workspace_id=actor.workspace_id))
+
+
 async def get_spend(
     actor: Actor, session: Any, *, days: int = 30, surface: str | None = None,
     model: str | None = None, repo: str | None = None, bucket: str = "day",
 ) -> dict[str, Any]:
     """LLM spend for a period: totals, the top rows per breakdown, and the
-    series. `GET /api/spend/summary` and `/daily` are the code; any member of
-    the workspace may read them, so any member may ask."""
+    series. `GET /api/spend/summary` and `/daily` are the code; workspace owner
+    and admin only, so the same people may ask."""
     from src.api.routers import spend
 
     user = _user_for(actor)
+    await _require_spend_reader(actor, user)
     days = _clamp(days, 1, 365, 30)
     common = dict(days=days, since=None, until=None, surface=_opt(surface),
                   repo=_opt(repo), model=_opt(model), operation=None, agent=None)
@@ -172,6 +181,7 @@ async def get_budget(actor: Actor) -> dict[str, Any]:
     from src.api.routers import spend
 
     user = _user_for(actor)
+    await _require_spend_reader(actor, user)
     out = await _as_action(spend.get_budget(_user=user, ws=actor.workspace_id))
     return {**out.model_dump(), "links": [_link("budget", "spend")]}
 

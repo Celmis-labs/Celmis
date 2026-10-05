@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "共有スロットに入れられるのは Anthropic の API キー（sk-ant-api…）で、サブスクリプションのトークンではありません。利用分はキーの所有者に請求され、これは Anthropic の規約が認めています。サブスクリプションは個人のものなので、メンバーはそれぞれ自分のものを接続してください。",
   "common.add": "追加",
   "common.adminOnly": "このページにはグローバル管理者権限が必要です。",
+  "common.spendAdminOnly": "支出と予算は、ワークスペースのオーナーと管理者のみが閲覧できます。",
   "common.cancel": "キャンセル",
   "common.confirm": "確認",
   "common.create": "作成",

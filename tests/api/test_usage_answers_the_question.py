@@ -180,7 +180,7 @@ async def usage_api(rows: list[dict], *, ws: str = WS):
 
     app.dependency_overrides[get_async_session] = _session
     app.dependency_overrides[get_current_user] = lambda: User(
-        id="u-1", email="lead@example.com",
+        id="u-1", email="lead@example.com", is_admin=True,
     )
     app.dependency_overrides[current_workspace_id] = lambda: ws
 

@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "A shared slot takes an Anthropic API key (sk-ant-api…), not a subscription token. Its usage bills to the key's owner, which Anthropic's terms allow; a subscription belongs to one person, so each member connects their own.",
   "common.add": "Add",
   "common.adminOnly": "This page requires a global administrator.",
+  "common.spendAdminOnly": "Spend and budget are visible to workspace owners and admins only.",
   "common.cancel": "Cancel",
   "common.confirm": "Confirm",
   "common.create": "Create",

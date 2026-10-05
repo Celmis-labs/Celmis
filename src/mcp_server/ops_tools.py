@@ -139,8 +139,8 @@ def register_ops_tools(
             "hit, the top surfaces / models / agents / repositories / "
             "operations, and a daily series. days 1-365 (default 30); "
             "optional surface, model and repo_slug filters; bucket "
-            "hour|day|week|month for the series. Any workspace member may "
-            "read it, as the Usage page."
+            "hour|day|week|month for the series. Workspace owner or admin "
+            "only, as the Usage page."
         ),
     )
     @scoped(READ_GRAPH)

@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "공유 슬롯에는 구독 토큰이 아니라 Anthropic API 키(sk-ant-api…)를 넣습니다. 사용량은 키 소유자에게 청구되며 Anthropic 약관이 이를 허용합니다. 구독은 개인의 것이므로 각 구성원이 자기 것을 연결하세요.",
   "common.add": "추가",
   "common.adminOnly": "이 페이지는 전역 관리자 권한이 필요합니다.",
+  "common.spendAdminOnly": "지출과 예산은 워크스페이스 소유자와 관리자만 볼 수 있습니다.",
   "common.cancel": "취소",
   "common.confirm": "확인",
   "common.create": "만들기",

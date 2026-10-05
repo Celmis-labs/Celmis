@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "Un slot partajat acceptă o cheie API Anthropic (sk-ant-api…), nu un token de abonament. Consumul se facturează proprietarului cheii, ceea ce termenii Anthropic permit; un abonament aparține unei singure persoane, așa că fiecare membru îl conectează pe al său.",
   "common.add": "Adaugă",
   "common.adminOnly": "Această pagină necesită un administrator global.",
+  "common.spendAdminOnly": "Cheltuielile și bugetul sunt vizibile doar proprietarilor și administratorilor spațiului de lucru.",
   "common.cancel": "Anulează",
   "common.confirm": "Confirmă",
   "common.create": "Creează",

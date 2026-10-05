@@ -131,7 +131,12 @@ def queue(monkeypatch) -> FakeQueue:
 
 
 @pytest.fixture
-def client(workspace_dir, store, queue) -> TestClient:
+def client(workspace_dir, store, queue, monkeypatch) -> TestClient:
+    # What these tests are about is registering, not who may read the list.
+    async def _everyone(_user, _ws, slugs):
+        return set(slugs)
+
+    monkeypatch.setattr("src.api.deps.readable_repo_slugs", _everyone)
     app = FastAPI()
     app.include_router(repos_router.router)
     app.dependency_overrides[get_current_user] = lambda: USER

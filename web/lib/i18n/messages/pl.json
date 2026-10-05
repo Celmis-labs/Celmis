@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "Wspólny slot przyjmuje klucz API Anthropic (sk-ant-api…), a nie token subskrypcji. Zużycie obciąża właściciela klucza, na co pozwalają warunki Anthropic; subskrypcja należy do jednej osoby, więc każdy członek podłącza własną.",
   "common.add": "Dodaj",
   "common.adminOnly": "Ta strona wymaga globalnego administratora.",
+  "common.spendAdminOnly": "Wydatki i budżet są widoczne tylko dla właścicieli i administratorów przestrzeni roboczej.",
   "common.cancel": "Anuluj",
   "common.confirm": "Potwierdź",
   "common.create": "Utwórz",

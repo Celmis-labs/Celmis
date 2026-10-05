@@ -42,7 +42,7 @@ def world(monkeypatch):
     import src.users as users
 
     state = {"defaults": None, "denied": set(), "guidelines": {}, "replaced": set(),
-             "asked": []}
+             "asked": [], "ws_admin": True}
     cfgs = [
         types.SimpleNamespace(repo_slug="billing-api", full_name="acme/billing-api",
                               enabled=True, branch="main", mode="polling"),
@@ -54,6 +54,8 @@ def world(monkeypatch):
     monkeypatch.setattr(auto_review, "get_auto_review_store", lambda: store)
 
     user = types.SimpleNamespace(id="u-1", email="a@b.c", is_active=True, is_admin=True)
+    # Owners/admins see every repository; a test may take that away.
+    monkeypatch.setattr(deps, "is_workspace_admin", lambda _u, _ws: state["ws_admin"])
     monkeypatch.setattr(users, "get_user_store",
                         lambda: types.SimpleNamespace(get_by_id=lambda _u: user))
 
@@ -232,6 +234,7 @@ def test_a_repository_the_caller_may_not_read_is_neither_named_nor_readable(worl
     from src.automation.actions import ActionError
 
     world["denied"] = {"payments"}
+    world["ws_admin"] = False
     row = _row(repo_slug="payments", approve_when_clean=True)
     session = _Session([row])
 

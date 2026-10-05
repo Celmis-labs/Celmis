@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "Zdieľaný slot prijme API kľúč Anthropic (sk-ant-api…), nie token predplatného. Spotreba sa účtuje majiteľovi kľúča, čo podmienky Anthropic dovoľujú; predplatné patrí jednej osobe, takže každý člen pripojí svoje vlastné.",
   "common.add": "Pridať",
   "common.adminOnly": "Táto stránka vyžaduje globálneho administrátora.",
+  "common.spendAdminOnly": "Výdavky a rozpočet vidia iba vlastníci a správcovia pracovného priestoru.",
   "common.cancel": "Zrušiť",
   "common.confirm": "Potvrdiť",
   "common.create": "Vytvoriť",

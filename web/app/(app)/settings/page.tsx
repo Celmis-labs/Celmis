@@ -13,6 +13,7 @@ import { authApi, spendApi } from "@/lib/api";
 import { forgetAgentSession } from "@/lib/agent-session";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
+import { useCanManageWorkspace } from "@/lib/use-workspace-role";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import { PushCard } from "@/components/push-card";
@@ -36,17 +37,21 @@ export default function SettingsPage() {
   const token = useToken();
   const [days, setDays] = useState(30);
 
+  // Spend is for the workspace owner/admin only (the API refuses the rest).
+  const canManage = useCanManageWorkspace();
+  const canReadSpend = canManage === true;
+
   // Той самий API, що й Адміністрування → Витрати — числа збігаються.
   const usage = useQuery({
     queryKey: ["spend", "summary", days],
     queryFn: () => spendApi.summary(token!, days),
-    enabled: !!token,
+    enabled: !!token && canReadSpend,
     staleTime: 60_000,
   });
   const dailyQ = useQuery({
     queryKey: ["spend", "daily", days],
     queryFn: () => spendApi.daily(token!, days),
-    enabled: !!token,
+    enabled: !!token && canReadSpend,
     staleTime: 60_000,
   });
 
@@ -89,6 +94,18 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      {canManage === false ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <ActivityIcon className="h-4 w-4" /> {t("settings.usageTitle")}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-[var(--color-muted-foreground)]">
+            {t("common.spendAdminOnly")}
+          </CardContent>
+        </Card>
+      ) : (
       <Card>
         <CardHeader className="flex flex-row items-start justify-between gap-4">
           <div>
@@ -255,6 +272,7 @@ export default function SettingsPage() {
           )}
         </CardContent>
       </Card>
+      )}
 
       <DeleteAccountCard />
     </PageShell>

@@ -383,19 +383,33 @@ def legacy_bad_row(registry):
     return "github_alpha-foo..bar"
 
 
-def test_one_bad_stored_slug_does_not_take_down_the_repo_list(legacy_bad_row):
+@pytest.fixture
+def everyone_reads(monkeypatch):
+    """These two tests are about a bad stored slug, not about grants."""
+    import src.api.deps as deps
+
+    async def _all(_user, _ws, slugs):
+        return set(slugs)
+
+    monkeypatch.setattr(deps, "readable_repo_slugs", _all)
+    import src.automation.actions as actions
+
+    monkeypatch.setattr(actions, "_user_for", lambda actor: User(id=actor.user_id, email="a@x"))
+
+
+async def test_one_bad_stored_slug_does_not_take_down_the_repo_list(legacy_bad_row, everyone_reads):
     from src.api.routers.repos import list_repos
 
-    out = list_repos(user=User(id="user-a", email="a@x"), workspace_id=WS_A)
+    out = await list_repos(user=User(id="user-a", email="a@x"), workspace_id=WS_A)
     by_slug = {r.slug: r for r in out}
     assert SLUG_A in by_slug
     assert by_slug[legacy_bad_row].indexed is False
 
 
-def test_one_bad_stored_slug_does_not_break_automation_listing(legacy_bad_row):
+async def test_one_bad_stored_slug_does_not_break_automation_listing(legacy_bad_row, everyone_reads):
     from src.automation.actions import Actor, list_repos
 
-    out = list_repos(Actor("user-a", "a@x", WS_A))
+    out = await list_repos(Actor("user-a", "a@x", WS_A))
     assert {r["repo"] for r in out["repos"]} >= {SLUG_A, legacy_bad_row}
 
 

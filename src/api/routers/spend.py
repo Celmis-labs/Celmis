@@ -34,7 +34,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import (
     current_workspace_id,
-    get_current_user,
     require_workspace_admin,
 )
 from src.db.models import LlmSpend, WorkspaceBudget
@@ -293,7 +292,9 @@ async def summary(
     # Workspace-scoped read: any member sees THEIR active workspace's spend
     # (the query below already filters by ws) — /settings and /admin/usage
     # now show the same numbers. Budget writes stay admin-only.
-    _user: User = Depends(get_current_user),
+    # Owner/admin of the workspace: what the workspace spends and may spend is
+    # for whoever pays for it (the agent and MCP ask the same).
+    _user: User = Depends(require_workspace_admin),
     ws: str = Depends(current_workspace_id),
 ) -> SpendSummary:
     start_at, end_at = _window(days, since, until)
@@ -363,7 +364,9 @@ async def daily(
     operation: str | None = Query(default=None),
     agent: str | None = Query(default=None),
     session: AsyncSession = Depends(get_async_session),
-    _user: User = Depends(get_current_user),
+    # Owner/admin of the workspace: what the workspace spends and may spend is
+    # for whoever pays for it (the agent and MCP ask the same).
+    _user: User = Depends(require_workspace_admin),
     ws: str = Depends(current_workspace_id),
 ) -> list[DailyPoint]:
     """The same window and filters as the summary, over time.
@@ -402,7 +405,9 @@ async def daily(
 
 @router.get("/budget", response_model=BudgetOut)
 async def get_budget(
-    _user: User = Depends(get_current_user),
+    # Owner/admin of the workspace: what the workspace spends and may spend is
+    # for whoever pays for it (the agent and MCP ask the same).
+    _user: User = Depends(require_workspace_admin),
     ws: str = Depends(current_workspace_id),
 ) -> BudgetOut:
     from src.llm.budget import get_status

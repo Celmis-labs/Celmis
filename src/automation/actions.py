@@ -556,8 +556,11 @@ def set_auto_review(
     return {"updated": updated, "count": len(updated)}
 
 
-def list_repos(actor: Actor) -> dict[str, Any]:
-    """What this workspace has, and the state of each repository.
+async def list_repos(actor: Actor) -> dict[str, Any]:
+    """What this workspace has, and the state of each repository — the ones the
+    asker may read: owners/admins see all, everyone else the repositories a team
+    of theirs grants `read` on (as `GET /api/repos` and the review-settings
+    overview). A repository they may not read is neither named nor counted.
 
     A read verb, and the first one this surface has had. Everything in this
     module until now queued expensive work, which is why the chat refused
@@ -569,13 +572,19 @@ def list_repos(actor: Actor) -> dict[str, Any]:
     build over twenty repositories and could not say which twenty.
     """
     from src.api.auto_review import get_auto_review_store
+    from src.api.deps import readable_repo_slugs
     from src.config import get_settings, is_valid_repo_slug
 
     settings = get_settings()
     store = get_auto_review_store()
+    configs = sorted(store.list_for_workspace(actor.workspace_id),
+                     key=lambda c: c.full_name)
+    allowed = await readable_repo_slugs(
+        _user_for(actor), actor.workspace_id, [c.repo_slug for c in configs])
     repos = []
-    for cfg in sorted(store.list_for_workspace(actor.workspace_id),
-                      key=lambda c: c.full_name):
+    for cfg in configs:
+        if cfg.repo_slug not in allowed:
+            continue
         if not is_valid_repo_slug(cfg.repo_slug):
             # A row stored before slugs were validated: report it, never
             # let it break the whole listing.
@@ -1452,17 +1461,20 @@ async def read_review_settings(
         policies = {r.repo_slug: r for r in (await session.scalars(
             select(RepoReviewPolicy).where(RepoReviewPolicy.workspace_id == ws)
         )).all()}
+        from src.api.deps import readable_repo_slugs
+
+        visible = await readable_repo_slugs(user, ws, [c.repo_slug for c in configs])
         seen: set[str] = set()
         total = 0
+        auto_on = 0
         for c in sorted(configs, key=lambda c: c.full_name):
             if c.repo_slug in seen:
                 continue
             seen.add(c.repo_slug)
-            try:
-                await enforce_repo_permission(c.repo_slug, user, "read", ws)
-            except Exception:  # noqa: BLE001 — a repository they may not read is not named
+            if c.repo_slug not in visible:  # a repository they may not read is not named
                 continue
             total += 1
+            auto_on += 1 if c.enabled else 0
             policy = policies.get(c.repo_slug) or policies.get(c.full_name)
             overridden = overridden_fields(policy) if policy is not None else []
             off = policy is not None and not policy.enabled
@@ -1472,7 +1484,7 @@ async def read_review_settings(
                     "review_enabled": not off, "auto_review": bool(c.enabled),
                 })
         auto_review = {"repos_total": total,
-                       "auto_review_on": sum(1 for c in configs if c.enabled)}
+                       "auto_review_on": auto_on}
 
     return {
         "scope": "repo" if slug else "workspace",

@@ -30,7 +30,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -99,7 +99,6 @@ async def review_settings_overview(
     """The active workspace's defaults and every readable repository: what
     each overrides and how its last review went."""
     from src.api.auto_review import get_auto_review_store
-    from src.api.deps import enforce_repo_permission
     from src.api.routers.review_defaults import _require_member, overridden_fields
     from src.review.review_defaults import INHERITABLE_FIELDS, defaults_from_row
 
@@ -123,6 +122,9 @@ async def review_settings_overview(
 
     configs = await asyncio.to_thread(
         get_auto_review_store().list_for_workspace, ws_id)
+    from src.api.deps import readable_repo_slugs
+
+    visible = await readable_repo_slugs(user, ws_id, [c.repo_slug for c in configs])
     repos: list[ReviewSettingsRepoSummary] = []
     seen: set[str] = set()
     for cfg in configs:
@@ -131,9 +133,7 @@ async def review_settings_overview(
         if cfg.repo_slug in seen:
             continue
         seen.add(cfg.repo_slug)
-        try:
-            await enforce_repo_permission(cfg.repo_slug, user, "read", ws_id)
-        except HTTPException:
+        if cfg.repo_slug not in visible:
             continue
         policy = policies.get(cfg.repo_slug) or policies.get(cfg.full_name)
         fields = overridden_fields(policy) if policy is not None else []

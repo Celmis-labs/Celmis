@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "Un espacio compartido admite una clave de API de Anthropic (sk-ant-api…), no un token de suscripción. El uso se factura al dueño de la clave, algo que los términos de Anthropic permiten; una suscripción pertenece a una persona, así que cada miembro conecta la suya.",
   "common.add": "Añadir",
   "common.adminOnly": "Esta página requiere un administrador global.",
+  "common.spendAdminOnly": "El gasto y el presupuesto solo los ven los propietarios y administradores del espacio de trabajo.",
   "common.cancel": "Cancelar",
   "common.confirm": "Confirmar",
   "common.create": "Crear",

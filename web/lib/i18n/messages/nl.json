@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "Een gedeeld slot neemt een Anthropic API-sleutel (sk-ant-api…), geen abonnementstoken. Het gebruik wordt de eigenaar van de sleutel in rekening gebracht, wat de voorwaarden van Anthropic toestaan; een abonnement hoort bij één persoon, dus elk lid koppelt het zijne.",
   "common.add": "Toevoegen",
   "common.adminOnly": "Voor deze pagina is een algemeen beheerder vereist.",
+  "common.spendAdminOnly": "Uitgaven en budget zijn alleen zichtbaar voor eigenaren en beheerders van de werkruimte.",
   "common.cancel": "Annuleren",
   "common.confirm": "Bevestigen",
   "common.create": "Aanmaken",

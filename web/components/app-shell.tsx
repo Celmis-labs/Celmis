@@ -24,6 +24,7 @@ import { API_BASE, WORKSPACES_CHANGED_EVENT } from "@/lib/api";
 import { forgetAgentSession } from "@/lib/agent-session";
 import { LEGACY_SIDEBAR_KEY, writeSidebarCookie } from "@/lib/sidebar";
 import { useT } from "@/lib/i18n";
+import { useCanManageWorkspace } from "@/lib/use-workspace-role";
 import { startMainTour, TOUR_DONE_KEY } from "@/lib/tour";
 import { cn } from "@/lib/utils";
 import { LicenseFooter } from "@/components/license-footer";
@@ -39,6 +40,8 @@ type NavSection = {
   icon: typeof LayoutDashboardIcon;
   /** Visible only to global admins (session.isAdmin). */
   adminOnly?: boolean;
+  /** Owner or admin of the ACTIVE workspace (or a global admin). */
+  workspaceAdminOnly?: boolean;
   /** All routes that belong to this section (prefix-matched unless exact). */
   pages: readonly TabDef[];
 };
@@ -63,11 +66,9 @@ const NAV_SECTIONS: NavSection[] = [
   // Administration as their rows learned which workspace they belong to; this
   // entry is deliberately NOT adminOnly, so a workspace owner can reach them.
   { href: "/alerts", labelKey: "nav.monitoring", icon: ActivityIcon, pages: SECTION_TABS.monitoring },
-  // Not adminOnly, and that is the point. The spend endpoint has always been
-  // workspace-scoped — any member reads their OWN workspace's figures, and
-  // only the budget cap is an admin write. The page was nevertheless buried
-  // in the global-admin section, so the person who pays for a workspace
-  // could not see what it costs. A number nobody can find is not reported.
+  // Workspace owner/admin only: spend and the budget are the workspace's
+  // money, and the API (and the agent, and MCP) refuse everyone below admin.
+  // Not global-admin-only — a workspace owner pays the bill.
   //
   // Its own page list, not Administration's. `pages: []` matched nothing, so
   // the section that DID claim /admin/usage — the global-admin one — answered
@@ -75,7 +76,7 @@ const NAV_SECTIONS: NavSection[] = [
   // Administration entry lit up while you were reading your own bill, and the
   // tab row beside it offered Job queue / System status / Audit log. See the
   // `usage` key in SECTION_TABS.
-  { href: "/admin/usage", labelKey: "nav.usage", icon: GaugeIcon, pages: SECTION_TABS.usage },
+  { href: "/admin/usage", labelKey: "nav.usage", icon: GaugeIcon, workspaceAdminOnly: true, pages: SECTION_TABS.usage },
   { href: "/admin/workspaces", labelKey: "nav.team", icon: UsersIcon, pages: SECTION_TABS.team },
   { href: "/settings", labelKey: "nav.settings", icon: SettingsIcon, pages: SECTION_TABS.settings },
   { href: "/admin/health", labelKey: "nav.adminSection", icon: ShieldIcon, adminOnly: true, pages: SECTION_TABS.admin },
@@ -587,9 +588,13 @@ export function AppShell({
 
   // Global-admin-only sections stay out of sight for regular members.
   const isAdmin = Boolean(data?.isAdmin);
+  const canManageWorkspace = useCanManageWorkspace() === true;
   const navSections = useMemo(
-    () => NAV_SECTIONS.filter((s) => !s.adminOnly || isAdmin),
-    [isAdmin],
+    () =>
+      NAV_SECTIONS.filter(
+        (s) => (!s.adminOnly || isAdmin) && (!s.workspaceAdminOnly || canManageWorkspace),
+      ),
+    [isAdmin, canManageWorkspace],
   );
 
   // Sidebar collapse — persisted so it survives navigation and reloads, and

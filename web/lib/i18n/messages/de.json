@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "Ein gemeinsamer Slot nimmt einen Anthropic-API-Schlüssel (sk-ant-api…), kein Abo-Token. Die Nutzung wird dem Inhaber des Schlüssels berechnet, was Anthropics Bedingungen erlauben; ein Abo gehört einer Person, deshalb verbindet jedes Mitglied sein eigenes.",
   "common.add": "Hinzufügen",
   "common.adminOnly": "Diese Seite erfordert einen globalen Administrator.",
+  "common.spendAdminOnly": "Kosten und Budget sind nur für Besitzer und Administratoren des Arbeitsbereichs sichtbar.",
   "common.cancel": "Abbrechen",
   "common.confirm": "Bestätigen",
   "common.create": "Erstellen",

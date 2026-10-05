@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "Un emplacement partagé accepte une clé API Anthropic (sk-ant-api…), pas un jeton d'abonnement. L'usage est facturé au propriétaire de la clé, ce que les conditions d'Anthropic autorisent ; un abonnement appartient à une seule personne, donc chaque membre connecte le sien.",
   "common.add": "Ajouter",
   "common.adminOnly": "Cette page nécessite un administrateur global.",
+  "common.spendAdminOnly": "Les dépenses et le budget ne sont visibles que par les propriétaires et administrateurs de l'espace de travail.",
   "common.cancel": "Annuler",
   "common.confirm": "Confirmer",
   "common.create": "Créer",

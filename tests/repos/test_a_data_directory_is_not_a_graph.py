@@ -75,6 +75,10 @@ def world(tmp_path, monkeypatch):
     store, queue = FakeStore(), FakeQueue()
     monkeypatch.setattr(repos_router, "get_auto_review_store", lambda: store)
     monkeypatch.setattr("src.sync.queue.enqueue", queue.enqueue)
+    async def _everyone(_user, _ws, slugs):  # the list's grants are not what is tested here
+        return set(slugs)
+
+    monkeypatch.setattr("src.api.deps.readable_repo_slugs", _everyone)
     app = FastAPI()
     app.include_router(repos_router.router)
     app.dependency_overrides[get_current_user] = lambda: USER

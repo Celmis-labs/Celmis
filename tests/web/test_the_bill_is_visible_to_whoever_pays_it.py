@@ -1,15 +1,13 @@
-"""Usage is a workspace's own figures, so a workspace member can reach it.
+"""Spend and budget belong to whoever pays for the workspace: owner and admin.
 
-The page was built, translated into sixteen languages, filled with breakdowns
-— and filed under the global-admin section, `adminOnly: true`, wrapped in an
-AdminGate. The account that owns a workspace is not necessarily a global
-admin, so the person who pays for it could not open the page that says what it
-costs. Asked where the section was, the honest answer was "behind a flag you
-do not have".
-
-The API never agreed with that. `/api/spend/summary` has always been
-workspace-scoped and readable by any member; only the budget cap is an admin
-write. This pins the UI to the rule the backend already had.
+History: the page was once filed under the global-admin section, so the
+account that owns a workspace could not read its own bill. That was fixed by
+opening the page to every member. The product decision since then is the
+middle road: the workspace's money is visible to the workspace's owner and
+admins (and global admins), and to nobody below. The API, the agent
+(`get_spend`/`get_budget`), MCP and these pages all say the same thing, and
+the UI shows an "only owners and admins" state instead of three 403s.
+`/api/usage/summary` (the member's own activity) is deliberately untouched.
 """
 
 from __future__ import annotations
@@ -33,15 +31,19 @@ def _strip_comments(source: str) -> str:
 
 
 def test_usage_has_its_own_entry_in_the_navigation():
-    """Reachable by name, not by knowing the URL."""
+    """Reachable by name, for the people allowed to read it."""
     body = _strip_comments(SHELL)
     entry = next((line for line in body.splitlines()
                   if "/admin/usage" in line and "labelKey" in line), None)
     assert entry, "the Usage page is not in the navigation at all"
     assert "nav.usage" in entry, "it is filed under some other section's label"
-    assert "adminOnly" not in entry, (
-        "the workspace's own spend is hidden from the workspace"
+    assert "adminOnly" not in entry.replace("workspaceAdminOnly", ""), (
+        "it is hidden behind the GLOBAL admin flag; a workspace owner pays the bill"
     )
+    assert "workspaceAdminOnly: true" in entry, (
+        "members below admin are offered a page that only refuses them"
+    )
+    assert "useCanManageWorkspace" in body
 
 
 def test_the_admin_section_does_not_open_on_the_same_page():
@@ -52,38 +54,39 @@ def test_the_admin_section_does_not_open_on_the_same_page():
     assert "/admin/usage" not in admin
 
 
-def test_the_page_itself_no_longer_gates_everything():
-    """The gate moved rather than disappeared: off the page, onto the one
-    control that changes something for everybody else."""
+def test_the_page_gates_its_queries_and_says_why():
+    """Off for lower roles: no requests that end in 403, and a plain sentence."""
     body = _strip_comments(PAGE)
-    assert "AdminGate" not in body, "the page is still gated as a whole"
-    assert "useCanManageWorkspace" in body, (
-        "nothing decides who may set the cap, so it renders for everyone"
+    assert "AdminGate" not in body, "the page is gated as a whole by the global flag"
+    assert "useCanManageWorkspace" in body
+    assert body.count("enabled: !!token && canReadSpend") >= 3, (
+        "summary, daily and budget must wait for the role"
     )
-    assert "canManage && (" in body.replace("\n", " "), (
-        "the budget card is drawn without checking"
-    )
+    assert "common.spendAdminOnly" in body, "no 'only admins/owners' state"
 
 
-def test_the_backend_agrees_that_members_may_read_it():
-    """If the endpoint were admin-only this change would produce a nav entry
-    leading to a 403 — worse than a hidden page."""
+def test_the_settings_spend_card_follows_the_same_rule():
+    settings = _strip_comments(
+        (ROOT / "web" / "app" / "(app)" / "settings" / "page.tsx").read_text(encoding="utf-8"))
+    assert "useCanManageWorkspace" in settings
+    assert settings.count("enabled: !!token && canReadSpend") >= 2
+    assert "common.spendAdminOnly" in settings
+
+
+def test_every_spend_route_needs_a_workspace_admin():
+    """If the endpoints were looser than the page, the page would only be
+    politeness; if stricter, the nav would lead to a refusal."""
     tree = ast.parse(SPEND)
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-              and n.name == "summary")
-    src = ast.dump(fn)
-    assert "get_current_user" in src, "the summary is unauthenticated"
-    assert "require_admin" not in src, (
-        "the endpoint is admin-only, so the new nav entry leads to a refusal"
-    )
+    for name in ("summary", "daily", "get_budget", "put_budget"):
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and n.name == name)
+        assert "require_workspace_admin" in ast.dump(fn), f"{name} is open below admin"
 
 
 def test_writing_the_cap_needs_the_workspace_not_the_globe():
-    """Reading what a workspace spent is its members' business. Setting a cap
-    is a control over everyone else's work — but it is still THIS workspace's
-    business, so it belongs to its owner rather than to a global admin who may
-    have nothing to do with it."""
+    """Setting a cap is THIS workspace's business, so it belongs to its owner
+    rather than to a global admin who may have nothing to do with it."""
     tree = ast.parse(SPEND)
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -97,6 +100,7 @@ def test_the_label_exists_in_every_locale():
     for path in sorted(MESSAGES.glob("*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data.get("nav.usage"), f"{path.stem} has no nav.usage"
+        assert data.get("common.spendAdminOnly"), f"{path.stem} has no spendAdminOnly"
 
 
 # ─── who may CHANGE things, as opposed to read them ──────────────────

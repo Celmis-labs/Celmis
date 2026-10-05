@@ -905,6 +905,7 @@
   "claude.workspaceWarning": "Um slot compartilhado aceita uma chave de API da Anthropic (sk-ant-api…), não um token de assinatura. O uso é cobrado do dono da chave, o que os termos da Anthropic permitem; uma assinatura pertence a uma pessoa, então cada membro conecta a sua.",
   "common.add": "Adicionar",
   "common.adminOnly": "Esta página requer um administrador global.",
+  "common.spendAdminOnly": "Gastos e orçamento são visíveis apenas para proprietários e administradores do espaço de trabalho.",
   "common.cancel": "Cancelar",
   "common.confirm": "Confirmar",
   "common.create": "Criar",

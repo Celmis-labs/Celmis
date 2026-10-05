@@ -262,8 +262,19 @@ def test_set_budget_refuses_an_invalid_value_with_the_schemas_words(who):
         run(ops.set_budget(ACTOR, object(), monthly_usd_cap=-5))
 
 
+def test_spend_and_budget_are_for_owner_and_admin_only(who):
+    for role in ("viewer", "member", "editor"):
+        who["role"] = role
+        with pytest.raises(ActionError):
+            run(ops.get_spend(ACTOR, object()))
+        with pytest.raises(ActionError):
+            run(ops.get_budget(ACTOR))
+
+
 def test_spend_is_read_for_this_workspace_and_trimmed(who, monkeypatch):
     import src.api.routers.spend as spend
+
+    who["role"] = "admin"
 
     rows = [spend.GroupRow(key=f"m{i}", calls=1, tokens_in=1, tokens_out=1,
                            cached_tokens_in=0, cost_usd=1.0) for i in range(20)]

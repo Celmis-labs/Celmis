@@ -89,7 +89,11 @@ class Row:
     action  where the action enforces it — file
     note    `stricter` = the action asks for more than the page; `route-open`
             = the page asks for nothing (policy question);
-            `pending-by-design` = the agent only files a proposal
+            `pending-by-design` = the agent only files a proposal — INTENDED
+            (user decision): a MEMBER may propose review rules through the
+            agent even though the route needs an editor; the proposal is
+            PENDING and an editor/admin approves it, so nothing changes until
+            someone allowed to decides
     """
 
     verb: str
@@ -120,8 +124,8 @@ MATRIX: dict[str, Row] = {
 
     # ── what the workspace has ──
     "list_repos": R("list_repos", {}, ALL_ROLES, "",
-                    "repos.py:76 get_current_user (every member sees every repo)",
-                    "actions.py list_repos", "route-open"),
+                    "repos.py GET /api/repos readable_repo_slugs (team read grants)",
+                    "actions.py list_repos readable_repo_slugs"),
     "audit_status": R("audit_status", {}, ALL_ROLES, "",
                       "deps.py:151 get_current_user", "actions.py get_dep_audit"),
     "list_findings": R("list_findings", {"run_id": "run-a"}, ALL_ROLES, "",
@@ -150,6 +154,7 @@ MATRIX: dict[str, Row] = {
                    "actions_reviews.py review_pr + _require_repo_review"),
 
     # ── review configuration ──
+    # Intended, user decision: members propose (pending); editors+ approve.
     "propose_review_rules[ws]": R(
         "propose_review_rules", {"rules": [{"title": "t", "instructions": "do x"}]},
         MEMBER_UP, "", "review_rules.py:271 require_prompt_editor (agent files PENDING)",
@@ -209,13 +214,13 @@ MATRIX: dict[str, Row] = {
                      "actions_reviews.py search_code + _can_read", "stricter"),
 
     # ── money and operations ──
-    "get_spend": R("get_spend", {}, ALL_ROLES, "", "spend.py:296 get_current_user",
-                   "actions_ops.py get_spend", "route-open"),
+    "get_spend": R("get_spend", {}, ADMIN_UP, "", "spend.py summary/daily require_workspace_admin",
+                   "actions_ops.py get_spend _require_spend_reader"),
     "get_usage": R("get_usage", {}, EDITOR_UP, "",
                    "usage.py:52 get_current_user (any member)",
                    "actions_ops.py get_usage ANALYTICS_ROLES", "stricter"),
-    "get_budget": R("get_budget", {}, ALL_ROLES, "", "spend.py:405 get_current_user",
-                    "actions_ops.py get_budget", "route-open"),
+    "get_budget": R("get_budget", {}, ADMIN_UP, "", "spend.py get_budget require_workspace_admin",
+                    "actions_ops.py get_budget _require_spend_reader"),
     "set_budget": R("set_budget", {"monthly_usd_cap": 100}, ADMIN_UP, "",
                     "spend.py:419 require_workspace_admin", "actions_ops.py set_budget"),
     "list_alerts": R("list_alerts", {}, ALL_ROLES, "", "alerts.py:365 get_current_user",
@@ -478,6 +483,31 @@ async def test_a_reader_is_never_shown_a_repository_their_team_excludes(mx):
             "issue-a", "issue-secret"}
 
 
+async def test_the_repo_list_names_only_what_the_asker_may_read(mx):
+    """User decision: `list_repos` (agent and MCP) and `GET /api/repos` hide
+    the repositories the asker's team grants do not allow reading; workspace
+    owners/admins and global admins see everything. Counts follow."""
+    async def repos(who):
+        async with mx.factory() as session:
+            out = await execute(Plan(steps=[Step(action="list_repos")]),
+                                _actor(mx, ASKERS[who]), session)
+        return out["steps"][0]["result"]
+
+    seen = await repos("member+grant")
+    assert [r["repo"] for r in seen["repos"]] == [A_REPO]
+    assert seen["count"] == 1 and SECRET_REPO not in repr(seen)
+    assert (await repos("member"))["repos"] == [], "no team, no grant, nothing named"
+    for who in ("admin", "owner", "global admin"):
+        got = await repos(who)
+        assert {r["repo"] for r in got["repos"]} == {A_REPO, SECRET_REPO}, who
+
+    # The counts in the review-settings snapshot do not leak the hidden one.
+    async with mx.factory() as session:
+        out = await execute(Plan(steps=[Step(action="review_settings")]),
+                            _actor(mx, ASKERS["member+grant"]), session)
+    assert out["steps"][0]["result"]["auto_review"]["repos_total"] == 1
+
+
 async def test_reviews_of_an_excluded_repository_are_not_listed(mx):
     async with mx.factory() as session:
         out = await execute(
@@ -629,12 +659,46 @@ async def test_the_person_who_planned_it_can_press_it(mx):
     assert await _status(mx, pid) == "started"
 
 
-@pytest.mark.parametrize("presser", ["viewer_a", "member_a", "editor_a", "owner_a"])
+@pytest.mark.parametrize("presser", ["viewer_a", "member_a", "editor_a", "admin2_a", "gadmin"])
 async def test_nobody_else_can_press_someones_plan(mx, presser):
+    """Only the workspace OWNER may press a colleague's plan (user decision).
+    Another admin, and a global admin who is not an owner of THIS workspace,
+    still may not."""
     pid = await _plan_row(mx, by="admin_a", verb="set_budget", args={"monthly_usd_cap": 50})
     r = await _press(mx, presser, pid)
     assert r.status_code == 403, r.text
     assert await _status(mx, pid) == "planned", "somebody else's press used the plan up"
+
+
+async def test_the_workspace_owner_may_press_a_colleagues_plan(mx):
+    pid = await _plan_row(mx, by="admin_a", verb="set_budget", args={"monthly_usd_cap": 50})
+    r = await _press(mx, "owner_a", pid)
+    assert r.status_code == 202, r.text
+    assert await _status(mx, pid) == "started"
+
+
+async def test_an_owner_of_another_workspace_may_not(mx):
+    """Owner means owner of THIS workspace."""
+    pid = await _plan_row(mx, by="admin_a", verb="set_budget", args={"monthly_usd_cap": 50})
+    r = await _press(mx, "admin_b", pid)
+    assert r.status_code in (403, 404), r.text
+    assert await _status(mx, pid) == "planned"
+
+
+async def test_the_owners_press_still_meets_the_role_recheck(mx):
+    """The plan was made by a member for a verb a member may run; an owner
+    pressing it runs as the owner and is checked as the owner — here that
+    changes nothing. And the owner who lost the role before pressing is just
+    another colleague."""
+    from src.db.models import WorkspaceMember
+
+    pid = await _plan_row(mx, by="admin_a", verb="set_budget", args={"monthly_usd_cap": 50})
+    async with mx.factory() as s:
+        (await s.get(WorkspaceMember, (WS_A, mx.uid("owner_a")))).role = "editor"
+        await s.commit()
+    r = await _press(mx, "owner_a", pid)
+    assert r.status_code == 403, r.text
+    assert await _status(mx, pid) == "planned"
 
 
 async def test_a_role_lost_between_plan_and_press_is_felt_at_the_press(mx):

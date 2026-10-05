@@ -16,6 +16,7 @@ somebody has when they come back.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -283,10 +284,17 @@ async def execute_plan(
     # pressed. Everything runs as whoever presses, so it could never do more
     # than that person may — but their approval is what makes it run, and a
     # refusal would be recorded on the plan of somebody who never pressed.
+    # The one exception is the workspace's OWNER, who answers for everything
+    # done in it and may press a plan a colleague prepared; it still runs as
+    # the owner, through the same press-time role re-check. A global admin who
+    # is not an owner of THIS workspace gets no such right.
     if row.user_id and row.user_id != user.id:
-        raise HTTPException(
-            status_code=403,
-            detail="That plan was made by someone else. Ask again to run your own.")
+        from src.api.deps import workspace_role
+
+        if await asyncio.to_thread(workspace_role, user.id, workspace_id) != "owner":
+            raise HTTPException(
+                status_code=403,
+                detail="That plan was made by someone else. Ask again to run your own.")
     if row.status not in ("planned",):
         raise HTTPException(
             status_code=409,

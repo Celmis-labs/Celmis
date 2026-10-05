@@ -1701,7 +1701,7 @@ async def execute(plan: Plan, actor, session) -> dict[str, Any]:
             # without parsing markdown of its own.
             outcome = {"links": guide_links(plan.note)}
         elif step.action == "list_repos":
-            outcome = list_repos(actor)
+            outcome = await list_repos(actor)
         elif step.action == "review_settings":
             # A snapshot, not prose: the answer is written from it by a second
             # model call in the worker (`explain_review_settings`), so what
