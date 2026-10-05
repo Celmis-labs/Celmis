@@ -255,6 +255,9 @@ def _poll_gitlab_project(token: str, cfg: RepoConfig, gitlab=None) -> None:
         iid = int(mr.get("iid", 0))
         if iid <= (cfg.last_seen_pr_id or 0):
             continue
+        if _skip_untargeted("gitlab", cfg, iid, mr):
+            new_max_iid = max(new_max_iid, iid)
+            continue
         _trigger_review("gitlab", cfg.full_name, iid,
                         user_id=cfg.user_id, workspace_id=cfg.workspace_id)
         new_max_iid = max(new_max_iid, iid)
@@ -265,6 +268,39 @@ def _poll_gitlab_project(token: str, cfg: RepoConfig, gitlab=None) -> None:
         etag=new_etag,
         last_seen_pr_id=new_max_iid if new_max_iid > (cfg.last_seen_pr_id or 0) else None,
     )
+
+
+def _skip_untargeted(provider: str, cfg: RepoConfig, number: int, mr: dict) -> bool:
+    """True when the MR's target branch is outside the repo's target patterns:
+    the skip is recorded (as the webhook does) instead of queuing a job that
+    would only end at the orchestrator's gate. The listing names the base
+    branch; GitHub notifications do not, so that path leaves it to the gate."""
+    base = str(mr.get("target_branch") or "")
+    if not base:
+        return False
+    try:
+        from src.review.branch_patterns import branch_targeted, skip_sentence
+        from src.review.dispatch import record_gate_skip
+        from src.review.review_defaults import target_branches_for_repo
+
+        patterns = target_branches_for_repo(provider, cfg.full_name)
+        if not patterns or branch_targeted(base, patterns):
+            return False
+        record_gate_skip(
+            provider, cfg.full_name, number, user_id=cfg.user_id,
+            workspace_id=cfg.workspace_id, source="poller",
+            gate_key="gate_target_branch", gate_name="Validate target branch",
+            reason=skip_sentence(base, patterns),
+            pr_meta={"title": mr.get("title"),
+                     "author": (mr.get("author") or {}).get("username"),
+                     "url": mr.get("web_url"), "head_ref": mr.get("source_branch"),
+                     "base_ref": base},
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — the gate in the orchestrator decides
+        logger.warning("poller_target_check_failed repo=%s err=%s",
+                       cfg.full_name, type(exc).__name__)
+        return False
 
 
 def _trigger_review(provider: str, repo: str, pr_number: int, *, user_id: str,

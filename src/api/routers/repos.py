@@ -1451,6 +1451,15 @@ def _open_listing(cfg: RepoConfig, secret: str, email: str, *,
         ) from None
 
 
+def _is_targeted(base: str | None, patterns: list[str]) -> bool:
+    """Would the orchestrator's target-branch gate let this base branch
+    through? Same matcher; no patterns or an unknown base = yes (the gate
+    skips only when it knows both)."""
+    from src.review.branch_patterns import branch_targeted
+
+    return not patterns or not base or branch_targeted(base, patterns)
+
+
 @router.get("/{slug}/pulls", response_model=OpenPullListOut)
 def list_open_prs(
     slug: str,
@@ -1463,6 +1472,9 @@ def list_open_prs(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     refresh: bool = Query(default=False, description="Bypass the 30s cache"),
+    targeted_only: bool = Query(
+        default=False,
+        description="Only PRs whose base branch is in the repo's target branches"),
     user: User = Depends(require_repo_permission("read")),
     workspace_id: str = Depends(current_workspace_id),
 ) -> OpenPullListOut:
@@ -1471,12 +1483,21 @@ def list_open_prs(
     from src.api.review_runs import get_review_run_store
     from src.repos import open_pulls
     from src.review.dispatch import BULK_LIMIT
+    from src.review.review_defaults import target_branches_for_repo
 
     cfg = _registered_repo(slug, workspace_id)
     secret, email, gitlab = _repo_credential(cfg, user)
     listing = _open_listing(cfg, secret, email, branch=branch, refresh=refresh,
                             gitlab=gitlab)
     chosen = open_pulls.select(listing.items, q=q, target=branch or None, sort=sort)
+    patterns = target_branches_for_repo(cfg.provider, cfg.full_name)
+    if targeted_only:
+        chosen = [p for p in chosen if _is_targeted(p.target_branch, patterns)]
+    elif sort == "newest":
+        # Default order: the PRs a review would actually run on first (stable,
+        # so each group stays newest-first).
+        chosen = sorted(chosen, key=lambda p: not _is_targeted(p.target_branch, patterns))
+    targeted_total = sum(1 for p in chosen if _is_targeted(p.target_branch, patterns))
     page = chosen[offset:offset + limit]
     try:
         latest = get_review_run_store().latest_for_prs(
@@ -1498,6 +1519,7 @@ def list_open_prs(
             last_review_reason=run.status_reason if run else None,
             last_run_id=run.id if run else None,
             last_review_at=run.started_at if run else None,
+            targeted=_is_targeted(p.target_branch, patterns),
         ))
     return OpenPullListOut(
         items=items, total=len(chosen), open_total=len(listing.items),
@@ -1505,6 +1527,7 @@ def list_open_prs(
         target_branches=sorted({p.target_branch for p in listing.items
                                 if p.target_branch}),
         bulk_limit=BULK_LIMIT,
+        effective_target_branches=patterns, targeted_total=targeted_total,
     )
 
 
@@ -1566,10 +1589,14 @@ def review_all_open_prs(
             detail="Bulk review needs confirmation (confirm: true).",
         )
     cfg = _registered_repo(slug, workspace_id)
-    # The selection, the cap and the fresh listing are the action's: the agent
-    # starts the same review through the same function.
-    targets = open_pr_targets(cfg, user, branch=body.branch, q=body.q,
-                              numbers=body.numbers)
+    # The selection, the target-branch pre-filter, the cap and the fresh
+    # listing are the action's: the agent starts the same review through the
+    # same function.
+    targets, untargeted = open_pr_targets(cfg, user, branch=body.branch, q=body.q,
+                                          numbers=body.numbers)
+    skipped = [QueuedReviewOut(number=n, status="skipped",
+                               reason="base branch not targeted")
+               for n in untargeted]
     items = [
         _queue_one(cfg, n, user=user, post_comments=body.post_comments,
                    source="bulk", background=background)
@@ -1578,10 +1605,11 @@ def review_all_open_prs(
     queued = sum(1 for i in items if i.status in ("queued", "inline"))
     audit_bulk_review(user, workspace_id, slug, requested=len(targets),
                       queued=queued, branch=body.branch, q=body.q,
-                      ip=client_ip(request))
+                      ip=client_ip(request), skipped_not_targeted=len(skipped))
     logger.info("bulk_review_queued repo=%s requested=%d queued=%d by=%s",
                 slug, len(targets), queued, user.email)
-    return BulkReviewOut(requested=len(targets), queued=queued, items=items)
+    return BulkReviewOut(requested=len(targets), queued=queued, items=items,
+                         skipped=skipped)
 
 
 @router.get("/{slug}/branches", response_model=RepoBranchesOut)

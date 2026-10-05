@@ -14,11 +14,15 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { AnimatePresence } from "motion/react";
 import * as m from "motion/react-m";
 import {
-  ChevronRightIcon, ExternalLinkIcon, GitPullRequestIcon, SearchIcon,
+  ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, ClockIcon,
+  ExternalLinkIcon, GitPullRequestIcon, SearchIcon,
+  type LucideIcon,
 } from "lucide-react";
 
 import {
   pullRequestsApi,
+  type PullRequestBucket,
+  type PullRequestStats,
   type ReviewedPullRequest,
   type ReviewedPullRequestList,
 } from "@/lib/api";
@@ -61,11 +65,20 @@ export default function PullRequestsPage() {
   const [repo, setRepo] = useState("");
   const [state, setState] = useState("");
   const [reviewStatus, setReviewStatus] = useState("");
+  const [bucket, setBucket] = useState<PullRequestBucket | "">("");
   const [offset, setOffset] = useState(0);
 
   const filters = {
-    q, repo, state, review_status: reviewStatus, limit: PAGE, offset,
+    q, repo, state, review_status: reviewStatus, bucket, limit: PAGE, offset,
   };
+  // The cards follow the repository filter only: they are the overview, the
+  // other filters narrow the list below them.
+  const stats = useQuery({
+    queryKey: ["pull-requests", "stats", repo],
+    queryFn: () => pullRequestsApi.stats(token!, { repo }),
+    enabled: !!token,
+    placeholderData: keepPreviousData,
+  });
   const list = useQuery({
     queryKey: ["pull-requests", filters],
     queryFn: () => pullRequestsApi.list(token!, filters),
@@ -97,6 +110,12 @@ export default function PullRequestsPage() {
         badge={<WorkspaceBadge />}
         description={t("prs.subtitle")}
         tabs={<SectionTabs set="review" />}
+      />
+
+      <SummaryCards
+        stats={stats.data}
+        active={bucket}
+        onPick={(b) => { setBucket(b); setOffset(0); }}
       />
 
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
@@ -197,11 +216,84 @@ export default function PullRequestsPage() {
   );
 }
 
+const CARDS: {
+  bucket: PullRequestBucket;
+  icon: LucideIcon;
+  /** Colour comes from the scales in globals.css: green reviewed, neutral
+   *  waiting, orange needs a person. The icon says it too. */
+  tone: string;
+}[] = [
+  { bucket: "reviewed_today", icon: CircleCheckIcon,
+    tone: "bg-[var(--color-success-soft)] text-[var(--color-success)]" },
+  { bucket: "awaiting", icon: ClockIcon,
+    tone: "bg-[var(--color-neutral-soft)] text-[var(--color-muted-foreground)]" },
+  { bucket: "attention", icon: CircleAlertIcon,
+    tone: "bg-[var(--color-attention-soft)] text-[var(--color-attention)]" },
+];
+
+const CARD_KEY = {
+  reviewed_today: "reviewedToday",
+  awaiting: "awaiting",
+  attention: "attention",
+} as const;
+
+/** Three counters above the filters. A card is a toggle: clicking it narrows
+ *  the list to exactly the PRs it counted, clicking it again clears that. */
+function SummaryCards({ stats, active, onPick }: {
+  stats: PullRequestStats | undefined;
+  active: PullRequestBucket | "";
+  onPick: (b: PullRequestBucket | "") => void;
+}) {
+  const t = useT();
+  return (
+    <div className="grid gap-2 sm:grid-cols-3" role="group" aria-label={t("prs.title")}>
+      {CARDS.map(({ bucket, icon: Icon, tone }) => {
+        const key = CARD_KEY[bucket];
+        const on = active === bucket;
+        const partial = bucket === "awaiting" && !!stats?.partial;
+        const hint = t(`prs.card.${key}Hint`)
+          + (partial
+            ? ` ${t("prs.card.partialHint", { repos: (stats?.missing_repos ?? []).join(", ") })}`
+            : "");
+        return (
+          <button
+            key={bucket}
+            type="button"
+            aria-pressed={on}
+            title={on ? `${hint} ${t("prs.card.filterOn")}` : hint}
+            onClick={() => onPick(on ? "" : bucket)}
+            className={cn(
+              "flex items-center gap-3 rounded-xl border bg-[var(--color-card)] px-4 py-3 text-left transition-colors",
+              "hover:bg-[var(--color-accent)]/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)]",
+              on ? "border-[var(--color-ring)]" : "border-[var(--color-border)]",
+            )}
+          >
+            <span className={cn("inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", tone)}>
+              <Icon aria-hidden className="h-5 w-5" />
+            </span>
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate text-xs text-[var(--color-muted-foreground)]">
+                {t(`prs.card.${key}`)}
+              </span>
+              <span className="text-2xl font-semibold leading-tight tabular-nums">
+                {stats ? `${partial ? "≥" : ""}${stats[bucket]}` : "–"}
+              </span>
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Columns of the PR table — the expanded row spans all of them. */
 const COLS = 10;
 
 function PrRow({ pr }: { pr: ReviewedPullRequest }) {
   const t = useT();
+  // Rows of the "Awaiting review" card come from the provider's listing: the
+  // PR may never have been reviewed, so there is no timeline to expand.
+  const awaiting = pr.last_review_status === "awaiting";
   const [open, setOpen] = useState(false);
   const sev = pr.by_severity ?? {};
   const severityTitle = SEVERITIES
@@ -214,7 +306,7 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
     <Fragment>
     <TR className={cn(open && "bg-[var(--color-accent)]/50")}>
       <TD className="w-8 align-middle">
-        <button
+        {!awaiting && <button
           type="button"
           aria-expanded={open}
           aria-label={open ? t("prs.collapse") : t("prs.expand")}
@@ -225,7 +317,7 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
             "h-4 w-4 transition-transform duration-200 ease-out-quint",
             open && "rotate-90",
           )} />
-        </button>
+        </button>}
       </TD>
       <TD className="whitespace-nowrap align-middle font-mono text-xs">
         {pr.url ? (
@@ -267,7 +359,9 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
         </span>
       </TD>
       <TD className="max-w-[18rem] align-middle">
-        {pr.last_review_status ? (
+        {awaiting ? (
+          <Badge variant="default">{t("prs.card.awaiting")}</Badge>
+        ) : pr.last_review_status ? (
           <div className="flex flex-col gap-1">
             <StatusPill
               status={toRunStatus(pr.last_review_status)}
@@ -285,7 +379,7 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
       </TD>
     </TR>
     <AnimatePresence initial={false}>
-      {open && (
+      {open && !awaiting && (
         <TR key="reviews" className="hover:bg-transparent">
           <TD colSpan={COLS} className="p-0">
             <m.div

@@ -178,11 +178,17 @@ def run_review_inline(payload: dict[str, Any]) -> None:
 def open_pr_targets(
     cfg: Any, user: Any, *, branch: str | None, q: str,
     numbers: list[int] | None,
-) -> list[int]:
-    """The open PR numbers a bulk review covers: the listed `numbers` that are
-    still open, or every open PR matching `q` and `branch`. Fresh from the
-    provider (this spends model budget on what it reads), at most
-    `BULK_LIMIT`. Raises HTTPException exactly as the route did."""
+) -> tuple[list[int], list[int]]:
+    """(targets, untargeted): the open PR numbers a bulk review covers — the
+    listed `numbers` that are still open, or every open PR matching `q` and
+    `branch` — split by the repo's target branches. Fresh from the provider
+    (this spends model budget on what it reads), at most `BULK_LIMIT`
+    targets. Raises HTTPException exactly as the route did.
+
+    A PR whose base branch the target patterns leave out is not queued: the
+    orchestrator's gate would only skip it, writing a "skipped" run and
+    using up the bulk limit. The gate stays the authority for anything this
+    misses (an unknown base branch is let through)."""
     from fastapi import HTTPException
 
     from src.api.routers import repos as repos_router
@@ -192,12 +198,22 @@ def open_pr_targets(
     secret, email, gitlab = repos_router._repo_credential(cfg, user)
     listing = repos_router._open_listing(
         cfg, secret, email, branch=branch, refresh=True, gitlab=gitlab)
+    from src.review.review_defaults import target_branches_for_repo
+
     if numbers:
-        open_numbers = {p.number for p in listing.items}
-        targets = sorted({int(n) for n in numbers if int(n) in open_numbers})
+        wanted_numbers = {int(n) for n in numbers}
+        wanted = sorted((p for p in listing.items if p.number in wanted_numbers),
+                        key=lambda p: p.number)
     else:
-        targets = [p.number for p in open_pulls.select(
-            listing.items, q=q, target=branch or None)]
+        wanted = list(open_pulls.select(listing.items, q=q, target=branch or None))
+    patterns = target_branches_for_repo(cfg.provider, cfg.full_name)
+    targets: list[int] = []
+    untargeted: list[int] = []
+    for pr in wanted:
+        if repos_router._is_targeted(pr.target_branch, patterns):
+            targets.append(pr.number)
+        else:
+            untargeted.append(pr.number)
     if len(targets) > BULK_LIMIT:
         raise HTTPException(
             status_code=422,
@@ -205,7 +221,7 @@ def open_pr_targets(
                     f"{BULK_LIMIT} can be reviewed in one request — narrow the "
                     f"search or the target-branch filter."),
         )
-    return targets
+    return targets, untargeted
 
 
 def queue_pr_reviews(
@@ -227,6 +243,7 @@ def queue_pr_reviews(
 def audit_bulk_review(
     user: Any, workspace_id: str, slug: str, *, requested: int, queued: int,
     branch: str | None, q: str | None, ip: str | None, via: str = "",
+    skipped_not_targeted: int = 0,
 ) -> None:
     """The audit-log entry of a bulk review — one for the page and the agent."""
     from src.security.audit import record_action
@@ -235,6 +252,8 @@ def audit_bulk_review(
                               "branch": branch or "", "q": bool(q)}
     if via:
         detail["via"] = via
+    if skipped_not_targeted:
+        detail["skipped_not_targeted"] = skipped_not_targeted
     record_action(
         action="review.bulk_queued", actor=user.email, actor_id=user.id,
         workspace_id=workspace_id, target=slug, ip=ip, detail=detail)
@@ -276,19 +295,22 @@ async def review_pr(
 
     if all_open or numbers:
         try:
-            targets = await asyncio.to_thread(
+            targets, untargeted = await asyncio.to_thread(
                 open_pr_targets, cfg, user, branch=(branch or None),
                 q=str(q or ""), numbers=[_number(n) for n in numbers or []] or None)
         except HTTPException as exc:
             raise ActionError(str(exc.detail)) from None
         source = "bulk"
+        not_targeted = [{"repo": f"{slug}#{n}", "reason": "base branch not targeted"}
+                        for n in untargeted]
         if not targets:
             return {"repo": slug, "provider": cfg.provider, "requested": 0,
-                    "queued": [], "skipped": [], "items": [],
+                    "queued": [], "skipped": not_targeted, "items": [],
                     "links": [_LINK_PRS, _LINK_REVIEWS]}
     else:
         targets = [_number(number)]
         source = "manual"
+        not_targeted = []
 
     items, inline = await asyncio.to_thread(
         queue_pr_reviews, cfg, targets, user_id=user.id,
@@ -301,10 +323,12 @@ async def review_pr(
     skipped = [{"repo": f"{slug}#{i['number']}",
                 "reason": i.get("reason") or i["status"]}
                for i in items if i["status"] not in ("queued", "inline")]
+    skipped += not_targeted
     if source == "bulk":
         audit_bulk_review(
             user, actor.workspace_id, slug, requested=len(targets),
-            queued=len(queued), branch=branch, q=q, ip=None, via=actor.label)
+            queued=len(queued), branch=branch, q=q, ip=None, via=actor.label,
+            skipped_not_targeted=len(not_targeted))
     logger.info("review_pr via=%s repo=%s requested=%d queued=%d by=%s",
                 actor.label, slug, len(targets), len(queued), actor.email)
     return {

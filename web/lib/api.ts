@@ -2504,12 +2504,30 @@ export type ReviewedPullRequestList = {
   repos: string[];
 };
 
+/** The three summary cards above the pull-requests list. */
+export type PullRequestBucket = "reviewed_today" | "awaiting" | "attention";
+
+export type PullRequestStats = {
+  reviewed_today: number;
+  awaiting: number;
+  /** Some repo's listing failed or timed out: `awaiting` is a lower bound. */
+  partial: boolean;
+  missing_repos: string[];
+  attention: number;
+  /** Start of the counted day (UTC). */
+  day_start: string;
+};
+
 export const pullRequestsApi = {
   list: (token: string, f: {
     q?: string; repo?: string; state?: string; review_status?: string;
+    bucket?: PullRequestBucket | "";
     limit?: number; offset?: number;
   } = {}) =>
     api<ReviewedPullRequestList>(`/api/pull-requests${queryString(f)}`, { token }),
+  /** Counts for the cards; `repo` narrows them like the list's repo filter. */
+  stats: (token: string, f: { repo?: string } = {}) =>
+    api<PullRequestStats>(`/api/pull-requests/stats${queryString(f)}`, { token }),
   /** Every recorded review of one PR, newest first, each with its stages. */
   runs: (token: string, prId: string) =>
     api<{ pr_id: string; items: ReviewRunOut[] }>(
@@ -2534,6 +2552,8 @@ export type OpenPull = {
   last_review_reason: string | null;
   last_run_id: string | null;
   last_review_at: string | null;
+  /** False when the repo's target branches leave the base branch out. */
+  targeted: boolean;
 };
 
 export type OpenPullList = {
@@ -2545,6 +2565,10 @@ export type OpenPullList = {
   truncated: boolean;
   target_branches: string[];
   bulk_limit: number;
+  /** The repo's effective target-branch patterns; empty = every branch. */
+  effective_target_branches: string[];
+  /** Matching PRs on a targeted base branch — what "Review all" queues. */
+  targeted_total: number;
 };
 
 export type QueuedReview = {
@@ -2557,6 +2581,7 @@ export type QueuedReview = {
 
 export type OpenPullFilters = {
   q?: string; branch?: string; sort?: string; limit?: number; offset?: number;
+  targeted_only?: "true" | "";
 };
 
 export const openPullsApi = {
@@ -2572,7 +2597,7 @@ export const openPullsApi = {
     q?: string; branch?: string | null; numbers?: number[];
     post_comments?: boolean; confirm: boolean;
   }) =>
-    api<{ requested: number; queued: number; items: QueuedReview[] }>(
+    api<{ requested: number; queued: number; items: QueuedReview[]; skipped: QueuedReview[] }>(
       `/api/repos/${encodeURIComponent(slug)}/pulls/review-all`,
       { token, method: "POST", json: body }),
 };

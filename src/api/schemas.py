@@ -531,9 +531,14 @@ class BulkReviewIn(BaseModel):
 
 
 class BulkReviewOut(BaseModel):
+    #: PRs the request tried to review — targeted ones only.
     requested: int
     queued: int
     items: list[QueuedReviewOut]
+    #: PRs left out before queuing because their base branch is not in the
+    #: repo's target branches (status "skipped", reason "base branch not
+    #: targeted"). Not counted in `requested`, so they do not eat BULK_LIMIT.
+    skipped: list[QueuedReviewOut] = Field(default_factory=list)
 
 
 class OpenPullOut(BaseModel):
@@ -556,6 +561,9 @@ class OpenPullOut(BaseModel):
     last_review_reason: str | None = None
     last_run_id: str | None = None
     last_review_at: str | None = None
+    #: False when the repo's effective target branches leave this PR's base
+    #: branch out — a review would be skipped by the orchestrator's gate.
+    targeted: bool = True
 
 
 class OpenPullListOut(BaseModel):
@@ -572,6 +580,12 @@ class OpenPullListOut(BaseModel):
     target_branches: list[str] = Field(default_factory=list)
     #: The most PRs one "Review all open PRs" request may queue.
     bulk_limit: int = 25
+    #: The repo's effective target-branch patterns (repo > workspace default);
+    #: empty = every branch is targeted.
+    effective_target_branches: list[str] = Field(default_factory=list)
+    #: Matching PRs (before limit/offset) whose base branch is targeted — what
+    #: "Review all" would actually queue.
+    targeted_total: int = 0
 
 
 # ═══════════════════════════════════════════════════════════════════
