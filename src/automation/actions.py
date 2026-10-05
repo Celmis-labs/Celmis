@@ -951,7 +951,49 @@ def _user_for(actor: Actor):
     user = get_user_store().get_by_id(actor.user_id) if actor.user_id else None
     if user is None or not getattr(user, "is_active", True):
         raise ActionError("Could not tell who is asking — sign in again.")
+    _require_member(actor, user)
     return user
+
+
+def _require_member(actor: Actor, user: Any) -> None:
+    """The asker belongs to `actor.workspace_id` (a global admin may act in any).
+
+    The HTTP routes never need this: `current_workspace_id` only ever hands a
+    caller a workspace they are in. An `Actor` is built from a workspace id
+    that was true when it was made — a plan read a minute ago, a token minted
+    last week — so the action asks again, with the same rule the
+    review-defaults routes apply (`_require_member`): multi-tenant only, since
+    the shared single-tenant default has no membership to ask. Blocking.
+    """
+    if getattr(user, "is_admin", False):
+        return
+    from src.deployment import is_multi_tenant
+
+    if not is_multi_tenant():
+        return
+    from src.api.deps import workspace_role
+
+    if workspace_role(user.id, actor.workspace_id) is None:
+        raise ActionError("You are not a member of this workspace.")
+
+
+async def _require_workspace_member(actor: Actor) -> None:
+    """`_require_member` for a caller that has only an `Actor` — the executor,
+    before any verb, so even the verbs that never look the person up (the
+    repository list, a dependency audit, the canned answers) are refused to
+    somebody who is not in the workspace."""
+    import asyncio
+
+    from src.deployment import is_multi_tenant
+
+    if not is_multi_tenant():
+        return
+    from src.users import get_user_store
+
+    user = get_user_store().get_by_id(actor.user_id) if actor.user_id else None
+    if user is None:
+        raise ActionError("Could not tell who is asking — sign in again.")
+    await asyncio.to_thread(_require_member, actor, user)
 
 
 async def _as_action(coro: Any) -> Any:
@@ -1042,8 +1084,8 @@ async def _upsert_policy_fields(actor: Actor, session: Any, user: Any,
         where = ".".join(str(p) for p in first.get("loc", ()))
         raise ActionError(f"{where}: {first.get('msg')}") from None
     return await _as_action(upsert_policy(
-        repo_slug=slug, payload=payload, session=session, user=user,
-        _perm=user, ws_id=actor.workspace_id))
+        repo_slug=slug, payload=payload, request=None, session=session,
+        user=user, _perm=user, ws_id=actor.workspace_id))
 
 
 def _rules_links(slug: str | None, *, pending: bool) -> list[dict[str, str]]:

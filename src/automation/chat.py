@@ -1644,6 +1644,7 @@ async def execute(plan: Plan, actor, session) -> dict[str, Any]:
     from src.automation import actions_reviews
     from src.automation.actions import (
         ActionError,
+        _require_workspace_member,
         generate_docs,
         generate_review_rules,
         get_dep_audit,
@@ -1663,6 +1664,9 @@ async def execute(plan: Plan, actor, session) -> dict[str, Any]:
     blocked = plan.blocked
     if blocked:
         raise ActionError(blocked)
+    # Before any verb: the workspace in `actor` was true when the plan was
+    # read, not necessarily now (a member removed between plan and press).
+    await _require_workspace_member(actor)
 
     logger.info("automation_chat_execute steps=%d ws=%s repos=%d by=%s",
                 len(plan.steps), actor.workspace_id,

@@ -278,6 +278,15 @@ async def execute_plan(
     row = await session.get(AutomationRun, payload.plan_id)
     if row is None or row.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="No such plan")
+    # The history is the workspace's, so another member can SEE this plan and
+    # know its id. Running it is the person's own: they read the card and
+    # pressed. Everything runs as whoever presses, so it could never do more
+    # than that person may — but their approval is what makes it run, and a
+    # refusal would be recorded on the plan of somebody who never pressed.
+    if row.user_id and row.user_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="That plan was made by someone else. Ask again to run your own.")
     if row.status not in ("planned",):
         raise HTTPException(
             status_code=409,

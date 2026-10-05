@@ -108,6 +108,10 @@ async def list_issues(
     severity: str | None = Query(default=None, description="comma-separated"),
     category: str | None = Query(default=None, description="comma-separated"),
     repo: str | None = Query(default=None, max_length=300),
+    # Repositories to leave out, by slug or by full name. The page never sends
+    # it; the agent does, for the repositories the asker's team grants exclude,
+    # so the totals and the status counts are the ones the asker may see.
+    exclude_repo: list[str] | None = Query(default=None, max_length=100),
     pr: int | None = Query(default=None, ge=0),
     q: str | None = Query(default=None, max_length=200),
     sort: Literal["newest", "oldest", "severity", "last_seen"] = "newest",
@@ -124,6 +128,9 @@ async def list_issues(
         base.append(ReviewIssue.category.in_(category_list))
     if repo:
         base.append(or_(ReviewIssue.repo_slug == repo, ReviewIssue.pr_repo == repo))
+    if exclude_repo:
+        base.append(~or_(func.coalesce(ReviewIssue.repo_slug, "").in_(exclude_repo),
+                         func.coalesce(ReviewIssue.pr_repo, "").in_(exclude_repo)))
     if pr is not None:
         base.append(ReviewIssue.pr_number == pr)
     if q and q.strip():

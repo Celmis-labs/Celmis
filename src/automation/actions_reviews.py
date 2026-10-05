@@ -573,10 +573,20 @@ async def list_issues(
         repo = resolve_repo(actor, repo_slug)
         if not await _can_read(actor, user, repo, {}):
             raise ActionError(f"Requires 'read' on {repo}")
+    # Workspace-wide, the page lists every repository's issues; the agent
+    # leaves out the ones whose repository the asker's team grants exclude, as
+    # it does for review runs (`list_reviews`).
+    hidden: list[str] = []
+    if repo is None:
+        allowed: dict[str, bool] = {}
+        for slug, cfg in _registered(actor).items():
+            if not await _can_read(actor, user, slug, allowed):
+                hidden += [slug, cfg.full_name]
     status_csv = ",".join(s for s in (status or "").split(",")
                           if s.strip() in ISSUE_STATUSES) or None
     out = await _as_action(issues_router.list_issues(
         status=status_csv, severity=severity or None, category=None, repo=repo,
+        exclude_repo=hidden or None,
         pr=_number(pr) if pr not in (None, "") else None,
         q=q or None, sort="severity", limit=_limit(limit, 15, MAX_LIST),
         offset=0, session=session, _user=user, ws=actor.workspace_id))
@@ -933,6 +943,14 @@ def roles_for(action: str) -> frozenset[str]:
         from src.api.deps import ISSUE_WRITE_ROLES
 
         return ISSUE_WRITE_ROLES
+    if action == "review_pr":
+        # The route asks for the `review` grant on the repository and for no
+        # workspace role at all, so a viewer a team lets review gets the same
+        # card, and the same press, as anybody else. The grant is the
+        # action's to check.
+        from src.users.roles import VALID_WORKSPACE_ROLES
+
+        return frozenset(VALID_WORKSPACE_ROLES)
     return PROPOSER_ROLES
 
 

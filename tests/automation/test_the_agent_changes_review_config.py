@@ -99,7 +99,7 @@ def routes(monkeypatch):
         seen["defaults"] = (payload.model_dump(exclude_unset=True), ws_id, user.id)
         return types.SimpleNamespace(effective=payload.model_dump(exclude_unset=True))
 
-    async def _upsert(repo_slug, payload, session, user, _perm, ws_id):
+    async def _upsert(repo_slug, payload, request, session, user, _perm, ws_id):
         seen["policy"] = (repo_slug, payload, ws_id)
         return types.SimpleNamespace()
 
