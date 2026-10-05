@@ -138,9 +138,8 @@ def test_enforcing_keeps_sync_tools_sync():
 
     assert not asyncio.iscoroutinefunction(_sync_tool)
     with patch("mcp.server.auth.middleware.auth_context.get_access_token",
-               return_value=_token(["read:graph"])):
-        with pytest.raises(ScopeError):
-            _sync_tool()
+               return_value=_token(["read:graph"])), pytest.raises(ScopeError):
+        _sync_tool()
 
 
 # ─── the stdio build ─────────────────────────────────────────────────
@@ -158,9 +157,8 @@ def test_the_stdio_server_denies_a_read_token_a_write_tool():
 
     tool = build_server()._tool_manager._tools["set_budget"]
     with patch("mcp.server.auth.middleware.auth_context.get_access_token",
-               return_value=_token(["read:graph"])):
-        with pytest.raises(ScopeError):
-            asyncio.run(tool.fn(monthly_usd_cap=10))
+               return_value=_token(["read:graph"])), pytest.raises(ScopeError):
+        asyncio.run(tool.fn(monthly_usd_cap=10))
 
 
 # ─── a refusal is an answer ──────────────────────────────────────────

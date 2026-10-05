@@ -114,7 +114,7 @@ def test_the_issue_call_passes_what_was_granted_not_the_request():
 
 
 def test_the_default_constant_stays_read_only():
-    from src.api.routers.mcp_access import WRITE_SCOPES, _TOKEN_SCOPES
+    from src.api.routers.mcp_access import _TOKEN_SCOPES, WRITE_SCOPES
 
     assert not set(WRITE_SCOPES) & set(_TOKEN_SCOPES)
 
