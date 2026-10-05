@@ -20,6 +20,59 @@ derives it from there.
 
 ## [Unreleased]
 
+## [2.3.5] — 2026-10-06
+
+### Security
+
+- **The in-app agent is bound to the asker's workspace membership.** Every
+  agent verb (and the MCP tools built on the same actions) now refuses a
+  caller who is not a member of the workspace; before, several reads and
+  writes (spend, alerts, jobs, repository list, audits, docs, auto-review)
+  ran for a non-member holding a workspace id.
+- **Only the author of a plan — or the workspace owner — may press it.**
+  `POST /api/automation/execute` let any member run another member's plan
+  (plan ids are visible in history). Other members, other admins and global
+  admins who are not the owner now get 403. Roles are still re-read at
+  press time.
+- **Issues without a named repository no longer include repositories the
+  asker's team may not read** (rows, totals and status counts). New optional
+  `exclude_repo` filter on `/api/issues`.
+
+### Changed
+
+- **Spend and budget are for workspace owners and admins** (and global
+  admins): `/api/spend/summary`, `/daily`, `GET /budget`, the agent's and
+  MCP's `get_spend` / `get_budget`, the Usage page and the settings spend
+  card (shown as admin-only instead of an error). `/api/usage/summary` is
+  unchanged.
+- **Review cost is for workspace owners and admins**: `cost_usd` is left out
+  of review history, run detail, PR runs, review analytics and the MCP
+  `get_review` tool for other roles; the analytics cost tile is hidden, not
+  shown as $0.
+- **Workspace owners and admins hold every repository of their workspace**
+  — in the grant check every per-repo route and agent/MCP action uses, and
+  in code (research) access. Owners/admins of another workspace get
+  nothing. Viewers, members and editors keep team grants.
+- **Repository lists show only what the asker may read**: `GET /api/repos`,
+  the agent's `list_repos`, MCP `list_workspace_repos`, the review-settings
+  overview and the agent's settings snapshot (including its auto-review
+  count).
+
+### Fixed
+
+- **Agent: changing a repository-scope review setting or guidelines always
+  failed** (`TypeError` — the policy upsert gained an argument the action
+  never passed).
+- **Agent: the review-a-PR card refused viewers** that the action and route
+  allow with a review grant.
+
+### Tests
+
+- `tests/automation/test_agent_role_matrix.py`: every agent verb × every
+  role (viewer … owner, team grants, non-member, other workspace, global
+  admin, superadmin), card-vs-action and agent-vs-MCP parity, cross-workspace
+  ids, plan press. A new verb without a row fails CI.
+
 ## [2.3.3] — 2026-10-05
 
 ### Added
