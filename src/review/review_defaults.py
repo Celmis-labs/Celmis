@@ -325,6 +325,8 @@ def blank_policy() -> dict[str, Any]:
         "prompt_template": "",
         "folder_rules": [],
         "agent_prompt_overrides": {},
+        "agent_prompt_guidelines": {},
+        "agent_guidelines_extend": [],
         "agents": {},
         "mcp_sources": [],
         "review_language": None,

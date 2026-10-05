@@ -299,6 +299,13 @@ class AgentContext:
     # Per-repo per-agent full system_prompt overrides (Stage 12). Takes precedence
     # over global /admin/agents override, which in turn overrides the agent default.
     repo_agent_prompts: dict[str, str] = field(default_factory=dict)
+    #: agent → this repository's team guidelines: text ADDED to the agent's
+    #: prompt (src/review/prompt_guidelines.py). Empty inherits the
+    #: workspace's guidelines for that agent.
+    repo_agent_guidelines: dict[str, str] = field(default_factory=dict)
+    #: Agents whose repository guidelines are added to the workspace's
+    #: instead of replacing them (an explicit choice; the default replaces).
+    repo_guidelines_extend: list[str] = field(default_factory=list)
     # agent → the policy rules addressed to that agent by name. Appended after
     # `custom_rules` (the rules for every agent) in that agent's prompt only.
     agent_custom_rules: dict[str, str] = field(default_factory=dict)
@@ -478,14 +485,20 @@ class ReviewAgent(ABC):
 #
 # Resolution order (highest priority wins as the BASE), then extras append:
 #
-#   1. Per-repo per-agent override (RepoReviewPolicy.agent_prompt_overrides[name])
-#   2. Global per-agent override (/admin/agents — credentials row)
+#   1. Per-repo per-agent REPLACEMENT (RepoReviewPolicy.agent_prompt_overrides[name])
+#   2. Workspace per-agent replacement (credentials row `__agent_prompt__`)
 #   3. Agent's built-in default (self.system_prompt)
 #
-# Appends (always applied on top of whichever base was chosen):
+# Both replacements are the advanced mode. Appends (always applied on top of
+# whichever base was chosen):
+#   G. The team guidelines for this agent — the repository's, else the
+#      workspace's (both when the repository says "extend") — in a delimited
+#      block that says they cannot change the rules around them
+#      (src/review/prompt_guidelines.py)
 #   0. The policy's base instruction (how every suggestion is written)
 #   a. Workspace-wide `system_prompt_extras` from /settings/llm
 #   b. Per-repo NL rules (custom_rules) — was architect-only, now every agent
+#   c. The output language, then the output contract when the base lacks it
 
 
 def _review_model(workspace_id: str):
@@ -630,33 +643,96 @@ def _review_language_instruction(
     )
 
 
-def _compose_effective_system_prompt(
+@dataclass(frozen=True)
+class PromptPart:
+    """One block of a composed system prompt, labelled for the preview.
+
+    `kind`: "base" (the agent's prompt — built-in or a replacement), then the
+    appended blocks: "guidelines", "base_instruction", "workspace_rules",
+    "rules", "language", "output_format" and, for the verifier and the
+    compliance auditor, "rider". `source` says which layer a block came from
+    where that is a question ("builtin" | "workspace" | "repo" for the base,
+    "workspace" | "repository" | "workspace+repository" for guidelines).
+    """
+
+    kind: str
+    text: str
+    source: str = ""
+
+
+def _base_prompt(
+    agent_name: str, default_system: str, context: AgentContext,
+) -> tuple[str, str]:
+    """The prompt an agent starts from, and the layer it came from."""
+    # 1) Per-repo per-agent replacement wins.
+    repo_override = ((context.repo_agent_prompts or {}).get(agent_name) or "").strip()
+    if repo_override:
+        return repo_override, "repo"
+    # 2) Workspace-level replacement.
+    try:
+        from src.api.routers.agents import get_effective_system_prompt
+        base = get_effective_system_prompt(agent_name, context.workspace_id)
+    except Exception:  # noqa: BLE001
+        base = ""
+    if base and base.strip() != (default_system or "").strip():
+        return base, "workspace"
+    return default_system, "builtin"
+
+
+def team_guidelines_entries(context: AgentContext, agent_name: str) -> list:
+    """The guideline layers `agent_name` reads here, in order
+    (`prompt_guidelines.resolve_guidelines`). The workspace layer is read
+    only when it can matter — no repository text, or an explicit extend."""
+    from src.review.prompt_guidelines import clamp_guidelines, resolve_guidelines
+
+    repo_text = clamp_guidelines((context.repo_agent_guidelines or {}).get(agent_name))
+    extend = agent_name in (context.repo_guidelines_extend or ())
+    workspace_text = ""
+    if extend or not repo_text:
+        try:
+            from src.api.routers.agents import get_workspace_guidelines
+            workspace_text = get_workspace_guidelines(agent_name, context.workspace_id)
+        except Exception:  # noqa: BLE001 — no guidelines beats no review
+            workspace_text = ""
+    return resolve_guidelines(
+        repo_text=repo_text, workspace_text=workspace_text, extend=extend)
+
+
+def team_guidelines_part(context: AgentContext, agent_name: str) -> PromptPart | None:
+    """The team-guidelines block for `agent_name`, or None."""
+    from src.review.prompt_guidelines import guidelines_block, guidelines_source
+
+    entries = team_guidelines_entries(context, agent_name)
+    block = guidelines_block(agent_name, entries)
+    if not block:
+        return None
+    return PromptPart("guidelines", block, guidelines_source(entries))
+
+
+def compose_system_prompt_parts(
     *,
     agent_name: str,
     default_system: str,
     context: AgentContext,
-) -> str:
-    # 1) Per-repo per-agent override wins.
-    repo_override = (context.repo_agent_prompts or {}).get(agent_name, "").strip()
-    if repo_override:
-        base = repo_override
-    else:
-        # 2) Workspace-level /admin/agents override.
-        try:
-            from src.api.routers.agents import get_effective_system_prompt
-            base = get_effective_system_prompt(agent_name, context.workspace_id) or default_system
-        except Exception:  # noqa: BLE001
-            base = default_system
+) -> list[PromptPart]:
+    """The blocks of an LLM finder's system prompt, in the order sent."""
+    base, base_source = _base_prompt(agent_name, default_system, context)
+    parts = [PromptPart("base", base.rstrip(), base_source)]
 
-    parts = [base.rstrip()]
+    # G) The team's guidelines for this agent — ADDED to whichever prompt won,
+    #    right after it, so they read as a refinement of that prompt, and
+    #    before every block a review fills in.
+    guidelines = team_guidelines_part(context, agent_name)
+    if guidelines is not None:
+        parts.append(guidelines)
 
     # The team's base instruction — how every suggestion is written. Right
-    # after the agent's own prompt and before every rule block, whichever
-    # layer the prompt came from: it is a policy setting, not part of any
-    # one agent's text, so a prompt override does not drop it.
+    # after the agent's own prompt and its guidelines and before every rule
+    # block, whichever layer the prompt came from: it is a policy setting,
+    # not part of any one agent's text, so a prompt override does not drop it.
     base_instruction = base_instruction_block(getattr(context, "base_instruction", ""))
     if base_instruction:
-        parts.append(base_instruction)
+        parts.append(PromptPart("base_instruction", base_instruction))
 
     # a) Workspace-wide append.
     try:
@@ -665,24 +741,21 @@ def _compose_effective_system_prompt(
     except Exception:  # noqa: BLE001
         extras = ""
     if extras:
-        parts.append("**Workspace-wide rules:**\n" + extras)
+        parts.append(PromptPart("workspace_rules", "**Workspace-wide rules:**\n" + extras))
 
     # b) Per-repo custom rules — surfaced to every agent, not just architect,
     #    plus the rules addressed to this agent alone.
     rules = custom_rules_for(context, agent_name)
     if rules:
-        parts.append(rules)
+        parts.append(PromptPart("rules", rules))
 
     repo_lang = getattr(context, "review_language", None)
     lang = (
         _review_language_instruction(context.workspace_id, repo_lang)
         if repo_lang else _review_language_instruction(context.workspace_id)
     )
-
     if lang:
-
-        parts.append(lang.strip())
-
+        parts.append(PromptPart("language", lang.strip()))
 
     # The contract the parser enforces has to be in every prompt the parser
     # reads from. An override that replaced the default prompt wholesale —
@@ -690,11 +763,22 @@ def _compose_effective_system_prompt(
     # required, and without this every finding it produced would be dropped
     # at parse time for want of a sentence nobody asked the model for: a
     # review lost over a filter. "reasoning" anywhere in the override means
-    # it asks in its own words; otherwise the shared shape is appended.
+    # it asks in its own words; otherwise the shared shape is appended. Last,
+    # after every block a team wrote, so the contract is the final word.
     if '"reasoning"' not in base:
-        parts.append(FINDING_OUTPUT_FORMAT.strip())
+        parts.append(PromptPart("output_format", FINDING_OUTPUT_FORMAT.strip()))
 
-    return "\n\n".join(parts)
+    return parts
+
+
+def _compose_effective_system_prompt(
+    *,
+    agent_name: str,
+    default_system: str,
+    context: AgentContext,
+) -> str:
+    return "\n\n".join(p.text for p in compose_system_prompt_parts(
+        agent_name=agent_name, default_system=default_system, context=context))
 
 
 # ─── The shape every LLM agent answers in ────────────────────────────
@@ -1956,3 +2040,19 @@ class LLMReviewAgent(ReviewAgent):
             rule=str(data.get("rule") or "").strip()[:200]
             if isinstance(data.get("rule"), str) else "",
         )
+
+
+def claude_engine_guidelines(context: AgentContext, agent_names: list[str]) -> str:
+    """Every running finder's team guidelines, for the Claude Code engine.
+
+    That engine sends one prompt and one reviewer plays every agent, so each
+    agent's guidelines go in as that agent's own delimited block, one after
+    another — the same blocks the API engine's agents carry. The verifier's
+    are left out: that engine has no veto pass for them to steer.
+    """
+    blocks: list[str] = []
+    for name in dict.fromkeys(agent_names):
+        part = team_guidelines_part(context, name)
+        if part is not None:
+            blocks.append(part.text)
+    return "\n\n".join(blocks)

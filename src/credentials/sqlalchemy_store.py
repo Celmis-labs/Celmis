@@ -253,6 +253,19 @@ class SqlAlchemyCredentialStore:
             for r in rows
         ]
 
+    def slots_with(self, *, provider: str,
+                   account_label: str | None = None) -> list[str]:
+        """Every `user_id` slot holding a credential for `provider` —
+        presence only, nothing decrypted. The sqlite3 store's twin
+        (src/credentials/store.py), for the callers that walk every
+        workspace (the 2.3.1 prompt-guidelines conversion among them)."""
+        with self._session() as session:
+            stmt = select(_CredentialRow.user_id).where(
+                _CredentialRow.provider == provider).distinct()
+            if account_label is not None:
+                stmt = stmt.where(_CredentialRow.account_label == account_label)
+            return sorted(str(u) for u in session.execute(stmt).scalars().all())
+
     def is_authenticated(
         self,
         provider: str,

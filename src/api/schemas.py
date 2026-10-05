@@ -732,9 +732,21 @@ class ReviewPolicyIn(BaseModel):
     # would read that as "leave it alone" and keep a value the operator
     # watched disappear from the screen.
     agent_llm_overrides: dict[str, dict | None] | None = None
-    # Per-repo per-agent system prompt overrides. Empty string / missing key
-    # means "inherit /admin/agents global override → agent default".
+    # Per-repo per-agent system prompt REPLACEMENTS (the advanced mode).
+    # Empty string / missing key means "inherit the workspace replacement →
+    # agent default".
     agent_prompt_overrides: dict[str, str] = Field(default_factory=dict)
+    # Per-repo per-agent team guidelines — ADDED to the agent's prompt in a
+    # delimited block (src/review/prompt_guidelines.py), at most
+    # GUIDELINES_MAX_CHARS each: longer is a 422, never a silent cut. ABSENT
+    # keeps what is stored (a client that predates the field cannot wipe
+    # it); a map replaces it whole — a missing agent or an empty value
+    # inherits the workspace's guidelines for that agent.
+    agent_prompt_guidelines: dict[str, str] | None = None
+    # Agents whose guidelines here are ADDED to the workspace's instead of
+    # replacing them. ABSENT keeps; a list replaces ([] = replace for every
+    # agent, the default). Unknown names are dropped by the router.
+    agent_guidelines_extend: list[str] | None = Field(default=None, max_length=20)
     # Per-repo MCP evidence sources (Stage 13).
     mcp_sources: list[dict] = Field(default_factory=list)
     # Agents that must not run for this repo (no LLM call, no findings).
@@ -802,6 +814,17 @@ class ReviewPolicyIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    @model_validator(mode="after")
+    def _guidelines_fit(self) -> ReviewPolicyIn:
+        from src.review.prompt_guidelines import GUIDELINES_MAX_CHARS
+
+        for agent, text in (self.agent_prompt_guidelines or {}).items():
+            if isinstance(text, str) and len(text.strip()) > GUIDELINES_MAX_CHARS:
+                raise ValueError(
+                    f"agent_prompt_guidelines.{agent}: at most "
+                    f"{GUIDELINES_MAX_CHARS} characters ({len(text.strip())} given)")
+        return self
+
 
 class ReviewPolicyOut(BaseModel):
     """Full policy detail."""
@@ -830,6 +853,10 @@ class ReviewPolicyOut(BaseModel):
     # prompts. A field the router sends must be declared, or the drop is
     # invisible until the data is gone.
     agent_prompt_overrides: dict[str, str] = Field(default_factory=dict)
+    # This repository's team guidelines per agent (ADDED to the prompt), and
+    # the agents whose guidelines extend the workspace's.
+    agent_prompt_guidelines: dict[str, str] = Field(default_factory=dict)
+    agent_guidelines_extend: list[str] = Field(default_factory=list)
     # What THIS policy overrides — {} for a policy that overrides nothing.
     agent_llm_overrides: dict[str, dict] = Field(default_factory=dict)
     # What each agent would actually run with if a review started now, after
@@ -1061,6 +1088,8 @@ class AgentOverridesSummary(BaseModel):
 
     #: agent → the repositories overriding its system prompt.
     prompt_overrides: dict[str, list[AgentPromptOverrideRepo]] = Field(default_factory=dict)
+    #: agent → the repositories with team guidelines of their own for it.
+    guideline_overrides: dict[str, list[AgentPromptOverrideRepo]] = Field(default_factory=dict)
 
 
 class ReviewPolicyListItem(BaseModel):

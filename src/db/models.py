@@ -301,6 +301,20 @@ class RepoReviewPolicy(Base, TimestampMixin):
         JSONB, nullable=False, server_default="{}",
     )
 
+    # Per-repo per-agent team guidelines (2.3.1, migration c5d6e7f8a9b0):
+    # {"security": "- Flag …", …}. ADDED to the agent's prompt, at most 2000
+    # characters each; missing/empty = inherit the workspace's guidelines.
+    # `agent_prompt_overrides` above is the advanced mode that REPLACES the
+    # prompt; src/review/prompt_guidelines.py says how the two combine.
+    agent_prompt_guidelines: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default="{}",
+    )
+    # Agents whose guidelines here are added to the workspace's instead of
+    # replacing them — an explicit opt-in per agent; [] = replace (Kodus).
+    agent_guidelines_extend: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default="[]",
+    )
+
     # Per-repo MCP evidence sources (Stage 13).
     # [{"name":"sentry","url":"https://mcp.sentry.dev","auth_type":"oauth",
     #   "api_key_ref":"mcp:sentry", "allowed_tools":["get_issue","list_issues"],

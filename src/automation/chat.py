@@ -225,8 +225,10 @@ CATALOGUE: dict[str, dict[str, Any]] = {
                    "request changes on a critical finding, review drafts, "
                    "committable suggestions, the lowest severity posted, "
                    "the inline-comment cap, the PR summary, the review "
-                   "language, or which agents are switched off ('увімкни "
-                   "approve для репо X').",
+                   "language, which agents are switched off ('увімкни "
+                   "approve для репо X'), or an agent's team guidelines — "
+                   "text ADDED to that agent's built-in prompt ('додай "
+                   "до security агента: перевіряй …').",
         "config": True,
         "arguments": {
             "scope": "workspace | repo",
@@ -234,12 +236,16 @@ CATALOGUE: dict[str, dict[str, Any]] = {
             "key": "run_on_drafts | approve_when_clean | "
                    "request_changes_on_critical | committable_suggestions | "
                    "comment_min_severity | max_inline_comments | "
-                   "summary_enabled | review_language | disabled_agents",
+                   "summary_enabled | review_language | disabled_agents | "
+                   "agent_prompt_guidelines",
             "value": "true/false for switches; info | warning | error | "
                      "critical for comment_min_severity; 1-100 for "
                      "max_inline_comments; a language code such as uk for "
                      "review_language; a list of agent names for "
-                     "disabled_agents; null to inherit again",
+                     "disabled_agents; for agent_prompt_guidelines an "
+                     "object {agent: guidelines} (at most 2000 characters "
+                     "each, \"\" removes them) — these are ADDED to the "
+                     "agent's prompt, never replace it; null to inherit again",
         },
     },
 }
@@ -779,7 +785,7 @@ def _parse(text: str) -> Plan:
 
 
 def _role_refusal(action: str, scope: str,
-                  caller: dict[str, Any] | None) -> str | None:
+                  caller: dict[str, Any] | None, key: str = "") -> str | None:
     """The role refusal a settings step will meet, said before the press.
 
     Only the workspace ROLE half of each gate, read from what the request
@@ -794,7 +800,11 @@ def _role_refusal(action: str, scope: str,
         return None
     role = caller.get("role")
     if action == "update_review_setting":
-        needed = WORKSPACE_ADMIN_ROLES if scope == "workspace" else PROMPT_EDITOR_ROLES
+        # Agent guidelines are prompts: the editor role edits them at both
+        # scopes, as on the page (`require_prompt_editor`).
+        needed = (WORKSPACE_ADMIN_ROLES
+                  if scope == "workspace" and key != "agent_prompt_guidelines"
+                  else PROMPT_EDITOR_ROLES)
     elif action == "propose_review_rules" and not rules_store_available():
         needed = PROMPT_EDITOR_ROLES
     else:
@@ -866,7 +876,8 @@ def _resolve_config_step(step: Step, workspace_id: str,
         step.blocked = str(exc)
         return
     step.resolved_repos = [slug] if slug else []
-    refusal = _role_refusal(step.action or "", scope, caller)
+    refusal = _role_refusal(step.action or "", scope, caller,
+                            str((step.arguments or {}).get("key") or ""))
     if refusal:
         step.blocked = refusal
 

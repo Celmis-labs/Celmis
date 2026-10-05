@@ -115,6 +115,9 @@ export const MAX_INLINE_MIN = 1;
 export const MAX_INLINE_MAX = 100;
 /** `AgentPromptIn.system_prompt` min_length on the server. */
 export const WORKSPACE_PROMPT_MIN = 10;
+/** Team guidelines per agent and layer — src/review/prompt_guidelines.py
+ *  `GUIDELINES_MAX_CHARS` (Kodus's cap). Longer is a 422. */
+export const GUIDELINES_MAX = 2000;
 
 /** What the form holds per field: the stored value, except the two line
  *  lists, which are the text being typed (null = inherit, "" = an empty list
@@ -154,6 +157,13 @@ export type Draft = {
    *  Global: unused (see `workspacePrompts`). */
   agentPrompts: Record<string, string>;
   workspacePrompts: Record<string, WorkspacePromptDraft>;
+  /** Team guidelines per agent — ADDED to the agent's prompt. Repository:
+   *  this repo's ("" = inherit the workspace's). Global: the workspace's
+   *  ("" = none). */
+  agentGuidelines: Record<string, string>;
+  /** Repository only: agents whose guidelines here add to the workspace's
+   *  instead of replacing them. */
+  guidelinesExtend: string[];
   /** Per-agent model / output ceiling / reasoning / temperature. */
   agentLLM: Record<string, AgentDraft>;
 };
@@ -193,6 +203,8 @@ export function emptyDraft(): Draft {
     mcpSources: [],
     agentPrompts: {},
     workspacePrompts: {},
+    agentGuidelines: {},
+    guidelinesExtend: [],
     agentLLM: {},
   };
 }
@@ -209,6 +221,9 @@ export function draftFromDefaults(
     workspacePrompts: Object.fromEntries(
       (agents ?? []).map((a) => [a.name, { text: a.system_prompt, reset: false }]),
     ),
+    agentGuidelines: Object.fromEntries(
+      (agents ?? []).map((a) => [a.name, a.guidelines ?? ""]),
+    ),
     agentLLM: Object.fromEntries(
       llmAgentNames.map((a) => [a, agentDraftFrom(llmAgents?.[a] ?? null)]),
     ),
@@ -218,6 +233,7 @@ export function draftFromDefaults(
 export function draftFromPolicy(p: ReviewPolicy): Draft {
   const llm = p.agent_llm_overrides ?? {};
   const prompts = p.agent_prompt_overrides ?? {};
+  const guidelines = p.agent_prompt_guidelines ?? {};
   return {
     ...emptyDraft(),
     own: ownFrom(p as unknown as Record<string, unknown>),
@@ -229,6 +245,10 @@ export function draftFromPolicy(p: ReviewPolicy): Draft {
     agentPrompts: Object.fromEntries(
       (p.overridable_agents ?? Object.keys(prompts)).map((a) => [a, prompts[a] ?? ""]),
     ),
+    agentGuidelines: Object.fromEntries(
+      (p.overridable_agents ?? Object.keys(guidelines)).map((a) => [a, guidelines[a] ?? ""]),
+    ),
+    guidelinesExtend: [...(p.agent_guidelines_extend ?? [])],
     agentLLM: Object.fromEntries(POLICY_LLM_AGENTS.map((agent) => [agent, agentDraftFrom({
       model: (p[POLICY_MODEL_FIELD[agent] as keyof ReviewPolicy] as string | null | undefined) ?? null,
       max_output_tokens: llm[agent]?.max_output_tokens ?? null,
@@ -488,6 +508,12 @@ export function policyPayload(
     agent_prompt_overrides: Object.fromEntries(
       Object.entries(draft.agentPrompts).filter(([, v]) => v.trim()),
     ),
+    agent_prompt_guidelines: Object.fromEntries(
+      Object.entries(draft.agentGuidelines)
+        .map(([k, v]) => [k, v.trim()] as const)
+        .filter(([, v]) => v),
+    ),
+    agent_guidelines_extend: draft.guidelinesExtend,
     mcp_sources: draft.mcpSources,
     target_branches: c.target_branches as string[] | null,
     // Switching the veto on clears the deny-list's old spelling of off too,
@@ -541,6 +567,12 @@ export function changedSections(
   for (const agent of Object.keys(draft.workspacePrompts)) {
     if (!sameValue(draft.workspacePrompts[agent], original.workspacePrompts[agent])) bump("prompts");
   }
+  for (const agent of new Set([...Object.keys(draft.agentGuidelines), ...Object.keys(original.agentGuidelines)])) {
+    if ((draft.agentGuidelines[agent] ?? "").trim() !== (original.agentGuidelines[agent] ?? "").trim()) {
+      bump("prompts");
+    }
+  }
+  if (!sameValue([...draft.guidelinesExtend].sort(), [...original.guidelinesExtend].sort())) bump("prompts");
   if (draft.promptTemplate !== original.promptTemplate) bump("prompts");
   if (draft.enabled !== original.enabled) bump("general");
   if (draft.department.trim() !== original.department.trim()) bump("general");
