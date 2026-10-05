@@ -323,6 +323,11 @@ _TOOL_SCOPES: dict[str, str] = {
     "list_dep_findings": "read:graph",
 }
 
+# Operations + review-configuration tools: scopes are defined next to the tools.
+from src.mcp_server.ops_tools import OPS_TOOL_SCOPES  # noqa: E402
+
+_TOOL_SCOPES.update(OPS_TOOL_SCOPES)
+
 
 def _install_scope_filter(mcp) -> None:  # noqa: ANN001
     """Wrap the low-level list_tools handler so scoped tokens only see
@@ -370,6 +375,7 @@ def _install_scope_filter(mcp) -> None:  # noqa: ANN001
 
 def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     """Register composite-workflow tools on the FastMCP instance."""
+    from src.mcp_server.ops_tools import enforcing, register_ops_tools
 
     # ─── Project catalog ──────────────────────────────────────────────
 
@@ -694,6 +700,7 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
             "skipped. Use for coordinated renames or v1→v2 API rollouts."
         ),
     )
+    @enforcing("write:reviews")
     def _migrate_consumers(
         project_id: str,
         symbol: str,
@@ -816,6 +823,7 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
             "queue_unavailable — so an unindexed repo is never a silent one."
         ),
     )
+    @enforcing("write:repos")
     def _add_repo(
         url: str, branch: str | None = None, index: bool = True,
     ) -> dict[str, Any]:
@@ -838,6 +846,7 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
             "prose — the findings are always deterministic. Returns run_id."
         ),
     )
+    @enforcing("write:repos")
     async def _start_dep_audit(
         repo_slugs: list[str] | None = None,
         owner: str | None = None,
@@ -873,6 +882,7 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
             "documented from its filenames."
         ),
     )
+    @enforcing("write:repos")
     async def _generate_docs(
         repo_slugs: list[str] | None = None,
         owner: str | None = None,
@@ -907,6 +917,7 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
             "estate."
         ),
     )
+    @enforcing("write:repos")
     async def _set_auto_review(
         repo_slugs: list[str] | None = None,
         owner: str | None = None,
@@ -987,6 +998,12 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
             return {"ok": True, "findings": rows, "count": len(rows)}
         except ActionError as exc:
             return {"ok": False, "error": str(exc)}
+
+    # Operations (spend, alerts, jobs, audit extras, members) and review
+    # configuration — one registration shared with the stdio server. Scopes
+    # hide the tools in tools/list (`_TOOL_SCOPES`) AND refuse the call itself
+    # (`enforcing`): a hidden tool can otherwise still be called by name.
+    register_ops_tools(mcp, _actor, _in_session, enforcing)
 
 def _run_async(coro):
     """Run coroutine to completion from sync tool context.

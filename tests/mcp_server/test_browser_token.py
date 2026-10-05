@@ -38,24 +38,85 @@ def test_the_token_is_read_only():
         )
 
 
-def test_the_caller_cannot_name_the_scope():
-    """The request model must have no scope field. A ceiling the caller can
-    raise is not a ceiling."""
-    from src.api.routers.mcp_access import McpTokenIn
+def _user(uid="u1", is_admin=False):
+    from types import SimpleNamespace
 
-    fields = set(McpTokenIn.model_fields)
-    assert "scope" not in fields and "scopes" not in fields, (
-        f"the request model exposes scopes: {fields}"
-    )
-    # And the issue call must pass the constant, not anything from the payload.
-    assert "scopes=list(_TOKEN_SCOPES)" in ROUTER
+    return SimpleNamespace(id=uid, email=f"{uid}@x.test", is_admin=is_admin)
 
 
-def test_write_scopes_stay_with_the_cli():
-    """The server supports write:reviews / write:policies / write:repos. None
-    of them may be reachable from a browser click."""
-    for scope in ("write:reviews", "write:policies", "write:repos"):
-        assert scope not in ROUTER, f"{scope} is reachable from the browser"
+def _grant(monkeypatch, role, requested, *, is_admin=False):
+    from src.api import deps
+    from src.api.routers.mcp_access import _granted_scopes
+
+    monkeypatch.setattr(deps, "workspace_role", lambda uid, ws: role)
+    return _granted_scopes(_user(is_admin=is_admin), "ws-1", requested)
+
+
+def test_no_request_means_the_read_only_default(monkeypatch):
+    """The default never changes: a click with no scopes named is read-only,
+    whatever the caller's role."""
+    from src.api.routers.mcp_access import _TOKEN_SCOPES
+
+    assert _grant(monkeypatch, "owner", None) == list(_TOKEN_SCOPES)
+    assert _grant(monkeypatch, "owner", []) == list(_TOKEN_SCOPES)
+
+
+def test_a_write_scope_is_issued_only_when_asked_for_and_allowed(monkeypatch):
+    from src.api.routers.mcp_access import _TOKEN_SCOPES
+
+    got = _grant(monkeypatch, "admin", ["write:config"])
+    assert got == [*_TOKEN_SCOPES, "write:config"]
+    got = _grant(monkeypatch, "owner", ["write:repos", "write:config"])
+    assert {"write:repos", "write:config"} <= set(got)
+    # editors may have the review scope, not the workspace-configuration ones
+    assert "write:reviews" in _grant(monkeypatch, "editor", ["write:reviews"])
+
+
+@pytest.mark.parametrize("role", ["member", "viewer", None])
+def test_a_role_that_cannot_use_a_scope_is_refused(monkeypatch, role):
+    from fastapi import HTTPException
+
+    for scope in ("write:config", "write:repos", "write:reviews"):
+        with pytest.raises(HTTPException) as exc:
+            _grant(monkeypatch, role, [scope])
+        assert exc.value.status_code == 403
+        assert scope in exc.value.detail
+
+
+def test_an_editor_cannot_ask_for_workspace_configuration(monkeypatch):
+    from fastapi import HTTPException
+
+    for scope in ("write:config", "write:repos"):
+        with pytest.raises(HTTPException) as exc:
+            _grant(monkeypatch, "editor", [scope])
+        assert exc.value.status_code == 403
+
+
+def test_an_unknown_scope_is_refused_not_ignored(monkeypatch):
+    """`admin` is the wildcard scope: it must never be one a click can name."""
+    from fastapi import HTTPException
+
+    for scope in ("admin", "write:groups", "write:everything", "read:secrets"):
+        with pytest.raises(HTTPException) as exc:
+            _grant(monkeypatch, "owner", [scope])
+        assert exc.value.status_code == 422
+
+
+def test_a_global_admin_may_ask_for_any_requestable_scope(monkeypatch):
+    got = _grant(monkeypatch, None, ["write:config", "write:repos"], is_admin=True)
+    assert {"write:config", "write:repos"} <= set(got)
+
+
+def test_the_issue_call_passes_what_was_granted_not_the_request():
+    """The token is signed with the checked list, never with payload.scopes."""
+    assert "scopes=granted" in ROUTER
+    assert "scopes=payload" not in ROUTER
+
+
+def test_the_default_constant_stays_read_only():
+    from src.api.routers.mcp_access import WRITE_SCOPES, _TOKEN_SCOPES
+
+    assert not set(WRITE_SCOPES) & set(_TOKEN_SCOPES)
 
 
 def test_the_token_is_bound_to_the_caller_and_their_workspace():
@@ -172,3 +233,33 @@ def test_every_locale_has_the_page_strings(locale):
     assert keys, "the page has no strings"
     missing = [k for k in keys if k not in data]
     assert not missing, f"{locale} is missing {missing}"
+
+
+def test_the_endpoint_signs_the_granted_scopes_only(monkeypatch):
+    """End to end through the route: the claim carries the read defaults plus
+    exactly the write scopes the role allowed, and a role that may not gets a 403
+    instead of a token."""
+    import jwt as pyjwt
+    from fastapi import HTTPException
+
+    from src.api import deps
+    from src.api.routers.mcp_access import McpTokenIn, issue_mcp_token
+
+    secret = "test-secret-long-enough-for-hs256-aaaaaaaaaaaa"
+    monkeypatch.setenv("MCP_JWT_SECRET", secret)
+    monkeypatch.setattr(deps, "workspace_role", lambda uid, ws: "admin")
+    user = _user()
+
+    out = issue_mcp_token(McpTokenIn(scopes=["write:config"]), user, "ws-1")
+    claims = pyjwt.decode(out.token, secret, algorithms=["HS256"],
+                          options={"verify_aud": False})
+    assert "write:config" in str(claims["scope"]).split()
+    assert out.scopes == str(claims["scope"]).split()
+
+    plain = issue_mcp_token(None, user, "ws-1")
+    assert not any(s.startswith("write:") for s in plain.scopes)
+
+    monkeypatch.setattr(deps, "workspace_role", lambda uid, ws: "member")
+    with pytest.raises(HTTPException) as exc:
+        issue_mcp_token(McpTokenIn(scopes=["write:config"]), user, "ws-1")
+    assert exc.value.status_code == 403

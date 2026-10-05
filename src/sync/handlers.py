@@ -505,9 +505,11 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
                 error=str(exc)[:500])
             return
         note = d["note"]
+        from src.automation.chat import EXPLAINED_READS
+
         settings_step = next(
             (r for r in answer.get("steps", [])
-             if r.get("action") == "review_settings"), None)
+             if r.get("action") in EXPLAINED_READS), None)
         if settings_step is not None:
             # The plan's note was written before anyone had looked at the
             # settings, so it can only say generic things about them. A second
@@ -522,6 +524,7 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
                     workspace_id=workspace_id, user_id=p.get("user_id", ""),
                     language=d.get("language", ""), history=p.get("history"),
                     on_note=on_note, should_stop=should_stop,
+                    verb=settings_step.get("action") or "review_settings",
                 )
                 note = explained or note
             except Exception as exc:  # noqa: BLE001

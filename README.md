@@ -725,11 +725,14 @@ docker compose exec api analyzer mcp issue-token \
 
 ### What an agent can ask
 
-The HTTP mount serves **23 tools**, and a client does not necessarily see all of
-them. Eighteen are read-only; the five that write — `add_repo`, `start_dep_audit`,
-`generate_docs`, `set_auto_review`, `migrate_consumers` — require a scope no
-read token carries, so they are absent from a read client's tool list rather than
-merely refused when called. This is what the read-only ones answer, and they are
+The HTTP mount serves **40 tools**, and a client does not necessarily see all of
+them. Twenty-seven are read-only; the thirteen that write — `add_repo`,
+`start_dep_audit`, `cancel_dep_audit`, `generate_docs`, `set_auto_review`,
+`migrate_consumers`, `ack_alert`, `retry_job`, `cancel_job`, `set_budget`,
+`update_review_setting`, `propose_review_rules`, `generate_review_rules` —
+require a write scope (`write:repos`, `write:config`, `write:reviews`) that a
+default token does not carry, so they are absent from a read client's tool list
+and refused if called by name. This is what the read-only ones answer, and they are
 the questions a grep cannot:
 
 | | |
@@ -743,10 +746,15 @@ the questions a grep cannot:
 | `bootstrap_client` · `start_integration_walk` | what a client needs to call another team's service |
 | `get_dep_audit` · `list_dep_findings` | the last audit and its findings, worst first |
 | `get_review` · `get_review_policy` | the latest review of a PR, and which agents run where |
+| `get_review_settings` | the review settings in force and where each value comes from |
+| `get_spend` · `get_usage` · `get_budget` | LLM spend by model, surface and day; review usage; the monthly cap |
+| `list_alerts` · `list_jobs` | incoming alerts; background jobs with counts per status |
+| `audit_delta` · `export_sbom` | what changed since the previous audit; the SBOM download URL |
+| `list_members` | workspace members with roles and teams |
 
 **The two transports are not the same set.** `analyzer mcp serve` over stdio
 serves 13 older, graph-shaped tools (`find_symbol`, `find_callers`,
-`query_graph`); the HTTP mount serves the 18 above. Neither is a subset of the
+`query_graph`); the HTTP mount serves the 27 above. Neither is a subset of the
 other — pick the transport for the tools you want.
 
 A step-by-step guide, with the scopes each tool needs and the failure modes,

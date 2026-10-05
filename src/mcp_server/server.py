@@ -541,6 +541,11 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         except ActionError as exc:
             return {"ok": False, "error": str(exc)}
 
+    # Operations (spend, alerts, jobs, audit extras, members) and review
+    # configuration — one registration shared with the HTTP mount.
+    from src.mcp_server.ops_tools import register_ops_tools
+    register_ops_tools(mcp, _actor, _in_session, require_scopes)
+
     # Defence in depth behind the verifier: every tool refuses a refused
     # caller itself (see src/mcp_server/guard.py).
     from src.mcp_server.guard import guard_every_tool
