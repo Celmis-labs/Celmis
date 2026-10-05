@@ -2510,6 +2510,9 @@ export type PullRequestBucket = "reviewed_today" | "awaiting" | "attention";
 export type PullRequestStats = {
   reviewed_today: number;
   awaiting: number;
+  /** Some repo's listing failed or timed out: `awaiting` is a lower bound. */
+  partial: boolean;
+  missing_repos: string[];
   attention: number;
   /** Start of the counted day (UTC). */
   day_start: string;

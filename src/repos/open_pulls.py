@@ -64,6 +64,8 @@ class OpenPull:
     created_at: str | None
     updated_at: str | None
     draft: bool = False
+    #: Head commit of the source branch, as the provider lists it.
+    head_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +134,7 @@ def _github(client: httpx.Client, full_name: str, token: str, cap: int,
                 target_branch=(p.get("base") or {}).get("ref") or None,
                 created_at=p.get("created_at"), updated_at=p.get("updated_at"),
                 draft=bool(p.get("draft")),
+                head_sha=(p.get("head") or {}).get("sha") or None,
             ))
         nxt = r.links.get("next", {}).get("url")
         if nxt and len(out) >= cap:
@@ -167,6 +170,7 @@ def _gitlab(client: httpx.Client, full_name: str, token: str, cap: int,
                 target_branch=m.get("target_branch") or None,
                 created_at=m.get("created_at"), updated_at=m.get("updated_at"),
                 draft=bool(m.get("draft") or m.get("work_in_progress")),
+                head_sha=m.get("sha") or None,
             ))
         next_page = (r.headers.get("X-Next-Page") or "").strip()
         link_next = r.links.get("next", {}).get("url")
@@ -221,6 +225,8 @@ def _bitbucket(client: httpx.Client, full_name: str, email: str, token: str,
                 .get("name") or None,
                 created_at=p.get("created_on"), updated_at=p.get("updated_on"),
                 draft=bool(p.get("draft")),
+                head_sha=(((p.get("source") or {}).get("commit") or {}).get("hash")
+                          or None),
             ))
         nxt = payload.get("next")
         if nxt and len(out) >= cap:

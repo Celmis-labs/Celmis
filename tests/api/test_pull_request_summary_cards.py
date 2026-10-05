@@ -30,6 +30,7 @@ from src.db.models import (
     WorkspaceReviewDefaults,
 )
 from src.db.session import get_async_session
+from src.repos.open_pulls import OpenPull
 from tests.api.rbac_world import _sqlite_booleans
 from tests.api.test_issues_and_pull_requests_are_scoped import (
     _jsonb_as_json_on_sqlite,  # noqa: F401 — registers the JSONB→JSON compile
@@ -68,7 +69,8 @@ def _issue(i, number, *, severity="error", status="open", repo="acme/api"):
 
 @asynccontextmanager
 async def api(tmp_path, monkeypatch, *, rows, runs=(), issues=(), policies=(),
-              ws_default=None, enabled=True, denied=()):
+              ws_default=None, enabled=True, denied=(), listings=None,
+              ws_drafts=None):
     store = ReviewRunStore(tmp_path / "runs.db")
     monkeypatch.setattr("src.api.review_runs._default_store", store)
     for r in runs:
@@ -82,6 +84,25 @@ async def api(tmp_path, monkeypatch, *, rows, runs=(), issues=(), policies=(),
             url=f"https://github.com/{full}", workspace_id=WS, enabled=enabled,
             mode="webhook"))
     monkeypatch.setattr("src.api.auto_review.get_auto_review_store", lambda: registry)
+
+    # Provider listings: full_name -> list[OpenPull] | Exception | "hang".
+    from src.api.routers import repos as repos_router
+
+    monkeypatch.setattr(repos_router, "_repo_credential",
+                        lambda cfg, user: ("tok", "", None))
+
+    def _listing(cfg, secret, email, *, branch, refresh=False, gitlab=None):
+        got = (listings or {}).get(cfg.full_name, [])
+        if got == "hang":
+            import time
+            time.sleep(1.0)
+            got = []
+        if isinstance(got, Exception):
+            raise got
+        return SimpleNamespace(items=tuple(got), truncated=False)
+
+    monkeypatch.setattr(repos_router, "_open_listing", _listing)
+    monkeypatch.setattr(prs_router, "AWAITING_BUDGET_S", 0.2)
 
     async def _enforce(slug, user, min_perm="read", workspace_id=None):
         if slug in denied:
@@ -100,10 +121,11 @@ async def api(tmp_path, monkeypatch, *, rows, runs=(), issues=(), policies=(),
     async with factory() as s:
         s.add_all(rows)
         s.add_all(issues)
-        s.add_all([RepoReviewPolicy(repo_slug=slug, target_branches=tb)
-                   for slug, tb in policies])
-        if ws_default is not None:
-            s.add(WorkspaceReviewDefaults(workspace_id=WS, target_branches=ws_default))
+        s.add_all([RepoReviewPolicy(repo_slug=slug, target_branches=tb, run_on_drafts=rd)
+                   for slug, tb, rd in policies])
+        if ws_default is not None or ws_drafts is not None:
+            s.add(WorkspaceReviewDefaults(workspace_id=WS, target_branches=ws_default,
+                                          run_on_drafts=ws_drafts))
         await s.commit()
 
     app = FastAPI()
@@ -129,6 +151,13 @@ async def _stats(c, repo=None):
     return b["reviewed_today"], b["awaiting"], b["attention"]
 
 
+def _op(number, *, base="main", sha="s1", draft=False, title=None):
+    return OpenPull(number=number, title=title or f"Open {number}", author="dana",
+                    url=f"https://x/{number}", source_branch="feat", target_branch=base,
+                    created_at=NOW.isoformat(), updated_at=NOW.isoformat(),
+                    draft=draft, head_sha=sha)
+
+
 async def test_reviewed_today_counts_prs_whose_latest_review_completed_today(
     tmp_path, monkeypatch,
 ):
@@ -144,7 +173,7 @@ async def test_reviewed_today_counts_prs_whose_latest_review_completed_today(
             dict(rid="rc", number=3, when=YESTERDAY),
             dict(rid="rd", number=4, status="skipped"), dict(rid="re", number=5)]
     async with api(tmp_path, monkeypatch, rows=rows, runs=runs) as c:
-        assert await _stats(c) == (3, 1, 0)  # the skipped draft awaits
+        assert await _stats(c) == (3, 0, 0)
         listed = (await c.get("/api/pull-requests?bucket=reviewed_today")).json()
         assert sorted(i["number"] for i in listed["items"]) == [1, 2, 5]
 
@@ -157,42 +186,101 @@ async def test_a_close_webhook_today_is_not_a_review_today(tmp_path, monkeypatch
         assert (await _stats(c))[0] == 0
 
 
-async def test_awaiting_is_open_targeted_and_not_completed(tmp_path, monkeypatch):
-    rows = [
-        _pr("a", 1, status="skipped", base="main"),          # draft, targeted
-        _pr("b", 2, status="failed", base="main"),           # failed, targeted
-        _pr("c", 3, status="skipped", base="develop"),       # branch not targeted
-        _pr("d", 4, status="skipped", base="main", state="merged"),   # not open
-        _pr("e", 5, status="complete", base="main", run="re"),        # reviewed
-        _pr("f", 6, status="skipped", base="main", repo="other/x", slug="other-x"),
-        _pr("g", 7, status="skipped", base="release/1"),     # glob target
-    ]
-    runs = [dict(rid="re", number=5, when=YESTERDAY)]
-    async with api(tmp_path, monkeypatch, rows=rows, runs=runs,
-                   ws_default=["main", "release/*"]) as c:
-        # c is left out by the branch; f's repo is not registered
-        assert (await _stats(c))[1] == 3
-        listed = (await c.get("/api/pull-requests?bucket=awaiting")).json()
-        assert sorted(i["number"] for i in listed["items"]) == [1, 2, 7]
+def _nums(body):
+    return sorted(i["number"] for i in body["items"])
 
 
-async def test_the_repo_policy_beats_the_workspace_default(tmp_path, monkeypatch):
-    rows = [_pr("a", 1, status="skipped", base="develop")]
-    async with api(tmp_path, monkeypatch, rows=rows, ws_default=["main"],
-                   policies=[("acme-api", ["develop"])]) as c:
-        assert (await _stats(c))[1] == 1
-    async with api(tmp_path, monkeypatch, rows=rows, ws_default=["main"]) as c:
-        assert (await _stats(c))[1] == 0
-
-
-async def test_no_patterns_means_every_branch_and_auto_review_off_means_none(
+async def test_awaiting_counts_never_reviewed_open_prs_even_in_manual_mode(
     tmp_path, monkeypatch,
 ):
-    rows = [_pr("a", 1, status="skipped", base="anything")]
-    async with api(tmp_path, monkeypatch, rows=rows) as c:
+    # No DB rows at all, auto-review off: the provider listing is the source.
+    listings = {"acme/api": [_op(1), _op(2)]}
+    async with api(tmp_path, monkeypatch, rows=[], enabled=False,
+                   listings=listings) as c:
+        assert (await _stats(c)) == (0, 2, 0)
+        body = (await c.get("/api/pull-requests?bucket=awaiting")).json()
+        assert _nums(body) == [1, 2] and body["total"] == 2
+        first = body["items"][0]
+        assert first["last_review_status"] == "awaiting" and first["state"] == "open"
+        assert first["id"].startswith("awaiting:github:acme/api#")
+        assert first["base_ref"] == "main" and first["repo"] == "acme/api"
+
+
+async def test_awaiting_compares_the_head_sha_of_the_last_completed_review(
+    tmp_path, monkeypatch,
+):
+    def row(pid, n, sha, status="complete"):
+        r = _pr(pid, n, status=status, run=None)
+        r.head_sha = sha
+        return r
+
+    rows = [row("a", 1, "s1"),              # reviewed at the current head
+            row("b", 2, "old"),             # pushed since: awaiting again
+            row("c", 3, None, "failed"),    # never completed
+            row("d", 4, "s1", "skipped")]   # skipped at that head: not a review
+    listings = {"acme/api": [_op(1), _op(2), _op(3), _op(4)]}
+    async with api(tmp_path, monkeypatch, rows=rows, listings=listings) as c:
+        assert (await _stats(c))[1] == 3
+        body = (await c.get("/api/pull-requests?bucket=awaiting")).json()
+        assert _nums(body) == [2, 3, 4]
+        # a PR with a row keeps its id, so its reviews stay reachable
+        assert {i["number"]: i["id"] for i in body["items"]}[2] == "b"
+
+
+async def test_awaiting_without_a_provider_sha_falls_back_to_any_completed_review(
+    tmp_path, monkeypatch,
+):
+    rows = [_pr("a", 1)]
+    listings = {"acme/api": [_op(1, sha=None), _op(2, sha=None)]}
+    async with api(tmp_path, monkeypatch, rows=rows, listings=listings) as c:
         assert (await _stats(c))[1] == 1
-    async with api(tmp_path, monkeypatch, rows=rows, enabled=False) as c:
-        assert (await _stats(c))[1] == 0
+
+
+async def test_awaiting_skips_drafts_unless_the_repo_reviews_them(tmp_path, monkeypatch):
+    listings = {"acme/api": [_op(1, draft=True), _op(2)]}
+    async with api(tmp_path, monkeypatch, rows=[], listings=listings) as c:
+        assert (await _stats(c))[1] == 1
+    async with api(tmp_path, monkeypatch, rows=[], listings=listings,
+                   ws_drafts=True) as c:
+        assert (await _stats(c))[1] == 2
+    async with api(tmp_path, monkeypatch, rows=[], listings=listings, ws_drafts=True,
+                   policies=[("acme-api", None, False)]) as c:
+        assert (await _stats(c))[1] == 1  # the repo policy beats the workspace
+
+
+async def test_awaiting_leaves_out_prs_on_untargeted_base_branches(tmp_path, monkeypatch):
+    listings = {"acme/api": [_op(1, base="main"), _op(2, base="develop"),
+                             _op(3, base="release/2")]}
+    async with api(tmp_path, monkeypatch, rows=[], listings=listings,
+                   ws_default=["main", "release/*"]) as c:
+        assert _nums((await c.get("/api/pull-requests?bucket=awaiting")).json()) == [1, 3]
+    async with api(tmp_path, monkeypatch, rows=[], listings=listings,
+                   ws_default=["main"], policies=[("acme-api", ["develop"], None)]) as c:
+        assert _nums((await c.get("/api/pull-requests?bucket=awaiting")).json()) == [2]
+    async with api(tmp_path, monkeypatch, rows=[], listings=listings) as c:
+        assert (await _stats(c))[1] == 3  # no patterns: every branch
+
+
+async def test_a_failing_or_slow_listing_makes_the_count_partial(tmp_path, monkeypatch):
+    listings = {"acme/api": [_op(1)], "acme/web": RuntimeError("boom"),
+                "acme/secret": "hang"}
+    async with api(tmp_path, monkeypatch, rows=[], listings=listings) as c:
+        b = (await c.get("/api/pull-requests/stats")).json()
+        assert b["awaiting"] == 1 and b["partial"] is True
+        assert b["missing_repos"] == ["acme/secret", "acme/web"]
+    async with api(tmp_path, monkeypatch, rows=[], listings={"acme/api": [_op(1)]}) as c:
+        b = (await c.get("/api/pull-requests/stats")).json()
+        assert b["partial"] is False and b["missing_repos"] == []
+
+
+async def test_awaiting_list_filters_and_pages(tmp_path, monkeypatch):
+    listings = {"acme/api": [_op(n, title=f"Thing {n}") for n in range(1, 6)]}
+    async with api(tmp_path, monkeypatch, rows=[], listings=listings) as c:
+        body = (await c.get("/api/pull-requests?bucket=awaiting&limit=2&offset=2")).json()
+        assert body["total"] == 5 and len(body["items"]) == 2
+        assert (await c.get("/api/pull-requests?bucket=awaiting&q=%234")).json()["total"] == 1
+        assert (await c.get("/api/pull-requests?bucket=awaiting&state=merged")).json()["total"] == 0
+        assert (await c.get("/api/pull-requests?bucket=awaiting&review_status=failed")).json()["total"] == 0
 
 
 async def test_needs_attention_failed_critical_or_changes_requested(
@@ -228,15 +316,20 @@ async def test_scoping_repo_filter_workspace_and_read_permission(
         _pr("c", 3, status="failed", repo="acme/secret", slug="secret"),
         _pr("d", 4, status="failed", ws="ws-2"),
     ]
-    async with api(tmp_path, monkeypatch, rows=rows, denied=("secret",)) as c:
+    listings = {"acme/api": [_op(10)], "acme/web": [_op(20), _op(21)],
+                "acme/secret": [_op(30)]}
+    async with api(tmp_path, monkeypatch, rows=rows, denied=("secret",),
+                   listings=listings) as c:
         # the unreadable repo and the other workspace are not counted
-        assert (await _stats(c)) == (0, 2, 2)
-        assert (await _stats(c, repo="acme/web")) == (0, 1, 1)
+        assert (await _stats(c)) == (0, 3, 2)
+        assert (await _stats(c, repo="acme/web")) == (0, 2, 1)
         assert (await _stats(c, repo="acme-api")) == (0, 1, 1)
         assert (await _stats(c, repo="acme/secret")) == (0, 0, 0)
         # the list under a bucket honours the same repo filter
         listed = (await c.get("/api/pull-requests?bucket=attention&repo=acme/web")).json()
         assert [i["number"] for i in listed["items"]] == [2]
+        aw = (await c.get("/api/pull-requests?bucket=awaiting&repo=acme/web")).json()
+        assert _nums(aw) == [20, 21]
 
 
 async def test_an_empty_bucket_lists_nothing(tmp_path, monkeypatch):

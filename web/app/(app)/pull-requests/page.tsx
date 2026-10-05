@@ -250,7 +250,11 @@ function SummaryCards({ stats, active, onPick }: {
       {CARDS.map(({ bucket, icon: Icon, tone }) => {
         const key = CARD_KEY[bucket];
         const on = active === bucket;
-        const hint = t(`prs.card.${key}Hint`);
+        const partial = bucket === "awaiting" && !!stats?.partial;
+        const hint = t(`prs.card.${key}Hint`)
+          + (partial
+            ? ` ${t("prs.card.partialHint", { repos: (stats?.missing_repos ?? []).join(", ") })}`
+            : "");
         return (
           <button
             key={bucket}
@@ -272,7 +276,7 @@ function SummaryCards({ stats, active, onPick }: {
                 {t(`prs.card.${key}`)}
               </span>
               <span className="text-2xl font-semibold leading-tight tabular-nums">
-                {stats ? stats[bucket] : "–"}
+                {stats ? `${partial ? "≥" : ""}${stats[bucket]}` : "–"}
               </span>
             </span>
           </button>
@@ -287,6 +291,9 @@ const COLS = 10;
 
 function PrRow({ pr }: { pr: ReviewedPullRequest }) {
   const t = useT();
+  // Rows of the "Awaiting review" card come from the provider's listing: the
+  // PR may never have been reviewed, so there is no timeline to expand.
+  const awaiting = pr.last_review_status === "awaiting";
   const [open, setOpen] = useState(false);
   const sev = pr.by_severity ?? {};
   const severityTitle = SEVERITIES
@@ -299,7 +306,7 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
     <Fragment>
     <TR className={cn(open && "bg-[var(--color-accent)]/50")}>
       <TD className="w-8 align-middle">
-        <button
+        {!awaiting && <button
           type="button"
           aria-expanded={open}
           aria-label={open ? t("prs.collapse") : t("prs.expand")}
@@ -310,7 +317,7 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
             "h-4 w-4 transition-transform duration-200 ease-out-quint",
             open && "rotate-90",
           )} />
-        </button>
+        </button>}
       </TD>
       <TD className="whitespace-nowrap align-middle font-mono text-xs">
         {pr.url ? (
@@ -352,7 +359,9 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
         </span>
       </TD>
       <TD className="max-w-[18rem] align-middle">
-        {pr.last_review_status ? (
+        {awaiting ? (
+          <Badge variant="default">{t("prs.card.awaiting")}</Badge>
+        ) : pr.last_review_status ? (
           <div className="flex flex-col gap-1">
             <StatusPill
               status={toRunStatus(pr.last_review_status)}
@@ -370,7 +379,7 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
       </TD>
     </TR>
     <AnimatePresence initial={false}>
-      {open && (
+      {open && !awaiting && (
         <TR key="reviews" className="hover:bg-transparent">
           <TD colSpan={COLS} className="p-0">
             <m.div

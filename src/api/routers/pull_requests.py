@@ -51,9 +51,13 @@ class PullRequestStats(BaseModel):
 
     #: PRs whose latest review completed today (UTC day).
     reviewed_today: int
-    #: Open PRs in auto-review repos, on a targeted base branch, whose latest
-    #: review did not complete (skipped or failed).
+    #: Open PRs (read from the provider's cached listing) on a targeted base
+    #: branch with no completed review at their current head.
     awaiting: int
+    #: True when some repo's listing failed or timed out: `awaiting` is then a
+    #: lower bound ("at least N") and `missing_repos` names what is left out.
+    partial: bool = False
+    missing_repos: list[str] = Field(default_factory=list)
     #: Open PRs whose latest review failed, or that carry open critical/error
     #: findings, or whose latest completed review asked for changes.
     attention: int
@@ -64,7 +68,6 @@ class PullRequestStats(BaseModel):
 @dataclass
 class _Buckets:
     reviewed_today: set[str] = field(default_factory=set)
-    awaiting: set[str] = field(default_factory=set)
     attention: set[str] = field(default_factory=set)
 
 
@@ -90,21 +93,11 @@ async def _classify(
         say) is not counted. Any PR state: one merged after its review still
         was reviewed today.
 
-    awaiting - the PR is open, its repo is registered with auto-review on,
-        its base branch is targeted by the repo's effective target_branches
-        (same matcher and resolution as the orchestrator's gate: repo policy
-        > workspace default > every branch), and its latest review did not
-        complete (`skipped` - a draft, say - or `failed`).
-        LIMITS: the DB stores the head the last COMPLETED review saw, not the
-        provider's current head, so a push nobody has reviewed yet is not
-        noticed until its run starts, and a PR Celmis never received an event
-        for (opened before the webhook, delivery lost) has no row at all. Both
-        need the provider's API, which this endpoint never calls.
+    awaiting - NOT computed here: see `_awaiting` (provider listing, not DB).
 
     attention - the PR is open and one of: its latest review `failed`; it has
         an open finding of severity critical or error (what "request changes"
         is made of); or its latest completed review's verdict is `changes`.
-        A failed PR is therefore in both "awaiting" and "attention".
 
     Scope: this workspace, the repo filter when given, and only repos the
     caller may read.
@@ -113,7 +106,6 @@ async def _classify(
 
     from src.api import deps
     from src.api.auto_review import get_auto_review_store
-    from src.review.branch_patterns import branch_targeted
 
     where = [ReviewPullRequest.workspace_id == ws,
              ReviewPullRequest.reviews_count > 0]
@@ -146,20 +138,6 @@ async def _classify(
     rows = [r for r in rows if await _may_read(r)]
     if not rows:
         return out
-
-    # Effective target branches per repo slug, in two queries.
-    policies = {slug: tb for slug, tb in (await session.execute(
-        select(RepoReviewPolicy.repo_slug, RepoReviewPolicy.target_branches)
-    )).all()}
-    ws_default = (await session.execute(
-        select(WorkspaceReviewDefaults.target_branches).where(
-            WorkspaceReviewDefaults.workspace_id == ws))).scalar_one_or_none()
-
-    def _patterns(r: ReviewPullRequest) -> list[str]:
-        value = policies.get(r.repo_slug or "")
-        if value is None:
-            value = ws_default
-        return [str(v) for v in value] if isinstance(value, list) else []
 
     open_rows = [r for r in rows if r.state == "open"]
 
@@ -211,13 +189,155 @@ async def _classify(
                     or (r.last_review_status in ("complete", "partial")
                         and run is not None and run.verdict == "changes")):
                 out.attention.add(r.id)
-            cfg = cfgs.get((r.provider, r.repo))
-            if (cfg is not None and cfg.enabled
-                    and r.last_review_status in ("skipped", "failed")):
-                patterns = _patterns(r)
-                if (not patterns or not r.base_ref
-                        or branch_targeted(r.base_ref, patterns)):
-                    out.awaiting.add(r.id)
+    return out
+
+
+@dataclass
+class _AwaitingPR:
+    provider: str
+    repo: str
+    slug: str
+    number: int
+    title: str
+    author: str
+    url: str
+    base: str | None
+    created_at: str | None
+    updated_at: str | None
+    row_id: str | None  # the PR's DB row, when it has one
+
+
+@dataclass
+class _Awaiting:
+    items: list[_AwaitingPR] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+
+
+#: Wall-clock budget for all provider listings of one request, and how many
+#: run at once. The listings come from the ~5 min cache (`cached_open_pulls`),
+#: so a warm page costs no provider call at all.
+AWAITING_BUDGET_S = 4.0
+AWAITING_WORKERS = 6
+
+
+async def _awaiting(
+    session: AsyncSession, user: User, ws: str, repo: str | None,
+) -> _Awaiting:
+    """Open PRs still waiting for a review, from the providers' listings.
+
+    A PR is awaiting when ALL hold:
+      * it is open in a repo registered in this workspace that the caller may
+        read (the repo filter narrows this) - whatever the auto-review mode,
+        so manual repos count;
+      * its base branch is targeted by the repo's effective target_branches
+        (repo policy > workspace default > every branch; the orchestrator's
+        matcher);
+      * it is not a draft, unless the repo's effective run_on_drafts is true;
+      * no complete/partial review exists at its CURRENT head: the provider's
+        head sha differs from the head the latest completed review stored
+        (`review_pull_requests.head_sha`), or there is no such review. When
+        the provider gives no sha, any completed review counts as reviewed.
+
+    The listings are fetched concurrently (bounded pool) under an overall
+    budget. A repo that fails or misses the budget is left out and named in
+    `missing`, so the number is a lower bound, never a guess.
+    """
+    from fastapi import HTTPException
+
+    from src.api import deps
+    from src.api.auto_review import get_auto_review_store
+    from src.review.branch_patterns import branch_targeted
+
+    out = _Awaiting()
+    unique: dict[tuple[str, str], object] = {}
+    for c in await asyncio.to_thread(get_auto_review_store().list_for_workspace, ws):
+        if repo and repo not in (c.full_name, c.repo_slug):
+            continue
+        unique.setdefault((c.provider, c.full_name), c)
+    cfgs = []
+    for c in unique.values():
+        try:
+            await deps.enforce_repo_permission(c.repo_slug, user, "read", ws)
+        except HTTPException:
+            continue
+        cfgs.append(c)
+    if not cfgs:
+        return out
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.api.routers.repos import _open_listing, _repo_credential
+
+    def _fetch(cfg):
+        secret, email, gitlab = _repo_credential(cfg, user)
+        return _open_listing(cfg, secret, email, branch=None, gitlab=gitlab)
+
+    loop = asyncio.get_running_loop()
+    pool = ThreadPoolExecutor(max_workers=AWAITING_WORKERS,
+                              thread_name_prefix="pr-awaiting")
+    try:
+        futs = [(c, loop.run_in_executor(pool, _fetch, c)) for c in cfgs]
+        await asyncio.wait([f for _, f in futs], timeout=AWAITING_BUDGET_S)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    listings = []
+    for c, fut in futs:
+        if fut.done() and not fut.cancelled() and fut.exception() is None:
+            listings.append((c, fut.result()))
+        else:
+            if fut.done() and not fut.cancelled():
+                logger.warning("pr_awaiting_listing_failed repo=%s err=%s",
+                               c.full_name, type(fut.exception()).__name__)
+            out.missing.append(c.full_name)
+    out.missing.sort()
+    if not listings:
+        return out
+
+    # Effective settings per repo, and what the DB knows of each PR's review.
+    policies = {slug: (tb, rd) for slug, tb, rd in (await session.execute(
+        select(RepoReviewPolicy.repo_slug, RepoReviewPolicy.target_branches,
+               RepoReviewPolicy.run_on_drafts)
+    )).all()}
+    ws_tb, ws_rd = (await session.execute(
+        select(WorkspaceReviewDefaults.target_branches,
+               WorkspaceReviewDefaults.run_on_drafts).where(
+            WorkspaceReviewDefaults.workspace_id == ws))).one_or_none() or (None, None)
+    known = {(r.provider, r.repo, r.number): r for r in (await session.execute(
+        select(ReviewPullRequest).where(
+            ReviewPullRequest.workspace_id == ws,
+            ReviewPullRequest.reviews_count > 0))).scalars().all()}
+
+    for c, listing in listings:
+        try:
+            from src.sync.git_providers import parse_repo_url
+            slug = parse_repo_url(f"{c.provider}:{c.full_name}").slug
+        except Exception:  # noqa: BLE001
+            slug = c.repo_slug
+        pol_tb, pol_rd = policies.get(slug, policies.get(c.repo_slug, (None, None)))
+        tb = pol_tb if pol_tb is not None else ws_tb
+        patterns = [str(v) for v in tb] if isinstance(tb, list) else []
+        rd = pol_rd if pol_rd is not None else ws_rd
+        drafts_ok = bool(rd)
+        for p in listing.items:
+            if p.draft and not drafts_ok:
+                continue
+            if patterns and p.target_branch and not branch_targeted(
+                    p.target_branch, patterns):
+                continue
+            row = known.get((c.provider, c.full_name, p.number))
+            done = row is not None and row.last_review_status in ("complete", "partial")
+            if p.head_sha:
+                reviewed_here = (row is not None and bool(row.head_sha)
+                                 and row.head_sha == p.head_sha and done)
+            else:
+                reviewed_here = done
+            if reviewed_here:
+                continue
+            out.items.append(_AwaitingPR(
+                provider=c.provider, repo=c.full_name, slug=c.repo_slug,
+                number=p.number, title=p.title, author=p.author, url=p.url,
+                base=p.target_branch, created_at=p.created_at,
+                updated_at=p.updated_at, row_id=row.id if row else None))
     return out
 
 
@@ -230,8 +350,10 @@ async def pull_request_stats(
 ) -> PullRequestStats:
     """The page's summary cards; see `_classify` for each definition."""
     b = await _classify(session, user, ws, repo)
+    aw = await _awaiting(session, user, ws, repo)
     return PullRequestStats(
-        reviewed_today=len(b.reviewed_today), awaiting=len(b.awaiting),
+        reviewed_today=len(b.reviewed_today), awaiting=len(aw.items),
+        partial=bool(aw.missing), missing_repos=aw.missing,
         attention=len(b.attention), day_start=_utc_day_start().isoformat(),
     )
 
@@ -294,6 +416,9 @@ async def list_pull_requests(
     # one never reviewed included (a skipped draft, one opened before the
     # install) — so the state of a review still running when it closed is not
     # lost. This page is what Celmis REVIEWED: such rows stay out of it.
+    if bucket == "awaiting":
+        return await _awaiting_list(session, _user, ws, repo, state, review_status,
+                                    q, limit, offset)
     reviewed = ReviewPullRequest.reviews_count > 0
     where = [ReviewPullRequest.workspace_id == ws, reviewed]
     if repo:
@@ -385,6 +510,48 @@ async def list_pull_requests(
         ))
     return PullRequestList(items=items, total=total, limit=limit, offset=offset,
                            repos=repos)
+
+
+def _parse_ts(value: str | None) -> datetime:
+    try:
+        return _aware(datetime.fromisoformat(str(value)))
+    except (TypeError, ValueError):
+        return datetime.now(UTC)
+
+
+async def _awaiting_list(
+    session: AsyncSession, user: User, ws: str, repo: str | None,
+    state: str | None, review_status: str | None, q: str | None,
+    limit: int, offset: int,
+) -> PullRequestList:
+    """The list under the "Awaiting review" card: exactly the PRs `_awaiting`
+    counts. Most have no DB row, so they are synthetic items (id
+    "awaiting:<provider>:<repo>#<n>", status "awaiting", no reviews yet);
+    the page renders them without the review timeline. A `state` other than
+    open or any `review_status` filter matches none of them."""
+    aw = await _awaiting(session, user, ws, repo)
+    items = aw.items
+    if (state and state != "open") or review_status:
+        items = []
+    if q and q.strip():
+        term = q.strip().lstrip("#").lower()
+        items = [i for i in items if term in i.title.lower()
+                 or term in i.author.lower()
+                 or (term.isdigit() and i.number == int(term))]
+    items = sorted(items, key=lambda i: _parse_ts(i.updated_at), reverse=True)
+    page = items[offset:offset + limit]
+    out = [PullRequestOut(
+        id=i.row_id or f"awaiting:{i.provider}:{i.repo}#{i.number}",
+        provider=i.provider, repo=i.repo, repo_slug=i.slug, number=i.number,
+        title=i.title, author=i.author or None, url=i.url or None,
+        head_ref=None, base_ref=i.base, state="open", head_sha=None,
+        last_review_status="awaiting", last_run_id=None,
+        reviews_count=0 if not i.row_id else 1,
+        opened_at=_parse_ts(i.created_at), updated_at=_parse_ts(i.updated_at),
+        closed_at=None,
+    ) for i in page]
+    return PullRequestList(items=out, total=len(items), limit=limit, offset=offset,
+                           repos=sorted({i.repo for i in aw.items}))
 
 
 class PullRequestRuns(BaseModel):
