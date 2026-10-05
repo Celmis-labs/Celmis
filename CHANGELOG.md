@@ -20,6 +20,32 @@ derives it from there.
 
 ## [Unreleased]
 
+## [2.3.2] — 2026-10-05
+
+### Added
+
+- **Self-hosted GitLab.** A GitLab connection takes a "GitLab URL" (own domain
+  or a sub-path such as `https://host/gitlab`; gitlab.com when empty). Every
+  GitLab operation — clone and fetch, merge requests, branches, review
+  comments, approvals, descriptions, webhook install, polling, reviewer
+  assignment, apply-fix, links — goes to the workspace's instance. The URL is
+  checked like the LiteLLM proxy: https, no credentials or query, public
+  addresses only, the address pinned on every connection; an internal host is
+  allowed only by the operator (`GITLAB_ALLOWED_HOSTS`, plain http only by
+  `GITLAB_HTTP_ALLOWED_HOSTS`), a private CA through `GITLAB_CA_BUNDLE`. TLS
+  verification cannot be turned off. The token no longer appears in clone URLs,
+  process arguments or `.git/config`; a webhook from another instance than the
+  workspace's is refused.
+- **The review settings panel folds**: Global, the repository list and every
+  repository have a chevron; Global lists its sections with counts too; the
+  state is remembered per user; tree keyboard navigation and Collapse all /
+  Expand all.
+
+### Fixed
+
+- The full repository name no longer covers the "Per repository" heading; it is
+  shown beside the panel and only when the name is cut off.
+
 ### Changed
 
 - **Agent prompts are customised with guidelines that are ADDED, not swapped

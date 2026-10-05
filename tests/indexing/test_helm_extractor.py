@@ -167,7 +167,7 @@ class TestRealWorld:
         chart_source = """
 apiVersion: v2
 name: acme-platform
-version: 2.3.1
+version: 2.3.2
 appVersion: "1.5.0"
 description: Acme Pro продукт chart
 type: application
@@ -192,7 +192,7 @@ dependencies:
         charts = [s for s in res.symbols if s.kind == "vendor.helm.chart"]
         deps = [s for s in res.symbols if s.kind == "vendor.helm.dependency"]
         assert charts[0].name == "acme-platform"
-        assert charts[0].module == "2.3.1"
+        assert charts[0].module == "2.3.2"
         assert {d.name for d in deps} == {"postgresql", "redis"}
 
         # IMPORTS включно з OCI URL

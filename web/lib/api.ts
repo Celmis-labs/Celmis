@@ -615,7 +615,7 @@ export type ReviewPolicy = {
   }>;
   // Stage 12 — per-repo per-agent system_prompt REPLACEMENTS (advanced).
   agent_prompt_overrides?: Record<string, string>;
-  // 2.3.1 — per-repo per-agent team guidelines, ADDED to the agent's prompt
+  // 2.3.2 — per-repo per-agent team guidelines, ADDED to the agent's prompt
   // (at most 2000 characters each; empty inherits the workspace's), and the
   // agents whose guidelines here add to the workspace's instead of replacing.
   agent_prompt_guidelines?: Record<string, string>;

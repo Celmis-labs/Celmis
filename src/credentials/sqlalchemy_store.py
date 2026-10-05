@@ -258,7 +258,7 @@ class SqlAlchemyCredentialStore:
         """Every `user_id` slot holding a credential for `provider` —
         presence only, nothing decrypted. The sqlite3 store's twin
         (src/credentials/store.py), for the callers that walk every
-        workspace (the 2.3.1 prompt-guidelines conversion among them)."""
+        workspace (the 2.3.2 prompt-guidelines conversion among them)."""
         with self._session() as session:
             stmt = select(_CredentialRow.user_id).where(
                 _CredentialRow.provider == provider).distinct()

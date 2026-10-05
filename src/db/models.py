@@ -301,7 +301,7 @@ class RepoReviewPolicy(Base, TimestampMixin):
         JSONB, nullable=False, server_default="{}",
     )
 
-    # Per-repo per-agent team guidelines (2.3.1, migration c5d6e7f8a9b0):
+    # Per-repo per-agent team guidelines (2.3.2, migration c5d6e7f8a9b0):
     # {"security": "- Flag …", …}. ADDED to the agent's prompt, at most 2000
     # characters each; missing/empty = inherit the workspace's guidelines.
     # `agent_prompt_overrides` above is the advanced mode that REPLACES the

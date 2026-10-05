@@ -1,6 +1,6 @@
 """Team guidelines: per-agent text ADDED to an agent's prompt, never in place of it.
 
-Until 2.3.1 the only way to customise an agent was to replace its whole system
+Until 2.3.2 the only way to customise an agent was to replace its whole system
 prompt. A team that pasted a short Kodus-style list of what to look for into
 the "Security" box therefore threw away everything that box had held: the
 severity calibration, the changed-lines-only scope, the list of comments no
@@ -76,7 +76,7 @@ def clamp_guidelines(text: object) -> str:
 
 # ─── the migration heuristic ─────────────────────────────────────────
 #
-# An override stored before 2.3.1 is either a whole system prompt someone
+# An override stored before 2.3.2 is either a whole system prompt someone
 # wrote on purpose, or a short list of what to look for that was pasted into
 # the only box there was. The first must keep replacing; the second must
 # start being ADDED, or the agent keeps running without its own prompt.
@@ -108,7 +108,7 @@ _ROLE_OPENING = re.compile(
 
 
 def classify_legacy_override(text: object) -> Literal["guidelines", "replace", "empty"]:
-    """What a pre-2.3.1 override was: guidelines, a replacement, or nothing."""
+    """What a pre-2.3.2 override was: guidelines, a replacement, or nothing."""
     if not isinstance(text, str) or not text.strip():
         return "empty"
     body = text.strip()

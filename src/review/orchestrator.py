@@ -1916,7 +1916,7 @@ class ReviewOrchestrator:
                         "verifier_model": row.verifier_model,
                         # Stage 12 — per-repo per-agent system_prompt overrides.
                         "agent_prompt_overrides": dict(row.agent_prompt_overrides or {}),
-                        # 2.3.1 — per-repo per-agent team guidelines (ADDED
+                        # 2.3.2 — per-repo per-agent team guidelines (ADDED
                         # to the prompt) and the agents whose guidelines add
                         # to the workspace's instead of replacing them.
                         "agent_prompt_guidelines": dict(

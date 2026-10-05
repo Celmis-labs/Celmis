@@ -188,7 +188,7 @@ def _default_user_template(agent_name: str) -> str:
 _PROMPT_PROVIDER = "__agent_prompt__"
 #: The workspace's team guidelines, one row per agent, beside the overrides.
 _GUIDELINES_PROVIDER = "__agent_guidelines__"
-#: One installation-wide row once the pre-2.3.1 overrides were sorted into
+#: One installation-wide row once the pre-2.3.2 overrides were sorted into
 #: guidelines and replacements (`migrate_workspace_prompt_overrides`).
 _MIGRATION_PROVIDER = "__agent_prompt_migration__"
 
@@ -261,7 +261,7 @@ def _delete_guidelines(agent_name: str, workspace_id: str = "default") -> None:
     _store_delete(_GUIDELINES_PROVIDER, agent_name, workspace_id)
 
 
-# ─── 2.3.1: sorting the old overrides (workspace layer) ─────────────
+# ─── 2.3.2: sorting the old overrides (workspace layer) ─────────────
 #
 # The repository layer is converted by Alembic migration c5d6e7f8a9b0. This
 # layer lives in the credential store — encrypted, and in a database Alembic
@@ -303,7 +303,7 @@ def _convert_slot(store, slot: str) -> list[str]:
 
 
 def migrate_workspace_prompt_overrides(*, store=None) -> dict[str, list[str]] | None:
-    """Sort every workspace's pre-2.3.1 overrides once. Returns {slot:
+    """Sort every workspace's pre-2.3.2 overrides once. Returns {slot:
     agents converted}, or None when it had already run (or cannot run here:
     a store that cannot list its slots is left exactly as it was)."""
     if store is None:

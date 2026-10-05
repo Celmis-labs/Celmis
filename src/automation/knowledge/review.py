@@ -48,7 +48,7 @@ performance, business_logic and the verifier). Both live on one page,
 - "Advanced: replace the built-in prompt" — the whole system prompt is
   swapped for your text (with a warning: the built-in severity calibration,
   scope rules and avoid-list are lost). Guidelines are still added to it.
-  Since 2.3.1 an old per-agent prompt that was a short list (no output
+  Since 2.3.2 an old per-agent prompt that was a short list (no output
   format, no `You are …` opening) was turned into guidelines automatically; long
   prompts stayed replacements.
 

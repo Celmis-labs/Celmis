@@ -672,7 +672,7 @@ def build_app() -> FastAPI:
         get_user_store()
         logger.info("celmis_api_started cors=%s", cors_origins)
 
-        # 2.3.1: the workspace agent prompts written before guidelines
+        # 2.3.2: the workspace agent prompts written before guidelines
         # existed are sorted once — a short list becomes guidelines ADDED to
         # the built-in prompt, a real prompt stays a replacement. The
         # repository layer is Alembic migration c5d6e7f8a9b0; this layer lives

@@ -11,9 +11,9 @@ or forces it:
 
 `revert` turns every guideline the conversion created back into the
 replacement prompt it was and removes the marker — run it BEFORE going back
-to a release older than 2.3.1, whose code reads only the replacements.
+to a release older than 2.3.2, whose code reads only the replacements.
 Guidelines a person wrote after the upgrade are left alone. (Staying on
-2.3.1 after a revert, the next start sorts them again: the marker is gone.)
+2.3.2 after a revert, the next start sorts them again: the marker is gone.)
 Prints workspaces and agents touched; never the text.
 """
 

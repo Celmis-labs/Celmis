@@ -9,7 +9,7 @@
   * the previews — per repository and for the workspace — return the
     composed prompt as labelled parts, the guidelines among them;
   * the overrides summary names the repositories with guidelines of their own;
-  * the workspace conversion of pre-2.3.1 prompts sorts once, is marked, and
+  * the workspace conversion of pre-2.3.2 prompts sorts once, is marked, and
     reverts.
 """
 

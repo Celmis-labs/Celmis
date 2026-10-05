@@ -253,7 +253,7 @@ def osv_fixed_version(detail: dict[str, Any], ecosystem: str, package: str,
     """The version to upgrade to, from OSV's affected ranges.
 
     `current` is what makes the answer usable: an advisory patched on several
-    branches lists a `fixed` per branch (log4j-core: 2.3.1, 2.12.2, 2.15.0),
+    branches lists a `fixed` per branch (log4j-core: 2.3.2, 2.12.2, 2.15.0),
     and the smallest of those is a *downgrade* for anyone on 2.14.1. The
     upgrade target is the lowest fix above the installed version.
 

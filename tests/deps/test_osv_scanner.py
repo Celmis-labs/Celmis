@@ -53,7 +53,7 @@ LOG4J_RCE = {
         {"package": {"ecosystem": "Maven",
                      "name": "org.apache.logging.log4j:log4j-core"},
          "ranges": [{"type": "ECOSYSTEM",
-                     "events": [{"introduced": "2.0-beta9"}, {"fixed": "2.3.1"}]}]},
+                     "events": [{"introduced": "2.0-beta9"}, {"fixed": "2.3.2"}]}]},
         {"package": {"ecosystem": "Maven",
                      "name": "org.apache.logging.log4j:log4j-core"},
          "ranges": [{"type": "ECOSYSTEM",
@@ -236,7 +236,7 @@ def test_fixed_in_is_an_upgrade_not_a_downgrade(tmp_path) -> None:
     findings = parse_osv_scanner(_report(tmp_path), repo_path=tmp_path)
     by_id = {f.vuln_id: f for f in findings}
 
-    assert by_id["GHSA-jfh8-c2jp-5v3q"].fixed_in == "2.15.0", "не 2.3.1"
+    assert by_id["GHSA-jfh8-c2jp-5v3q"].fixed_in == "2.15.0", "не 2.3.2"
     assert by_id["PYSEC-2021-109"].fixed_in == "3.2.5", "не 3.1.13"
 
 
