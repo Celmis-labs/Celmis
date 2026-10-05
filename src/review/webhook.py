@@ -139,6 +139,34 @@ def _verify_gitlab_token(token_header: str | None, expected: str) -> bool:
     return hmac.compare_digest(token_header, expected)
 
 
+def _gitlab_instance_matches(workspace_id: str | None, web_url: object) -> bool:
+    """Is the payload's ``project.web_url`` on the GitLab this workspace is
+    connected to?
+
+    The token check already proved the sender knows the workspace's secret;
+    this binds the event to the INSTANCE as well, so a hook on some other
+    GitLab carrying the same secret (a copied configuration, a test instance)
+    cannot make the workspace review a same-named project from the wrong
+    server. A workspace with no GitLab connection has nothing to compare
+    against and cannot review anyway — not refused here. A payload without a
+    web_url (old GitLab versions, hand-made tests) is not refused either.
+    """
+    if not isinstance(web_url, str) or not web_url.strip():
+        return True
+    try:
+        from src.credentials import resolve_git_credential
+        from src.sync.gitlab_instance import instance_for_credential
+
+        cred = resolve_git_credential("gitlab", workspace_id=workspace_id or "default")
+        if cred is None:
+            return True
+        return instance_for_credential(cred).owns_url(web_url)
+    except Exception as exc:  # noqa: BLE001 — unreadable config: refuse, log
+        logger.warning("gitlab_webhook_instance_check_failed ws=%s err=%s",
+                       workspace_id, type(exc).__name__)
+        return False
+
+
 def _verify_bitbucket_signature(
     body: bytes, signature_header: str | None, secret: str,
 ) -> bool:
@@ -869,6 +897,19 @@ def build_webhook_app(
         except json.JSONDecodeError:
             # The decoder's offset is noise to a webhook sender; 400 is the answer.
             raise HTTPException(400, "Invalid JSON") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "Invalid JSON")
+
+        # 3b. The event must come from the GitLab instance this workspace is
+        # connected to (gitlab.com or its self-hosted URL).
+        project = payload.get("project")
+        web_url = project.get("web_url") if isinstance(project, dict) else None
+        if not await asyncio.to_thread(_gitlab_instance_matches, workspace_id, web_url):
+            stats_counter["rejected"] += 1
+            logger.warning("gitlab_webhook_instance_mismatch ws=%s", workspace_id)
+            raise HTTPException(
+                403, "This event comes from a GitLab instance this workspace is "
+                     "not connected to")
 
         # 4. Filter FIRST, then dedup.
         #

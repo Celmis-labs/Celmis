@@ -52,7 +52,7 @@ from src.credentials import resolve_git_credential
 from src.db.session import get_async_session
 from src.http import build_client
 from src.security.audit import record_action
-from src.sync.git_providers import parse_repo_url
+from src.sync.git_providers import GitProvider, parse_repo_url
 from src.users import User
 
 logger = logging.getLogger(__name__)
@@ -174,6 +174,36 @@ def _qualify_with_connected_provider(value: str, workspace_id: str,
     return v
 
 
+def _workspace_gitlab_base(workspace_id: str, user_id: str) -> str | None:
+    """The workspace's self-hosted GitLab root, or None (gitlab.com / none /
+    unreadable). Read from the workspace's OWN connection only."""
+    try:
+        from src.sync.gitlab_instance import instance_for_workspace
+
+        inst = instance_for_workspace(workspace_id, user_id=user_id)
+    except Exception as exc:  # noqa: BLE001 — parse as gitlab.com
+        logger.warning("gitlab_instance_unreadable ws=%s err=%s", workspace_id,
+                       type(exc).__name__)
+        return None
+    return None if inst.is_default else inst.base_url
+
+
+def _gitlab_of(creds: Any):
+    """The GitLabInstance a stored GitLab credential belongs to; 400 when the
+    stored URL is no longer usable (never silently gitlab.com — that would
+    send a self-hosted token to gitlab.com)."""
+    from src.sync.gitlab_instance import UnsafeGitLabURL, instance_for_credential
+
+    try:
+        return instance_for_credential(creds)
+    except UnsafeGitLabURL as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The saved GitLab URL is not usable: {exc}. Re-save the "
+                   "GitLab connection.",
+        ) from None
+
+
 @router.post("", response_model=RepoOut, status_code=status.HTTP_201_CREATED)
 def add_repo(
     request: Request,
@@ -187,7 +217,24 @@ def add_repo(
     # fix is the same defect wearing the fix's name: one place corrected, the
     # stored value left alone, two derivations disagreeing.
     qualified = _qualify_with_connected_provider(req.url, workspace_id, user.id)
-    parsed = parse_repo_url(qualified)
+    gitlab_base = _workspace_gitlab_base(workspace_id, user.id)
+    parsed = parse_repo_url(qualified, gitlab_base_url=gitlab_base)
+    requested_branch = (req.branch or "").strip() or None
+    if parsed.base_url:
+        # A URL on the workspace's self-hosted GitLab is STORED in the
+        # provider-prefixed form. Every later re-parse of the stored value —
+        # clone, freshness, agent, groups — then says gitlab and the same
+        # slug without needing to know the host, and the host itself always
+        # comes from the workspace's connection, never from this string.
+        qualified = f"gitlab:{parsed.owner}/{parsed.name}"
+        requested_branch = requested_branch or parsed.branch_hint
+    elif parsed.provider == GitProvider.GENERIC:
+        raise HTTPException(
+            status_code=422,
+            detail=("This address is not on a connected git provider. For a "
+                    "self-hosted GitLab, set its URL on the Connections page "
+                    "first, then add the repository again."),
+        )
     # Before anything is stored: the slug names the clone, graph and vault
     # directories, and a stored slug that is not one safe path segment would
     # make every later per-repo path lookup raise — the workspace's whole
@@ -233,7 +280,7 @@ def add_repo(
         full_name=full_name,
         url=qualified,
         workspace_id=workspace_id,
-        branch=(req.branch or "").strip() or None,
+        branch=requested_branch,
         enabled=req.auto_review,
         # Bitbucket cannot poll — force manual mode if user toggled auto for BB
         mode=_default_mode(parsed.provider.value, req.auto_review),
@@ -771,7 +818,8 @@ def browse_provider(
     if provider == "github":
         return _browse_github(creds.secret, page, per_page, existing, query)
     if provider == "gitlab":
-        return _browse_gitlab(creds.secret, page, per_page, existing, query)
+        return _browse_gitlab(creds.secret, page, per_page, existing, query,
+                              gitlab=_gitlab_of(creds))
     workspace = (creds.metadata or {}).get("bitbucket_workspace")
     email = (creds.metadata or {}).get("atlassian_email")
     if not workspace or not email:
@@ -1086,12 +1134,13 @@ def browse_provider_owners(
                 if len(batch) < 100:
                     break
         elif provider == "gitlab":
+            gl = _gitlab_of(creds)
             for page in range(1, _OWNER_SCAN_PAGES + 1):
                 resp = _get(
-                    "https://gitlab.com/api/v4/projects",
+                    f"{gl.api_base}/projects",
                     headers={"PRIVATE-TOKEN": creds.secret},
                     params={"membership": "true", "per_page": 100, "page": page},
-                    timeout=15.0,
+                    timeout=15.0, gitlab=gl,
                 )
                 resp.raise_for_status()
                 batch = list(resp.json())
@@ -1172,11 +1221,14 @@ def _contributors(provider: str, full_name: str, creds, meta: dict) -> list[tupl
             ]
         if provider == "gitlab":
             import urllib.parse as _u
+
+            from src.sync.gitlab_instance import instance_for_credential
+            gl = instance_for_credential(creds)
             pid = _u.quote(full_name, safe="")
             r = _get(
-                f"https://gitlab.com/api/v4/projects/{pid}/repository/contributors",
+                f"{gl.api_base}/projects/{pid}/repository/contributors",
                 headers={"PRIVATE-TOKEN": creds.secret},
-                params={"per_page": 100}, timeout=15.0,
+                params={"per_page": 100}, timeout=15.0, gitlab=gl,
             )
             r.raise_for_status()
             return [
@@ -1246,10 +1298,12 @@ def browse_provider_developers(
             names = [str(r.get("full_name", ""))
                      for r in _github_repos_page(creds.secret, 1, 100)]
         elif provider == "gitlab":
+            gl = _gitlab_of(creds)
             resp = _get(
-                "https://gitlab.com/api/v4/projects",
+                f"{gl.api_base}/projects",
                 headers={"PRIVATE-TOKEN": creds.secret},
                 params={"membership": "true", "per_page": 100}, timeout=15.0,
+                gitlab=gl,
             )
             resp.raise_for_status()
             names = [str(p.get("path_with_namespace", "")) for p in resp.json()]
@@ -1350,8 +1404,9 @@ def _registered_repo(slug: str, workspace_id: str) -> RepoConfig:
     return cfg
 
 
-def _repo_credential(cfg: RepoConfig, user: User) -> tuple[str, str]:
-    """(secret, atlassian e-mail) for the repo's provider, or 400."""
+def _repo_credential(cfg: RepoConfig, user: User) -> tuple[str, str, Any]:
+    """(secret, atlassian e-mail, GitLab instance or None) for the repo's
+    provider, or 400."""
     creds = resolve_git_credential(cfg.provider, user_id=user.id,
                                    workspace_id=cfg.workspace_id)
     if creds is None:
@@ -1359,11 +1414,13 @@ def _repo_credential(cfg: RepoConfig, user: User) -> tuple[str, str]:
             status_code=400,
             detail=f"No {cfg.provider} token saved — connect first",
         )
-    return creds.secret, str((creds.metadata or {}).get("atlassian_email") or "")
+    gitlab = _gitlab_of(creds) if cfg.provider == "gitlab" else None
+    return (creds.secret, str((creds.metadata or {}).get("atlassian_email") or ""),
+            gitlab)
 
 
 def _open_listing(cfg: RepoConfig, secret: str, email: str, *,
-                  branch: str | None, refresh: bool = False):
+                  branch: str | None, refresh: bool = False, gitlab: Any = None):
     from src.repos import open_pulls
 
     label = {"github": "GitHub", "gitlab": "GitLab",
@@ -1372,6 +1429,7 @@ def _open_listing(cfg: RepoConfig, secret: str, email: str, *,
         return open_pulls.cached_open_pulls(
             cfg.provider, cfg.full_name, secret, email,
             target=branch or None, refresh=refresh,
+            **({"gitlab": gitlab} if gitlab is not None else {}),
         )
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
@@ -1415,8 +1473,9 @@ def list_open_prs(
     from src.review.dispatch import BULK_LIMIT
 
     cfg = _registered_repo(slug, workspace_id)
-    secret, email = _repo_credential(cfg, user)
-    listing = _open_listing(cfg, secret, email, branch=branch, refresh=refresh)
+    secret, email, gitlab = _repo_credential(cfg, user)
+    listing = _open_listing(cfg, secret, email, branch=branch, refresh=refresh,
+                            gitlab=gitlab)
     chosen = open_pulls.select(listing.items, q=q, target=branch or None, sort=sort)
     page = chosen[offset:offset + limit]
     try:
@@ -1518,9 +1577,10 @@ def review_all_open_prs(
             detail="Bulk review needs confirmation (confirm: true).",
         )
     cfg = _registered_repo(slug, workspace_id)
-    secret, email = _repo_credential(cfg, user)
+    secret, email, gitlab = _repo_credential(cfg, user)
     # Fresh, not cached: this spends model budget on what it reads.
-    listing = _open_listing(cfg, secret, email, branch=body.branch, refresh=True)
+    listing = _open_listing(cfg, secret, email, branch=body.branch, refresh=True,
+                            gitlab=gitlab)
     if body.numbers:
         open_numbers = {p.number for p in listing.items}
         targets = sorted({int(n) for n in body.numbers if int(n) in open_numbers})
@@ -1578,8 +1638,10 @@ def list_branches(
                                error="no_credential")
     email = str((creds.metadata or {}).get("atlassian_email") or "")
     try:
+        from src.sync.gitlab_instance import gitlab_kwarg
+
         page = branch_page(cfg.provider, cfg.full_name, creds.secret, email,
-                           q=q, limit=limit)
+                           q=q, limit=limit, **gitlab_kwarg(cfg.provider, creds))
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("branch_list_failed repo=%s provider=%s err=%s",
                        slug, cfg.provider, type(exc).__name__)
@@ -1831,7 +1893,8 @@ def delete_repo_webhook(
 # ─── helpers ─────────────────────────────────────────────────────────
 
 
-def _get(url: str, *, timeout: float = 15.0, **kwargs: Any) -> httpx.Response:
+def _get(url: str, *, timeout: float = 15.0, gitlab: Any = None,
+         **kwargs: Any) -> httpx.Response:
     """One guarded GET against a git provider's API.
 
     Replaces the raw ``httpx.get`` verbs this router grew: each of those
@@ -1839,8 +1902,21 @@ def _get(url: str, *, timeout: float = 15.0, **kwargs: Any) -> httpx.Response:
     per-call lifecycle, same defaults — the only change is the egress
     whitelist transport, and every host this router talks to (api.github.com,
     gitlab.com, api.bitbucket.org) is on the shipped public allowlist.
+
+    `gitlab` — the workspace's self-hosted GitLabInstance: its host becomes
+    the client's one extra allowed destination, pinned to the address that
+    was validated just now. Derived from the workspace's credential, never
+    from the request.
     """
-    with build_client(timeout=timeout) as client:
+    extra: dict[str, Any] = {}
+    if gitlab is not None:
+        from src.sync.gitlab_instance import UnsafeGitLabURL
+
+        try:
+            extra = gitlab.http_kwargs()
+        except UnsafeGitLabURL as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+    with build_client(timeout=timeout, **extra) as client:
         return client.get(url, **kwargs)
 
 
@@ -1922,8 +1998,11 @@ def _browse_github(
 
 def _browse_gitlab(
     token: str, page: int, per_page: int, existing: set[str],
-    query: str | None = None,
+    query: str | None = None, *, gitlab: Any = None,
 ) -> list[RepoBrowseItem]:
+    from src.sync.gitlab_instance import DEFAULT_INSTANCE
+
+    gitlab = gitlab or DEFAULT_INSTANCE
     # NB: skip `order_by=last_activity_at` — the GitLab API returns 500 for it
     # on membership=true queries (an existing transient bug, checked May 2026).
     # The default order (id desc) gives acceptable UX.
@@ -1936,10 +2015,10 @@ def _browse_gitlab(
         params["search"] = _bare_name(query)
         params["search_namespaces"] = "true"
     resp = _get(
-        "https://gitlab.com/api/v4/projects",
+        f"{gitlab.api_base}/projects",
         headers={"PRIVATE-TOKEN": token},
         params=params,
-        timeout=15.0,
+        timeout=15.0, gitlab=gitlab,
     )
     resp.raise_for_status()
     data: list[dict[str, Any]] = resp.json()

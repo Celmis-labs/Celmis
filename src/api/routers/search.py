@@ -88,6 +88,15 @@ def _web_file_url(cfg, file: str | None, line: int | None) -> str | None:
     if cfg is None or not file:
         return None
     base = (cfg.url or "").rstrip("/").removesuffix(".git")
+    if cfg.provider == "gitlab" and not base.startswith("http") and cfg.full_name:
+        # A self-hosted GitLab repo is stored as `gitlab:group/proj`; its web
+        # address comes from the workspace's own connection.
+        try:
+            from src.sync.gitlab_instance import instance_for_workspace
+
+            base = instance_for_workspace(cfg.workspace_id).web_url(cfg.full_name)
+        except Exception:  # noqa: BLE001 — no link beats a wrong one
+            return None
     if not base.startswith("http"):
         return None
     branch = _repo_branch(cfg.repo_slug)

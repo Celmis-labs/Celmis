@@ -28,8 +28,9 @@ Where: [Git connections](/connections) (Settings → "Git connections"). One
 token per provider per workspace, encrypted with a workspace-scoped key and
 used to clone, list repositories and post review comments. Saving, replacing,
 verifying and removing a token needs owner or admin of the workspace (or a
-global admin); anyone else gets 403 Requires owner/admin on this workspace. There is no field for a self-hosted GitLab or GitHub Enterprise
-URL: verification and polling talk to gitlab.com / github.com.
+global admin); anyone else gets 403 Requires owner/admin on this workspace. A self-hosted GitLab is supported: fill "GitLab URL" on the
+GitLab card (see the self-hosted GitLab section). GitHub Enterprise Server
+is not: GitHub verification and polling talk to github.com.
 
 Steps (every card works the same way):
 1. Open [Git connections](/connections). Each card (GitHub, GitLab,
@@ -73,6 +74,61 @@ project; Bitbucket `read:webhook:bitbucket` + `write:webhook:bitbucket`
 """,
     ),
     Section(
+        id="self-hosted-gitlab",
+        title="Self-hosted GitLab (own instance URL, sub-path, network, CA)",
+        keywords=(
+            "self-hosted", "self hosted", "selfhosted", "on-prem", "on prem",
+            "own gitlab", "gitlab url", "instance", "enterprise", "internal",
+            "private network", "vpn", "certificate", "ca bundle", "tls",
+            "власн", "свій gitlab", "інстанс", "сертифікат", "внутрішн",
+            "собственн", "свой gitlab", "инстанс", "внутренн",
+        ),
+        strong=("self-hosted", "self hosted", "gitlab url", "on-prem",
+                "власний gitlab", "свой gitlab"),
+        body="""
+Where: [Git connections](/connections), GitLab card, field "GitLab URL".
+Empty means gitlab.com. For your own instance enter its root address —
+`https://gitlab.example.com`, or `https://example.com/gitlab` when GitLab
+runs under a sub-path. A trailing `/api/v4` is accepted and removed; a
+project link is refused. The URL is saved together with the token (you
+always re-enter the token when you change it), and is used for EVERYTHING
+GitLab in this workspace: verification (`GET /api/v4/user`), the repository
+browser, cloning, merge-request lists, branches, review comments,
+approvals, the MR description, reviewer assignment, apply-fix, polling and
+the one-press webhook install. Other workspaces keep their own GitLab.
+
+Token: a personal (or group/project) access token created ON YOUR INSTANCE
+(avatar → Edit profile → Access tokens) with the `api` scope; `read_api` can
+list but not comment or approve. Installing the webhook needs the
+Maintainer role on the project.
+
+Rules the URL must pass (checked on save and again before every call):
+https only; no user:password@, query string or fragment; the host must
+resolve to a public address. The server operator can relax two of these:
+`GITLAB_ALLOWED_HOSTS` (JSON list) lets a listed host resolve to a private
+address (never the 169.254.x cloud-metadata range), `GITLAB_HTTP_ALLOWED_HOSTS`
+allows plain http:// for an exact host. A private certificate authority:
+`GITLAB_CA_BUNDLE` = path to a PEM bundle on the server (added to the public
+roots; TLS verification cannot be switched off).
+
+Network: the Celmis SERVER connects to GitLab, not your browser. A GitLab
+that is only reachable inside an office network or VPN (for example
+gitlab.internal.example.com) cannot be reached from a cloud server unless a
+route is arranged (VPN, peering, a reverse proxy). The save then fails with
+an error saying the host does not resolve from the Celmis server, resolves
+to a non-public address, could not be connected to, or presented a
+certificate that is not trusted. For webhooks the
+reverse also applies: your GitLab must reach this Celmis address.
+
+Adding repositories: paste the project URL
+(`https://gitlab.example.com/group/sub/project`, a merge-request URL also
+works) on [Repositories](/repositories), or pick it in the browser. It is
+stored as `gitlab:group/sub/project` and always resolved against the
+workspace's own instance; a manual review takes `gitlab:group/project#7` or
+the merge-request URL.
+""",
+    ),
+    Section(
         id="webhooks",
         title="Automatic review: polling or webhook (URL, secret, events)",
         keywords=(
@@ -100,7 +156,8 @@ Two ways a new pull request reaches Celmis once the switch is on:
 - Polling (GitHub and GitLab, every ~60 s). GitHub polling reads the token's
   notification inbox, so it needs a CLASSIC token with `notifications`;
   fine-grained tokens get 403, and GitHub never notifies you about your own
-  pull requests. GitLab polls gitlab.com merge requests.
+  pull requests. GitLab polls the merge requests of the workspace's GitLab
+  (gitlab.com or its self-hosted URL).
 - Webhook (all three providers, recommended; the only automatic way for
   Bitbucket). Works whenever the repository's switch is on.
 

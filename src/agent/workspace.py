@@ -88,6 +88,9 @@ class RepoCheckout:
     clean_url: str       # origin URL without credentials
     push_url: str        # authenticated URL — used ONLY at push time
     default_branch: str
+    #: Self-hosted GitLab root this repo lives on (None otherwise): its
+    #: address is re-checked and pinned, and its CA bundle applied, at push.
+    gitlab_base: str | None = None
 
 
 @dataclass
@@ -117,16 +120,51 @@ class AgentWorkspace:
     #: there, and widening the boundary to reach it would hand the agent the
     #: CLI's own state directory.
     root_dir: Path | None = None
+    #: See RepoCheckout.gitlab_base — first repo's.
+    gitlab_base: str | None = None
 
     def __post_init__(self) -> None:
         if not self.repos:
             self.repos = [RepoCheckout(
                 slug=self.repo_slug or self.repo_dir.name, path=self.repo_dir,
                 clean_url=self.clean_url, push_url=self.push_url,
-                default_branch=self.default_branch,
+                default_branch=self.default_branch, gitlab_base=self.gitlab_base,
             )]
         if self.root_dir is None:
             self.root_dir = self.repo_dir
+
+
+def _instance_args(gitlab_base: str | None) -> list[str]:
+    """`-c` args pinning a self-hosted GitLab's validated address and adding
+    the operator CA bundle. Empty for anything else. Not secrets."""
+    if not gitlab_base:
+        return []
+    from src.sync.gitlab_instance import instance_of
+
+    args: list[str] = []
+    for key, value in instance_of(gitlab_base).git_config():
+        args += ["-c", f"{key}={value}"]
+    return args
+
+
+def _gitlab_target(repo_url: str, workspace_id: str):
+    """(ParsedRepo, instance) for a GitLab repo of this workspace, else None.
+
+    `gitlab:group/proj` and a URL on the workspace's self-hosted instance both
+    resolve against the instance its OWN GitLab connection names — never
+    another workspace's.
+    """
+    from src.sync.git_providers import GitProvider, detect_provider, parse_repo_url
+    from src.sync.gitlab_instance import instance_for_workspace
+
+    if detect_provider(repo_url) in (GitProvider.GITHUB, GitProvider.BITBUCKET):
+        return None
+    inst = instance_for_workspace(workspace_id)
+    parsed = parse_repo_url(repo_url,
+                            gitlab_base_url=None if inst.is_default else inst.base_url)
+    if parsed.provider != GitProvider.GITLAB:
+        return None
+    return parsed, inst
 
 
 def _run(cmd: list[str], cwd: Path, timeout: int = 300,
@@ -168,7 +206,22 @@ def prepare_workspace(
     from src.credentials import resolve_git_credential
     from src.sync.git_providers import build_authenticated_url, parse_repo_url
 
-    parsed = parse_repo_url(repo_url)
+    gitlab_base: str | None = None
+    clone_cred: dict[str, str] | None = None
+    gl = _gitlab_target(repo_url, workspace_id)
+    if gl is not None:
+        from src.http import allowed_hosts
+        from src.security.egress import assert_url_allowed
+        from src.sync.git_providers import build_clone_url
+
+        parsed, inst = gl
+        gitlab_base = None if inst.is_default else inst.base_url
+        # The clone/origin URL of a GitLab repo is the instance's https URL —
+        # a `gitlab:` registration is not something git can fetch.
+        repo_url = build_clone_url(parsed, gitlab_base_url=inst.base_url)
+        assert_url_allowed(repo_url, allowed_hosts(() if inst.is_default else (inst.host,)))
+    else:
+        parsed = parse_repo_url(repo_url)
     creds = resolve_git_credential(
         parsed.provider.value, workspace_id=workspace_id,
     )
@@ -188,8 +241,13 @@ def prepare_workspace(
             build_authenticated_url(parsed, username=kw["username"],
                                     password=kw["password"])
             if "username" in kw
-            else build_authenticated_url(parsed, token=kw["api_token"])
+            else build_authenticated_url(parsed, token=kw["api_token"],
+                                         gitlab_base_url=gitlab_base)
         )
+        if gl is not None:
+            split = _split_credential(push_url)
+            if split is not None:
+                clone_cred = {"CELMIS_GIT_USER": split[1], "CELMIS_GIT_PW": split[2]}
     clean_url = repo_url
 
     root = agent_workspaces_root() / session_id
@@ -200,13 +258,21 @@ def prepare_workspace(
 
     # depth 50 keeps clones fast; full blobs (no blob:none) so the agent's
     # file reads never trigger lazy network fetches mid-session.
-    base_clone = _GIT_BASE + ["clone", "--depth", "50"]
+    # GitLab: the plain URL plus the env credential helper, so the token is
+    # never in argv (ps) — and the instance's address pin / CA bundle.
+    if clone_cred is not None:
+        base_clone = (_GIT_BASE + _PUSH_CREDENTIAL + _instance_args(gitlab_base)
+                      + ["clone", "--depth", "50"])
+        clone_from = clean_url
+    else:
+        base_clone = _GIT_BASE + _instance_args(gitlab_base) + ["clone", "--depth", "50"]
+        clone_from = push_url
     wanted = (branch or "").strip()
     try:
         _run(
             base_clone + (["--branch", wanted] if wanted else [])
-            + [push_url, str(repo_dir)],
-            cwd=root, timeout=600,
+            + [clone_from, str(repo_dir)],
+            cwd=root, timeout=600, env_extra=clone_cred,
         )
     except RuntimeError:
         if not wanted:
@@ -219,7 +285,8 @@ def prepare_workspace(
             session_id, parsed.slug, wanted,
         )
         shutil.rmtree(repo_dir, ignore_errors=True)
-        _run(base_clone + [push_url, str(repo_dir)], cwd=root, timeout=600)
+        _run(base_clone + [clone_from, str(repo_dir)], cwd=root, timeout=600,
+             env_extra=clone_cred)
     # Immediately scrub the credentialed URL out of .git/config.
     _run(_GIT_BASE + ["remote", "set-url", "origin", clean_url], cwd=repo_dir)
 
@@ -234,7 +301,7 @@ def prepare_workspace(
     return AgentWorkspace(
         session_id=session_id, repo_dir=repo_dir, home_dir=home_dir,
         clean_url=clean_url, push_url=push_url, default_branch=default_branch,
-        repo_slug=parsed.slug,
+        repo_slug=parsed.slug, gitlab_base=gitlab_base,
     )
 
 
@@ -500,16 +567,18 @@ def commit_and_push(ws: AgentWorkspace, *, summary: str = "",
         # The credential goes through the environment for this one
         # invocation; the URL git is given carries none.
         cred = _split_credential(repo.push_url)
+        gl_base = getattr(repo, "gitlab_base", None)
         if cred is None:
             # No credential to move out of the way — a public remote, or a
             # local path in a test. `push_url` is still WHERE to push, so it
             # is used unchanged; substituting `clean_url` here would send a
             # local bare repo's push to github.com.
-            _run(_GIT_BASE + ["push", repo.push_url, f"HEAD:refs/heads/{branch}"],
+            _run(_GIT_BASE + _instance_args(gl_base)
+                 + ["push", repo.push_url, f"HEAD:refs/heads/{branch}"],
                  cwd=repo.path, timeout=300)
         else:
             clean, user, secret = cred
-            _run(_GIT_BASE + _PUSH_CREDENTIAL
+            _run(_GIT_BASE + _PUSH_CREDENTIAL + _instance_args(gl_base)
                  + ["push", clean, f"HEAD:refs/heads/{branch}"],
                  cwd=repo.path, timeout=300,
                  env_extra={"CELMIS_GIT_USER": user, "CELMIS_GIT_PW": secret})
@@ -517,7 +586,8 @@ def commit_and_push(ws: AgentWorkspace, *, summary: str = "",
         pushed.append({
             "repo_slug": repo.slug,
             "branch": branch,
-            "compare_url": _compare_url(repo.clean_url, repo.default_branch, branch),
+            "compare_url": _compare_url(repo.clean_url, repo.default_branch, branch,
+                                        gitlab=gl_base is not None),
             "commit": sha,
         })
         logger.info("agent_branch_pushed session=%s repo=%s branch=%s",
@@ -532,9 +602,15 @@ def commit_and_push(ws: AgentWorkspace, *, summary: str = "",
     return {**first, "pushes": pushed}
 
 
-def _compare_url(clean_url: str, base: str, branch: str) -> str | None:
-    """Best-effort web URL to open a PR/MR from the pushed branch."""
+def _compare_url(clean_url: str, base: str, branch: str, *,
+                 gitlab: bool = False) -> str | None:
+    """Best-effort web URL to open a PR/MR from the pushed branch.
+
+    `gitlab` — the repo is on a self-hosted GitLab whose host need not say
+    "gitlab" (git.example.com)."""
     u = clean_url.removesuffix(".git")
+    if gitlab:
+        return f"{u}/-/merge_requests/new?merge_request%5Bsource_branch%5D={branch}"
     if "github.com" in u:
         return f"{u}/compare/{base}...{branch}?expand=1"
     if "gitlab" in u:
@@ -607,6 +683,7 @@ def prepare_multi_workspace(
         checkouts.append(RepoCheckout(
             slug=slug, path=target, clean_url=staged.clean_url,
             push_url=staged.push_url, default_branch=staged.default_branch,
+            gitlab_base=staged.gitlab_base,
         ))
 
     first = checkouts[0]
@@ -614,7 +691,7 @@ def prepare_multi_workspace(
         session_id=session_id, repo_dir=first.path, home_dir=home_dir,
         clean_url=first.clean_url, push_url=first.push_url,
         default_branch=first.default_branch, repo_slug=first.slug,
-        repos=checkouts, root_dir=repos_dir,
+        repos=checkouts, root_dir=repos_dir, gitlab_base=first.gitlab_base,
     )
 
 

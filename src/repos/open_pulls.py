@@ -91,7 +91,13 @@ def _same_host(url: str, base: str) -> bool:
         got, want = urllib.parse.urlsplit(url), urllib.parse.urlsplit(base)
     except ValueError:
         return False
-    return got.scheme == "https" and got.netloc.lower() == want.netloc.lower()
+    # Same scheme as the API base (https, or http only for an instance the
+    # operator allowed over http), same host:port, and under the base path —
+    # a self-hosted GitLab's next link must not leave its /sub-path/api/v4.
+    prefix = want.path.rstrip("/")
+    return (got.scheme == want.scheme and got.scheme in ("https", "http")
+            and got.netloc.lower() == want.netloc.lower()
+            and (not prefix or got.path == prefix or got.path.startswith(prefix + "/")))
 
 
 def _bbql_value(value: str) -> str:
@@ -137,10 +143,10 @@ def _github(client: httpx.Client, full_name: str, token: str, cap: int,
 
 
 def _gitlab(client: httpx.Client, full_name: str, token: str, cap: int,
-            target: str | None) -> OpenPullListing:
+            target: str | None, *, api: str = GITLAB_API) -> OpenPullListing:
     headers = {"PRIVATE-TOKEN": token}
     pid = urllib.parse.quote(full_name, safe="")
-    base = f"{GITLAB_API}/projects/{pid}/merge_requests"
+    base = f"{api}/projects/{pid}/merge_requests"
     params: dict[str, Any] = {"state": "opened", "per_page": 100, "page": 1,
                               "order_by": "created_at", "sort": "desc"}
     if target:
@@ -170,7 +176,7 @@ def _gitlab(client: httpx.Client, full_name: str, token: str, cap: int,
         if next_page.isdigit():
             params = {**params, "page": int(next_page)}
             url = base
-        elif link_next and _same_host(link_next, GITLAB_API):
+        elif link_next and _same_host(link_next, api):
             url = link_next
         else:
             url = None
@@ -226,33 +232,41 @@ def _bitbucket(client: httpx.Client, full_name: str, email: str, token: str,
 
 
 def fetch_open_pulls(provider: str, full_name: str, secret: str, email: str = "",
-                     *, target: str | None = None, cap: int | None = None
-                     ) -> OpenPullListing:
-    """Walk every page (up to `cap`). Raises `httpx.HTTPError` on failure."""
+                     *, target: str | None = None, cap: int | None = None,
+                     gitlab=None) -> OpenPullListing:
+    """Walk every page (up to `cap`). Raises `httpx.HTTPError` on failure.
+
+    `gitlab` — the workspace's GitLabInstance (None → gitlab.com)."""
+    from src.sync.gitlab_instance import DEFAULT_INSTANCE
+
     cap = cap or PULL_CAP
-    with build_client(timeout=15.0) as client:
+    inst = gitlab or DEFAULT_INSTANCE
+    extra = inst.http_kwargs() if provider == "gitlab" else {}
+    with build_client(timeout=15.0, **extra) as client:
         if provider == "github":
             return _github(client, full_name, secret, cap, target)
         if provider == "gitlab":
-            return _gitlab(client, full_name, secret, cap, target)
+            return _gitlab(client, full_name, secret, cap, target, api=inst.api_base)
         if provider == "bitbucket":
             return _bitbucket(client, full_name, email, secret, cap, target)
     return OpenPullListing((), False)
 
 
 def cached_open_pulls(provider: str, full_name: str, secret: str, email: str = "",
-                      *, target: str | None = None, refresh: bool = False
-                      ) -> OpenPullListing:
+                      *, target: str | None = None, refresh: bool = False,
+                      gitlab=None) -> OpenPullListing:
     """`fetch_open_pulls`, reused for `CACHE_TTL` seconds. Failures are
     never cached."""
-    key = (provider, full_name, target or "", _fingerprint(secret, email))
+    instance_key = gitlab.base_url if gitlab is not None else ""
+    key = (provider, full_name, target or "", _fingerprint(secret, email), instance_key)
     now = time.monotonic()
     if not refresh:
         with _cache_lock:
             hit = _cache.get(key)
         if hit and now - hit[0] < CACHE_TTL:
             return hit[1]
-    listing = fetch_open_pulls(provider, full_name, secret, email, target=target)
+    listing = fetch_open_pulls(provider, full_name, secret, email, target=target,
+                               gitlab=gitlab)
     with _cache_lock:
         if len(_cache) >= _CACHE_MAX:
             _cache.pop(min(_cache, key=lambda k: _cache[k][0]))

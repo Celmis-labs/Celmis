@@ -652,13 +652,28 @@ def serve_cmd(
         uvicorn.run(build_app(), host=host, port=port, log_level="info")
 
 
-def _parse_pr_ref(ref: str) -> tuple[str, str, int]:
+def _parse_pr_ref(ref: str, *, gitlab_base_url: str | None = None) -> tuple[str, str, int]:
     """Parse 'github:owner/repo#42' / 'https://github.com/o/r/pull/42' / etc.
+
+    `gitlab_base_url` — the workspace's self-hosted GitLab: a merge-request
+    URL on that instance (sub-path included) parses as GitLab. The shorthand
+    'gitlab:group/repo#IID' needs no host: it is reviewed against whatever
+    instance the workspace's GitLab connection names.
 
     Returns (provider, repo, pr_number).
     """
     import re
     s = ref.strip()
+
+    if gitlab_base_url and s.startswith(("http://", "https://")):
+        from src.sync.gitlab_instance import instance_of
+
+        inst = instance_of(gitlab_base_url)
+        rel = inst.relative_path(s) if not inst.is_default else None
+        if rel is not None:
+            m = re.match(r"^([\w./-]+?)/-/merge_requests/(\d+)(?:[/?#].*)?$", rel)
+            if m:
+                return "gitlab", m.group(1), int(m.group(2))
 
     # Form 1: provider:owner/repo#NUM
     m = re.match(r"^(github|gitlab|bitbucket):([\w./-]+)#(\d+)$", s)
@@ -996,6 +1011,11 @@ def auth_gitlab_cmd(
         help="GitLab PAT with 'read_api' scope at minimum.",
     ),
     label: str = typer.Option("default", "--label", "-l"),
+    url: str = typer.Option(
+        "", "--url",
+        help="Self-hosted GitLab root, e.g. https://gitlab.example.com "
+             "(default: https://gitlab.com).",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Save the GitLab PAT into the encrypted credential store + verify."""
@@ -1007,9 +1027,16 @@ def auth_gitlab_cmd(
         GitLabScopeError,
         authenticate,
     )
+    from src.sync.gitlab_instance import METADATA_KEY, UnsafeGitLabURL, validate_base_url
 
     try:
-        creds = authenticate(token)
+        instance = validate_base_url(url.strip() or "https://gitlab.com")
+    except UnsafeGitLabURL as exc:
+        console.print(f"[red]✗ GitLab URL refused:[/red] {exc}")
+        raise typer.Exit(1) from None
+
+    try:
+        creds = authenticate(token, instance=instance)
     except GitLabAuthError as exc:
         console.print(f"[red]✗ Authentication failed:[/red] {exc}")
         raise typer.Exit(1) from None
@@ -1025,6 +1052,7 @@ def auth_gitlab_cmd(
             "username": creds.username,
             "user_id": creds.user_id,
             "expires_at": creds.expires_at,
+            **({} if instance.is_default else {METADATA_KEY: instance.base_url}),
         },
         account_label=label,
     )
@@ -1847,7 +1875,9 @@ def group_add_from_gitlab_group_cmd(
         raise typer.Exit(1) from None
 
     console.print(f"[bold]Fetching projects from GitLab group {gitlab_group}…[/bold]")
-    with GitLabClient(creds.secret) as client:
+    from src.sync.gitlab_instance import instance_for_credential
+
+    with GitLabClient(creds.secret, instance=instance_for_credential(creds)) as client:
         projects = client.list_group_projects(
             gitlab_group,
             include_subgroups=include_subgroups,

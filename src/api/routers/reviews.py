@@ -111,6 +111,19 @@ async def trigger_review(
     # — matches the path-param dep behaviour so single-user workspaces
     # keep working without any RBAC setup.
     slug = slug_from_pr_ref(req.pr_ref)
+    gitlab_base = _gitlab_base(workspace_id) if "://" in req.pr_ref else None
+    if gitlab_base:
+        # A merge-request URL on a self-hosted GitLab under a sub-path
+        # (https://host/gitlab/group/proj/-/merge_requests/7): the generic
+        # parse above would count the sub-path as a group.
+        from src.cli import _parse_pr_ref
+
+        try:
+            prov, repo, _n = _parse_pr_ref(req.pr_ref, gitlab_base_url=gitlab_base)
+            if prov == "gitlab":
+                slug = repo
+        except ValueError:
+            pass
     if slug:
         # The workspace lets the check reach a grant stored under the other
         # spelling — see repo_grant_candidates.
@@ -128,6 +141,25 @@ async def trigger_review(
     return _run_to_out(run)
 
 
+def _gitlab_base(workspace_id: str) -> str | None:
+    """The workspace's self-hosted GitLab root, so a merge-request URL on it
+    parses. None for gitlab.com / no connection / an unreadable store."""
+    try:
+        from src.sync.gitlab_instance import instance_for_workspace
+
+        inst = instance_for_workspace(workspace_id)
+    except Exception:  # noqa: BLE001 — the URL then simply does not parse
+        return None
+    return None if inst.is_default else inst.base_url
+
+
+def _parse_ref(parse, pr_ref: str, workspace_id: str):
+    """`_parse_pr_ref`, told about the workspace's self-hosted GitLab only
+    when it has one and the reference is a URL (the shorthand needs no host)."""
+    base = _gitlab_base(workspace_id) if "://" in (pr_ref or "") else None
+    return parse(pr_ref, gitlab_base_url=base) if base else parse(pr_ref)
+
+
 def _new_manual_run(pr_ref: str, *, user_id: str, workspace_id: str) -> ReviewRun:
     """The row of a manually triggered review, with its "Review started"
     stage and — when the reference parses — the PR it is about, so a run
@@ -135,7 +167,7 @@ def _new_manual_run(pr_ref: str, *, user_id: str, workspace_id: str) -> ReviewRu
     try:
         from src.cli import _parse_pr_ref
 
-        provider, repo, number = _parse_pr_ref(pr_ref)
+        provider, repo, number = _parse_ref(_parse_pr_ref, pr_ref, workspace_id)
     except ValueError:
         run = ReviewRun(id=str(uuid.uuid4()), user_id=user_id, pr_ref=pr_ref,
                         workspace_id=workspace_id)
@@ -299,7 +331,7 @@ def _run_review_task(
         from src.review.orchestrator import ReviewOrchestrator
         from src.review.providers import get_provider_for
 
-        provider, repo, pr_number = _parse_pr_ref(pr_ref)
+        provider, repo, pr_number = _parse_ref(_parse_pr_ref, pr_ref, workspace_id)
         pr_provider = get_provider_for(provider, user_id=user_id, workspace_id=workspace_id)
         try:
             orch = ReviewOrchestrator()
@@ -441,7 +473,7 @@ def _run_review_task(
         try:
             from src.cli import _parse_pr_ref
             from src.review.issues import record_failed_review
-            f_provider, f_repo, f_number = _parse_pr_ref(pr_ref)
+            f_provider, f_repo, f_number = _parse_ref(_parse_pr_ref, pr_ref, workspace_id)
             record_failed_review(
                 workspace_id=workspace_id, provider=f_provider, repo=f_repo,
                 number=int(f_number), run_id=run_id,

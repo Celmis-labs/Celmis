@@ -201,9 +201,11 @@ def check_repo_access(
         "attempts": [],
     }
 
+    client_kwargs: dict = {}
+
     def _try(label: str, **kw) -> None:
         try:
-            with build_client(timeout=20.0) as c:
+            with build_client(timeout=20.0, **client_kwargs) as c:
                 r = c.get(url, **kw)
             out["attempts"].append({
                 "auth": label, "status": r.status_code,
@@ -242,7 +244,16 @@ def check_repo_access(
         _try("bearer", headers={"Authorization": f"Bearer {secret}",
                                 "Accept": "application/vnd.github+json"})
     else:
-        url = f"https://gitlab.com/api/v4/projects/{cfg.full_name.replace('/', '%2F')}"
+        from src.sync.gitlab_instance import UnsafeGitLabURL, instance_for_credential
+
+        try:
+            instance = instance_for_credential(creds)
+            out["gitlab_instance"] = instance.base_url
+            client_kwargs.update(instance.http_kwargs())
+        except UnsafeGitLabURL as exc:
+            out["error"] = f"gitlab url: {exc}"
+            return out
+        url = f"{instance.api_base}/projects/{cfg.full_name.replace('/', '%2F')}"
         _try("private-token", headers={"PRIVATE-TOKEN": secret})
     return out
 

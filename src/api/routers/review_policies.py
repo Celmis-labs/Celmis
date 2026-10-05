@@ -1305,8 +1305,11 @@ def _provider_branches(registered: Any, user: User, q: str, limit: int) -> Any:
         return None
     email = str((creds.metadata or {}).get("atlassian_email") or "")
     try:
+        from src.sync.gitlab_instance import gitlab_kwarg
+
         return branch_page(registered.provider, registered.full_name,
-                           creds.secret, email, q=q, limit=limit)
+                           creds.secret, email, q=q, limit=limit,
+                           **gitlab_kwarg(registered.provider, creds))
     except Exception as exc:  # noqa: BLE001 — never 500 a picker
         logger.warning("branch_list_failed repo=%s provider=%s err=%s",
                        registered.repo_slug, registered.provider,

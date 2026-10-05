@@ -15,6 +15,9 @@ Required scopes (PAT):
     Public projects: no scopes (read_api)
     Private projects: 'read_api' + 'read_repository'
 
+Self-hosted GitLab: pass ``instance`` (src/sync/gitlab_instance.py) — the
+client then talks to that instance only, pinned to its validated address.
+
 Pagination:
     X-Next-Page header (present/empty)
     X-Total + X-Total-Pages — for UI progress
@@ -25,9 +28,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 from src.http import build_client
+from src.sync.gitlab_instance import API_SUFFIX, GitLabInstance, instance_of
 
 logger = logging.getLogger(__name__)
 
@@ -86,19 +90,22 @@ class GitLabClient:
         self,
         token: str,
         *,
-        api_base: str = GITLAB_API_BASE,
+        api_base: str | None = None,
+        instance: GitLabInstance | None = None,
         timeout: float = 30.0,
     ) -> None:
         self.token = token
-        self.api_base = api_base.rstrip("/")
-        # gitlab.com is already on the shipped public allowlist; the host
-        # exception matters only for a self-hosted `api_base`, and it is
-        # derived from that configured value — never from request data — as
-        # src/http.py's rule demands.
-        api_host = urlsplit(self.api_base).hostname or ""
+        # The instance decides where the client may go: gitlab.com (shipped
+        # allowlist) or ONE self-hosted host, address-checked and pinned. A
+        # raw `api_base` goes through the same URL rules as a saved one.
+        if instance is None:
+            raw = (api_base or GITLAB_API_BASE).rstrip("/")
+            instance = instance_of(raw.removesuffix(API_SUFFIX))
+        self.instance = instance
+        self.api_base = instance.api_base
         self._http = build_client(
             timeout=timeout,
-            extra_allowed_hosts=(api_host,) if api_host else (),
+            **instance.http_kwargs(),
             headers={
                 "PRIVATE-TOKEN": token,
                 "Accept": "application/json",
@@ -284,10 +291,10 @@ def _replace_page_param(url: str, page: str) -> str:
 # ─── module-level convenience ───────────────────────────────────────
 
 
-def authenticate(token: str) -> GitLabCredentials:
-    """Verify + auto-derive username/id."""
+def authenticate(token: str, *, instance: GitLabInstance | None = None) -> GitLabCredentials:
+    """Verify + auto-derive username/id (against ``instance``; gitlab.com by default)."""
     creds = GitLabCredentials(token=token.strip())
-    with GitLabClient(creds.token) as client:
+    with GitLabClient(creds.token, instance=instance) as client:
         user = client.fetch_current_user()
         creds.username = str(user.get("username") or "")
         creds.user_id = int(user.get("id") or 0) or None

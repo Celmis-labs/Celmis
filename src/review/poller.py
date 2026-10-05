@@ -83,6 +83,8 @@ def _poll_cycle() -> None:
     # is fetched once per workspace per cycle), and two workspaces never share
     # a token. Polling *state* stays per-config (cfg.user_id, cfg.repo_slug).
     by_token: dict[tuple[str, str], tuple[str, list[RepoConfig]]] = {}
+    # The credential row per key: a GitLab row also names its instance.
+    cred_rows: dict[tuple[str, str], object] = {}
     for cfg in configs:
         try:
             creds = resolve_git_credential(
@@ -107,14 +109,19 @@ def _poll_cycle() -> None:
             continue
         key = (cfg.provider, cfg.workspace_id)
         by_token.setdefault(key, (creds.secret, []))[1].append(cfg)
+        cred_rows.setdefault(key, creds)
 
     for (provider, ws), (secret, cfg_list) in by_token.items():
         try:
             if provider == "github":
                 _poll_github(secret, cfg_list)
             elif provider == "gitlab":
+                from src.sync.gitlab_instance import instance_for_credential
+
+                # The instance of THIS workspace's own GitLab row.
+                instance = instance_for_credential(cred_rows.get((provider, ws)))
                 for cfg in cfg_list:
-                    _poll_gitlab_project(secret, cfg)
+                    _poll_gitlab_project(secret, cfg, instance)
             # Bitbucket polling intentionally not supported — manual mode only
         except Exception as exc:  # noqa: BLE001
             logger.exception(
@@ -201,8 +208,13 @@ def _poll_github(token: str, configs: list[RepoConfig]) -> None:
 # ─── GitLab: per-project MR polling ───────────────────────────────────
 
 
-def _poll_gitlab_project(token: str, cfg: RepoConfig) -> None:
+def _poll_gitlab_project(token: str, cfg: RepoConfig, gitlab=None) -> None:
+    """`gitlab` — the workspace's GitLabInstance (None → gitlab.com)."""
     import urllib.parse as _u
+
+    from src.sync.gitlab_instance import DEFAULT_INSTANCE, UnsafeGitLabURL
+
+    gitlab = gitlab or DEFAULT_INSTANCE
 
     project_id = _u.quote(cfg.full_name, safe="")
     headers = {"PRIVATE-TOKEN": token}
@@ -218,12 +230,12 @@ def _poll_gitlab_project(token: str, cfg: RepoConfig) -> None:
         params["updated_after"] = cfg.last_polled_at
 
     try:
-        with build_client(timeout=15.0) as client:
+        with build_client(timeout=15.0, **gitlab.http_kwargs()) as client:
             resp = client.get(
-                f"https://gitlab.com/api/v4/projects/{project_id}/merge_requests",
+                f"{gitlab.api_base}/projects/{project_id}/merge_requests",
                 headers=headers, params=params,
             )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, UnsafeGitLabURL) as exc:
         logger.warning("gitlab_poll_failed repo=%s err=%s", cfg.full_name, exc)
         return
 

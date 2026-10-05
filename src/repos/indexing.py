@@ -198,6 +198,17 @@ def index_repo_sync(
                 f"Connections page, then index again."
             ))
         kw = git_auth_kwargs(cfg.provider, creds.secret, creds.metadata)
+        gitlab_base_url = None
+        if cfg.provider == "gitlab":
+            from src.sync.gitlab_instance import UnsafeGitLabURL, instance_for_credential
+
+            try:
+                gitlab_base_url = instance_for_credential(creds).base_url
+            except UnsafeGitLabURL as exc:
+                raise IndexError_(safe_detail(
+                    f"The GitLab URL saved for this workspace is not usable ({exc}) "
+                    "— re-save the GitLab connection."
+                )) from exc
 
         indexer = GroupIndexer(
             group=RepoGroup(name=f"_solo_{cfg.repo_slug[:50]}", repos=[cfg.url]),
@@ -209,6 +220,7 @@ def index_repo_sync(
             # always lands on the default branch, so a repo whose work happens on
             # `dev` would be indexed from the wrong ref.
             branch=cfg.branch or None,
+            gitlab_base_url=gitlab_base_url,
         )
         try:
             result = indexer.index()

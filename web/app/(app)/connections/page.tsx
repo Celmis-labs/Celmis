@@ -134,16 +134,31 @@ function ProviderCard({
   const { confirm, dialog } = useConfirm();
   const info = PROVIDER_INFO[provider];
   const [showInstructions, setShowInstructions] = useState(false);
+  // An error the server returned for the last save, shown under the form —
+  // a toast disappears before anyone has read "resolves to a private address".
+  const [formError, setFormError] = useState<string | null>(null);
   const connected = Boolean(current?.connected);
+  // Self-hosted GitLab: the saved instance root ("" = gitlab.com).
+  const gitlabUrl =
+    provider === "gitlab" ? String(current?.metadata?.gitlab_base_url ?? "") : "";
+  const tokenUrl = gitlabUrl
+    ? `${gitlabUrl}/-/user_settings/personal_access_tokens`
+    : info.tokenUrl;
 
   const upsert = useMutation({
-    mutationFn: async (form: { token: string; email?: string; workspace?: string }) =>
+    mutationFn: async (form: {
+      token: string;
+      email?: string;
+      workspace?: string;
+      base_url?: string;
+    }) =>
       api<ConnectionVerifyResult>(`/api/connections/${provider}`, {
         method: "PUT",
         token,
         json: { provider, ...form },
       }),
     onSuccess: (res) => {
+      setFormError(res.ok ? null : (res.error ?? t("connections.verificationFailed")));
       if (res.ok) {
         toast.success(
           res.username
@@ -199,10 +214,19 @@ function ProviderCard({
     const fd = new FormData(e.currentTarget);
     const tok = String(fd.get("token") || "").trim();
     if (!tok) return;
+    const baseUrl = provider === "gitlab" ? String(fd.get("base_url") || "").trim() : "";
+    // The server decides (https, public address, no project path); this only
+    // catches the obvious slip before a token is sent anywhere.
+    if (baseUrl && !/^https?:\/\/[^/?#\s]+/i.test(baseUrl)) {
+      setFormError(t("connections.gitlab.urlInvalid"));
+      return;
+    }
+    setFormError(null);
     upsert.mutate({
       token: tok,
       email: provider === "bitbucket" ? String(fd.get("email") || "").trim() : undefined,
       workspace: provider === "bitbucket" ? String(fd.get("workspace") || "").trim() : undefined,
+      base_url: provider === "gitlab" ? baseUrl : undefined,
     });
   };
 
@@ -235,6 +259,11 @@ function ProviderCard({
                   updated: formatDateTime(current?.updated_at),
                 })
               : t("connections.requiredScope", { scopes: t(info.scopes) })}
+            {connected && gitlabUrl && (
+              <span className="block font-mono text-xs">
+                {t("connections.gitlab.instance", { url: gitlabUrl })}
+              </span>
+            )}
           </CardDescription>
         </div>
         {connected && (
@@ -273,7 +302,7 @@ function ProviderCard({
             {showInstructions ? t("connections.hideInstructions") : t("connections.showInstructions")}
           </Button>
           <a
-            href={info.tokenUrl}
+            href={tokenUrl}
             target="_blank"
             rel="noreferrer"
             className="text-sm text-[var(--color-brand)] hover:underline inline-flex items-center gap-1"
@@ -292,6 +321,11 @@ function ProviderCard({
             {provider === "github" && (
               <p className="pt-1 border-t border-[var(--color-border)]">
                 {t("connections.github.classic")}
+              </p>
+            )}
+            {provider === "gitlab" && (
+              <p className="pt-1 border-t border-[var(--color-border)]">
+                {t("connections.gitlab.selfHosted")}
               </p>
             )}
           </div>
@@ -324,6 +358,25 @@ function ProviderCard({
               </div>
             </div>
           )}
+          {provider === "gitlab" && (
+            <div>
+              <Label htmlFor="gitlab-url">{t("connections.gitlab.urlLabel")}</Label>
+              <Input
+                id="gitlab-url"
+                name="base_url"
+                type="url"
+                inputMode="url"
+                placeholder="https://gitlab.com"
+                defaultValue={gitlabUrl}
+                autoComplete="off"
+                aria-describedby="gitlab-url-help"
+                aria-invalid={formError ? true : undefined}
+              />
+              <p id="gitlab-url-help" className="text-xs text-[var(--color-muted-foreground)] mt-1">
+                {t("connections.gitlab.urlHelp")}
+              </p>
+            </div>
+          )}
           <div>
             <Label htmlFor={`${provider}-token`}>{t("connections.tokenLabel")}</Label>
             <Input
@@ -335,6 +388,11 @@ function ProviderCard({
               required
             />
           </div>
+          {formError && (
+            <p role="alert" className="text-sm text-[var(--color-destructive)]">
+              {formError}
+            </p>
+          )}
           <div className="flex justify-end">
             <Button type="submit" disabled={upsert.isPending}>
               {upsert.isPending

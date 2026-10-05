@@ -142,7 +142,13 @@ def _same_host(url: str, base: str) -> bool:
         got, want = urllib.parse.urlsplit(url), urllib.parse.urlsplit(base)
     except ValueError:
         return False
-    return got.scheme == "https" and got.netloc.lower() == want.netloc.lower()
+    # Same scheme as the API base (https, or http only for an instance the
+    # operator allowed over http), same host:port, and under the base path —
+    # a self-hosted GitLab's next link must not leave its /sub-path/api/v4.
+    prefix = want.path.rstrip("/")
+    return (got.scheme == want.scheme and got.scheme in ("https", "http")
+            and got.netloc.lower() == want.netloc.lower()
+            and (not prefix or got.path == prefix or got.path.startswith(prefix + "/")))
 
 
 def _order(
@@ -231,10 +237,10 @@ def _github(client: httpx.Client, full_name: str, token: str,
 
 
 def _gitlab(client: httpx.Client, full_name: str, token: str, cap: int,
-            search: str = "") -> BranchListing:
+            search: str = "", *, api: str = GITLAB_API) -> BranchListing:
     headers = {"PRIVATE-TOKEN": token}
     pid = urllib.parse.quote(full_name, safe="")
-    base = f"{GITLAB_API}/projects/{pid}/repository/branches"
+    base = f"{api}/projects/{pid}/repository/branches"
     params: dict[str, Any] = {"per_page": PAGE_SIZE, "page": 1,
                               "sort": "updated_desc"}
     if search:
@@ -263,7 +269,7 @@ def _gitlab(client: httpx.Client, full_name: str, token: str, cap: int,
         if next_page.isdigit():
             params = {**params, "page": int(next_page)}
             url = base
-        elif link_next and _same_host(link_next, GITLAB_API):
+        elif link_next and _same_host(link_next, api):
             url = link_next
         else:
             url = None
@@ -308,34 +314,53 @@ def _bitbucket(client: httpx.Client, full_name: str, email: str, token: str,
     return BranchListing(_order(items[:cap], default), default, truncated)
 
 
+def _instance(gitlab):
+    from src.sync.gitlab_instance import DEFAULT_INSTANCE
+
+    return gitlab or DEFAULT_INSTANCE
+
+
 def fetch_branches(provider: str, full_name: str, secret: str, email: str = "",
-                   *, search: str = "", cap: int | None = None) -> BranchListing:
+                   *, search: str = "", cap: int | None = None,
+                   gitlab=None) -> BranchListing:
     """Walk every page (up to ``cap``). Raises ``httpx.HTTPError`` on failure.
 
     ``search`` narrows server-side where the provider can (GitLab, Bitbucket);
-    GitHub ignores it — the caller filters.
+    GitHub ignores it — the caller filters. ``gitlab`` is the workspace's
+    :class:`~src.sync.gitlab_instance.GitLabInstance` (None → gitlab.com).
     """
     cap = cap or BRANCH_CAP
-    with build_client(timeout=15.0) as client:
+    inst = _instance(gitlab)
+    extra = inst.http_kwargs() if provider == "gitlab" else {}
+    with build_client(timeout=15.0, **extra) as client:
         if provider == "github":
             return _github(client, full_name, secret, cap)
         if provider == "gitlab":
-            return _gitlab(client, full_name, secret, cap, search)
+            return _gitlab(client, full_name, secret, cap, search, api=inst.api_base)
         if provider == "bitbucket":
             return _bitbucket(client, full_name, email, secret, cap, search)
     return BranchListing((), None, False)
 
 
+def _fp(secret: str, email: str, gitlab) -> str:
+    """Credential fingerprint, plus the instance for a self-hosted GitLab —
+    one token on two instances must never share a cache entry."""
+    if gitlab is not None and not gitlab.is_default:
+        email = f"{email}\0{gitlab.base_url}"
+    return credential_fingerprint(secret, email)
+
+
 def cached_branches(provider: str, full_name: str, secret: str, email: str = "",
-                    *, search: str = "") -> BranchListing:
+                    *, search: str = "", gitlab=None) -> BranchListing:
     """`fetch_branches` behind the short per-credential cache. Failures are
     never cached: the next open retries."""
-    key = (provider, full_name.lower(), credential_fingerprint(secret, email),
+    key = (provider, full_name.lower(), _fp(secret, email, gitlab),
            search.lower())
     hit = _cache_get(key)
     if hit is not None:
         return hit
-    listing = fetch_branches(provider, full_name, secret, email, search=search)
+    listing = fetch_branches(provider, full_name, secret, email, search=search,
+                             gitlab=gitlab)
     _cache_put(key, listing)
     return listing
 
@@ -379,7 +404,7 @@ def page_of(listing: BranchListing, q: str, limit: int) -> BranchPage:
 
 
 def branch_page(provider: str, full_name: str, secret: str, email: str = "",
-                *, q: str = "", limit: int = 100) -> BranchPage:
+                *, q: str = "", limit: int = 100, gitlab=None) -> BranchPage:
     """The answer a dropdown needs: matches for ``q``, at most ``limit``.
 
     Measured on a real Bitbucket repository with 2,092 branches: walking every
@@ -398,14 +423,15 @@ def branch_page(provider: str, full_name: str, secret: str, email: str = "",
     is still the only way to find a branch by substring.
     """
     q = normalize_query(q)
-    fp = credential_fingerprint(secret, email)
+    fp = _fp(secret, email, gitlab)
     full = _cache_get((provider, full_name.lower(), fp, ""))
     if full is None and provider not in _SEARCHABLE:
-        full = cached_branches(provider, full_name, secret, email)
+        full = cached_branches(provider, full_name, secret, email, gitlab=gitlab)
     if full is not None:
         if not q or not full.truncated or provider not in _SEARCHABLE:
             return page_of(full, q, limit)
-        narrowed = cached_branches(provider, full_name, secret, email, search=q)
+        narrowed = cached_branches(provider, full_name, secret, email, search=q,
+                                   gitlab=gitlab)
         merged = BranchListing(
             names=tuple(dict.fromkeys((*narrowed.names, *full.names))),
             default_branch=full.default_branch or narrowed.default_branch,
@@ -414,7 +440,8 @@ def branch_page(provider: str, full_name: str, secret: str, email: str = "",
         return page_of(merged, q, limit)
     if q:
         return page_of(
-            cached_branches(provider, full_name, secret, email, search=q), q, limit)
+            cached_branches(provider, full_name, secret, email, search=q,
+                            gitlab=gitlab), q, limit)
     return page_of(_cached_head(provider, full_name, secret, email,
                                 cap=max(limit, PAGE_SIZE)), "", limit)
 

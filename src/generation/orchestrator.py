@@ -45,6 +45,25 @@ def _is_quota_error(exc: Exception) -> bool:
     )
 
 
+def _workspace_gitlab_base(repo_identifier: str, workspace_id: str) -> str | None:
+    """The workspace's self-hosted GitLab root when the repo is a GitLab one.
+
+    None (gitlab.com) for every other provider and for a workspace without a
+    self-hosted connection. Never raises: the clone then reports the problem.
+    """
+    if not str(repo_identifier or "").lower().startswith("gitlab:"):
+        return None
+    try:
+        from src.sync.gitlab_instance import instance_for_workspace
+
+        inst = instance_for_workspace(workspace_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gitlab_instance_unresolved ws=%s err=%s", workspace_id,
+                       type(exc).__name__)
+        return None
+    return None if inst.is_default else inst.base_url
+
+
 @dataclass
 class GenerationResult:
     repo: str
@@ -169,6 +188,7 @@ class GenerationOrchestrator:
         cancel_check=None,
         language: str | None = None,
         engine: str | None = None,
+        gitlab_base_url: str | None = None,
     ) -> GenerationResult:
         """Run the full pipeline.
 
@@ -252,6 +272,8 @@ class GenerationOrchestrator:
             def _clone_progress(msg: str) -> None:
                 _notify("sync", msg)
 
+            if gitlab_base_url is None:
+                gitlab_base_url = _workspace_gitlab_base(repo_identifier, self.workspace_id)
             sync_result = self.sync.clone_or_update(
                 repo_identifier,
                 branch,
@@ -259,6 +281,7 @@ class GenerationOrchestrator:
                 password=password,
                 api_token=api_token,
                 progress_callback=_clone_progress,
+                gitlab_base_url=gitlab_base_url,
             )
             progress.update(t_sync, completed=1)
 
