@@ -20,6 +20,50 @@ derives it from there.
 
 ## [Unreleased]
 
+## [2.3.3] — 2026-10-05
+
+### Added
+
+- **The in-app agent reads and explains, and does far more.** The chat went
+  from 10 verbs to 33. New reads: the review settings in force for the
+  workspace or one repository (each value with where it comes from — repo,
+  workspace or built-in), review history and one run's findings, issues,
+  questions about the code (the Q&A pipeline) and code search (symbols,
+  usages, owners, architecture), spend, usage and budget, alerts, jobs, the
+  dependency-audit delta and SBOM link, and workspace members. Settings,
+  review runs, spend, usage, alerts, jobs and the audit delta are answered by
+  a second model call that explains the real data rather than generic text.
+  New writes, each shown as a plan and run only on a second press with the
+  same role checks as the pages: review a PR or every open PR of a
+  repository, re-index repositories, change an issue's status, set the
+  budget, acknowledge an alert, retry or cancel a job, cancel an audit.
+- **MCP: 48 tools on the HTTP mount (32 read, 16 write).** Every new agent
+  verb is a tool too, plus the review-configuration verbs
+  (`get_review_settings`, `update_review_setting`, `propose_review_rules`,
+  `generate_review_rules`). New scope `write:config`. `/api/mcp/token` and the
+  MCP settings page can issue write scopes on explicit request, bounded by
+  the caller's role (`write:config` / `write:repos`: owner or admin;
+  `write:reviews`: editor and above); the default token stays read-only.
+- **Pull Requests summary cards.** Reviewed today, Awaiting review (open PRs
+  into a targeted branch with no completed review at their current head,
+  read from the providers' cached listings, so repositories in manual mode
+  count too; partial results are shown as "≥N") and Needs attention (latest
+  review failed, requested changes, or an open critical/error finding).
+  Clicking a card filters the list to exactly those PRs.
+
+### Changed
+
+- **Target branches are applied before queueing.** Bulk review (page, agent
+  and MCP — one shared action) no longer queues PRs whose base branch the
+  repository's target branches leave out; they are returned as skipped and do
+  not count toward the bulk limit. The open-PR list marks them, sorts them
+  last and leaves them out of the "review all" count; reviewing one by hand
+  asks for confirmation. Webhooks (GitHub, GitLab, Bitbucket) and the GitLab
+  poller record the gate skip without running a review job. The
+  orchestrator's target-branch gate stays the authority.
+- **MCP write tools enforce their scope on every call** on the HTTP mount,
+  not only in `tools/list`. Legacy scope-less tokens and `admin` still pass.
+
 ## [2.3.2] — 2026-10-05
 
 ### Added
