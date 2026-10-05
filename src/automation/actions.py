@@ -1256,3 +1256,194 @@ async def update_review_setting(
             "count": 1,
             "links": [{"label": "policy",
                        "href": _settings_href(slug, REVIEW_SETTING_SECTION.get(key))}]}
+
+
+# ─── reading the review settings ─────────────────────────────────────
+#
+# The one verb in this section only LOOKS. "Which review settings are on, and
+# how does that work" had no verb, so the planner returned no steps and the
+# person got a generic paragraph about a configuration the agent had never
+# seen. Nothing here resolves anything itself: the layering is
+# `review_defaults.resolve`, the override list is `overridden_fields`, the
+# guidelines are `resolve_guidelines` — the functions the settings page and a
+# review already read, so this answer cannot disagree with either.
+
+#: How much of one value, one guideline or one list may travel. The snapshot
+#: goes into a model prompt, and a person's own text is the one part of it
+#: with no bound of its own.
+_SNAPSHOT_TEXT = 300
+_SNAPSHOT_LIST = 20
+#: Repositories named in the workspace overview. The counts are always exact;
+#: only the names are cut.
+_SNAPSHOT_REPOS = 40
+
+
+def _clip(value: Any) -> Any:
+    """`value` shaped for a prompt: strings cut, lists cut, nothing else."""
+    if isinstance(value, str):
+        return value if len(value) <= _SNAPSHOT_TEXT else value[:_SNAPSHOT_TEXT] + "…"
+    if isinstance(value, (list, tuple)):
+        return [_clip(v) for v in list(value)[:_SNAPSHOT_LIST]]
+    return value
+
+
+async def _active_rules_count(session: Any, ws: str, slug: str | None) -> int | None:
+    """Enabled review rules in force: the repository's composed with the
+    workspace's, or the workspace's own. None when the store is not there."""
+    if not rules_store_available():
+        return None
+    try:
+        from src.review import rules_store
+
+        if slug:
+            return len(await rules_store.effective_rules_for(ws, slug, session=session))
+        return (await rules_store.counts(ws, scope="workspace",
+                                         session=session))["active"]
+    except Exception as exc:  # noqa: BLE001 — a count is optional, never the answer
+        logger.warning("review_settings_rules_unavailable ws=%s err=%s", ws, exc)
+        return None
+
+
+async def read_review_settings(
+    actor: Actor, session: Any, repo_slug: str | None = None,
+) -> dict[str, Any]:
+    """The review settings in force, and where each one comes from.
+
+    `repo_slug` None is the workspace: its defaults over the built-in values,
+    plus which repositories override what. A slug is one repository: its
+    policy over the workspace's over the built-in. Members read, as on the
+    GET routes; a repository is also subject to the team's `read` grant, the
+    rule the settings overview applies per repository.
+    """
+    import asyncio
+
+    from sqlalchemy import select
+
+    from src.api.auto_review import get_auto_review_store
+    from src.api.deps import enforce_repo_permission
+    from src.api.routers import agents as agents_router
+    from src.api.routers.review_defaults import _require_member, overridden_fields
+    from src.api.routers.review_policies import (
+        _load_workspace_defaults,
+        _workspace_review_language_layer,
+    )
+    from src.db.models import RepoReviewPolicy
+    from src.review.prompt_guidelines import resolve_guidelines
+    from src.review.review_defaults import (
+        INHERITABLE_FIELDS,
+        agent_participation,
+        install_defaults,
+        resolve,
+    )
+
+    user = _user_for(actor)
+    ws = actor.workspace_id
+    await _as_action(_require_member(user, ws))
+
+    slug: str | None = None
+    if repo_slug and str(repo_slug).strip():
+        slug = resolve_repo(actor, repo_slug)
+        await _as_action(enforce_repo_permission(slug, user, "read", ws))
+
+    # First, before anything else touches the session: a database behind the
+    # migration is rolled back inside, and a rollback expires what is loaded.
+    ws_defaults = await _load_workspace_defaults(session, ws)
+    row = None
+    if slug:
+        row = await session.get(RepoReviewPolicy, slug)
+        if row is not None and row.workspace_id != ws:
+            row = None   # another tenant's row under the same slug: not ours
+    values, sources = resolve(row, ws_defaults, install_defaults())
+
+    language, language_source = await asyncio.to_thread(
+        _workspace_review_language_layer, ws)
+    own_language = getattr(row, "review_language", None) if row else None
+
+    fields: dict[str, Any] = {
+        name: {"value": _clip(values[name]), "source": sources[name]}
+        for name in INHERITABLE_FIELDS
+    }
+    fields["review_language"] = {
+        "value": own_language or language,
+        "source": "repo" if own_language else language_source,
+    }
+
+    participation = agent_participation(
+        values["disabled_agents"], values["enabled_agents"])
+
+    # Guidelines and replaced prompts are per agent, in two stores: the
+    # workspace's in the credential store (blocking), the repository's on its
+    # policy row. `resolve_guidelines` is what a review calls to combine them.
+    repo_guidelines = dict(getattr(row, "agent_prompt_guidelines", None) or {}) if row else {}
+    extend = set(getattr(row, "agent_guidelines_extend", None) or []) if row else set()
+    repo_overrides = dict(getattr(row, "agent_prompt_overrides", None) or {}) if row else {}
+
+    def _per_agent() -> tuple[dict[str, Any], list[str]]:
+        found: dict[str, Any] = {}
+        replaced: list[str] = []
+        for agent in agents_router._AGENTS:
+            entries = resolve_guidelines(
+                repo_text=repo_guidelines.get(agent),
+                workspace_text=agents_router.get_workspace_guidelines(agent, ws),
+                extend=agent in extend)
+            if entries:
+                text = "\n\n".join(e.text for e in entries)
+                found[agent] = {
+                    "from": "+".join(e.source for e in entries),
+                    "chars": len(text), "text": _clip(text),
+                }
+            repo_text = repo_overrides.get(agent)
+            if (isinstance(repo_text, str) and repo_text.strip()) or (
+                    agents_router._load_override(agent, ws) is not None):
+                replaced.append(agent)
+        return found, replaced
+
+    guidelines, replaced = await asyncio.to_thread(_per_agent)
+
+    configs = await asyncio.to_thread(get_auto_review_store().list_for_workspace, ws)
+    repos_overview: list[dict[str, Any]] = []
+    if slug:
+        cfg = next((c for c in configs if c.repo_slug == slug), None)
+        auto_review = ({"enabled": bool(cfg.enabled), "branch": cfg.branch,
+                        "mode": cfg.mode} if cfg is not None else None)
+    else:
+        policies = {r.repo_slug: r for r in (await session.scalars(
+            select(RepoReviewPolicy).where(RepoReviewPolicy.workspace_id == ws)
+        )).all()}
+        seen: set[str] = set()
+        total = 0
+        for c in sorted(configs, key=lambda c: c.full_name):
+            if c.repo_slug in seen:
+                continue
+            seen.add(c.repo_slug)
+            try:
+                await enforce_repo_permission(c.repo_slug, user, "read", ws)
+            except Exception:  # noqa: BLE001 — a repository they may not read is not named
+                continue
+            total += 1
+            policy = policies.get(c.repo_slug) or policies.get(c.full_name)
+            overridden = overridden_fields(policy) if policy is not None else []
+            off = policy is not None and not policy.enabled
+            if (overridden or off) and len(repos_overview) < _SNAPSHOT_REPOS:
+                repos_overview.append({
+                    "repo": c.repo_slug, "overridden": overridden,
+                    "review_enabled": not off, "auto_review": bool(c.enabled),
+                })
+        auto_review = {"repos_total": total,
+                       "auto_review_on": sum(1 for c in configs if c.enabled)}
+
+    return {
+        "scope": "repo" if slug else "workspace",
+        "repo": slug,
+        "review_enabled": (row is None or bool(row.enabled)) if slug else None,
+        "fields": fields,
+        "agents_on": [a for a, on in participation.items() if on],
+        "agents_off": [a for a, on in participation.items() if not on],
+        "guidelines": guidelines,
+        "prompt_replaced_agents": replaced,
+        "rules_enabled": await _active_rules_count(session, ws, slug),
+        "auto_review": auto_review,
+        "repos": repos_overview,
+        "links": [{"label": "policy" if slug else "defaults",
+                   "href": _settings_href(slug)}],
+    }

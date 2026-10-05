@@ -176,6 +176,7 @@ function switchSession(sid: string): void {
  *  costs a model call, and a fetch would put it back on the network. */
 const READS = [
   "list_repos", "explain", "help", "audit_status", "list_findings",
+  "review_settings",
 ] as const;
 const WRITES = [
   "generate_docs", "start_dep_audit", "set_auto_review",
@@ -452,7 +453,8 @@ export function sendsOnEnter(e: React.KeyboardEvent): boolean {
  *  be a live button for the seconds until the real note replaces it.
  *  Anything that is not a path on this origin renders as its label only.
  *
- *  Markdown only where the model wrote markdown: a `help` answer, or a note
+ *  Markdown only where the model wrote markdown: a `help` or `review_settings`
+ *  answer (the latter is the explanation written from the real settings), or a note
  *  carrying an in-app link (`isMarkdownNote`). Every other note — a plan's
  *  one-liner that echoes `services/*` or `api-*-service` back — is shown
  *  verbatim, as it was before notes could be markdown; parsed, those globs
@@ -462,7 +464,8 @@ export function sendsOnEnter(e: React.KeyboardEvent): boolean {
  *  panel open: it lives in the shell, and a client-side navigation does not
  *  unmount the shell. */
 export function isMarkdownNote(text: string, steps?: { action: string | null }[]): boolean {
-  return (steps ?? []).some((s) => s.action === "help") || text.includes("](/");
+  return (steps ?? []).some((s) => s.action === "help" || s.action === "review_settings")
+    || text.includes("](/");
 }
 
 export function NoteText({
@@ -1180,6 +1183,17 @@ function Answer({
         // guide; what is left to render is the pages it pointed at.
         if (s.action === "help") {
           return <GuideLinks key={i} links={Array.isArray(r.links) ? r.links : []} />;
+        }
+
+        // Same shape: the explanation written from the real settings is the
+        // note, and what is left is the page that edits them.
+        if (s.action === "review_settings") {
+          const links = (Array.isArray(r.links) ? r.links : []).map(
+            (l: { href: string }) => ({
+              href: l.href, label: t("automation.action.review_settings"),
+            }),
+          );
+          return <GuideLinks key={i} links={links} />;
         }
 
         if (s.action === "list_repos") {

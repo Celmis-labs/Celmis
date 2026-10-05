@@ -90,6 +90,7 @@ def test_the_catalogue_reaches_what_actions_can_do():
         "list_repos", "get_dep_audit", "list_dep_findings", "generate_docs",
         "start_dep_audit", "set_auto_review", "propose_review_rules",
         "generate_review_rules", "update_review_setting",
+        "read_review_settings",
     }
     assert not unreachable, (
         f"actions.py can do {sorted(unreachable)} and no sentence can reach it"

@@ -95,7 +95,8 @@ finding or alert.
 The round button at the bottom right of every page; [full view](/automation)
 keeps past chats. It answers how-to questions and does work across a SET of
 repositories: list repositories and their state, the last dependency audit and
-its findings, explain the product; and — shown as a plan you approve with
+its findings, show and explain the review settings in force (for the workspace
+or one repository, and where each value comes from), explain the product; and — shown as a plan you approve with
 "Run it" — generate documentation, start a dependency audit, or switch
 automatic review on or off (and pin a branch) for many repositories at once,
 add or draft review rules, and change a review setting (see the review

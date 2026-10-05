@@ -504,8 +504,34 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
                 run_id, status="failed", steps=d["steps"], note=d["note"],
                 error=str(exc)[:500])
             return
+        note = d["note"]
+        settings_step = next(
+            (r for r in answer.get("steps", [])
+             if r.get("action") == "review_settings"), None)
+        if settings_step is not None:
+            # The plan's note was written before anyone had looked at the
+            # settings, so it can only say generic things about them. A second
+            # call, handed what the read returned, explains the real values.
+            # Its failure is not the answer's: the plan note stays.
+            try:
+                from src.automation.chat import explain_review_settings
+
+                explained = await asyncio.to_thread(
+                    explain_review_settings, p["message"],
+                    settings_step.get("result") or {},
+                    workspace_id=workspace_id, user_id=p.get("user_id", ""),
+                    language=d.get("language", ""), history=p.get("history"),
+                    on_note=on_note, should_stop=should_stop,
+                )
+                note = explained or note
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("automation_explain_settings_failed run=%s err=%s",
+                               run_id, exc)
+            if is_cancel_requested(job["id"]):
+                await _finish_automation_plan(run_id, status="stopped")
+                return
         await _finish_automation_plan(
-            run_id, status="answered", steps=d["steps"], note=d["note"],
+            run_id, status="answered", steps=d["steps"], note=note,
             language=d.get("language", ""), result=answer)
         return
 
