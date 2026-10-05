@@ -851,11 +851,10 @@ function ChangePreview({ preview, said }: { preview: ChangePreviewData; said: Tr
   if (preview.kind === "budget" || preview.kind === "alert"
       || preview.kind === "job" || preview.kind === "audit_cancel") {
     // What Confirm will do to one record or one figure, as plain chips.
-    const { kind: _kind, ...fields } = preview;
     return (
       <div className="mb-1 flex flex-wrap items-center gap-1.5 text-xs">
-        {Object.entries(fields)
-          .filter(([, v]) => v !== null && v !== undefined && v !== "")
+        {Object.entries(preview)
+          .filter(([k, v]) => k !== "kind" && v !== null && v !== undefined && v !== "")
           .map(([k, v]) => (
             <code key={k} className="rounded bg-[var(--color-muted)]/60 px-1.5 py-0.5 text-[11px]">
               {k}: {String(v)}
@@ -962,11 +961,16 @@ const usd = (n: unknown) => `$${Number(n ?? 0).toFixed(2)}`;
  *  a link to the page that has the rest. For the explained reads (spend, usage,
  *  alerts, jobs, audit delta) the explanation is the note above; this is the
  *  evidence under it. */
+/** A read's result as the server sent it: rendered field by field, never
+ *  trusted for shape beyond that. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type ResultRecord = Record<string, any>;
+
 function OpsRead({
   action, r, t, token,
 }: {
   action: string;
-  r: Record<string, any>;
+  r: ResultRecord;
   t: Translate;
   token: string | null;
 }) {
@@ -984,7 +988,7 @@ function OpsRead({
           ["cache %", r.cache_hit_pct],
         ]} />
         <Chips items={(r.by_model ?? []).slice(0, 4).map(
-          (m: any): [string, unknown] => [m.label || m.key, usd(m.cost_usd)])} />
+          (m: ResultRecord): [string, unknown] => [m.label || m.key, usd(m.cost_usd)])} />
       </div>
     );
   } else if (action === "get_usage") {
@@ -1002,7 +1006,7 @@ function OpsRead({
       ]} />
     );
   } else if (action === "list_alerts") {
-    const rows: any[] = r.alerts ?? [];
+    const rows: ResultRecord[] = r.alerts ?? [];
     body = rows.length === 0 ? none : (
       <ul className="space-y-1">
         {rows.slice(0, 8).map((a) => (
@@ -1018,7 +1022,7 @@ function OpsRead({
       </ul>
     );
   } else if (action === "list_jobs") {
-    const rows: any[] = r.jobs ?? [];
+    const rows: ResultRecord[] = r.jobs ?? [];
     body = (
       <div className="space-y-1.5">
         <Chips items={Object.entries(r.stats ?? {})} />
@@ -1059,7 +1063,7 @@ function OpsRead({
       </Button>
     ) : none;
   } else if (action === "list_members") {
-    const rows: any[] = r.members ?? [];
+    const rows: ResultRecord[] = r.members ?? [];
     body = rows.length === 0 ? none : (
       <ul className="space-y-1">
         {rows.slice(0, 25).map((m) => (
