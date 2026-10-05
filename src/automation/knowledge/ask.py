@@ -96,11 +96,15 @@ The round button at the bottom right of every page; [full view](/automation)
 keeps past chats. It answers how-to questions and does work across a SET of
 repositories: list repositories and their state, the last dependency audit and
 its findings, show and explain the review settings in force (for the workspace
-or one repository, and where each value comes from), explain the product; and — shown as a plan you approve with
+or one repository, and where each value comes from), recent review runs and
+what one run found, review issues, answer a question about the code, find a
+symbol, its usages or a file's owner, explain the product; and — shown as a plan you approve with
 "Run it" — generate documentation, start a dependency audit, or switch
 automatic review on or off (and pin a branch) for many repositories at once,
-add or draft review rules, and change a review setting (see the review
-rules section). Nothing runs until you press the second button.
+add or draft review rules, change a review setting (see the review
+rules section), review one pull request or every open one of a repository,
+re-index repositories, and set the status of review issues. Nothing runs
+until you press the second button.
 
 It remembers the conversation: the last few turns of the current chat (your
 sentences and what it answered or planned) go with each new message, so
@@ -166,6 +170,53 @@ and nothing is written until you press "Run it" ("Cancel" leaves it).
   both scopes, like editing prompts on the page.
 Follow-ups work: after «add rules for billing-api: …», «і для payments
 теж» proposes the same rules for payments.
+""",
+    ),
+    Section(
+        id="agent-reviews-and-code",
+        title="Reviews, issues, indexing and questions about the code from the agent",
+        keywords=(
+            "review pr", "review pull request", "review runs", "review run",
+            "findings", "issue", "issues", "index", "reindex", "re-index",
+            "ask the code", "search code", "who owns", "owner", "usages",
+            "рев'ю", "ревю", "знахідк", "індекс", "переіндекс", "власник",
+            "кто владеет", "ревью", "находк", "индекс",
+        ),
+        strong=("review pr", "review pull request", "re-index", "reindex",
+                "who owns", "ask the code", "переіндекс"),
+        body="""
+The Celmis agent (round button, or [Celmis agent](/automation)) covers the
+daily review work as well as configuration.
+
+Reads (answered at once, nothing to approve):
+- «how did the last reviews of billing-api go» — recent runs with status,
+  verdict and findings by severity, linking to [Review history](/reviews).
+- «what did review of PR 42 in billing-api find» — one run's findings
+  (severity, file, line, title); give a run id, or repository and PR number
+  for the latest run.
+- «open critical issues» — tracked [Issues](/issues), worst first, with counts
+  per status.
+- «how does billing-api validate a token» — a written answer from the code Q&A
+  with the files it read. It costs one model call, booked as Q&A spend, and
+  honours the workspace budget and your research access.
+- «where is TokenValidator defined», «who calls it», «who owns
+  src/api/auth.py», «summarise the architecture of billing-api» — symbol
+  search, usages, ownership and the cached architecture summary, free of
+  model calls ([Search](/search)).
+
+Writes (a plan card first, then "Run it"):
+- Review a pull request: one by number, or every open pull request of a
+  repository (at most 25). Needs the `review` grant on the repository, like
+  the Review button. Findings are posted on the pull request unless you say
+  not to; the run shows up in [Review history](/reviews).
+- Re-index repositories (the code graph search and reviews read): the ones
+  you name, or all. Needs `review` on each; one already queued is skipped.
+- Set the status of review issues (open, fixed, dismissed, resolved): needs
+  the `member` role or higher, the same as the Issues page.
+
+Everything is also available to MCP clients: `review_pr`, `list_reviews`,
+`get_review_run`, `index_repo`, `list_issues`, `update_issue`, `ask_code` and
+`search_code`, behind the same checks.
 """,
     ),
 )

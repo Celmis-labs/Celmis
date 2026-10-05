@@ -315,11 +315,11 @@ def test_the_answer_is_the_explanation_written_from_the_snapshot(handler, monkey
 
     calls: dict = {}
 
-    def _explain(message, snapshot, **kw):
-        calls.update(message=message, snapshot=snapshot, **kw)
+    def _explain(message, action, snapshot, **kw):
+        calls.update(message=message, action=action, snapshot=snapshot, **kw)
         return "## Налаштування\nПояснення"
 
-    monkeypatch.setattr(chat, "explain_review_settings", _explain)
+    monkeypatch.setattr(chat, "explain_read", _explain)
     asyncio.run(handlers.handle_automation_plan(_job()))
 
     (run_id, kw), = handler["finished"]
@@ -327,6 +327,7 @@ def test_the_answer_is_the_explanation_written_from_the_snapshot(handler, monkey
     assert kw["status"] == "answered"
     assert kw["note"] == "## Налаштування\nПояснення"
     # The model is handed what the read returned, and the language it was asked in.
+    assert calls["action"] == "review_settings"
     assert calls["snapshot"] == {"scope": "workspace", "fields": {}}
     assert calls["language"] == "uk" and calls["workspace_id"] == WS
     assert calls["on_note"] is not None
@@ -339,7 +340,7 @@ def test_a_failed_explanation_keeps_the_plan_note_and_still_answers(handler, mon
     def _boom(*a, **k):
         raise RuntimeError("upstream 503")
 
-    monkeypatch.setattr(chat, "explain_review_settings", _boom)
+    monkeypatch.setattr(chat, "explain_read", _boom)
     asyncio.run(handlers.handle_automation_plan(_job()))
 
     (_, kw), = handler["finished"]
@@ -360,7 +361,7 @@ def test_other_reads_do_not_pay_for_a_second_call(handler, monkeypatch):
     def _never(*a, **k):
         raise AssertionError("a second model call for a read that has no data to explain")
 
-    monkeypatch.setattr(chat, "explain_review_settings", _never)
+    monkeypatch.setattr(chat, "explain_read", _never)
     asyncio.run(handlers.handle_automation_plan(_job()))
     assert handler["finished"][0][1]["note"] == "plan note"
 

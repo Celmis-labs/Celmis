@@ -10,17 +10,15 @@ workspace may read; viewers may not change a status.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api import deps as deps_module
 from src.api.deps import current_workspace_id, get_current_user
 from src.db.models import ReviewIssue, ReviewPullRequest
 from src.db.session import get_async_session
@@ -195,37 +193,9 @@ async def set_issue_status(
     user: User = Depends(get_current_user),
     ws: str = Depends(current_workspace_id),
 ) -> IssueOut:
-    if not user.is_admin:
-        role = await asyncio.to_thread(deps_module.workspace_role, user.id, ws)
-        if role not in deps_module.ISSUE_WRITE_ROLES:
-            raise HTTPException(
-                status_code=403,
-                detail="Changing an issue requires member or above on this workspace",
-            )
-    row = await session.get(ReviewIssue, issue_id)
-    if row is None or row.workspace_id != ws:
-        raise HTTPException(status_code=404, detail="Issue not found")
+    # The role check, the tenant check and the close/reopen bookkeeping are
+    # one function: the agent changes an issue through it too.
+    from src.automation.actions_reviews import apply_issue_status
 
-    if payload.status != row.status:
-        row.status = payload.status
-        if payload.status == "open":
-            row.resolution_source = None
-            row.closed_at = None
-            row.fixed_in_sha = None
-        else:
-            row.resolution_source = "manual"
-            row.closed_at = datetime.now(UTC)
-            if payload.status != "fixed":
-                row.fixed_in_sha = None
-        await session.commit()
-        await session.refresh(row)
-        logger.info("review_issue_status id=%s status=%s by=%s",
-                    issue_id, payload.status, user.email)
-
-    pr = (await session.execute(select(ReviewPullRequest).where(
-        ReviewPullRequest.workspace_id == ws,
-        ReviewPullRequest.provider == row.pr_provider,
-        ReviewPullRequest.repo == row.pr_repo,
-        ReviewPullRequest.number == row.pr_number,
-    ))).scalar_one_or_none()
+    row, pr = await apply_issue_status(session, user, ws, issue_id, payload.status)
     return _to_out(row, pr)

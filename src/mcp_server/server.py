@@ -541,6 +541,203 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         except ActionError as exc:
             return {"ok": False, "error": str(exc)}
 
+
+    # ─── Reviews, issues, indexing and questions about the code ───────
+    #
+    # The daily work an agent was missing: start a review of a pull request,
+    # see how the last ones went, read what a run found, close an issue,
+    # re-index, ask the code a question, find who owns a file. Bodies live in
+    # src.automation.actions_reviews — the same functions the in-app agent
+    # runs — so every gate (the team's `review` / `read` grant, the member
+    # role, the research-access resolver) is the page's.
+
+    @mcp.tool(
+        name="list_reviews",
+        description=(
+            "The newest review runs of one repository (repo_slug) or of the "
+            "whole workspace: pull request, status, verdict, finding counts "
+            "by severity, when. status filters (complete|failed|running|"
+            "queued|partial|skipped); limit defaults to 10, at most 25. Each "
+            "row carries the run_id for get_review_run."
+        ),
+    )
+    @require_scopes("read:reviews")
+    async def _list_reviews(
+        repo_slug: str | None = None, status: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        from src.automation.actions import ActionError
+        from src.automation.actions_reviews import list_reviews
+
+        try:
+            actor = _actor("mcp")
+            return {"ok": True, **await list_reviews(
+                actor, None, repo_slug=repo_slug, status=status, limit=limit)}
+        except ActionError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @mcp.tool(
+        name="get_review_run",
+        description=(
+            "One review run: summary, verdict, agents, and its findings "
+            "(severity, file, line, title, agent), bounded by limit (default "
+            "20, at most 40; `truncated` says it was cut). Give run_id, or "
+            "repo_slug + number for the latest run of that pull request. "
+            "Unlike get_review, which takes a PR reference, this reads the "
+            "stored run of the caller's workspace."
+        ),
+    )
+    @require_scopes("read:reviews")
+    async def _get_review_run(
+        run_id: str | None = None, repo_slug: str | None = None,
+        number: int | None = None, limit: int = 20,
+    ) -> dict[str, Any]:
+        from src.automation.actions import ActionError
+        from src.automation.actions_reviews import get_review_run
+
+        try:
+            actor = _actor("mcp")
+            return {"ok": True, **await get_review_run(
+                actor, None, run_id=run_id, repo_slug=repo_slug, number=number,
+                limit=limit)}
+        except ActionError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @mcp.tool(
+        name="index_repo",
+        description=(
+            "Queue a (re-)index of repositories — the code graph that search, "
+            "questions, reviews and architecture read. repo_slugs names them "
+            "(re-indexed even when a graph exists); omit to cover the whole "
+            "workspace (owner narrows by 'owner/' prefix; repositories that "
+            "already have a graph are left alone unless force=true). At most "
+            "50. Needs `review` on each repository; a repository whose index "
+            "is already queued is skipped, not cloned twice."
+        ),
+    )
+    @require_scopes("write:repos")
+    async def _index_repo(
+        repo_slugs: list[str] | None = None, owner: str | None = None,
+        force: bool | None = None,
+    ) -> dict[str, Any]:
+        from src.automation.actions import ActionError
+        from src.automation.actions_reviews import index_repo
+
+        try:
+            actor = _actor("mcp", writing=True)
+            return {"ok": True, **await index_repo(
+                actor, None, repo_slugs=repo_slugs, owner=owner, force=force)}
+        except ActionError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @mcp.tool(
+        name="list_issues",
+        description=(
+            "Tracked review issues (findings followed across a pull "
+            "request's runs), worst severity first, with counts per status. "
+            "status is open|fixed|dismissed|resolved, comma-separated "
+            "(default open); optional severity, repo_slug, pr number and "
+            "text q; limit defaults to 15, at most 25. Each row's id is what "
+            "update_issue takes."
+        ),
+    )
+    @require_scopes("read:reviews")
+    async def _list_issues(
+        status: str | None = "open", severity: str | None = None,
+        repo_slug: str | None = None, pr: int | None = None,
+        q: str | None = None, limit: int = 15,
+    ) -> dict[str, Any]:
+        from src.automation.actions import ActionError
+        from src.automation.actions_reviews import list_issues
+
+        try:
+            actor = _actor("mcp")
+            return {"ok": True, **await _in_session(
+                lambda s: list_issues(
+                    actor, s, status=status, severity=severity,
+                    repo_slug=repo_slug, pr=pr, q=q, limit=limit))}
+        except ActionError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @mcp.tool(
+        name="update_issue",
+        description=(
+            "Set the status of one or several review issues (issue_ids, at "
+            "most 25): open | fixed | dismissed | resolved. Needs the member "
+            "role or above on the workspace. Reopening clears the close "
+            "marks; any other status records a manual resolution."
+        ),
+    )
+    @require_scopes("write:repos")
+    async def _update_issue(issue_ids: list[str], status: str) -> dict[str, Any]:
+        from src.automation.actions import ActionError
+        from src.automation.actions_reviews import update_issue
+
+        try:
+            actor = _actor("mcp", writing=True)
+            return {"ok": True, **await _in_session(
+                lambda s: update_issue(actor, s, ids=issue_ids, status=status))}
+        except ActionError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @mcp.tool(
+        name="ask_code",
+        description=(
+            "Ask a question about the code of one or several repositories "
+            "(repo_slugs, at most 8; omit for all the caller can read) and "
+            "get a written answer built from the code Q&A pipeline: vault "
+            "notes, the code graph and the files it read, listed in `files`. "
+            "Costs one model call, booked as Q&A spend, and honours the "
+            "workspace budget and the caller's research access. The answer "
+            "is capped; for a symbol, an owner or an architecture summary "
+            "use search_code, which is free."
+        ),
+    )
+    @require_scopes("read:graph")
+    async def _ask_code(
+        question: str, repo_slugs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        from src.automation.actions import ActionError
+        from src.automation.actions_reviews import ask_code
+
+        try:
+            actor = _actor("mcp")
+            return {"ok": True, **await ask_code(
+                actor, None, question=question, repo_slugs=repo_slugs)}
+        except ActionError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    @mcp.tool(
+        name="search_code",
+        description=(
+            "Find things in the code. kind=search (default): symbols and "
+            "documentation notes matching `query`, optionally within "
+            "repo_slug. kind=usages: what calls or imports the symbol "
+            "`query` in repo_slug. kind=owner: who owns `path` in repo_slug "
+            "(git blame authors and CODEOWNERS). kind=architecture: the "
+            "cached architecture summary of repo_slug. Results are bounded "
+            "by limit (default 15, at most 50) and filtered by the caller's "
+            "research access."
+        ),
+    )
+    @require_scopes("read:graph")
+    async def _search_code(
+        kind: str = "search", query: str | None = None,
+        repo_slug: str | None = None, path: str | None = None,
+        limit: int = 15,
+    ) -> dict[str, Any]:
+        from src.automation.actions import ActionError
+        from src.automation.actions_reviews import search_code
+
+        try:
+            actor = _actor("mcp")
+            return {"ok": True, **await _in_session(
+                lambda s: search_code(
+                    actor, s, kind=kind, query=query, repo_slug=repo_slug,
+                    path=path, limit=limit))}
+        except ActionError as exc:
+            return {"ok": False, "error": str(exc)}
+
     # Defence in depth behind the verifier: every tool refuses a refused
     # caller itself (see src/mcp_server/guard.py).
     from src.mcp_server.guard import guard_every_tool

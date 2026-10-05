@@ -32,6 +32,16 @@ def test_server_builds_with_all_tools() -> None:
         "start_dep_audit",
         "get_dep_audit",
         "list_dep_findings",
+        # reviews, issues, indexing and code questions
+        # (src/automation/actions_reviews.py); `review_pr` above is the older
+        # synchronous one, the queued twin is HTTP-only
+        "list_reviews",
+        "get_review_run",
+        "index_repo",
+        "list_issues",
+        "update_issue",
+        "ask_code",
+        "search_code",
     ])
 
 

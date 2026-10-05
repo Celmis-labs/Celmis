@@ -505,27 +505,41 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
                 error=str(exc)[:500])
             return
         note = d["note"]
-        settings_step = next(
-            (r for r in answer.get("steps", [])
-             if r.get("action") == "review_settings"), None)
-        if settings_step is not None:
+        from src.automation.chat import ANSWER_READS, EXPLAINED_READS
+
+        steps_read = answer.get("steps", [])
+        # An answer a read already wrote (ask_code) IS the note: no second call.
+        for r in steps_read:
+            key = ANSWER_READS.get(r.get("action") or "")
+            written = ((r.get("result") or {}).get(key) if key else "") or ""
+            if written:
+                note = written if note == d["note"] else f"{note}\n\n{written}"
+                break
+        explained_steps = [r for r in steps_read
+                           if r.get("action") in EXPLAINED_READS]
+        if explained_steps and note == d["note"]:
             # The plan's note was written before anyone had looked at the
-            # settings, so it can only say generic things about them. A second
-            # call, handed what the read returned, explains the real values.
+            # data, so it can only say generic things about it. A second
+            # call, handed what the reads returned, explains the real values.
             # Its failure is not the answer's: the plan note stays.
             try:
-                from src.automation.chat import explain_review_settings
+                from src.automation.chat import explain_read
 
+                names = [r["action"] for r in explained_steps]
+                snapshot = (explained_steps[0].get("result") or {}
+                            if len(names) == 1 else
+                            {r["action"]: r.get("result") or {}
+                             for r in explained_steps})
                 explained = await asyncio.to_thread(
-                    explain_review_settings, p["message"],
-                    settings_step.get("result") or {},
+                    explain_read, p["message"],
+                    names[0] if len(names) == 1 else tuple(names), snapshot,
                     workspace_id=workspace_id, user_id=p.get("user_id", ""),
                     language=d.get("language", ""), history=p.get("history"),
                     on_note=on_note, should_stop=should_stop,
                 )
                 note = explained or note
             except Exception as exc:  # noqa: BLE001
-                logger.warning("automation_explain_settings_failed run=%s err=%s",
+                logger.warning("automation_explain_failed run=%s err=%s",
                                run_id, exc)
             if is_cancel_requested(job["id"]):
                 await _finish_automation_plan(run_id, status="stopped")

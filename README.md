@@ -743,6 +743,11 @@ the questions a grep cannot:
 | `bootstrap_client` · `start_integration_walk` | what a client needs to call another team's service |
 | `get_dep_audit` · `list_dep_findings` | the last audit and its findings, worst first |
 | `get_review` · `get_review_policy` | the latest review of a PR, and which agents run where |
+| `list_reviews` · `get_review_run` | the newest review runs, and one run's findings (by run id, or repo + PR number) |
+| `list_issues` | tracked review issues, worst first, with counts per status |
+| `ask_code` · `search_code` | a written answer about the code (one model call, booked as Q&A); symbol, usages, owner and architecture lookups |
+
+The HTTP mount also writes with `review_pr` (queue a review of one PR or every open one), `index_repo` and `update_issue` (set an issue's status), all behind `write:repos`.
 
 **The two transports are not the same set.** `analyzer mcp serve` over stdio
 serves 13 older, graph-shaped tools (`find_symbol`, `find_callers`,

@@ -1520,23 +1520,13 @@ def _run_inline(payload: dict) -> None:
 
 def _queue_one(cfg: RepoConfig, number: int, *, user: User, post_comments: bool,
                source: str, background: BackgroundTasks) -> QueuedReviewOut:
-    from src.review.dispatch import enqueue_review_run
+    from src.automation.actions_reviews import queue_pr_review
 
-    try:
-        res = enqueue_review_run(
-            cfg.provider, cfg.full_name, number, user_id=user.id,
-            workspace_id=cfg.workspace_id, post_comments=post_comments,
-            source=source,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("manual_review_enqueue_failed repo=%s pr=%s",
-                         cfg.repo_slug, number)
-        return QueuedReviewOut(number=number, status="failed",
-                               reason=f"Could not record the review ({type(exc).__name__}).")
-    if res.status == "inline":
-        background.add_task(_run_inline, res.payload)
-    return QueuedReviewOut(number=number, run_id=res.run_id, status=res.status,
-                           reason=res.reason)
+    item, inline = queue_pr_review(
+        cfg, number, user_id=user.id, post_comments=post_comments, source=source)
+    if inline is not None:
+        background.add_task(_run_inline, inline)
+    return QueuedReviewOut(**item)
 
 
 @router.post("/{slug}/pulls/{number}/review", response_model=QueuedReviewOut)
@@ -1568,8 +1558,7 @@ def review_all_open_prs(
 ) -> BulkReviewOut:
     """Queue a review of every open PR matching the page's filters (or the
     listed `numbers`), at most `BULK_LIMIT`, after explicit confirmation."""
-    from src.repos import open_pulls
-    from src.review.dispatch import BULK_LIMIT
+    from src.automation.actions_reviews import audit_bulk_review, open_pr_targets
 
     if not body.confirm:
         raise HTTPException(
@@ -1577,35 +1566,19 @@ def review_all_open_prs(
             detail="Bulk review needs confirmation (confirm: true).",
         )
     cfg = _registered_repo(slug, workspace_id)
-    secret, email, gitlab = _repo_credential(cfg, user)
-    # Fresh, not cached: this spends model budget on what it reads.
-    listing = _open_listing(cfg, secret, email, branch=body.branch, refresh=True,
-                            gitlab=gitlab)
-    if body.numbers:
-        open_numbers = {p.number for p in listing.items}
-        targets = sorted({int(n) for n in body.numbers if int(n) in open_numbers})
-    else:
-        targets = [p.number for p in open_pulls.select(
-            listing.items, q=body.q, target=body.branch or None)]
-    if len(targets) > BULK_LIMIT:
-        raise HTTPException(
-            status_code=422,
-            detail=(f"{len(targets)} open pull requests match; at most "
-                    f"{BULK_LIMIT} can be reviewed in one request — narrow the "
-                    f"search or the target-branch filter."),
-        )
+    # The selection, the cap and the fresh listing are the action's: the agent
+    # starts the same review through the same function.
+    targets = open_pr_targets(cfg, user, branch=body.branch, q=body.q,
+                              numbers=body.numbers)
     items = [
         _queue_one(cfg, n, user=user, post_comments=body.post_comments,
                    source="bulk", background=background)
         for n in targets
     ]
     queued = sum(1 for i in items if i.status in ("queued", "inline"))
-    record_action(
-        action="review.bulk_queued", actor=user.email, actor_id=user.id,
-        workspace_id=workspace_id, target=slug, ip=client_ip(request),
-        detail={"requested": len(targets), "queued": queued,
-                "branch": body.branch or "", "q": bool(body.q)},
-    )
+    audit_bulk_review(user, workspace_id, slug, requested=len(targets),
+                      queued=queued, branch=body.branch, q=body.q,
+                      ip=client_ip(request))
     logger.info("bulk_review_queued repo=%s requested=%d queued=%d by=%s",
                 slug, len(targets), queued, user.email)
     return BulkReviewOut(requested=len(targets), queued=queued, items=items)

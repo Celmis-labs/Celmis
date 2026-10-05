@@ -39,6 +39,10 @@ import { useDictFor, useT } from "@/lib/i18n";
 import { LocalSetupGuideBody } from "@/components/local-setup-guide";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  VERB_MARKDOWN, VERB_READS, VERB_WRITES, VerbAnswer, VerbOutcome, VerbPreview,
+  type VerbPreviewData,
+} from "@/components/automation/verb-results";
 
 type Step = {
   action: string | null;
@@ -65,6 +69,7 @@ type ChangePreviewData =
   | { kind: "rules"; repo: string | null; status: "pending" | "active"; rules: PreviewRule[] }
   | { kind: "generate"; repo: string }
   | { kind: "setting"; scope: "workspace" | "repo"; repo: string | null; key: string; value: unknown }
+  | VerbPreviewData
   | Record<string, never>;
 
 type RunResult = {
@@ -176,11 +181,13 @@ function switchSession(sid: string): void {
  *  costs a model call, and a fetch would put it back on the network. */
 const READS = [
   "list_repos", "explain", "help", "audit_status", "list_findings",
-  "review_settings",
+  "review_settings", "list_reviews", "get_review_run", "list_issues",
+  "ask_code", "search_code",
 ] as const;
 const WRITES = [
   "generate_docs", "start_dep_audit", "set_auto_review",
   "propose_review_rules", "generate_review_rules", "update_review_setting",
+  "review_pr", "index_repo", "update_issue",
 ] as const;
 
 /** The writes that change review configuration rather than queue work over a
@@ -189,6 +196,7 @@ const WRITES = [
  *  and their outcome is a saved change with links, not "started on N". */
 const CONFIG_VERBS = [
   "propose_review_rules", "generate_review_rules", "update_review_setting",
+  "review_pr", "update_issue",
 ];
 
 function isConfigOnly(steps: { action: string | null }[] | undefined): boolean {
@@ -464,7 +472,8 @@ export function sendsOnEnter(e: React.KeyboardEvent): boolean {
  *  panel open: it lives in the shell, and a client-side navigation does not
  *  unmount the shell. */
 export function isMarkdownNote(text: string, steps?: { action: string | null }[]): boolean {
-  return (steps ?? []).some((s) => s.action === "help" || s.action === "review_settings")
+  return (steps ?? []).some((s) => s.action === "help" || s.action === "review_settings"
+    || VERB_MARKDOWN.includes(s.action as (typeof VERB_MARKDOWN)[number]))
     || text.includes("](/");
 }
 
@@ -748,6 +757,14 @@ export function Reply({
         </div>
       )}
 
+      {/* The review, index and issue writes say more than a count: what was
+          skipped and why, and the pages that show the result. */}
+      {run.status === "started" && !isConfigOnly(run.steps) && (run.result.steps ?? [])
+        .filter((s) => s.action === "index_repo")
+        .map((s, i) => (
+          <VerbOutcome key={i} action={s.action} result={s.result} t={said} />
+        ))}
+
       {/* Below whatever the model said, never instead of it: its note is the
           only part that is about this particular sentence. In the language of
           that sentence too — this is the reply to a question nobody could
@@ -791,6 +808,9 @@ function ChangePreview({ preview, said }: { preview: ChangePreviewData; said: Tr
         </code>
       </div>
     );
+  }
+  if (preview.kind === "review_pr" || preview.kind === "issue") {
+    return <VerbPreview preview={preview} t={said} />;
   }
   if (preview.kind === "generate") {
     return (
@@ -851,6 +871,9 @@ function ConfigOutcome({ result, said }: { result: RunResult; said: Translate })
   return (
     <div className="space-y-2">
       {steps.map((s, i) => {
+        if ((VERB_WRITES as readonly string[]).includes(s.action)) {
+          return <VerbOutcome key={i} action={s.action} result={s.result} t={said} />;
+        }
         const r = s.result as {
           status?: string;
           links?: { label: string; href: string }[];
@@ -1194,6 +1217,10 @@ function Answer({
             }),
           );
           return <GuideLinks key={i} links={links} />;
+        }
+
+        if ((VERB_READS as readonly string[]).includes(s.action)) {
+          return <VerbAnswer key={i} action={s.action} result={r} t={t} />;
         }
 
         if (s.action === "list_repos") {
