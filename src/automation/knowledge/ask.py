@@ -219,4 +219,47 @@ Everything is also available to MCP clients: `review_pr`, `list_reviews`,
 `search_code`, behind the same checks.
 """,
     ),
+    Section(
+        id="agent-operations",
+        title="Spend, alerts, jobs, audit extras and members from the agent chat and MCP",
+        keywords=(
+            "spend", "cost", "costs", "budget", "cap", "usage", "tokens",
+            "alert", "alerts", "ack", "acknowledge", "job", "jobs", "queue",
+            "retry", "cancel", "sbom", "delta", "members", "roles", "teams",
+            "who is in", "витрат", "бюджет", "токен", "алерт", "задач",
+            "черг", "перезапуст", "зупин", "учасник", "ролі", "команд",
+            "расход", "бюджет", "задач", "очеред", "участник",
+        ),
+        strong=("budget", "бюджет", "spend", "sbom", "alerts", "алерт",
+                "jobs", "members"),
+        body="""
+The Celmis agent (and an MCP client, with the same names) answers operational
+questions from the pages' own data, behind each page's own permission:
+- `get_spend` — LLM spend for a period (default 30 days): totals, tokens,
+  cache hit, top surfaces, models, agents and repositories, daily series
+  (any member, as [Usage & cost](/admin/usage)). `get_usage` — review runs,
+  tokens and cost (owner, admin or editor, as [Analytics](/analytics)).
+  `get_budget` — the monthly cap and how much is used.
+- `set_budget` — set the monthly cap in USD, the alert percentage and
+  hard stop (0 = no cap); owner or admin of the workspace; shown as a plan
+  and run on the second press.
+- `list_alerts` — incoming [alerts](/alerts) (filter new, acked, fixed);
+  `ack_alert` — mark one acked or fixed.
+- `list_jobs` — background jobs of this workspace with counts per status
+  ([Job queue](/admin/jobs)); `retry_job` puts a dead, failed or cancelled
+  job back; `cancel_job` stops a running one at its next checkpoint (both
+  owner or admin, and only a job of this workspace).
+- `cancel_dep_audit` stops a queued or running dependency audit;
+  `audit_delta` says what appeared and what was resolved since the previous
+  audit; `export_sbom` returns the download link of the CycloneDX SBOM of a
+  finished run (one repository, or all as a zip) — a link, not the file. See
+  [Dependencies](/dependencies).
+- `list_members` — the workspace's members with roles and teams (any
+  member). Inviting people and changing roles are not agent verbs.
+Over MCP the reads need `read:graph` (usage `read:reviews`), the writes
+`write:repos` (alerts, jobs, audit cancel) or `write:config` (budget,
+review settings and rules) — scopes a browser-issued token only carries when asked for and
+allowed by the person's workspace role.
+""",
+    ),
 )

@@ -44,6 +44,9 @@ type McpToken = {
  *  navigator.clipboard is unavailable over plain HTTP on some browsers, and a
  *  button that silently does nothing on the one page whose whole job is
  *  "copy this" is worse than no button. */
+/** The write scopes a token may ask for — the server's `WRITE_SCOPES`. */
+const WRITE_SCOPES = ["write:config", "write:repos", "write:reviews"];
+
 function CopyButton({ text, label }: { text: string; label: string }) {
   const t = useT();
   const [done, setDone] = useState(false);
@@ -80,10 +83,18 @@ export default function McpPage() {
   const t = useT();
   const token = useToken();
   const [issued, setIssued] = useState<McpToken | null>(null);
+  // Write scopes are opt-in: nothing ticked is the read-only token it always
+  // was. The server refuses the ones the account's role cannot use.
+  const [writeScopes, setWriteScopes] = useState<string[]>([]);
+  const toggleScope = (scope: string) =>
+    setWriteScopes((cur) => cur.includes(scope) ? cur.filter((x) => x !== scope) : [...cur, scope]);
 
   const issue = useMutation({
     mutationFn: () =>
-      api<McpToken>("/api/mcp/token", { method: "POST", token, json: {} }),
+      api<McpToken>("/api/mcp/token", {
+        method: "POST", token,
+        json: writeScopes.length ? { scopes: writeScopes } : {},
+      }),
     onSuccess: (r) => { setIssued(r); toast.success(t("mcp.issued")); },
     onError: (e) => toast.error((e as Error).message),
   });
@@ -136,15 +147,38 @@ export default function McpPage() {
           <CardDescription>{t("mcp.step1Body")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <fieldset className="space-y-1.5">
+            <legend className="text-xs font-medium">{t("mcp.writeScopes")}</legend>
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              {WRITE_SCOPES.map((scope) => (
+                <label key={scope} className="flex items-center gap-1.5 text-xs">
+                  <input type="checkbox" checked={writeScopes.includes(scope)}
+                         onChange={() => toggleScope(scope)} />
+                  <code className="text-[11px]">{scope}</code>
+                </label>
+              ))}
+            </div>
+            <p className="text-[11px] text-[var(--color-muted-foreground)]">
+              {t("mcp.writeScopesHint")}
+            </p>
+          </fieldset>
           <div className="flex flex-wrap items-center gap-2">
             <Button size="sm" disabled={issue.isPending} onClick={() => issue.mutate()}>
               {issue.isPending ? t("mcp.issuing") : t("mcp.issue")}
             </Button>
             {issued && (
               <>
-                <Badge variant="success" className="text-[10px]">
-                  {t("mcp.readOnly")}
-                </Badge>
+                {issued.scopes.some((x) => x.startsWith("write:"))
+                  ? (
+                    <Badge variant="warning" className="text-[10px]">
+                      {t("mcp.canWrite")}
+                    </Badge>
+                  )
+                  : (
+                    <Badge variant="success" className="text-[10px]">
+                      {t("mcp.readOnly")}
+                    </Badge>
+                  )}
                 <span className="text-xs text-[var(--color-muted-foreground)]">
                   {issued.scopes.join(" · ")}
                 </span>

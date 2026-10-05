@@ -30,7 +30,7 @@ import {
   MessageSquareIcon, PlayIcon, SquareIcon, XCircleIcon,
 } from "lucide-react";
 
-import { api, llmApi } from "@/lib/api";
+import { API_BASE, api, downloadWithAuth, llmApi } from "@/lib/api";
 import { isInAppHref } from "@/lib/in-app-href";
 import { AGENT_SESSION_KEY } from "@/lib/agent-session";
 import { cn } from "@/lib/utils";
@@ -70,6 +70,10 @@ type ChangePreviewData =
   | { kind: "generate"; repo: string }
   | { kind: "setting"; scope: "workspace" | "repo"; repo: string | null; key: string; value: unknown }
   | VerbPreviewData
+  | { kind: "budget"; monthly_usd_cap: number; alert_pct: number; hard_stop: boolean }
+  | { kind: "alert"; id: string; status: string }
+  | { kind: "job"; id: string; op: "retry" | "cancel" }
+  | { kind: "audit_cancel"; run_id: string | null }
   | Record<string, never>;
 
 type RunResult = {
@@ -183,12 +187,37 @@ const READS = [
   "list_repos", "explain", "help", "audit_status", "list_findings",
   "review_settings", "list_reviews", "get_review_run", "list_issues",
   "ask_code", "search_code",
+  "get_spend", "get_usage", "get_budget", "list_alerts", "list_jobs",
+  "audit_delta", "export_sbom", "list_members",
 ] as const;
 const WRITES = [
   "generate_docs", "start_dep_audit", "set_auto_review",
   "propose_review_rules", "generate_review_rules", "update_review_setting",
   "review_pr", "index_repo", "update_issue",
+  "set_budget", "ack_alert", "retry_job", "cancel_job", "cancel_dep_audit",
 ] as const;
+
+/** The operations writes — the server's `OPS_WRITE_VERBS`. Like the config
+ *  verbs they act on the workspace or on one named record, not on a set of
+ *  repositories: the card shows the change itself, and the outcome is "done". */
+const OPS_READS = [
+  "get_spend", "get_usage", "get_budget", "list_alerts", "list_jobs",
+  "audit_delta", "export_sbom", "list_members",
+];
+const OPS_WRITES = [
+  "set_budget", "ack_alert", "retry_job", "cancel_job", "cancel_dep_audit",
+];
+
+/** The reads whose answer is written by a second model call from the data —
+ *  the server's `EXPLAINED_READS`. Their note is markdown, like `help`. */
+const EXPLAINED_READS = [
+  "review_settings", "list_reviews", "get_review_run", "get_spend", "get_usage", "list_alerts", "list_jobs",
+  "audit_delta",
+];
+
+function isOpsOnly(steps: { action: string | null }[] | undefined): boolean {
+  return !!steps?.length && steps.every((s) => OPS_WRITES.includes(s.action ?? ""));
+}
 
 /** The writes that change review configuration rather than queue work over a
  *  set — the server's `CONFIG_VERBS`. Their card shows the change itself
@@ -418,7 +447,9 @@ export function useAutomationThread() {
         method: "POST", token, json: { plan_id: runId },
       }),
     onSuccess: (r) => {
-      toast.success(isConfigOnly(r.steps)
+      toast.success(isOpsOnly(r.steps)
+        ? t("automation.ops.done")
+        : isConfigOnly(r.steps)
         ? t("automation.config.saved")
         : t("automation.started", { count: String(howMany(r)) }));
       qc.invalidateQueries({ queryKey: ["automation-history", sessionId] });
@@ -472,9 +503,10 @@ export function sendsOnEnter(e: React.KeyboardEvent): boolean {
  *  panel open: it lives in the shell, and a client-side navigation does not
  *  unmount the shell. */
 export function isMarkdownNote(text: string, steps?: { action: string | null }[]): boolean {
-  return (steps ?? []).some((s) => s.action === "help" || s.action === "review_settings"
-    || VERB_MARKDOWN.includes(s.action as (typeof VERB_MARKDOWN)[number]))
-    || text.includes("](/");
+  return (steps ?? []).some(
+    (s) => s.action === "help" || EXPLAINED_READS.includes(s.action ?? "")
+      || VERB_MARKDOWN.includes(s.action as (typeof VERB_MARKDOWN)[number]),
+  ) || text.includes("](/");
 }
 
 export function NoteText({
@@ -691,12 +723,12 @@ export function Reply({
              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-background)]/60 p-3">
           <div className="mb-1 flex flex-wrap items-center gap-2 text-sm font-medium">
             {said(`automation.action.${s.action}`)}
-            {!CONFIG_VERBS.includes(s.action ?? "") && (
+            {!CONFIG_VERBS.includes(s.action ?? "") && !OPS_WRITES.includes(s.action ?? "") && (
               <Badge variant="brand" className="text-[10px]">
                 {said("automation.repoCount", { count: String(s.resolved_repos.length) })}
               </Badge>
             )}
-            {!CONFIG_VERBS.includes(s.action ?? "") && Object.entries(s.arguments)
+            {!CONFIG_VERBS.includes(s.action ?? "") && !OPS_WRITES.includes(s.action ?? "") && Object.entries(s.arguments)
               .filter(([, v]) => v !== null && v !== undefined && v !== "")
               .filter(([k]) => k !== "repo_slugs" && k !== "owner")
               .map(([k, v]) => (
@@ -742,11 +774,15 @@ export function Reply({
         )
       )}
 
+      {run.status === "started" && isOpsOnly(run.steps) && (
+        <OpsOutcome result={run.result} said={said} />
+      )}
+
       {run.status === "started" && isConfigOnly(run.steps) && (
         <ConfigOutcome result={run.result} said={said} />
       )}
 
-      {run.status === "started" && !isConfigOnly(run.steps) && (
+      {run.status === "started" && !isOpsOnly(run.steps) && !isConfigOnly(run.steps) && (
         <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted-foreground)]">
           <span>{said("automation.started", { count: String(howMany(run.result)) })}</span>
           {howMany(run.result) > 0 && (
@@ -812,6 +848,22 @@ function ChangePreview({ preview, said }: { preview: ChangePreviewData; said: Tr
   if (preview.kind === "review_pr" || preview.kind === "issue") {
     return <VerbPreview preview={preview} t={said} />;
   }
+  if (preview.kind === "budget" || preview.kind === "alert"
+      || preview.kind === "job" || preview.kind === "audit_cancel") {
+    // What Confirm will do to one record or one figure, as plain chips.
+    const { kind: _kind, ...fields } = preview;
+    return (
+      <div className="mb-1 flex flex-wrap items-center gap-1.5 text-xs">
+        {Object.entries(fields)
+          .filter(([, v]) => v !== null && v !== undefined && v !== "")
+          .map(([k, v]) => (
+            <code key={k} className="rounded bg-[var(--color-muted)]/60 px-1.5 py-0.5 text-[11px]">
+              {k}: {String(v)}
+            </code>
+          ))}
+      </div>
+    );
+  }
   if (preview.kind === "generate") {
     return (
       <p className="mb-1 text-xs text-[var(--color-muted-foreground)]">
@@ -853,6 +905,184 @@ function ChangePreview({ preview, said }: { preview: ChangePreviewData; said: Tr
           </li>
         ))}
       </ol>
+    </div>
+  );
+}
+
+/** What an operations write did: one line per step, and the page that shows it.
+ *  The result is the action's own (`actions_ops`), so the line names the verb
+ *  and the record it touched rather than a count of repositories. */
+function OpsOutcome({ result, said }: { result: RunResult; said: Translate }) {
+  const steps = result.steps ?? [];
+  return (
+    <div className="space-y-2">
+      {steps.map((s, i) => {
+        const r = s.result as { id?: string; run_id?: string; links?: { href: string }[] };
+        const href = (Array.isArray(r.links) ? r.links : []).find((l) => isInAppHref(l.href))?.href;
+        return (
+          <div key={i} className="space-y-1.5">
+            <p className="flex flex-wrap items-center gap-1.5 text-xs text-[var(--color-muted-foreground)]">
+              <CheckCircle2Icon className="h-3.5 w-3.5 text-[var(--color-brand)]" />
+              {said("automation.ops.done")}
+              <span>{said(`automation.action.${s.action}`)}</span>
+              {(r.id || r.run_id) && (
+                <code className="rounded bg-[var(--color-muted)]/60 px-1.5 py-0.5 text-[11px]">
+                  {r.id || r.run_id}
+                </code>
+              )}
+            </p>
+            {href && (
+              <GuideLinks links={[{ href, label: said(`automation.action.${s.action}`) }]} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Small figures, as `key: value` chips. Empty values are left out. */
+function Chips({ items }: { items: [string, unknown][] }) {
+  const shown = items.filter(([, v]) => v !== null && v !== undefined && v !== "");
+  if (shown.length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-2 text-xs">
+      {shown.map(([k, v]) => (
+        <span key={k} className="rounded bg-[var(--color-muted)]/60 px-1.5 py-0.5">
+          {k}: {String(v)}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+const usd = (n: unknown) => `$${Number(n ?? 0).toFixed(2)}`;
+
+/** The data behind the operations reads, compact: figures and short lists, with
+ *  a link to the page that has the rest. For the explained reads (spend, usage,
+ *  alerts, jobs, audit delta) the explanation is the note above; this is the
+ *  evidence under it. */
+function OpsRead({
+  action, r, t, token,
+}: {
+  action: string;
+  r: Record<string, any>;
+  t: Translate;
+  token: string | null;
+}) {
+  const none = (
+    <p className="text-xs text-[var(--color-muted-foreground)]">{t("automation.ops.none")}</p>
+  );
+  let body: React.ReactNode = null;
+
+  if (action === "get_spend") {
+    body = (
+      <div className="space-y-1.5">
+        <Chips items={[
+          ["cost", usd(r.cost_usd)], ["calls", r.calls],
+          ["tokens in", r.tokens_in], ["tokens out", r.tokens_out],
+          ["cache %", r.cache_hit_pct],
+        ]} />
+        <Chips items={(r.by_model ?? []).slice(0, 4).map(
+          (m: any): [string, unknown] => [m.label || m.key, usd(m.cost_usd)])} />
+      </div>
+    );
+  } else if (action === "get_usage") {
+    body = (
+      <Chips items={[
+        ["runs", r.total_runs], ["completed", r.completed_runs],
+        ["failed", r.failed_runs], ["cost", usd(r.cost_usd)],
+      ]} />
+    );
+  } else if (action === "get_budget") {
+    body = (
+      <Chips items={[
+        ["spent", usd(r.spent_usd)], ["cap", r.enabled ? usd(r.cap_usd) : "—"],
+        ["used %", r.used_pct], ["hard stop", r.hard_stop ? "on" : "off"],
+      ]} />
+    );
+  } else if (action === "list_alerts") {
+    const rows: any[] = r.alerts ?? [];
+    body = rows.length === 0 ? none : (
+      <ul className="space-y-1">
+        {rows.slice(0, 8).map((a) => (
+          <li key={a.id} className="flex flex-wrap items-center gap-2 text-xs">
+            <Badge variant="outline" className="text-[10px]">{a.severity}</Badge>
+            <span className="wrap-anywhere">{a.title}</span>
+            <Badge variant={a.status === "new" ? "brand" : "outline"} className="text-[10px]">
+              {a.status}
+            </Badge>
+            <code className="text-[10px] text-[var(--color-muted-foreground)]">{a.id}</code>
+          </li>
+        ))}
+      </ul>
+    );
+  } else if (action === "list_jobs") {
+    const rows: any[] = r.jobs ?? [];
+    body = (
+      <div className="space-y-1.5">
+        <Chips items={Object.entries(r.stats ?? {})} />
+        {rows.length === 0 ? none : (
+          <ul className="space-y-1">
+            {rows.slice(0, 8).map((j) => (
+              <li key={j.id} className="flex flex-wrap items-center gap-2 text-xs">
+                <code>{j.kind}</code>
+                <Badge variant="outline" className="text-[10px]">{j.status}</Badge>
+                {j.last_error && (
+                  <span className="wrap-anywhere text-[var(--color-muted-foreground)]">
+                    {String(j.last_error).slice(0, 120)}
+                  </span>
+                )}
+                <code className="text-[10px] text-[var(--color-muted-foreground)]">{j.id}</code>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  } else if (action === "audit_delta") {
+    body = (
+      <div className="space-y-1.5">
+        {r.headline && <p className="text-xs">{r.headline}</p>}
+        <Chips items={Object.entries(r.counts ?? {})} />
+      </div>
+    );
+  } else if (action === "export_sbom") {
+    // A button, not a link: the endpoint reads the Authorization header and
+    // nothing else, so a plain navigation would save an error body.
+    body = r.path ? (
+      <Button size="sm" variant="outline" className="h-8"
+              onClick={() => downloadWithAuth(
+                `${API_BASE}${r.path}`, `celmis-sbom-${r.run_id}.cdx.json`, token,
+              ).catch((e: Error) => toast.error(e.message))}>
+        {t("deps.downloadSbom")}
+      </Button>
+    ) : none;
+  } else if (action === "list_members") {
+    const rows: any[] = r.members ?? [];
+    body = rows.length === 0 ? none : (
+      <ul className="space-y-1">
+        {rows.slice(0, 25).map((m) => (
+          <li key={m.user_id} className="flex flex-wrap items-center gap-2 text-xs">
+            <span>{m.name || m.email}</span>
+            <Badge variant="outline" className="text-[10px]">{m.role}</Badge>
+            {(m.teams ?? []).map((tm: string) => (
+              <Badge key={tm} variant="outline" className="text-[10px]">{tm}</Badge>
+            ))}
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  // export_sbom's own link is the button; every other verb points at its page.
+  const links = action === "export_sbom" ? [] : (Array.isArray(r.links) ? r.links : [])
+    .filter((l: { href: string }) => isInAppHref(l.href))
+    .map((l: { href: string }) => ({ href: l.href, label: t(`automation.action.${action}`) }));
+  return (
+    <div className="space-y-2">
+      {body}
+      <GuideLinks links={links} />
     </div>
   );
 }
@@ -1180,12 +1410,19 @@ function Answer({
   onPick: (text: string) => void;
 }) {
   const t = useDictFor(language);
+  const token = useToken();
   const steps = result.steps ?? [];
 
   return (
     <div className="space-y-3">
       {steps.map((s, i) => {
         const r = s.result as Record<string, any>;
+
+        // The operations reads: figures and short lists under the note (which
+        // is the explanation, for the explained ones), and the page to open.
+        if (OPS_READS.includes(s.action)) {
+          return <OpsRead key={i} action={s.action} r={r} t={t} token={token} />;
+        }
 
         // The one verb whose entire answer is written down here. The server
         // replies with a topic and nothing else, which is the whole point of

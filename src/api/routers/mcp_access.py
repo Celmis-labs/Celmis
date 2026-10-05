@@ -11,10 +11,19 @@ not shipped — that endpoint says so itself. This is the bridge until it does:
 the user is already authenticated to the API, so the API can hand them a token
 for the resource server it also runs.
 
-Scopes are READ-ONLY and not negotiable from the request. An MCP client is
-software on somebody's laptop that a language model drives; a token minted from
-a browser click should not be able to write a review policy or register a repo,
-and the way to guarantee that is to never let the caller name the scope.
+A token is READ-ONLY by default. An MCP client is software on somebody's
+laptop that a language model drives, so a plain browser click mints a token
+that cannot write a review policy or register a repo. Write scopes are issued
+only when the request NAMES them (`scopes`), and only the ones the caller's
+workspace role could use anyway:
+
+    write:config   owner / admin   budget, review settings and rules
+    write:repos    owner / admin   register repos, audits, docs, alerts, jobs
+    write:reviews  editor and up   cross-repo migration PRs
+
+A scope is a ceiling, never a grant: every tool still applies the caller's own
+role, so asking for one the role cannot use is refused here rather than issued
+as a token that fails later. A scope outside this list is refused too.
 """
 
 from __future__ import annotations
@@ -34,6 +43,21 @@ router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 #: What a browser-issued token may do. Read-only on purpose — see the module
 #: docstring. `write:*` stays with the CLI, where an operator is the one asking.
 _TOKEN_SCOPES = ["read:graph", "read:groups", "read:reviews"]
+
+#: The write scopes a caller may ASK for, and who may have each one. Roles come
+#: from `src.users.roles`, so a role added there is not forgotten here.
+def _write_scope_roles() -> dict[str, frozenset[str]]:
+    from src.users.roles import PROMPT_EDITOR_ROLES, WORKSPACE_ADMIN_ROLES
+
+    return {
+        "write:config": WORKSPACE_ADMIN_ROLES,
+        "write:repos": WORKSPACE_ADMIN_ROLES,
+        "write:reviews": PROMPT_EDITOR_ROLES,
+    }
+
+
+#: Names of the requestable write scopes, for the page's selector.
+WRITE_SCOPES = ("write:repos", "write:config", "write:reviews")
 
 #: Long enough to be worth pasting into a config file, short enough that a
 #: leaked one expires. Thirty days: an MCP client config is edited rarely, and
@@ -56,6 +80,41 @@ class McpTokenIn(BaseModel):
     #: Free-text label so a user can tell two clients apart in the audit log.
     #: Not a scope and not a permission — it only travels as the client_id.
     label: str = Field(default="celmis-mcp-client", max_length=64)
+    #: Write scopes to add to the read-only default. Omitted or empty = a
+    #: read-only token. Each one must be allowed for the caller's workspace role.
+    scopes: list[str] | None = Field(default=None, max_length=8)
+
+
+def _granted_scopes(user: User, workspace_id: str,
+                    requested: list[str] | None) -> list[str]:
+    """The read scopes, plus each requested write scope the caller's role in
+    this workspace allows. Raises 422 for a name that is not a requestable
+    scope and 403 for one the role cannot use."""
+    granted = list(_TOKEN_SCOPES)
+    wanted = list(dict.fromkeys(s.strip() for s in (requested or []) if s and s.strip()))
+    if not wanted:
+        return granted
+    roles = _write_scope_roles()
+    unknown = [s for s in wanted if s not in roles and s not in _TOKEN_SCOPES]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"Unknown scope: {', '.join(unknown)}. Requestable write "
+                    f"scopes: {', '.join(WRITE_SCOPES)}."))
+    from src.api.deps import workspace_role
+
+    role = None if user.is_admin else workspace_role(user.id, workspace_id)
+    for scope in wanted:
+        if scope in _TOKEN_SCOPES:
+            continue
+        if not user.is_admin and role not in roles[scope]:
+            raise HTTPException(
+                status_code=403,
+                detail=(f"{scope} needs one of these roles on this workspace: "
+                        f"{', '.join(sorted(roles[scope]))} (yours: "
+                        f"{role or 'none'})."))
+        granted.append(scope)
+    return granted
 
 
 @router.post("/token", response_model=McpTokenOut)
@@ -86,10 +145,12 @@ def issue_mcp_token(
         ) from exc
 
     label = (payload.label if payload else None) or "celmis-mcp-client"
+    granted = _granted_scopes(user, workspace_id,
+                              payload.scopes if payload else None)
     token = issue_token(
         config,
         subject=user.id,
-        scopes=list(_TOKEN_SCOPES),
+        scopes=granted,
         client_id=label,
         expires_in=_TOKEN_TTL_SECONDS,
         # The workspace travels in the token so the MCP server answers for the
@@ -98,12 +159,13 @@ def issue_mcp_token(
     )
     settings = get_settings()
     base = str(getattr(settings, "public_base_url", "") or "").rstrip("/")
-    logger.info("mcp_token_issued user=%s ws=%s label=%s ttl=%ds",
-                user.email, workspace_id, label, _TOKEN_TTL_SECONDS)
+    logger.info("mcp_token_issued user=%s ws=%s label=%s ttl=%ds scopes=%s",
+                user.email, workspace_id, label, _TOKEN_TTL_SECONDS,
+                " ".join(granted))
     return McpTokenOut(
         token=token,
         expires_in=_TOKEN_TTL_SECONDS,
-        scopes=list(_TOKEN_SCOPES),
+        scopes=granted,
         # Trailing slash on purpose: without it Starlette answers 307, and a
         # redirected POST is not something the MCP streamable-HTTP client is
         # guaranteed to follow.
@@ -112,4 +174,4 @@ def issue_mcp_token(
     )
 
 
-__all__ = ["router"]
+__all__ = ["WRITE_SCOPES", "router"]

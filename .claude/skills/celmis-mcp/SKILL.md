@@ -67,14 +67,27 @@ The scope names come from the stdio server's decorators and are what
 |---|---|
 | `read:graph` | the symbol and caller lookups |
 | `read:groups` | listing repositories and projects |
-| `write:repos` | registering a repository, starting an audit |
+| `read:reviews` | past reviews, review policy and settings (`get_review_settings`), review usage (`get_usage`, owner/admin/editor) |
+| `write:repos` | registering a repository, starting or cancelling an audit, docs, auto-review, acknowledging alerts, retrying and cancelling jobs |
+| `write:config` | the budget (`set_budget`) and review configuration (`update_review_setting`, `propose_review_rules`, `generate_review_rules`) |
+| `write:reviews` | cross-repository migration PRs (`migrate_consumers`) |
 | `review:pr` | reading and running reviews |
+
+Operations reads sit under `read:graph`: `get_spend`, `get_budget`,
+`list_alerts`, `list_jobs`, `audit_delta`, `export_sbom` (returns a download
+URL, not the file) and `list_members`.
 
 Ask for the narrowest set that answers your question. A read-only token cannot
 register a repository or spend money on a review, which is the point.
 
 A token minted from the UI is scoped to your account and its workspace, and it
 carries what that account may reach — `get_my_access` reports the result.
+
+A UI token is read-only unless you tick "Allow changes" on the MCP settings
+page (or send `scopes` to `POST /api/mcp/token`). Only the write scopes your
+workspace role allows are issued — `write:config` and `write:repos` need owner
+or admin, `write:reviews` editor or above — and each tool still applies your
+role on top of the scope. `admin` and unknown scopes are refused.
 
 ---
 

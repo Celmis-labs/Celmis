@@ -396,6 +396,135 @@ CATALOGUE: dict[str, dict[str, Any]] = {
             "limit": "default 15, at most 50",
         },
     },
+    # ─── operations: spend, alerts, jobs, audit extras, members ──────────
+    #
+    # Their bodies are `src.automation.actions_ops`; each calls the route the
+    # page calls, behind the same gate. Reads answer at once; the writes
+    # (`"ops": True`) are planned and wait for the second press.
+    "get_spend": {
+        "summary": "Show what the LLM calls cost over a period — totals, "
+                   "tokens, cache hit, by surface (review, chat, docs…), "
+                   "model, agent and repository, and the daily series "
+                   "('how much did we spend this month', 'скільки ми "
+                   "витратили на токени за тиждень', 'which model costs "
+                   "the most').",
+        "reads": True,
+        "arguments": {
+            "days": "the window in days (1-365), default 30; a month is 30, "
+                    "a week 7",
+            "surface": "only one surface, or null for all",
+            "model": "only one model, or null",
+            "repo_slug": "only one repository, or null",
+        },
+    },
+    "get_usage": {
+        "summary": "Show the code-review runs usage: how many review runs, "
+                   "completed and failed, tokens and cost, per day "
+                   "('review usage this month', 'статистика використання "
+                   "рев'ю'). Money by model or surface is get_spend.",
+        "reads": True,
+        "arguments": {"days": "the window in days (1-365), default 30"},
+    },
+    "get_budget": {
+        "summary": "Show the monthly spend cap and how much of it is used "
+                   "('what is our budget', 'який ліміт бюджету і скільки "
+                   "вже витрачено').",
+        "reads": True,
+        "arguments": {},
+    },
+    "set_budget": {
+        "summary": "Set the workspace's monthly spend cap in USD, the "
+                   "percentage that raises the alert and whether reaching "
+                   "the cap blocks further calls; 0 switches the cap off "
+                   "('set the budget to 200 dollars', 'встанови бюджет "
+                   "100$ на місяць').",
+        "ops": True,
+        "arguments": {
+            "monthly_usd_cap": "the cap in USD, 0 for none",
+            "alert_pct": "1-100, default 80",
+            "hard_stop": "true to block calls once the cap is reached, "
+                         "default false",
+        },
+    },
+    "list_alerts": {
+        "summary": "List the monitoring alerts that arrived: title, "
+                   "severity, status new, acked or fixed ('which alerts are "
+                   "open', 'які є алерти', 'show new alerts').",
+        "reads": True,
+        "arguments": {
+            "status": "new | acked | fixed, or null for all",
+            "limit": "how many, default 20",
+        },
+    },
+    "ack_alert": {
+        "summary": "Acknowledge an alert, or mark it fixed ('ack alert X', "
+                   "'підтверди алерт X'). Needs the alert id from list_alerts.",
+        "ops": True,
+        "arguments": {
+            "alert_id": "the alert's id",
+            "status": "acked (default) | fixed | new",
+        },
+    },
+    "list_jobs": {
+        "summary": "List the background jobs (indexing, docs, audits, "
+                   "reviews) of this workspace with counts per status — "
+                   "what is running, queued, failed or dead ('what jobs "
+                   "failed', 'що зараз у черзі', 'why is indexing stuck').",
+        "reads": True,
+        "arguments": {
+            "status": "pending | running | done | failed | dead | cancelled, "
+                      "or null for all",
+            "kind": "the job kind, or null",
+            "limit": "how many, default 20",
+        },
+    },
+    "retry_job": {
+        "summary": "Put a dead, failed or cancelled background job back in "
+                   "the queue ('retry job X', 'перезапусти завислу задачу'). "
+                   "Needs the job id from list_jobs.",
+        "ops": True,
+        "arguments": {"job_id": "the job's id"},
+    },
+    "cancel_job": {
+        "summary": "Stop a RUNNING background job at its next checkpoint "
+                   "('cancel job X', 'зупини задачу X'). Needs the job id "
+                   "from list_jobs.",
+        "ops": True,
+        "arguments": {"job_id": "the job's id"},
+    },
+    "cancel_dep_audit": {
+        "summary": "Stop a queued or running dependency audit ('cancel the "
+                   "audit', 'зупини аудит залежностей').",
+        "ops": True,
+        "arguments": {"run_id": "the run's id, or null for the live one"},
+    },
+    "audit_delta": {
+        "summary": "Show what changed in the dependency audit since the "
+                   "previous run: vulnerabilities that appeared and that "
+                   "were resolved ('what changed since the last audit', "
+                   "'що нового в аудиті залежностей').",
+        "reads": True,
+        "arguments": {"run_id": "the run's id, or null for the latest "
+                                "finished one"},
+    },
+    "export_sbom": {
+        "summary": "Give the download link of the SBOM (CycloneDX bill of "
+                   "materials) of a finished dependency audit ('export the "
+                   "SBOM', 'дай SBOM'). Returns a link, not the file.",
+        "reads": True,
+        "arguments": {
+            "run_id": "the run's id, or null for the latest finished one",
+            "repo_slug": "one repository, or null for all as a zip",
+        },
+    },
+    "list_members": {
+        "summary": "List the workspace members with their roles and teams "
+                   "('who is in the workspace', 'хто в команді і які ролі'). "
+                   "Only looking: inviting people or changing roles is done "
+                   "in the app.",
+        "reads": True,
+        "arguments": {},
+    },
 }
 
 #: The reads whose answer is explained by a SECOND model call, written from
@@ -408,6 +537,7 @@ CATALOGUE: dict[str, dict[str, Any]] = {
 #: (`ANSWER_READS`).
 EXPLAINED_READS: tuple[str, ...] = (
     "review_settings", "get_review_run", "list_reviews",
+    "get_spend", "get_usage", "list_alerts", "list_jobs", "audit_delta",
 )
 
 #: Reads whose result carries the finished answer: verb → the result key that
@@ -418,6 +548,12 @@ ANSWER_READS: dict[str, str] = {"ask_code": "answer"}
 #: set. Derived from the catalogue, so it cannot list a verb that is not one.
 CONFIG_VERBS: tuple[str, ...] = tuple(
     name for name, spec in CATALOGUE.items() if spec.get("config"))
+
+#: Writes of the operations family (budget, alerts, jobs, audit cancel). Like
+#: the config verbs they are about no repository set, so `resolve_scope` checks
+#: them with `actions_ops` instead of the fan-out rules.
+OPS_WRITE_VERBS: tuple[str, ...] = tuple(
+    name for name, spec in CATALOGUE.items() if spec.get("ops"))
 
 #: What `explain` can be asked about. Each one is a key the client renders a
 #: written-down paragraph for, in sixteen languages — so this tuple is the
@@ -881,6 +1017,12 @@ a markdown link to exactly that path (use the guide for the page's name); do
 not use any other link. Answer with the markdown only, no JSON, no preamble.
 """
 
+_OPS_COMMON = """
+The data is the result of an operations read. Write a concise answer: the
+direct answer first, with the real numbers (money in USD, tokens rounded
+sensibly), then what stands out or what to do next, only if the data shows it.
+"""
+
 #: What one verb's data means and what to say about it, appended to
 #: `_EXPLAIN_READ`. `review_settings` carries the long mechanics text.
 _EXPLAIN_HINTS: dict[str, str] = {
@@ -901,11 +1043,36 @@ how many ran, how many failed or are still running, which pull requests have
 critical findings — then list the runs worth looking at. Each run has a
 `run_id` the person can ask about.
 """,
+    "get_spend": _OPS_COMMON + """
+Spend of LLM calls over a window: totals, tokens, cache hit, by surface, model,
+agent and repository, and a daily series. Name the biggest contributors and the
+trend. A high estimated share means the cost is a price-table estimate, not a
+provider charge — say so.
+""",
+    "get_usage": _OPS_COMMON + """
+Code-review usage: runs, tokens and cost. Say how much ran and what it cost.
+""",
+    "list_alerts": _OPS_COMMON + """
+Incoming monitoring alerts: how many are new and the most severe ones.
+""",
+    "list_jobs": _OPS_COMMON + """
+Background jobs with counts per status: what failed or is stuck, with the error
+in a few words, and what could be retried.
+""",
+    "audit_delta": _OPS_COMMON + """
+What changed in the dependency audit since the previous run: what appeared
+(worst first) and what was resolved. Findings marked "out of scope" are not
+fixes — say so.
+""",
 }
 
 #: Which operation the second call is booked under. The settings one keeps its
 #: original name so its line on the bill does not change.
-_EXPLAIN_OPERATIONS = {"review_settings": "automation_explain_settings"}
+_EXPLAIN_OPERATIONS = {
+    "review_settings": "automation_explain_settings",
+    **{v: f"automation_explain_{v}" for v in
+       ("get_spend", "get_usage", "list_alerts", "list_jobs", "audit_delta")},
+}
 
 
 def explain_read(
@@ -919,6 +1086,7 @@ def explain_read(
     history: list[dict[str, str]] | None = None,
     on_note: Callable[[str], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    verb: str = "review_settings",
 ) -> str:
     """Write the answer to a question whose data a read already returned.
 
@@ -1009,10 +1177,12 @@ def explain_read(
     return keep_known_links(text)
 
 
-def explain_review_settings(message: str, snapshot: dict[str, Any], **kw: Any) -> str:
-    """`explain_read` for a `review_settings` snapshot — kept as its own name
-    because the settings answer was the first one and callers know it."""
-    return explain_read(message, "review_settings", snapshot, **kw)
+def explain_review_settings(message: str, snapshot: dict[str, Any], *,
+                            verb: str = "review_settings", **kw: Any) -> str:
+    """`explain_read` for one verb's snapshot (`review_settings` by default) —
+    kept as its own name because the settings answer was the first one and
+    callers know it."""
+    return explain_read(message, verb, snapshot, **kw)
 
 
 #: The opening of the note field in a JSON object that is not finished yet.
@@ -1157,7 +1327,11 @@ def _role_refusal(action: str, scope: str,
     if not caller or caller.get("is_admin") or caller.get("is_superadmin"):
         return None
     role = caller.get("role")
-    if action == "update_review_setting":
+    if action in ("ack_alert", "cancel_dep_audit"):
+        return None  # the routes take any member
+    if action in ("set_budget", "retry_job", "cancel_job"):
+        needed = WORKSPACE_ADMIN_ROLES
+    elif action == "update_review_setting":
         # Agent guidelines are prompts: the editor role edits them at both
         # scopes, as on the page (`require_prompt_editor`).
         needed = (WORKSPACE_ADMIN_ROLES
@@ -1251,6 +1425,55 @@ def _resolve_config_step(step: Step, workspace_id: str,
         step.blocked = refusal
 
 
+def _resolve_ops_step(step: Step, caller: dict[str, Any] | None) -> None:
+    """Check an operations write and say what it will do, before the press.
+
+    The same validation the action runs (the budget schema, the status set),
+    plus the workspace-role half of its gate; the action stays the authority
+    and re-checks everything, the row's workspace included.
+    """
+    from src.automation.actions import ActionError
+    from src.automation.actions_ops import parse_budget
+
+    args = step.arguments
+    try:
+        if step.action == "set_budget":
+            budget = parse_budget(args.get("monthly_usd_cap"),
+                                  args.get("alert_pct", 80),
+                                  args.get("hard_stop", False))
+            step.arguments = dict(budget)
+            step.preview = {"kind": "budget", **budget}
+        elif step.action == "ack_alert":
+            status = str(args.get("status") or "acked").lower()
+            alert_id = str(args.get("alert_id") or "").strip()
+            if status not in ("new", "acked", "fixed"):
+                raise ActionError("status must be new, acked or fixed.")
+            if not alert_id:
+                raise ActionError("Which alert? Name it by id (list the "
+                                  "alerts first).")
+            step.arguments = {"alert_id": alert_id, "status": status}
+            step.preview = {"kind": "alert", "id": alert_id, "status": status}
+        elif step.action in ("retry_job", "cancel_job"):
+            job_id = str(args.get("job_id") or "").strip()
+            if not job_id:
+                raise ActionError("Which job? Name it by id (list the jobs "
+                                  "first).")
+            step.arguments = {"job_id": job_id}
+            step.preview = {"kind": "job", "id": job_id,
+                            "op": "retry" if step.action == "retry_job"
+                            else "cancel"}
+        else:  # cancel_dep_audit
+            run_id = str(args.get("run_id") or "").strip() or None
+            step.arguments = {"run_id": run_id}
+            step.preview = {"kind": "audit_cancel", "run_id": run_id}
+    except ActionError as exc:
+        step.blocked = str(exc)
+        return
+    refusal = _role_refusal(step.action or "", "workspace", caller)
+    if refusal:
+        step.blocked = refusal
+
+
 def resolve_scope(plan: Plan, *, workspace_id: str,
                   caller: dict[str, Any] | None = None) -> Plan:
     """Fill in which repositories each step actually covers, and block early.
@@ -1290,6 +1513,9 @@ def resolve_scope(plan: Plan, *, workspace_id: str,
             continue
         if step.action in CONFIG_VERBS:
             _resolve_config_step(step, workspace_id, caller)
+            continue
+        if step.action in OPS_WRITE_VERBS:
+            _resolve_ops_step(step, caller)
             continue
         slugs = step.arguments.get("repo_slugs") or None
         owner = (step.arguments.get("owner") or "").strip() or None
@@ -1362,6 +1588,52 @@ def _self_hosted_surfaces() -> dict[str, list[str]]:
     }
 
 
+async def _run_ops(action: str, args: dict[str, Any], actor, session) -> dict[str, Any]:
+    """Run one operations verb (`actions_ops`). One place for the argument
+    mapping, so the executor stays a list of branches and not a second
+    implementation."""
+    from src.automation import actions_ops as ops
+
+    if action == "get_spend":
+        return await ops.get_spend(
+            actor, session, days=args.get("days") or 30,
+            surface=args.get("surface"), model=args.get("model"),
+            repo=args.get("repo_slug"))
+    if action == "get_usage":
+        return await ops.get_usage(actor, days=args.get("days") or 30)
+    if action == "get_budget":
+        return await ops.get_budget(actor)
+    if action == "set_budget":
+        return await ops.set_budget(
+            actor, session, monthly_usd_cap=args.get("monthly_usd_cap"),
+            alert_pct=args.get("alert_pct", 80),
+            hard_stop=args.get("hard_stop", False))
+    if action == "list_alerts":
+        return await ops.list_alerts(
+            actor, session, status=args.get("status"),
+            limit=args.get("limit") or 20)
+    if action == "ack_alert":
+        return await ops.ack_alert(
+            actor, session, alert_id=str(args.get("alert_id") or ""),
+            status=str(args.get("status") or "acked"))
+    if action == "list_jobs":
+        return await ops.list_jobs(
+            actor, status=args.get("status"), kind=args.get("kind"),
+            limit=args.get("limit") or 20)
+    if action == "retry_job":
+        return await ops.retry_job(actor, job_id=str(args.get("job_id") or ""))
+    if action == "cancel_job":
+        return await ops.cancel_job(actor, job_id=str(args.get("job_id") or ""))
+    if action == "cancel_dep_audit":
+        return await ops.cancel_dep_audit(actor, session, run_id=args.get("run_id"))
+    if action == "audit_delta":
+        return await ops.audit_delta(actor, session, run_id=args.get("run_id"))
+    if action == "export_sbom":
+        return await ops.export_sbom(
+            actor, session, run_id=args.get("run_id"), repo=args.get("repo_slug"))
+    return await ops.list_members(actor, session)
+
+
 async def execute(plan: Plan, actor, session) -> dict[str, Any]:
     """Run an approved plan. Refuses anything the plan itself blocked.
 
@@ -1383,6 +1655,7 @@ async def execute(plan: Plan, actor, session) -> dict[str, Any]:
         start_dep_audit,
         update_review_setting,
     )
+    from src.automation.actions_ops import OPS_READS, OPS_WRITES
     from src.automation.guide import guide_links
 
     if not plan.steps:
@@ -1529,6 +1802,8 @@ async def execute(plan: Plan, actor, session) -> dict[str, Any]:
                 actor, session, kind=str(args.get("kind") or "search"),
                 query=args.get("query"), repo_slug=args.get("repo_slug"),
                 path=args.get("path"), limit=args.get("limit"))
+        elif step.action in OPS_READS + OPS_WRITES:
+            outcome = await _run_ops(step.action, args, actor, session)
         else:
             outcome = await start_dep_audit(
                 actor, session,
@@ -1555,7 +1830,8 @@ async def execute(plan: Plan, actor, session) -> dict[str, Any]:
     }
 
 
-__all__ = ["CATALOGUE", "CONFIG_VERBS", "EXPLAIN_TOPICS", "Plan", "Step", "execute",
-           "EXPLAINED_READS", "ANSWER_READS", "explain_read",
+__all__ = ["ANSWER_READS", "CATALOGUE", "CONFIG_VERBS", "EXPLAINED_READS",
+           "EXPLAIN_TOPICS", "OPS_WRITE_VERBS", "Plan", "Step", "execute",
+           "explain_read",
            "explain_review_settings", "interpret", "resolve_scope"]
 

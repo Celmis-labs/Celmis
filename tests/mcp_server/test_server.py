@@ -42,6 +42,24 @@ def test_server_builds_with_all_tools() -> None:
         "update_issue",
         "ask_code",
         "search_code",
+        # operations + review configuration (src/mcp_server/ops_tools.py)
+        "get_spend",
+        "get_usage",
+        "get_budget",
+        "set_budget",
+        "list_alerts",
+        "ack_alert",
+        "list_jobs",
+        "retry_job",
+        "cancel_job",
+        "cancel_dep_audit",
+        "audit_delta",
+        "export_sbom",
+        "list_members",
+        "get_review_settings",
+        "update_review_setting",
+        "propose_review_rules",
+        "generate_review_rules",
     ])
 
 

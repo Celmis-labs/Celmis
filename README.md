@@ -725,11 +725,15 @@ docker compose exec api analyzer mcp issue-token \
 
 ### What an agent can ask
 
-The HTTP mount serves **23 tools**, and a client does not necessarily see all of
-them. Eighteen are read-only; the five that write — `add_repo`, `start_dep_audit`,
-`generate_docs`, `set_auto_review`, `migrate_consumers` — require a scope no
-read token carries, so they are absent from a read client's tool list rather than
-merely refused when called. This is what the read-only ones answer, and they are
+The HTTP mount serves **48 tools**, and a client does not necessarily see all of
+them. Thirty-two are read-only; the sixteen that write — `add_repo`,
+`start_dep_audit`, `cancel_dep_audit`, `generate_docs`, `set_auto_review`,
+`migrate_consumers`, `ack_alert`, `retry_job`, `cancel_job`, `set_budget`,
+`update_review_setting`, `propose_review_rules`, `generate_review_rules`,
+`review_pr`, `index_repo`, `update_issue` —
+require a write scope (`write:repos`, `write:config`, `write:reviews`) that a
+default token does not carry, so they are absent from a read client's tool list
+and refused if called by name. This is what the read-only ones answer, and they are
 the questions a grep cannot:
 
 | | |
@@ -748,10 +752,15 @@ the questions a grep cannot:
 | `ask_code` · `search_code` | a written answer about the code (one model call, booked as Q&A); symbol, usages, owner and architecture lookups |
 
 The HTTP mount also writes with `review_pr` (queue a review of one PR or every open one), `index_repo` and `update_issue` (set an issue's status), all behind `write:repos`.
+| `get_review_settings` | the review settings in force and where each value comes from |
+| `get_spend` · `get_usage` · `get_budget` | LLM spend by model, surface and day; review usage; the monthly cap |
+| `list_alerts` · `list_jobs` | incoming alerts; background jobs with counts per status |
+| `audit_delta` · `export_sbom` | what changed since the previous audit; the SBOM download URL |
+| `list_members` | workspace members with roles and teams |
 
 **The two transports are not the same set.** `analyzer mcp serve` over stdio
 serves 13 older, graph-shaped tools (`find_symbol`, `find_callers`,
-`query_graph`); the HTTP mount serves the 18 above. Neither is a subset of the
+`query_graph`); the HTTP mount serves the 32 read-only ones above. Neither is a subset of the
 other — pick the transport for the tools you want.
 
 A step-by-step guide, with the scopes each tool needs and the failure modes,

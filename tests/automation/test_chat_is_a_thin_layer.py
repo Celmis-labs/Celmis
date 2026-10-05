@@ -60,6 +60,13 @@ def test_every_verb_that_starts_work_takes_a_set():
             assert "repo_slug" in spec["arguments"], (
                 f"{name} does not say which repository it configures")
             continue
+        if spec.get("ops"):
+            # The operations writes (budget, alerts, jobs, audit cancel) act
+            # on the workspace or on one named record. They are the declared
+            # second exception, and are still writes: planned, shown on a
+            # card, run on the second press.
+            assert not spec.get("reads"), f"{name} would run unconfirmed"
+            continue
         assert "repo_slugs" in spec["arguments"], (
             f"{name} cannot take a set, so it belongs on a button"
         )
