@@ -526,31 +526,34 @@ async def _dispatch_review(
         )
         return
 
-    if skip_reason == "draft":
-        # A draft into a branch the target patterns leave out is not
-        # "reviewed once it is marked ready" — it is never reviewed, and the
-        # recorded reason says so, in the orchestrator gate's own words (one
-        # matcher, src/review/branch_patterns.py).
-        base_ref = str((pr_meta or {}).get("base_ref") or "")
-        if base_ref:
-            from src.review.branch_patterns import branch_targeted, skip_sentence
-            from src.review.review_defaults import target_branches_for_repo
+    # A pull request into a branch the target patterns leave out is never
+    # reviewed — a draft included (marking it ready would not get it
+    # reviewed). Recorded in the orchestrator gate's own words (one matcher,
+    # src/review/branch_patterns.py) instead of queuing a job that would only
+    # end at that gate. Only when the delivery named the base branch; without
+    # it the orchestrator's gate stays the authority.
+    base_ref = str((pr_meta or {}).get("base_ref") or "")
+    if base_ref:
+        from src.review.branch_patterns import branch_targeted, skip_sentence
+        from src.review.review_defaults import target_branches_for_repo
 
-            patterns = await asyncio.to_thread(
-                target_branches_for_repo, provider_name, repo)
-            if patterns and not branch_targeted(base_ref, patterns):
-                logger.info(
-                    "webhook_draft_skipped reason=branch_not_targeted provider=%s "
-                    "repo=%s pr=%d base=%s ws=%s",
-                    provider_name, repo, pr_number, base_ref, workspace_id)
-                await asyncio.to_thread(
-                    record_gate_skip, provider_name, repo, pr_number,
-                    user_id=cfg.user_id, workspace_id=workspace_id, source="webhook",
-                    gate_key="gate_target_branch", gate_name="Validate target branch",
-                    reason=skip_sentence(base_ref, patterns),
-                    pr_meta=pr_meta,
-                )
-                return
+        patterns = await asyncio.to_thread(
+            target_branches_for_repo, provider_name, repo)
+        if patterns and not branch_targeted(base_ref, patterns):
+            logger.info(
+                "webhook_skipped reason=branch_not_targeted provider=%s "
+                "repo=%s pr=%d base=%s ws=%s",
+                provider_name, repo, pr_number, base_ref, workspace_id)
+            await asyncio.to_thread(
+                record_gate_skip, provider_name, repo, pr_number,
+                user_id=cfg.user_id, workspace_id=workspace_id, source="webhook",
+                gate_key="gate_target_branch", gate_name="Validate target branch",
+                reason=skip_sentence(base_ref, patterns),
+                pr_meta=pr_meta,
+            )
+            return
+
+    if skip_reason == "draft":
         logger.info("webhook_draft_skipped provider=%s repo=%s pr=%d ws=%s",
                     provider_name, repo, pr_number, workspace_id)
         await asyncio.to_thread(
@@ -825,6 +828,7 @@ def build_webhook_app(
             "github", pr_info["repo"], pr_info["number"],
             head_sha=pr_info.get("head_sha", ""),
             expected_workspace_id=workspace_id,
+            pr_meta={"base_ref": (gh_pr.get("base") or {}).get("ref")},
         ))
         stats_counter["dispatched"] += 1
         return JSONResponse(
@@ -974,6 +978,7 @@ def build_webhook_app(
             "gitlab", mr_info["repo"], mr_info["number"],
             head_sha=mr_info.get("head_sha", ""),
             expected_workspace_id=workspace_id,
+            pr_meta={"base_ref": attrs.get("target_branch")},
         ))
         stats_counter["dispatched"] += 1
         return JSONResponse(
@@ -1061,6 +1066,9 @@ def build_webhook_app(
             "bitbucket", pr_info["repo"], pr_info["number"],
             head_sha=pr_info.get("head_sha", ""),
             expected_workspace_id=workspace_id,
+            pr_meta={"base_ref": (((payload.get("pullrequest") or {})
+                                   .get("destination") or {}).get("branch") or {})
+                     .get("name")},
         ))
         stats_counter["dispatched"] += 1
         return JSONResponse(

@@ -675,9 +675,12 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
   const [branch, setBranch] = useState<string>("");
   const [sort, setSort] = useState<"newest" | "recently_updated" | "oldest">("newest");
   const [q, setQ] = useState("");
+  const [targetedOnly, setTargetedOnly] = useState<"" | "true">("");
   const [offset, setOffset] = useState(0);
 
-  const filters = { q: q.trim(), branch, sort, limit: PR_PAGE, offset };
+  const filters = {
+    q: q.trim(), branch, sort, limit: PR_PAGE, offset, targeted_only: targetedOnly,
+  };
   const prs = useQuery({
     queryKey: ["pulls", slug, filters],
     queryFn: () => openPullsApi.list(token!, slug, filters),
@@ -701,7 +704,11 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
       q: q.trim(), branch: branch || null, confirm: true,
     }),
     onSuccess: (r) => {
-      toast.success(t("repositories.reviewAllQueued", { queued: r.queued, requested: r.requested }));
+      const left = r.skipped?.length ?? 0;
+      toast.success(
+        t("repositories.reviewAllQueued", { queued: r.queued, requested: r.requested })
+        + (left ? ` ${t("repositories.reviewAllSkippedNote", { n: left })}` : ""),
+      );
       refresh();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -709,17 +716,36 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
 
   const data = prs.data;
   const limit = data?.bulk_limit ?? 25;
-  const tooMany = (data?.total ?? 0) > limit;
+  // "Review all" queues only PRs on a targeted base branch; the others would
+  // be skipped by the orchestrator's gate, so they are not counted here.
+  const reviewable = data?.targeted_total ?? 0;
+  const patterns = (data?.effective_target_branches ?? []).join(", ");
+  const tooMany = reviewable > limit;
   const onReviewAll = async () => {
-    if (!data || data.total === 0 || tooMany) return;
+    if (!data || reviewable === 0 || tooMany) return;
     const ok = await confirm({
-      title: t("repositories.reviewAllTitle", { n: data.total }),
+      title: t("repositories.reviewAllTitle", { n: reviewable }),
       description: t("repositories.reviewAllDesc"),
       confirmLabel: t("repositories.reviewAllConfirm"),
     });
     if (ok) bulk.mutate();
   };
   const pick = <V,>(set: (v: V) => void) => (v: V) => { set(v); setOffset(0); };
+  // The gate stays the authority; this only warns before a review that it
+  // would skip is queued by hand.
+  const onReview = async (pr: OpenPull) => {
+    if (!pr.targeted) {
+      const ok = await confirm({
+        title: t("repositories.untargetedTitle"),
+        description: t("repositories.untargetedDesc", {
+          branch: pr.target_branch ?? "?", patterns,
+        }),
+        confirmLabel: t("repositories.untargetedConfirm"),
+      });
+      if (!ok) return;
+    }
+    trigger.mutate(pr);
+  };
 
   return (
     <div className="mt-3 sm:pl-12">
@@ -740,12 +766,12 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
           <Button
             size="sm"
             variant="secondary"
-            disabled={!data || data.total === 0 || tooMany || bulk.isPending}
-            title={tooMany ? t("repositories.reviewAllTooMany", { n: data?.total ?? 0, max: limit }) : undefined}
+            disabled={!data || reviewable === 0 || tooMany || bulk.isPending}
+            title={tooMany ? t("repositories.reviewAllTooMany", { n: reviewable, max: limit }) : undefined}
             onClick={onReviewAll}
           >
             <SparklesIcon />
-            {t("repositories.reviewAll", { n: Math.min(data?.total ?? 0, limit) })}
+            {t("repositories.reviewAll", { n: Math.min(reviewable, limit) })}
           </Button>
         </div>
         <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -775,10 +801,21 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
             ]}
             className="h-9 px-2 text-sm sm:h-8 sm:text-xs"
           />
+          {patterns && (
+            <Select
+              value={targetedOnly}
+              onChange={(v) => pick(setTargetedOnly)(v as "" | "true")}
+              options={[
+                { value: "", label: t("repositories.targetFilterAll") },
+                { value: "true", label: t("repositories.targetFilterTargeted") },
+              ]}
+              className="h-9 px-2 text-sm sm:h-8 sm:text-xs"
+            />
+          )}
         </div>
         {tooMany && (
           <p className="mb-2 text-xs text-[var(--color-muted-foreground)]">
-            {t("repositories.reviewAllTooMany", { n: data?.total ?? 0, max: limit })}
+            {t("repositories.reviewAllTooMany", { n: reviewable, max: limit })}
           </p>
         )}
         {data?.truncated && (
@@ -823,6 +860,14 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
                       <span title={formatDateTime(pr.updated_at)}>
                         · {t("repositories.prUpdated", { time: relativeTime(pr.updated_at ?? pr.created_at, locale) })}
                       </span>
+                      {!pr.targeted && (
+                        <Badge variant="outline"
+                          title={t("repositories.notTargetedHint", {
+                            branch: pr.target_branch ?? "?", patterns,
+                          })}>
+                          {t("repositories.notTargeted")}
+                        </Badge>
+                      )}
                       {pr.last_review_status ? (
                         <StatusPill
                           status={toRunStatus(pr.last_review_status)}
@@ -848,7 +893,7 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
                       variant="outline"
                       disabled={trigger.isPending}
                       loading={trigger.isPending && trigger.variables?.number === pr.number}
-                      onClick={() => trigger.mutate(pr)}
+                      onClick={() => onReview(pr)}
                     >
                       <SparklesIcon />
                       {t("repositories.reviewButton")}
