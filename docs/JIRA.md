@@ -32,6 +32,15 @@ as `UTF-8` or `SHA-256` are not taken for projects: a key counts when its projec
 is allow-listed (`task_project_keys`) or the connected site confirms the project
 exists. A browse link counts only when it is on the connection's own host.
 
+## Self-hosted Jira
+
+A workspace's site must be `https://<site>.atlassian.net` (or `.jira.com`). A Data
+Center or otherwise self-hosted Jira is accepted only when its host is listed in
+`JIRA_ALLOWED_HOSTS` (a JSON list in the environment, an exact host or a subdomain,
+e.g. `["jira.example.internal"]`). A listed host may resolve to a private address
+(a LAN or VPN Jira), never to a link-local, multicast or unspecified one. It is not
+implied by `EGRESS_ALLOW_PRIVATE_NETWORK`. Empty means Atlassian Cloud only.
+
 ## Settings
 
 Repository over workspace over built-in.

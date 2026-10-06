@@ -1034,9 +1034,15 @@ async def registered_developers(
     (Repositories → Repo intel → Rebuild). That is reported as an empty list
     rather than an error: nothing is broken, the data simply is not there yet.
     """
+    from src.api.deps import readable_repo_slugs
     from src.db.models import OwnershipSnapshot
 
     slugs = [c.repo_slug for c in get_auto_review_store().list_for_workspace(workspace_id)]
+    # Who works on which repository is a fact ABOUT the repository. A caller
+    # sees it for the repositories they may see in a list, and a person who
+    # works only on repositories hidden from them does not appear at all.
+    allowed = await readable_repo_slugs(user, workspace_id, slugs)
+    slugs = [s for s in slugs if s in allowed]
     if not slugs:
         return []
 

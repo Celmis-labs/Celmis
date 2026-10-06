@@ -20,18 +20,15 @@ Semantics (see :class:`src.db.models.RepoAccessRule`):
     connections, secret verification).
   * ``allow_globs`` — if non-empty, an allow-list; deny still subtracts.
 
-Fall-open convention (mirrors ``_effective_repo_permission``): if **no** rule
-exists for a repo in the active workspace, every member gets full ``code``
-access. Once *any* rule exists for that repo, teams without a matching rule
-get ``none``. Global admins always bypass.
-
-That fall-open is the single_tenant reading of "no rule", and it is the only
-reading that lets a fresh install work at all. It is not a safe reading for a
-box with several tenants on it, where "no rule yet" describes every repository
-until somebody writes one — so it is gated on the deployment mode
-(:mod:`src.deployment`): single_tenant keeps it, multi_tenant resolves an
-unruled repo to ``denied`` instead. The DB-error path below already fails
-closed regardless of mode.
+Default-deny (2.3.7): a repo with **no** rule and **no** team grant for
+anybody in the active workspace is visible to its owners/admins only, in both
+deployment modes (see :mod:`src.access.policy`; ``CELMIS_UNRULED_REPO_ACCESS=
+open`` restores the old open reading on a single_tenant box). A team grant of
+``read`` or higher on the repo (``repo_team_access``) means ``code``; a
+``RepoAccessRule`` of the same team narrows that (visibility, deny/allow
+globs). Teams without either get ``none``. Global admins always bypass.
+Resolving against the workspace's repository registry and a token's repo list
+is :mod:`src.access.effective`'s job.
 """
 
 from __future__ import annotations
@@ -324,6 +321,7 @@ def resolve_access_sync(
             RepoAccessRule.repo_slug.in_(repos_ruled),
         )
     ).scalars().all()
+    grants = _team_grants(session, workspace_id, repos_ruled)
 
     my_team_ids = {
         tm.team_id
@@ -338,21 +336,66 @@ def resolve_access_sync(
 
     out: dict[str, RepoAccessDecision] = {r: RepoAccessDecision.full(r) for r in owned}
     for repo in repos_ruled:
-        repo_rules = by_repo.get(repo)
+        repo_rules = by_repo.get(repo) or []
+        mine = [r for r in repo_rules if r.team_id in my_team_ids]
+        if mine:
+            out[repo] = _build_decision(repo, mine)      # the rule narrows
+            continue
+        repo_grants = grants.get(repo) or []
+        if not repo_rules and any(g.team_id in my_team_ids for g in repo_grants):
+            # A grant means code. It is the fallback for a repo nobody wrote a
+            # research rule for: once a rule exists, only a team the rule names
+            # is let in (a rule of team B does not open the repo to team A just
+            # because A holds a read grant on it).
+            out[repo] = RepoAccessDecision.full(repo)
+            continue
         if not repo_rules:
-            from src.deployment import fall_open_allowed
+            # No research rule at all: closed, unless the operator opened it
+            # (the pre-upgrade reading, single_tenant only).
+            from src.access.policy import unruled_repo_open
             out[repo] = (
-                RepoAccessDecision.full(repo)          # fall-open (single_tenant)
-                if fall_open_allowed("access.resolver.no_rule",
-                                     detail=f"repo={repo} ws={workspace_id}")
-                else RepoAccessDecision.denied(repo)   # multi_tenant
+                RepoAccessDecision.full(repo)            # open, single_tenant only
+                if unruled_repo_open(detail=f"repo={repo} ws={workspace_id}")
+                else RepoAccessDecision.denied(repo)     # closed by default
             )
             continue
-        mine = [r for r in repo_rules if r.team_id in my_team_ids]
-        if not mine:
-            out[repo] = RepoAccessDecision.denied(repo)  # default-deny
-            continue
-        out[repo] = _build_decision(repo, mine)
+        out[repo] = RepoAccessDecision.denied(repo)      # somebody else's repo
+    return out
+
+
+def _team_grants(session, workspace_id: str, repos: list[str]) -> dict[str, list]:
+    """``repo_team_access`` rows of this workspace's teams for ``repos``, keyed
+    by the slug the CALLER asked about.
+
+    The table is written by hand and a repository's grants may sit under
+    either spelling of it (indexed slug or ``owner/name``); the registry holds
+    both, so each requested slug is looked up under every spelling it has.
+    """
+    from sqlalchemy import select
+
+    from src.api.deps import repo_grant_candidates
+    from src.db.models import RepoTeamAccess, Team
+
+    spelled: dict[str, list[str]] = {
+        r: repo_grant_candidates(r, workspace_id) for r in repos
+    }
+    every = sorted({c for cands in spelled.values() for c in cands})
+    if not every:
+        return {}
+    rows = session.execute(
+        select(RepoTeamAccess)
+        .join(Team, Team.id == RepoTeamAccess.team_id)
+        .where(RepoTeamAccess.repo_slug.in_(every), Team.workspace_id == workspace_id)
+    ).scalars().all()
+    from src.api.deps import _PERM_RANK
+
+    out: dict[str, list] = {}
+    for repo, cands in spelled.items():
+        # Only a permission the app knows grants anything: an unknown value
+        # (hand-written row) is not "code".
+        hit = [g for g in rows if g.repo_slug in cands and g.permission in _PERM_RANK]
+        if hit:
+            out[repo] = hit
     return out
 
 

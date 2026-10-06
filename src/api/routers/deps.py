@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import current_workspace_id, get_current_user
+from src.api.deps import current_workspace_id, get_current_user, readable_repo_slugs
 from src.db.models import DepAuditRun, DepFinding
 from src.db.session import get_async_session
 from src.users import User
@@ -70,6 +70,74 @@ def _run_out(r: DepAuditRun) -> RunOut:
         id=r.id, status=r.status, summary=dict(r.summary or {}), error=r.error,
         created_at=r.created_at.isoformat() if r.created_at else "",
         updated_at=r.updated_at.isoformat() if r.updated_at else "",
+    )
+
+
+# ─── Who may see which repository's findings ─────────────────────────
+#
+# A run covers every repository of the workspace, and its rows name them. A
+# member sees the rows (and the totals) of the repositories they may read and
+# nothing about the others: not a row, not a count, not a slug in the summary.
+# Owners, admins and the superadmin see the run whole.
+
+
+async def _visible_repos(
+    session: AsyncSession, run: DepAuditRun, user: User, workspace_id: str,
+    *, only: set[str] | None = None,
+) -> set[str] | None:
+    """The repos of this run the caller may see; ``None`` = all of them.
+
+    ``only`` is for a caller holding an MCP token with a repo list: the repos
+    that list covers are the whole answer (the issuing admin is authoritative),
+    and nothing else exists for it, whatever the person's own rights are."""
+    summary = run.summary or {}
+    names = {str(r) for (r,) in (await session.execute(
+        select(DepFinding.repo_slug).where(DepFinding.run_id == run.id).distinct()
+    )).all() if r}
+    for key in ("repos_scanned_slugs", "repos_skipped"):
+        names.update(str(x) for x in (summary.get(key) or []) if isinstance(x, str))
+    names.update(str(k) for k in (summary.get("audited_commits") or {}))
+    if only is not None:
+        return None if names and names <= only else (names & only)
+    if not names:
+        return None
+    readable = await readable_repo_slugs(user, workspace_id, sorted(names))
+    return None if names <= readable else (names & readable)
+
+
+def _restricted_summary(summary: dict, rows: list, visible: set[str]) -> dict:
+    """A run summary rebuilt from what the caller may see. Whitelisted: any key
+    that could carry another repository's data (AI report, per-repo notes,
+    hygiene, groups) is left out rather than filtered."""
+    sev = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for r in rows:
+        if r.severity in sev:
+            sev[r.severity] += 1
+    scanned = [x for x in (summary.get("repos_scanned_slugs") or []) if x in visible]
+    return {
+        "repos_total": len(visible),
+        "repos_scanned": len(scanned) if scanned else len({r.repo_slug for r in rows}),
+        "repos_scanned_slugs": scanned,
+        "repos_skipped": [x for x in (summary.get("repos_skipped") or []) if x in visible],
+        "audited_commits": {k: v for k, v in (summary.get("audited_commits") or {}).items()
+                            if k in visible},
+        "packages": len(rows),
+        "outdated": sum(1 for r in rows if r.outdated != "none"),
+        "vulnerable": sum(1 for r in rows if r.severity != "none"),
+        "by_severity": sev,
+        "sources": summary.get("sources") or {},
+        "not_checked": summary.get("not_checked") or [],
+        "restricted": True,
+    }
+
+
+def _restricted_run(run: DepAuditRun, rows: list, visible: set[str]):  # noqa: ANN202
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        id=run.id, workspace_id=run.workspace_id, status=run.status, error=run.error,
+        created_at=run.created_at, updated_at=run.updated_at,
+        summary=_restricted_summary(dict(run.summary or {}), rows, visible),
     )
 
 
@@ -151,7 +219,7 @@ async def start_audit(
 @router.get("/latest", response_model=RunOut | None)
 async def latest_run(
     session: AsyncSession = Depends(get_async_session),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> RunOut | None:
     run = (await session.scalars(
@@ -160,7 +228,16 @@ async def latest_run(
         .order_by(DepAuditRun.created_at.desc())
         .limit(1)
     )).first()
-    return _run_out(run) if run else None
+    if run is None:
+        return None
+    visible = await _visible_repos(session, run, user, workspace_id)
+    if visible is not None:
+        rows = list((await session.scalars(
+            select(DepFinding).where(DepFinding.run_id == run.id)
+        )).all())
+        return _run_out(_restricted_run(
+            run, [r for r in rows if r.repo_slug in visible], visible))
+    return _run_out(run)
 
 
 @router.post("/{run_id}/cancel", response_model=RunOut)
@@ -229,6 +306,12 @@ async def generate_report(
         raise HTTPException(status_code=404, detail="Run not found")
     if run.status != "done":
         raise HTTPException(status_code=400, detail="Audit not finished yet")
+    if await _visible_repos(session, run, user, workspace_id) is not None:
+        # The report is stored on the run and shown to everyone: it must be
+        # written by somebody who can see every repository it describes.
+        raise HTTPException(
+            status_code=403,
+            detail="The report covers every audited repository; ask an administrator.")
 
     rows = (await session.scalars(
         select(DepFinding).where(DepFinding.run_id == run_id)
@@ -367,13 +450,16 @@ async def findings(
     repo: str | None = Query(default=None),
     limit: int = Query(default=500, ge=1, le=2000),
     session: AsyncSession = Depends(get_async_session),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> list[FindingOut]:
     run = await session.get(DepAuditRun, run_id)
     if run is None or run.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Run not found")
+    visible = await _visible_repos(session, run, user, workspace_id)
     q = select(DepFinding).where(DepFinding.run_id == run_id)
+    if visible is not None:
+        q = q.where(DepFinding.repo_slug.in_(sorted(visible)))
     if only == "vulnerable":
         q = q.where(DepFinding.severity != "none")
     elif only == "outdated":
@@ -424,6 +510,10 @@ async def export_run(
     rows = (await session.scalars(
         select(DepFinding).where(DepFinding.run_id == run_id)
     )).all()
+    visible = await _visible_repos(session, run, user, workspace_id)
+    if visible is not None:
+        rows = [r for r in rows if r.repo_slug in visible]
+        run = _restricted_run(run, list(rows), visible)
     stamp = datetime.now(UTC).strftime("%Y-%m-%d")
     markdown = build_markdown(run, list(rows), generated_at=stamp)
 
@@ -555,6 +645,11 @@ async def export_evidence(
             status_code=400,
             detail="Audit is not finished — export once the run completes.",
         )
+    if await _visible_repos(session, run, user, workspace_id) is not None:
+        # A filed pack is a complete inventory; a partial one would read as one.
+        raise HTTPException(
+            status_code=403,
+            detail="The evidence pack covers every audited repository; ask an administrator.")
 
     rows = list((await session.scalars(
         select(DepFinding).where(DepFinding.run_id == run_id)
@@ -708,6 +803,9 @@ async def export_sbom(
     rows = list((await session.scalars(
         select(DepFinding).where(DepFinding.run_id == run_id)
     )).all())
+    visible = await _visible_repos(session, run, user, workspace_id)
+    if visible is not None:
+        rows = [r for r in rows if r.repo_slug in visible]
     if repo:
         rows = [r for r in rows if r.repo_slug == repo]
         if not rows:
@@ -791,6 +889,14 @@ async def run_delta(
     Computed rather than recorded: a stored delta is a third artefact that can
     disagree with the two it came from.
     """
+    return await _run_delta(session, user, workspace_id, run_id)
+
+
+async def _run_delta(
+    session: AsyncSession, user: User, workspace_id: str, run_id: str,
+    *, only: set[str] | None = None,
+) -> dict:
+    """Body of :func:`run_delta`; ``only`` is the repo set of an MCP token."""
     from src.deps.delta import compute_delta
 
     run = await session.get(DepAuditRun, run_id)
@@ -820,6 +926,11 @@ async def run_delta(
     # returns the old undifferentiated answer rather than a confident wrong
     # split.
     scanned = (run.summary or {}).get("repos_scanned_slugs")
+    visible = await _visible_repos(session, run, user, workspace_id, only=only)
+    if visible is not None:
+        current_rows = [r for r in current_rows if r.repo_slug in visible]
+        previous_rows = [r for r in previous_rows if r.repo_slug in visible]
+        scanned = [x for x in (scanned or []) if x in visible] or None
     delta = compute_delta(
         current_rows, previous_rows,
         previous_run_id=previous.id if previous is not None else None,

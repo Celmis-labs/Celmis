@@ -21,6 +21,7 @@ Phase 4 — implemented.
 from __future__ import annotations
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -121,6 +122,18 @@ class GraphStore(ABC):
 
     @abstractmethod
     def close(self) -> None: ...
+
+
+_TOKEN_SPLIT = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+
+
+def name_tokens(text: str) -> list[str]:
+    """camelCase / snake_case / kebab / dotted name → lowercase tokens
+    (`OrderService.create_order` → order, service, create, order)."""
+    out: list[str] = []
+    for part in re.split(r"[^A-Za-z0-9]+", text or ""):
+        out.extend(t.lower() for t in _TOKEN_SPLIT.findall(part) if t)
+    return list(dict.fromkeys(out))
 
 
 # ─── FalkorDBLite implementation ────────────────────────────────────
@@ -384,6 +397,125 @@ class FalkorDBLiteStore(GraphStore):
             "ORDER BY s.end_line - s.start_line DESC "
             "LIMIT $limit",
             params={"prefix": pattern, "limit": limit},
+        )
+        cols = [h[1] for h in res.header]
+        return [_row_to_symbol(row, cols) for row in res.result_set]
+
+    #: The columns every symbol query returns, in `_row_to_symbol` order.
+    _SYMBOL_COLS = (
+        "s.id AS id, s.name AS name, s.kind AS kind, s.file AS file, "
+        "s.start_line AS start_line, s.end_line AS end_line, "
+        "s.language AS language, s.signature AS signature, "
+        "s.docstring AS docstring, s.is_exported AS is_exported, "
+        "s.module AS module"
+    )
+
+    def find_symbols(
+        self, q: str, *, mode: str = "auto", kind: str | None = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """Ranked-search candidates: symbols whose name matches `q`.
+
+        The dev profile's `find`. Three things the exact-only `find_by_name`
+        could not do, and the reason this is a second method rather than a
+        flag on it:
+
+        * `kind` goes into WHERE, **before** LIMIT. Filtering afterwards (what
+          the MCP wrapper used to do) turns "the 20 variables named `user`"
+          into "no functions", because the limit was spent before the filter ran.
+        * `mode`: ``exact`` (name equals), ``prefix``, ``contains`` (every
+          camel/snake token is inside the name), ``fuzzy`` (any token, or the
+          first three letters), ``auto`` (contains, then fuzzy when that
+          leaves the list short).
+        * every row carries `in_degree` (incoming CALLS/IMPORTS edges) and
+          `rank`, so the caller can order by how much the symbol is used.
+
+        `file_module` pseudo-symbols are never returned: one per file, they
+        would crowd out the functions and classes a reader asked for. The
+        result is a CANDIDATE list (at most `limit`); scoring is the caller's.
+        """
+        text = (q or "").strip()
+        if not text:
+            return []
+        if mode == "auto":
+            rows = self._find_symbols_once(text, "contains", kind, limit)
+            if len(rows) < min(limit, 20):
+                seen = {r["id"] for r in rows}
+                rows += [r for r in self._find_symbols_once(text, "fuzzy", kind, limit)
+                         if r["id"] not in seen]
+            return rows[:limit]
+        return self._find_symbols_once(text, mode, kind, limit)
+
+    def _find_symbols_once(
+        self, text: str, mode: str, kind: str | None, limit: int,
+    ) -> list[dict]:
+        params: dict[str, Any] = {"limit": int(limit)}
+        where = ["s.kind <> 'file_module'"]
+        if kind:
+            where.append("s.kind = $kind")
+            params["kind"] = kind
+        tokens = name_tokens(text)
+        if mode == "exact":
+            where.append("s.name = $q")
+            params["q"] = text
+        elif mode == "prefix":
+            where.append("toLower(s.name) STARTS WITH $ql")
+            params["ql"] = text.lower()
+        elif mode == "fuzzy":
+            conds = [f"toLower(s.name) CONTAINS $t{i}" for i, _ in enumerate(tokens)]
+            for i, tok in enumerate(tokens):
+                params[f"t{i}"] = tok
+            if len(text) >= 3:
+                conds.append("toLower(s.name) STARTS WITH $p3")
+                params["p3"] = text[:3].lower()
+            where.append("(" + " OR ".join(conds or ["false"]) + ")")
+        else:  # contains: every token
+            if not tokens:
+                return []
+            for i, tok in enumerate(tokens):
+                where.append(f"toLower(s.name) CONTAINS $t{i}")
+                params[f"t{i}"] = tok
+        # The cap is spent on the best candidates, not the shortest names: tier
+        # (how the name matches), then how much the symbol is used, then length.
+        # A pure `ORDER BY size(name) LIMIT` dropped the long, heavily-called
+        # class a typo query was after as soon as a repo had a few hundred names
+        # sharing the common token.
+        params["ql"] = text.lower()
+        for i, tok in enumerate(tokens):
+            params[f"t{i}"] = tok
+        all_tokens = " AND ".join(
+            f"toLower(s.name) CONTAINS $t{i}" for i, _ in enumerate(tokens)) or "false"
+        if len(text) >= 3:
+            params["p3"] = text[:3].lower()
+            first3 = "toLower(s.name) STARTS WITH $p3"
+        else:
+            first3 = "false"
+        tier = (
+            "CASE WHEN toLower(s.name) = $ql THEN 0 "
+            "WHEN toLower(s.name) STARTS WITH $ql THEN 1 "
+            f"WHEN {all_tokens} THEN 2 "
+            "WHEN toLower(s.name) CONTAINS $ql THEN 3 "
+            f"WHEN {first3} THEN 4 ELSE 5 END"
+        )
+        res = self._g.ro_query(
+            "MATCH (s:Symbol) WHERE " + " AND ".join(where) + " "
+            "OPTIONAL MATCH (s)<-[r:CALLS|IMPORTS]-() "
+            "WITH s, count(r) AS in_degree "
+            f"WITH s, in_degree, {tier} AS tier "
+            "ORDER BY tier, in_degree DESC, size(s.name) LIMIT $limit "
+            "RETURN " + self._SYMBOL_COLS + ", s.rank AS rank, in_degree",
+            params=params,
+        )
+        cols = [h[1] for h in res.header]
+        return [dict(zip(cols, row, strict=True)) for row in res.result_set]
+
+    def symbols_in_file(self, path: str, limit: int = 500) -> list[SymbolInfo]:
+        """Every symbol declared in one file, in source order (`file_module`
+        pseudo-symbols left out)."""
+        res = self._g.ro_query(
+            "MATCH (s:Symbol) WHERE s.kind <> 'file_module' AND s.file = $path "
+            "RETURN " + self._SYMBOL_COLS + " ORDER BY s.start_line LIMIT $limit",
+            params={"path": path, "limit": int(limit)},
         )
         cols = [h[1] for h in res.header]
         return [_row_to_symbol(row, cols) for row in res.result_set]

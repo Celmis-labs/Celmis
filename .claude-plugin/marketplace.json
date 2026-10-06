@@ -1,0 +1,19 @@
+{
+  "name": "celmis",
+  "owner": {
+    "name": "Celmis Labs",
+    "url": "https://github.com/Celmis-labs"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for Celmis, the self-hosted code intelligence server."
+  },
+  "plugins": [
+    {
+      "name": "celmis-code",
+      "source": "./packaging/claude-plugin/celmis-code",
+      "description": "Search and read code across every repository your Celmis token covers, with a small tool list and a token budget on every answer.",
+      "category": "development",
+      "tags": ["code-search", "mcp", "cross-repo"]
+    }
+  ]
+}

@@ -1968,7 +1968,8 @@ class ReviewOrchestrator:
             3. Stage 10 — inject per-repo policy (`custom_rules`)
         """
         graph = build_graph_context(pr, workspace_id=workspace_id)
-        drift_md = self._build_cross_repo_drift(pr, workspace_id=workspace_id)
+        drift_md = self._build_cross_repo_drift(
+            pr, workspace_id=workspace_id, user_id=user_id)
         custom_rules = self._build_custom_rules(pr, policy)
         agent_custom_rules = self._build_agent_custom_rules(pr, policy)
         mcp_evidence = self._build_mcp_evidence(pr, user_id=user_id)
@@ -2923,6 +2924,7 @@ class ReviewOrchestrator:
 
     def _build_cross_repo_drift(
         self, pr: PullRequest, *, workspace_id: str = "default",
+        user_id: str | None = None,
     ) -> str:
         """Run semantic drift detector (Stage 7). Graceful — empty on failure.
 
@@ -2940,7 +2942,7 @@ class ReviewOrchestrator:
         """
         try:
             from src.review.cross_repo_drift import detect_drift
-            report = detect_drift(pr, workspace_id=workspace_id)
+            report = detect_drift(pr, workspace_id=workspace_id, user_id=user_id)
             # Keep the FACTS alongside the prose. The markdown goes to the
             # architect; the structure goes to the run record, so the UI can
             # show the finding itself rather than the model's account of it.

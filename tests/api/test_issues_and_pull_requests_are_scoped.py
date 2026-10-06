@@ -115,6 +115,19 @@ async def api(*, role: str | None, is_admin: bool = False, monkeypatch):
 
     monkeypatch.setattr(deps_module, "workspace_role", lambda uid, ws: role)
 
+    async def _everything_readable(_user, _ws, slugs):
+        # Which repos a caller may read is the access matrix's subject
+        # (tests/security/test_access_matrix.py); here the rows are the subject.
+        return set(slugs)
+
+    monkeypatch.setattr(issues_router, "code_readable_repo_slugs", _everything_readable)
+    monkeypatch.setattr(deps_module, "code_readable_repo_slugs", _everything_readable)
+
+    async def _may_read(slug, user, min_perm="read", workspace_id=None):
+        return None
+
+    monkeypatch.setattr(deps_module, "enforce_repo_permission", _may_read)
+
     app = FastAPI()
     for r in (issues_router, prs_router):
         app.include_router(r.router)

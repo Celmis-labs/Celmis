@@ -88,8 +88,36 @@ def _bound_workspace(opaque: str | None) -> str | None:
     return value or None
 
 
-def _workspace_claims(workspace_id: str | None) -> dict | None:
-    return {"workspace_id": workspace_id} if workspace_id else None
+def _workspace_claims(workspace_id: str | None, grant_id: str | None = None) -> dict | None:
+    claims: dict = {}
+    if workspace_id:
+        claims["workspace_id"] = workspace_id
+    if grant_id:
+        # The row that says which repos this token may reach. The MCP server
+        # looks it up on every call, so revoking or narrowing it applies at once.
+        claims["grant"] = grant_id
+    return claims or None
+
+
+async def _grant_id(session: AsyncSession, user_id: str, workspace_id: str | None) -> str | None:
+    """Id of the person's active ``oauth_grant`` row in the workspace, or None.
+
+    OAuth is not a way around the per-person token list: without a grant a
+    superadmin created, there is nothing to consent to."""
+    if not workspace_id:
+        return None
+    from src.mcp_server import token_store
+
+    def _find(sync_session):  # noqa: ANN001, ANN202
+        row = token_store.active_grant(
+            sync_session, user_id=user_id, workspace_id=workspace_id)
+        return row.id if row is not None else None
+
+    return await session.run_sync(_find)
+
+
+_NO_GRANT = ("No MCP access has been granted to you for this workspace. "
+             "Ask your superadmin to grant it.")
 
 
 # ─── Dynamic client registration (RFC 7591) ─────────────────────────
@@ -320,6 +348,9 @@ async def authorize_consent(
         raise HTTPException(status_code=400,
                             detail=f"scopes not allowed for client: {denied}")
 
+    if await _grant_id(session, user.id, workspace_id) is None:
+        raise HTTPException(status_code=403, detail=_NO_GRANT)
+
     code = _bind_workspace(secrets.token_urlsafe(32), workspace_id)
     row = OAuthAuthCode(
         code=code, client_id=client_id, user_id=user.id,
@@ -417,12 +448,15 @@ async def token_exchange(
             detail=f"OAuth server not fully configured: {exc}",
         ) from exc
     workspace_id = _bound_workspace(row.code)
+    grant_id = await _grant_id(session, row.user_id, workspace_id)
+    if grant_id is None:
+        raise HTTPException(status_code=403, detail=_NO_GRANT)
     token = issue_token(
         cfg, subject=row.user_id,
         scopes=[s for s in (row.scope or "").split(" ") if s],
         client_id=client_id,
         expires_in=_TOKEN_TTL_SECONDS,
-        extra_claims=_workspace_claims(workspace_id),
+        extra_claims=_workspace_claims(workspace_id, grant_id),
     )
     # Fresh refresh token — new family (rotated_from is None here), carrying
     # the same workspace so a refreshed token answers for the same tenant.
@@ -535,6 +569,14 @@ async def _refresh_grant(
     if row.expires_at < now:
         raise HTTPException(status_code=400, detail="refresh_token expired")
 
+    # The grant behind this session may have been revoked or have expired since
+    # the last refresh: then the session ends here, not at the next 30 s check.
+    workspace_id = _bound_workspace(row.family_id)
+    grant_id = await _grant_id(session, row.user_id, workspace_id)
+    if grant_id is None:
+        await _revoke_family(session, row.family_id)
+        raise HTTPException(status_code=400, detail="invalid_grant: access was withdrawn")
+
     # Atomically claim this token: mark rotated_to='pending' ONLY if it's
     # still unrotated. Two concurrent refreshes with the same token race
     # here — exactly one UPDATE flips the row, the loser sees rowcount 0
@@ -566,7 +608,7 @@ async def _refresh_grant(
         cfg, subject=row.user_id,
         scopes=[s for s in (row.scope or "").split(" ") if s],
         client_id=client_id, expires_in=_TOKEN_TTL_SECONDS,
-        extra_claims=_workspace_claims(_bound_workspace(row.family_id)),
+        extra_claims=_workspace_claims(workspace_id, grant_id),
     )
     new_refresh = await _mint_refresh(
         session=session, client_id=client_id, user_id=row.user_id,

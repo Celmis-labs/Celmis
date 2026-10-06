@@ -610,7 +610,10 @@ class ExplorationAgent:
         if not note:
             return {"error": f"not_found: {rel}"}
         # Truncate so as not to blow up the LLM context
-        body = note.content[:6000]
+        from src.security.mcp_redact import redact_for_mcp_floored
+
+        # Notes written before the MCP rules existed are redacted again on read.
+        body, _ = redact_for_mcp_floored(note.content[:6000], source_hint=rel)
         meta_min = {
             "type": note.metadata.get("type"),
             "path": note.metadata.get("path"),
@@ -627,7 +630,13 @@ class ExplorationAgent:
         max_matches = min(int(args.get("max_matches", 10) or 10), 30)
         if not file or not pattern:
             return {"error": "file and pattern required"}
-        fp = self.repo_path / file
+        from src.security.secret_files import SecretPathRefused, safe_join
+
+        try:
+            fp = safe_join(self.repo_path, file)
+        except SecretPathRefused:
+            # A secret file or a path out of the repo reads like a missing file.
+            return {"error": f"not_found: {file}"}
         if not fp.exists() or not fp.is_file():
             return {"error": f"not_found: {file}"}
         try:
@@ -638,10 +647,24 @@ class ExplorationAgent:
             text = fp.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             return {"error": f"read_failed: {exc}"}
+        from src.security.mcp_redact import redact_for_mcp_floored
+        from src.security.secret_files import classify, mask_env_values
+
+        if classify(file) == "keys_only":
+            text = mask_env_values(text)
         matches: list[dict[str, Any]] = []
         for i, line in enumerate(text.splitlines(), 1):
-            if rx.search(line):
-                matches.append({"line": i, "text": line.strip()[:200]})
+            # What this tool returns goes straight into the model loop, so a
+            # line with a secret literal never leaves unredacted. The pattern
+            # is matched against the REDACTED line: whether a line matched is
+            # an answer too, and a guess at a masked value (``password: Q``)
+            # must not be able to tell right from wrong.
+            try:
+                redacted, _ = redact_for_mcp_floored(line.strip()[:200], source_hint=file)
+            except Exception:  # noqa: BLE001 — unchecked text is not matched
+                continue
+            if rx.search(redacted):
+                matches.append({"line": i, "text": redacted})
                 if len(matches) >= max_matches:
                     break
         return {"count": len(matches), "matches": matches}

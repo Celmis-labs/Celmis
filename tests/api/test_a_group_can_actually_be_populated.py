@@ -50,6 +50,13 @@ def wired(tmp_path, monkeypatch):
         workspace_id="ws-1",
     ))
     monkeypatch.setattr("src.api.auto_review.get_auto_review_store", lambda: ar)
+    # Not about who may read what (tests/security covers that): everybody may.
+    from src.access.resolver import RepoAccessDecision
+
+    monkeypatch.setattr(
+        "src.access.effective.effective_access",
+        lambda _principal, _ws, repos=None: {
+            r: RepoAccessDecision.full(r) for r in (repos or [])})
 
     mgr = GroupManager()
     mgr.groups_dir = tmp_path / "groups"

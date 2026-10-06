@@ -41,9 +41,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import (
+    code_readable_repo_slugs,
     current_workspace_id,
     enforce_repo_permission,
-    readable_repo_slugs,
     require_memories_access,
 )
 from src.api.routers.review_rules import _audit, _can_edit, _writable_repo
@@ -116,7 +116,7 @@ async def _memories_in_ws(
     if not rows:
         raise HTTPException(status_code=404, detail="No such memory in this workspace")
     slugs = sorted({r["repo_slug"] for r in rows if r["repo_slug"]})
-    seen = await readable_repo_slugs(user, ws_id, slugs)
+    seen = await code_readable_repo_slugs(user, ws_id, slugs)
     if any(slug not in seen for slug in slugs):
         raise HTTPException(status_code=404, detail="No such memory in this workspace")
     for slug in slugs:
@@ -151,7 +151,7 @@ async def _hide_unreadable_sources(
         if row.get("source_repo"):
             slugs[row["id"]] = local_slug(str(row.get("source_provider") or ""),
                                           str(row["source_repo"]))
-    readable = await readable_repo_slugs(user, ws_id, sorted(set(slugs.values())))
+    readable = await code_readable_repo_slugs(user, ws_id, sorted(set(slugs.values())))
     out = []
     for row in rows:
         slug = slugs.get(row["id"])
@@ -191,7 +191,7 @@ async def list_memories(
     everything = await store.list_memories(
         ws_id, repo_slug, scope=scope_arg, origin=origin, q=q, session=session)
     if repo_slug is None:
-        shown = await readable_repo_slugs(
+        shown = await code_readable_repo_slugs(
             user, ws_id, sorted({r["repo_slug"] for r in everything if r["repo_slug"]}))
 
         def _visible(row: dict) -> bool:

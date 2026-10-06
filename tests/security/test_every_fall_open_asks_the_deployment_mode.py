@@ -42,17 +42,13 @@ ROOT = Path(__file__).resolve().parents[2]
 #: enclosing function is walked whole, so a guard inside a nested def
 #: (require_repo_permission._dep) counts. The last column is checked against
 #: the code reachable when the guard says False — "raise" an exception,
-#: "denied" a RepoAccessDecision.denied(), "not_admin" an identity built with
+#: "denied" a RepoAccessDecision.denied(), "false" a literal ``return False``, "not_admin" an identity built with
 #: a literal False where the admin flag goes.
 SITES: list[tuple[str, str, str, str]] = [
-    ("src/api/deps.py", "enforce_repo_permission", "api.deps.repo_permission",
-     "raise"),
-    ("src/api/deps.py", "require_repo_permission", "api.deps.repo_permission",
-     "raise"),
     ("src/api/deps.py", "current_workspace_id", "api.deps.workspace_provision",
      "raise"),
-    ("src/access/resolver.py", "resolve_access_sync", "access.resolver.no_rule",
-     "denied"),
+    ("src/access/policy.py", "unruled_repo_open", "access.policy.unruled_repo",
+     "false"),
     ("src/mcp_server/identity.py", "_no_identity", "mcp.identity.no_auth_context",
      "not_admin"),
     ("src/mcp_server/identity.py", "caller_access",
@@ -136,6 +132,10 @@ def _looks_like_refusing(nodes: list[ast.AST], kind: str) -> bool:
     for node in nodes:
         for sub in ast.walk(node):
             if kind == "raise" and isinstance(sub, ast.Raise):
+                return True
+            if kind == "false" and isinstance(sub, ast.Return) and (
+                isinstance(sub.value, ast.Constant) and sub.value.value is False
+            ):
                 return True
             if kind == "denied" and isinstance(sub, ast.Call) and (
                 (isinstance(sub.func, ast.Attribute) and sub.func.attr == "denied")
@@ -225,7 +225,7 @@ def test_the_default_is_todays_behaviour(mode):
     upgrade changed the default, every one of them would be denied at once."""
     assert mode(None) is DeploymentMode.SINGLE_TENANT
     assert deployment.is_single_tenant() is True
-    assert deployment.fall_open_allowed("access.resolver.no_rule") is True
+    assert deployment.fall_open_allowed("access.policy.unruled_repo") is True
 
 
 def test_multi_tenant_refuses_at_every_site(mode):
@@ -250,54 +250,48 @@ def test_spelling_variants_are_accepted(mode):
 # ─── behaviour: each reachable site actually refuses ─────────────────
 
 
-def test_a_repo_with_no_grant_is_refused(mode, monkeypatch):
-    import asyncio
+def test_an_unruled_repo_is_closed_by_default_in_both_modes(mode, monkeypatch):
+    """Deny is the default now: the mode only matters once the operator asks
+    for the old behaviour with CELMIS_UNRULED_REPO_ACCESS=open."""
+    from src.access import policy
+    from src.config import get_settings
 
-    from fastapi import HTTPException
-
-    from src.api import deps as deps_mod
-
-    # The third argument is the tenant: a grant may be stored under either
-    # spelling of the repository, and only the workspace knows which one
-    # this repository was registered under.
-    async def _no_grants(repo_slug, user, workspace_id=None):
-        return None, False
-
-    monkeypatch.setattr(deps_mod, "_effective_repo_permission", _no_grants)
-    user = type("U", (), {"id": "u1", "is_admin": False})()
-
-    mode(None)
-    asyncio.run(deps_mod.enforce_repo_permission("acme/api", user))  # allowed
-
-    mode("multi_tenant")
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(deps_mod.enforce_repo_permission("acme/api", user))
-    assert exc.value.status_code == 403
+    monkeypatch.delenv("CELMIS_UNRULED_REPO_ACCESS", raising=False)
+    get_settings.cache_clear()
+    try:
+        for value in (None, "multi_tenant"):
+            mode(value)
+            assert policy.unruled_repo_open() is False
+    finally:
+        get_settings.cache_clear()
 
 
-def test_a_repo_with_no_rule_is_refused(mode):
-    from src.access.resolver import resolve_access_sync
+def test_open_is_honoured_in_single_tenant_and_ignored_in_multi_tenant(mode, monkeypatch):
+    from src.access import policy
+    from src.config import get_settings
 
-    class _Result:
-        def scalars(self):
-            return self
+    monkeypatch.setenv("CELMIS_UNRULED_REPO_ACCESS", "open")
+    get_settings.cache_clear()
+    try:
+        mode(None)
+        assert policy.unruled_repo_open() is True
+        mode("multi_tenant")
+        assert policy.unruled_repo_open() is False
+    finally:
+        get_settings.cache_clear()
 
-        def all(self):
-            return []
 
-    class _Session:
-        def execute(self, *_a, **_k):
-            return _Result()
+def test_a_misspelt_policy_is_the_closed_one(mode, monkeypatch):
+    from src.access import policy
+    from src.config import get_settings
 
-    kw = dict(user_id="u1", is_admin=False, workspace_id="ws-a", repos=["acme/api"])
-
-    mode(None)
-    assert resolve_access_sync(_Session(), **kw)["acme/api"].code_visible is True
-
-    mode("multi_tenant")
-    denied = resolve_access_sync(_Session(), **kw)["acme/api"]
-    assert denied.researchable is False
-    assert denied.path_visible("README.md") is False
+    monkeypatch.setenv("CELMIS_UNRULED_REPO_ACCESS", "opne")
+    get_settings.cache_clear()
+    try:
+        mode(None)
+        assert policy.unruled_repo_open() is False
+    finally:
+        get_settings.cache_clear()
 
 
 def test_an_mcp_caller_with_no_identity_is_not_an_admin(mode):

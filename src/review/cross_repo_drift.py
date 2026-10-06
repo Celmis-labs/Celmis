@@ -335,9 +335,31 @@ _GREP_INCLUDES = (
     "--include=*.rs", "--include=*.rb", "--include=*.php",
     "--include=*.cs", "--include=*.c", "--include=*.cpp", "--include=*.h",
     "--include=*.yml", "--include=*.yaml", "--include=*.toml",
-    "--include=*.env*", "--include=*.json",
+    "--include=*.json",
     "--include=Dockerfile*", "--include=Makefile*",
 )
+
+
+def _is_secret_file(repo_path: Path, rel: str) -> bool:
+    """Fails CLOSED: a classifier that cannot answer hides the file."""
+    try:
+        from src.security.secret_files import classify_file
+
+        return classify_file(repo_path, rel) != "ok"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("drift_secret_classify_failed err=%s", type(exc).__name__)
+        return True
+
+
+def _redact_excerpt(excerpt: str, rel: str) -> str:
+    """A literal secret in a sibling's source is not quoted into a PR comment."""
+    try:
+        from src.security.mcp_redact import redact_for_mcp_floored
+
+        return redact_for_mcp_floored(excerpt, source_hint=rel)[0]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("drift_redact_failed err=%s", type(exc).__name__)
+        return ""
 
 
 def _grep_repo(
@@ -385,7 +407,12 @@ def _grep_repo(
         if any(part in {"node_modules", "dist", "build", ".next", "__pycache__",
                         ".venv", "venv", ".git"} for part in rel.parts):
             continue
+        # A sibling's env file, key or credential store is never quoted into a
+        # review comment, and neither is a file that merely LOOKS like one.
+        if _is_secret_file(repo_path, rel.as_posix()):
+            continue
         excerpt = excerpt.strip()
+        excerpt = _redact_excerpt(excerpt, rel.as_posix())
         if len(excerpt) > 140:
             excerpt = excerpt[:140] + "…"
         matches.append(DriftMatch(
@@ -402,11 +429,41 @@ def _grep_repo(
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _readable_siblings(
+    slugs: list[str], workspace_id: str | None, user_id: str | None,
+) -> list[str]:
+    """The siblings the person the review runs for may READ.
+
+    Group membership says which repositories are RELATED, not who may read
+    them: drift quotes a line of each sibling into the review. With a person
+    attached to the run, a sibling they cannot read (default-deny, a rule, no
+    grant) is left out, silently — the same answer as one that is not there.
+    A run without a person (a webhook with no author) keeps the group's
+    members, which could only be added by someone who could read them.
+    """
+    if not user_id or user_id == "default" or not workspace_id:
+        return slugs
+    try:
+        from src.access.effective import Principal, effective_access
+        from src.users.store import get_user_store
+
+        user = get_user_store().get_by_id(user_id)
+        if user is None:
+            return []
+        decisions = effective_access(
+            Principal(user.id, is_admin=bool(user.is_admin)), workspace_id, slugs)
+        return [s for s in slugs if decisions.get(s) and decisions[s].code_visible]
+    except Exception as exc:  # noqa: BLE001 — fail CLOSED
+        logger.warning("drift_access_unreadable err=%s", type(exc).__name__)
+        return []
+
+
 def detect_drift(
     pr: PullRequest,
     *,
     max_values: int = 25,
     workspace_id: str | None = None,
+    user_id: str | None = None,
 ) -> DriftReport:
     """Run drift detection. Idempotent, safe to call even if no group exists.
 
@@ -426,6 +483,9 @@ def detect_drift(
         return DriftReport(group_name=None, elapsed_seconds=time.time() - t0)
 
     group_name, other_slugs = group_info
+    other_slugs = _readable_siblings(other_slugs, workspace_id, user_id)
+    if not other_slugs:
+        return DriftReport(group_name=group_name, elapsed_seconds=time.time() - t0)
 
     removed = extract_removed_values(pr)[:max_values]
     if not removed:

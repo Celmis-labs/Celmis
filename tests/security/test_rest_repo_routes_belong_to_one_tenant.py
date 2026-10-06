@@ -219,6 +219,13 @@ def mcp_caller(monkeypatch):
         lambda *, user_id, is_admin, workspace_id, repos:  # noqa: ARG005
             {r: RepoAccessDecision.full(r) for r in repos},
     )
+    # The MCP decision is src.access.effective's; the rules need Postgres, so
+    # every repo the tenant binding lets through is fully readable here.
+    monkeypatch.setattr(
+        "src.access.effective.effective_access",
+        lambda principal, workspace_id, repos=None:  # noqa: ARG005
+            {r: RepoAccessDecision.full(r) for r in (repos or [])},
+    )
     return state
 
 
@@ -496,9 +503,11 @@ def test_bootstrap_client_does_not_hand_out_another_tenants_owners(
     foreign = _bootstrap(MISSING_PROJECT, SLUG_B)
     missing = _bootstrap(MISSING_PROJECT, "github_nobody-nothing")
 
-    assert foreign["top_owners"] == [] == missing["top_owners"]
+    from src.access.effective import NOT_ACCESSIBLE
+
+    # Denied and nonexistent are the same bytes: no owners, no stub, no hint.
+    assert foreign == missing == {"error": NOT_ACCESSIBLE}
     assert SLUG_B not in snapshots, "the foreign snapshot was read at all"
-    assert foreign.keys() == missing.keys()
     # the caller's own target still gets its owners
     assert _bootstrap(projects[WS_A], SLUG_A)["top_owners"] == [
         {"identity": f"dev@{SLUG_A}", "commits": 9}]
@@ -514,7 +523,14 @@ def test_bootstrap_client_respects_a_research_denial(registry, multi_tenant,
         lambda *, user_id, is_admin, workspace_id, repos:  # noqa: ARG005
             {r: RepoAccessDecision.denied(r) for r in repos},
     )
-    assert _bootstrap(projects[WS_A], SLUG_A)["top_owners"] == []
+    monkeypatch.setattr(
+        "src.access.effective.effective_access",
+        lambda principal, workspace_id, repos=None:  # noqa: ARG005
+            {r: RepoAccessDecision.denied(r) for r in (repos or [])},
+    )
+    from src.access.effective import NOT_ACCESSIBLE
+
+    assert _bootstrap(projects[WS_A], SLUG_A) == {"error": NOT_ACCESSIBLE}
     assert snapshots == []
 
 

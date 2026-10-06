@@ -35,6 +35,9 @@ def refuse_if_refused() -> None:
     caller = identity.resolve_caller()
     reason = getattr(caller, "refused", "") or ""
     if reason:
+        from src.mcp_server import callctx
+
+        callctx.set_status("denied")
         raise ToolError(reason)
 
 

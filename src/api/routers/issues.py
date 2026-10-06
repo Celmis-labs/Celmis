@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import current_workspace_id, get_current_user
+from src.api.deps import code_readable_repo_slugs, current_workspace_id, get_current_user
 from src.db.models import ReviewIssue, ReviewPullRequest
 from src.db.session import get_async_session
 from src.review.issues import AUTO_RESOLUTION_SOURCES, implementation_stats
@@ -169,6 +169,27 @@ def _resolution_clause(kinds: list[str]):
             parts.append(ReviewIssue.resolution_source == kind)
     return or_(*parts) if parts else ReviewIssue.id.is_(None)
 
+def _outside(hidden: list[str]):
+    """The where clause that leaves out the issues of the hidden repositories."""
+    return ~or_(func.coalesce(ReviewIssue.repo_slug, "").in_(hidden),
+                func.coalesce(ReviewIssue.pr_repo, "").in_(hidden))
+
+
+async def _hidden_repos(session: AsyncSession, user: User, ws: str) -> list[str]:
+    """Repo names (either spelling) in this workspace's issues the caller may not
+    read the CODE of: an issue is a finding with its snippet, so a repository
+    held at `metadata` is as hidden as one with no rule at all."""
+    names: set[str] = set()
+    for a, b in (await session.execute(
+        select(ReviewIssue.repo_slug, ReviewIssue.pr_repo)
+        .where(ReviewIssue.workspace_id == ws).distinct()
+    )).all():
+        names.update(str(n) for n in (a, b) if n)
+    if not names:
+        return []
+    readable = await code_readable_repo_slugs(user, ws, sorted(names))
+    return sorted(names - readable)
+
 
 @router.get("", response_model=IssueList)
 async def list_issues(
@@ -191,10 +212,15 @@ async def list_issues(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_async_session),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     ws: str = Depends(current_workspace_id),
 ) -> IssueList:
     base = [ReviewIssue.workspace_id == ws]
+    hidden = await _hidden_repos(session, user, ws)
+    if hidden:
+        # Issues of a repository the caller may not read are not listed, not
+        # counted and not named in the repo filter.
+        base.append(_outside(hidden))
     if severity_list := _csv(severity):
         base.append(ReviewIssue.severity.in_(severity_list))
     if category_list := _csv(category):
@@ -280,7 +306,7 @@ async def list_issues(
         str(r) for (r,) in (await session.execute(
             select(ReviewIssue.repo_slug).where(ReviewIssue.workspace_id == ws)
             .distinct()
-        )).all() if r
+        )).all() if r and str(r) not in hidden
     })
 
     return IssueList(
@@ -300,7 +326,7 @@ async def issues_summary(
     repo: str | None = Query(default=None, max_length=300),
     days: int = Query(default=30, ge=1, le=366),
     session: AsyncSession = Depends(get_async_session),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     ws: str = Depends(current_workspace_id),
 ) -> IssueSummary:
     """The numbers the page's header strip shows, and the one place the
@@ -311,6 +337,13 @@ async def issues_summary(
     """
     since = datetime.now(UTC) - timedelta(days=days)
     base = [ReviewIssue.workspace_id == ws, ReviewIssue.dup_of.is_(None)]
+    # The numbers cover the repositories the caller may read, no others: a
+    # repository they may not read is neither counted nor confirmed by a 0.
+    hidden = await _hidden_repos(session, user, ws)
+    if hidden:
+        if repo and repo in hidden:
+            raise HTTPException(status_code=404, detail="Repo not registered")
+        base.append(_outside(hidden))
     if repo:
         base.append(or_(ReviewIssue.repo_slug == repo, ReviewIssue.pr_repo == repo))
 
@@ -337,6 +370,8 @@ async def issues_summary(
     from src.db.models import ReviewIssueRecheckState as State
 
     states = select(State.last_result).where(State.workspace_id == ws)
+    if hidden:
+        states = states.where(func.coalesce(State.pr_repo, "").not_in(hidden))
     if repo:
         states = states.where(State.pr_repo == repo)
     reopened = 0
@@ -381,6 +416,12 @@ async def recheck_issues(
                 status_code=403,
                 detail="Rechecking issues requires member or above on this workspace")
     repo = (payload.repo if payload else None) or None
+    # A recheck calls the model and the provider for a repository's issues: it
+    # runs only for the repositories the caller may read, and naming one they
+    # may not is the answer for a repository that is not there.
+    hidden = await _hidden_repos(session, user, ws)
+    if repo and repo in hidden:
+        raise HTTPException(status_code=404, detail="Repo not registered")
     from src.review.issue_resolver import REVERT_WATCH_DAYS
 
     watch_since = datetime.now(UTC) - timedelta(days=REVERT_WATCH_DAYS)
@@ -393,6 +434,8 @@ async def recheck_issues(
                  or_(ReviewIssue.closed_at.is_(None),
                      ReviewIssue.closed_at >= watch_since))),
     ).distinct()
+    if hidden:
+        q = q.where(_outside(hidden))
     if repo:
         q = q.where(or_(ReviewIssue.repo_slug == repo, ReviewIssue.pr_repo == repo))
     branches = [(str(a), str(b), str(c)) for a, b, c in (await session.execute(q)).all()]

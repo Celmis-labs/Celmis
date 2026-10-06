@@ -16,6 +16,7 @@ import {
   type RepoOut,
   type RepoOwnerItem,
   type RepoDeveloperScan,
+  unruledApi,
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useI18n, useT } from "@/lib/i18n";
@@ -291,6 +292,15 @@ function RepoRow({
   const [showPRs, setShowPRs] = useState(false);
   const [removeOpen, setRemoveOpen] = useState(false);
   const [purge, setPurge] = useState(false);
+  // Only a workspace admin gets this list (the endpoint refuses everyone
+  // else), which is exactly who the badge is for.
+  const unruled = useQuery({
+    queryKey: ["access", "unruled"],
+    queryFn: () => unruledApi.list(token!),
+    enabled: !!token,
+    retry: false,
+  });
+  const adminsOnly = !!unruled.data?.repos.includes(repo.slug);
 
   const remove = useMutation({
     mutationFn: async (purge: boolean) =>
@@ -400,6 +410,11 @@ function RepoRow({
               </div>
             )}
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted-foreground)]">
+              {adminsOnly && (
+                <Badge variant="warning" className="px-1.5 py-0" title={t("repositories.adminsOnlyHint")}>
+                  {t("repositories.adminsOnlyBadge")}
+                </Badge>
+              )}
               {repo.indexed ? (
                 <>
                   <Badge variant="success" className="px-1.5 py-0">{t("repositories.indexedBadge")}</Badge>

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "celmis": {
+      "type": "http",
+      "url": "${CELMIS_URL}/mcp/dev/",
+      "headers": {
+        "Authorization": "Bearer ${CELMIS_TOKEN}"
+      }
+    }
+  }
+}

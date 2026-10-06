@@ -131,6 +131,18 @@ class TestIssueToken:
 
 
 class TestJwtTokenVerifier:
+    @pytest.fixture(autouse=True)
+    def _grantless_tokens(self, monkeypatch) -> None:
+        """These tests are about the signature, expiry and claims. They mint
+        tokens with no grant row, which the server refuses by default
+        (tests/security/test_mcp_tokens.py covers that); accept them here."""
+        from src.config import get_settings
+
+        monkeypatch.setenv("CELMIS_MCP_LEGACY_TOKENS", "accept")
+        get_settings.cache_clear()
+        yield
+        get_settings.cache_clear()
+
     @pytest.fixture
     def verifier(self, config: JwtConfig) -> JwtTokenVerifier:
         return JwtTokenVerifier(config)
@@ -294,6 +306,9 @@ class TestServerIntegration:
 
 
 class TestCliIssueTokenCommand:
+    ARGS = ["mcp", "issue-token", "--user", "dev@example.com",
+            "--workspace", "acme", "--repos", "acme/shop-*"]
+
     def test_issue_token_no_secret_fails(self, monkeypatch) -> None:
         from typer.testing import CliRunner
 
@@ -304,31 +319,24 @@ class TestCliIssueTokenCommand:
         # means neither is set. Without this the test passes alone and
         # fails in a full run, whenever another module has loaded .env.
         monkeypatch.delenv("CELMIS_JWT_SECRET", raising=False)
-        runner = CliRunner()
-        result = runner.invoke(app, ["mcp", "issue-token"])
+        result = CliRunner().invoke(app, self.ARGS)
         assert result.exit_code == 1
         assert "MCP_JWT_SECRET" in result.output
 
-    def test_issue_token_with_secret_outputs_jwt(self, monkeypatch) -> None:
+    @pytest.mark.parametrize("missing", ["--user", "--repos", "--workspace"])
+    def test_a_token_needs_a_person_a_workspace_and_a_repo_list(
+        self, monkeypatch, missing: str,
+    ) -> None:
+        """No more tokens for 'default' that reach whatever the server picks."""
         from typer.testing import CliRunner
 
         from src.cli import app
 
         monkeypatch.setenv("MCP_JWT_SECRET", "test-secret-32-chars-or-more-please")
-        runner = CliRunner()
-        result = runner.invoke(
-            app, ["mcp", "issue-token", "--subject", "test-user"],
-        )
-        assert result.exit_code == 0
-        # Output має бути JWT — 3 base64-encoded parts split by '.'
-        token = result.output.strip()
-        parts = token.split(".")
-        assert len(parts) == 3
-        # Verify it parses
-        decoded = jwt.decode(
-            token, "test-secret-32-chars-or-more-please",
-            algorithms=["HS256"],
-            audience=DEFAULT_AUDIENCE,
-            issuer=DEFAULT_ISSUER,
-        )
-        assert decoded["sub"] == "test-user"
+        args = list(self.ARGS)
+        i = args.index(missing)
+        del args[i:i + 2]
+        result = CliRunner().invoke(app, args)
+        assert result.exit_code == 2
+        assert missing in result.output
+

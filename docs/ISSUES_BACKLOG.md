@@ -52,7 +52,11 @@ or by feedback) is never touched.
 - Once a day for every repository with backlog issues
   (`CELMIS_ISSUES_SWEEP_INTERVAL_HOURS`, 24; `0` turns the sweep off). It costs one
   branch-head request per repository and branch, and nothing more when the head
-  has not moved since the last pass.
+  has not moved since the last pass. The first pass waits
+  `CELMIS_ISSUES_SWEEP_FIRST_DELAY_SECONDS` (300) after start-up, and repositories
+  are spaced `CELMIS_ISSUES_SWEEP_STAGGER_SECONDS` (5) apart so a large install
+  does not call the provider all at once. `CELMIS_DISABLE_ISSUES_SWEEP=1` never
+  starts the sweep.
 - On demand: "Recheck now" on the issues page (`POST /api/issues/recheck`).
 - Inside a review: the "resolve earlier issues" stage runs the same checks on the
   pull request being reviewed, and the completed comment says what it resolved.

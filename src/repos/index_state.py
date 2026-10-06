@@ -78,6 +78,9 @@ class RepoIndexInfo:
     last_checked_at: datetime | None = None
     last_remote_sha: str | None = None
     last_check_error: str | None = None
+    #: Branch the indexed revision belongs to (None: recorded before the
+    #: column existed, or the checkout was detached).
+    indexed_branch: str | None = None
 
     @property
     def up_to_date(self) -> bool | None:
@@ -186,6 +189,7 @@ def _to_info(row: RepoIndexState) -> RepoIndexInfo:
         last_checked_at=_aware(row.last_checked_at),
         last_remote_sha=row.last_remote_sha,
         last_check_error=row.last_check_error,
+        indexed_branch=getattr(row, "indexed_branch", None),
     )
 
 
@@ -230,6 +234,18 @@ def read_index_states(repo_slugs: Iterable[str]) -> dict[str, RepoIndexInfo]:
         return {}
 
 
+def clone_branch(repo_slug: str) -> str | None:
+    """The branch the local clone stands on, or None (detached, missing clone).
+    Never raises — bookkeeping must not fail the index it describes."""
+    try:
+        from src.repos.freshness import _checked_out_branch
+
+        return _checked_out_branch(repo_slug)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("clone_branch_failed repo=%s err=%s", repo_slug, exc)
+        return None
+
+
 # ─── write ───────────────────────────────────────────────────────────
 
 
@@ -247,6 +263,7 @@ def record_index_success(
     sha: str | None,
     files: int = 0,
     full_rebuild: bool,
+    branch: str | None = None,
 ) -> None:
     """The index finished and the graph on disk is this revision.
 
@@ -271,6 +288,10 @@ def record_index_success(
             # "never recorded" — the same silence this column exists to end.
             if sha is not None:
                 row.last_indexed_sha = sha
+                # The branch belongs to the sha: kept only alongside a sha this
+                # run named, and never blanked by a run that could not name one.
+                if branch:
+                    row.indexed_branch = branch
             row.last_indexed_at = now
             row.last_incremental_files = int(files or 0)
             if full_rebuild:

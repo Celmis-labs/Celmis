@@ -44,10 +44,38 @@ class Actor:
     email: str
     workspace_id: str
     label: str = "automation"
+    #: The repo list of the MCP token this actor acts for (exact slugs and/or
+    #: globs). ``None`` = no token narrows it. When set, only these repositories
+    #: of the workspace exist for the actor — the superadmin who issued the
+    #: token is authoritative — and a repo outside the list is as unknown as
+    #: one that was never registered.
+    token_filter: tuple[str, ...] | None = None
 
 
 class ActionError(RuntimeError):
     """A refusal the caller can act on — not an internal failure."""
+
+
+def workspace_configs(actor: Actor) -> list[Any]:
+    """The repositories registered in the actor's workspace that exist FOR the
+    actor: all of them, or — for an actor holding a token with a repo list —
+    the ones that list covers."""
+    from src.api.auto_review import get_auto_review_store
+
+    configs = get_auto_review_store().list_for_workspace(actor.workspace_id)
+    if actor.token_filter is None:
+        return configs
+    from src.access.effective import match_any
+
+    return [c for c in configs
+            if match_any(actor.token_filter, c.repo_slug, getattr(c, "full_name", ""))]
+
+
+def _token_slugs(actor: Actor) -> set[str] | None:
+    """The slugs an actor's token lists, or ``None`` when no token narrows it."""
+    if actor.token_filter is None:
+        return None
+    return {c.repo_slug for c in workspace_configs(actor)}
 
 
 def register_repo(
@@ -205,9 +233,7 @@ async def start_dep_audit(
         raise ActionError("report_engine must be none, api or claude_code.")
 
     if repo_slugs:
-        from src.api.auto_review import get_auto_review_store
-        owned = {c.repo_slug for c in
-                 get_auto_review_store().list_for_workspace(actor.workspace_id)}
+        owned = {c.repo_slug for c in workspace_configs(actor)}
         unknown = [s for s in repo_slugs if s not in owned]
         if unknown:
             # Named and refused, not silently dropped — an audit that covers
@@ -282,6 +308,16 @@ async def start_dep_audit(
     return {"run_id": run.id, "status": run.status, "job_id": job_id}
 
 
+async def _visible_dep_repos(actor: Actor, session: Any, run: Any) -> set[str] | None:
+    """The repositories of ``run`` this actor may see; ``None`` = all of them.
+    A token's repo list is the whole answer; otherwise the person's own access
+    (default-deny included) decides, as it does for the page."""
+    from src.api.routers import deps as deps_router
+
+    return await deps_router._visible_repos(
+        session, run, _user_for(actor), actor.workspace_id, only=_token_slugs(actor))
+
+
 async def get_dep_audit(
     actor: Actor, session: Any, run_id: str | None = None,
 ) -> dict[str, Any]:
@@ -299,11 +335,24 @@ async def get_dep_audit(
     run = (await session.scalars(query)).first()
     if run is None:
         raise ActionError("No audit run found.")
+    summary = dict(run.summary or {})
+    visible = await _visible_dep_repos(actor, session, run)
+    if visible is not None:
+        # The run covers every repository of the workspace: the caller gets
+        # the totals and slugs of the ones it may see, and a whitelist of the
+        # rest — the same rebuild the page's route applies.
+        from src.api.routers import deps as deps_router
+        from src.db.models import DepFinding
+
+        rows = [r for r in await session.scalars(
+            select(DepFinding).where(DepFinding.run_id == run.id))
+            if r.repo_slug in visible]
+        summary = deps_router._restricted_summary(summary, rows, visible)
     return {
         "run_id": run.id,
         "status": run.status,
         "error": run.error or "",
-        "summary": dict(run.summary or {}),
+        "summary": summary,
         "created_at": run.created_at.isoformat() if run.created_at else "",
     }
 
@@ -328,6 +377,9 @@ async def list_dep_findings(
 
     query = select(DepFinding).where(DepFinding.run_id == run_id)
     rows = list(await session.scalars(query))
+    visible = await _visible_dep_repos(actor, session, run)
+    if visible is not None:
+        rows = [r for r in rows if r.repo_slug in visible]
 
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "none": 4}
     if severity:
@@ -394,13 +446,11 @@ async def generate_docs(
     a bulk action that silently covers nine of ten is the failure this surface
     exists to avoid.
     """
-    from src.api.auto_review import get_auto_review_store
     from src.config import get_settings
     from src.generation.doc_language import resolve_doc_engine, resolve_doc_language
     from src.sync.queue import KIND_GENERATE_VAULT, enqueue
 
-    store = get_auto_review_store()
-    registered = {c.repo_slug: c for c in store.list_for_workspace(actor.workspace_id)}
+    registered = {c.repo_slug: c for c in workspace_configs(actor)}
 
     if repo_slugs:
         unknown = [s for s in repo_slugs if s not in registered]
@@ -510,8 +560,7 @@ def set_auto_review(
     from src.api.routers.repos import _default_mode
 
     store = get_auto_review_store()
-    registered = {c.repo_slug: c
-                  for c in store.list_for_workspace(actor.workspace_id)}
+    registered = {c.repo_slug: c for c in workspace_configs(actor)}
     if not registered:
         raise ActionError("No repositories are registered in this workspace.")
 
@@ -571,16 +620,17 @@ async def list_repos(actor: Actor) -> dict[str, Any]:
     That gap is what made the agent feel narrow: it could start a documentation
     build over twenty repositories and could not say which twenty.
     """
-    from src.api.auto_review import get_auto_review_store
     from src.api.deps import readable_repo_slugs
     from src.config import get_settings, is_valid_repo_slug
 
     settings = get_settings()
-    store = get_auto_review_store()
-    configs = sorted(store.list_for_workspace(actor.workspace_id),
-                     key=lambda c: c.full_name)
-    allowed = await readable_repo_slugs(
-        _user_for(actor), actor.workspace_id, [c.repo_slug for c in configs])
+    configs = sorted(workspace_configs(actor), key=lambda c: c.full_name)
+    if actor.token_filter is not None:
+        # The token's repo list is authoritative; `configs` is already that list.
+        allowed = {c.repo_slug for c in configs}
+    else:
+        allowed = await readable_repo_slugs(
+            _user_for(actor), actor.workspace_id, [c.repo_slug for c in configs])
     repos = []
     for cfg in configs:
         if cfg.repo_slug not in allowed:
@@ -761,12 +811,11 @@ def resolve_repo(actor: Actor, repo: str | None) -> str:
     Either spelling a person uses — the slug or owner/name — is accepted, the
     same two `_require_repo_in_workspace` accepts on the policy routes.
     """
-    from src.api.auto_review import get_auto_review_store
 
     wanted = (repo or "").strip()
     if not wanted:
         raise ActionError("Name the repository.")
-    for cfg in get_auto_review_store().list_for_workspace(actor.workspace_id):
+    for cfg in workspace_configs(actor):
         if wanted in (cfg.repo_slug, cfg.full_name):
             return cfg.repo_slug
     raise ActionError(f"Not registered in this workspace: {wanted}")

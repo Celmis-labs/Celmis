@@ -22,6 +22,7 @@ import { useT } from "@/lib/i18n";
 import { TEAM_ROLES } from "@/lib/roles";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
+import { UnruledBanner } from "@/components/unruled-banner";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -76,6 +77,7 @@ export default function TeamsPage() {
         }
         tabs={<SectionTabs set="team" />}
       />
+      <UnruledBanner />
 
       <Card>
         <CardHeader>

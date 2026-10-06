@@ -23,6 +23,15 @@ admin (the instance operator) passes every workspace check.
 workspace, a team grant or the provider itself. Owners and admins hold every
 repository of the workspace.
 
+A repository nobody has a rule for is closed to members. Every review feature
+above (reviews, issues, memories, learning, feedback, the commands and the
+requirements of a pull request, productivity tables, chat replies, the Jira
+check) uses the same resolver as MCP: a repository the person may not read is
+answered like one that does not exist (404), and a repository that is only
+named (`metadata` visibility) is listed by name and never opened. The role
+gates in the table still apply on top. How rules, grants, MCP tokens and the
+audit work: [MCP access](mcp-access.md).
+
 ## Rules worth knowing
 
 - Memories are for editors and above, reads included, and a repository's
@@ -36,7 +45,7 @@ repository of the workspace.
   secret; the connection list says only that one exists.
 - The commands given on a pull request (`GET /api/pull-requests/{id}/commands`)
   are shown only to people who may read the repository, otherwise the answer is
-  403.
+  404, as for a pull request that does not exist.
 - Webhooks are verified (HMAC or token) before anything is read, and a delivery
   is bound to the workspace of the registered repository.
 

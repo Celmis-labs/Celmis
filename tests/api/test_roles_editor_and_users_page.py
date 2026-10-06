@@ -97,7 +97,9 @@ async def test_an_editor_needs_the_repo_grant_too(tmp_path, monkeypatch):
             await s.commit()
         r = await w.client.put("/api/review-policies/github_aco-locked", json=POLICY,
                                headers=w.h("editor_a"))
-        assert r.status_code == 403, r.text
+        # Not 403: a repository the caller may not read at all is answered like
+        # one that does not exist, so its slug cannot be probed.
+        assert r.status_code == 404, r.text
         assert await w.scalar(RepoReviewPolicy, "github_aco-locked") is None
 
 

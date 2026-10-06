@@ -71,7 +71,7 @@ PROXY_PREFIX = "/backend"
 #:   GitLab:    Merge Request Hook, and Comments (a "Note Hook" — commands).
 #:   Bitbucket: created/updated (review) + fulfilled/rejected (lifecycle) +
 #:              comment created/updated (commands) + approved/unapproved
-#:              (productivity: who reviewed, and when).
+#:              (productivity: who reviewed, and when) + repo:push (index refresh).
 EVENTS: dict[str, list[str]] = {
     "github": ["pull_request", "push", "issue_comment", "pull_request_review_comment",
                "pull_request_review_thread"],
@@ -85,6 +85,7 @@ EVENTS: dict[str, list[str]] = {
         "pullrequest:comment_updated",
         "pullrequest:approved",
         "pullrequest:unapproved",
+        "repo:push",
     ],
 }
 

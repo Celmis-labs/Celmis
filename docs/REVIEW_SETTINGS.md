@@ -53,8 +53,9 @@ are not read as feedback from a person ([Memories and learning](MEMORIES_AND_LEA
 | `auto_pause_window_minutes` | 15 | The sliding window (1 to 240) the pushes are counted in. |
 
 A paused pull request gets one short note saying so. `@celmis start-review`
-(or the Resume button) resumes it and reviews it at once; `@celmis pause` and the
-Pause button pause it until somebody resumes, whatever the cadence says. An
+(or the Resume button) resumes it and reviews it at once; The Pause button on the
+pull-requests page pauses it until somebody resumes, whatever the cadence says
+(there is no `@celmis pause` comment command). An
 automatic pause lapses by itself when the repository leaves the `auto_pause`
 cadence.
 

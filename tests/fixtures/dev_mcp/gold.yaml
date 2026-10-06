@@ -1,0 +1,198 @@
+# Gold answers for the developer scenarios, over the three synthetic repos in
+# this directory. Every `gold` entry is a fact a correct answer contains and is
+# checked against the fixture by tests/e2e_local/test_the_gold_file_is_true.py,
+# so a fixture edit that moves a line fails a test instead of the scenario.
+#
+# Scoring (scripts/dev_mcp_e2e.py):
+#   gold      found when the answer names `path` with a range covering `line`
+#             (or, for slices, when it contains `text` after that path);
+#             `alt_lines` are other lines that pin the same fact (a reference
+#             list names the caller's first line, not the call site)
+#   names     environment / setting names the answer must list
+#   sources   files the answer must name as where a value comes from
+#   guidance  lower-cased phrases the answer must contain
+#   warnings  lower-cased phrases the answer must contain (a "do not copy" flag)
+#   forbid    strings that must NOT appear (beyond the global canary scan)
+# Repo names are logical: the runner maps `acme/shop` to whatever slug the
+# server registered it under.
+version: 1
+
+repos:
+  acme/shop:    {dir: acme-shop,    language: python,     branch: develop}
+  acme/billing: {dir: acme-billing, language: typescript, branch: develop}
+  acme/gateway: {dir: acme-gateway, language: go,         branch: develop}
+
+scenarios:
+  - id: S1-db-connection-like-billing
+    ask: "Make a database connection like in service acme/billing"
+    steps:
+      - {tool: howto, args: {topic: db, repo: acme/billing}}
+    gold:
+      - {repo: acme/billing, path: src/db/pool.ts, line: 5, text: createPool}
+      - {repo: acme/billing, path: src/config.ts, line: 20, text: DATABASE_URL}
+    names: [DATABASE_URL, DB_POOL_SIZE]
+    sources: [.env.example, docker-compose.yml, bitbucket-pipelines.yml]
+    guidance: ["ask the user or ops"]
+    baseline:
+      repos: [acme/billing]
+      terms: [Pool, DATABASE_URL]
+
+  - id: S2-credentials-of-shop
+    ask: "Find the database connection in service acme/shop, find its credentials and use them in this service"
+    steps:
+      - {tool: howto, args: {topic: db, repo: acme/shop}}
+      - {tool: howto, args: {topic: config, repo: acme/shop}}
+    gold:
+      - {repo: acme/shop, path: app/db.py, line: 9, text: build_engine}
+      - {repo: acme/shop, path: app/config.py, line: 14, text: DB_PASSWORD}
+    names: [DB_HOST, DB_USER, DB_PASSWORD]
+    sources: [.env.example, docker-compose.yml, bitbucket-pipelines.yml]
+    guidance: ["ask the user or ops"]
+    warnings: ["do not copy"]
+    baseline:
+      repos: [acme/shop]
+      terms: [DB_PASSWORD, create_engine, password]
+
+  - id: S3-auth-like-gateway
+    ask: "Find how authorization and credentials are done in service acme/gateway and do the same here"
+    steps:
+      - {tool: howto, args: {topic: auth, repo: acme/gateway}}
+      - {tool: refs, args: {repo: acme/gateway, symbol: Middleware, direction: callers}}
+    gold:
+      - {repo: acme/gateway, path: internal/auth/middleware.go, line: 17, text: Middleware}
+      - {repo: acme/gateway, path: internal/proxy/proxy.go, line: 19, alt_lines: [14], text: Middleware}
+    names: [JWT_KEY_PATH, JWT_ISSUER]
+    sources: [internal/config/config.go]
+    guidance: ["ask the user or ops"]
+    expect_text: ["secret/data/acme/gateway/jwt"]
+    baseline:
+      repos: [acme/gateway]
+      terms: [Middleware, Authorization, JWT]
+
+  - id: S13-auth-like-shop
+    ask: "Find how authorization is done in service acme/shop and do the same here"
+    steps:
+      - {tool: howto, args: {topic: auth, repo: acme/shop}}
+    gold:
+      - {repo: acme/shop, path: app/auth.py, line: 13, text: verify_token}
+    names: [JWT_ISSUER, JWT_AUDIENCE, JWT_JWKS_URL]
+    sources: [.env.example, docker-compose.yml]
+    guidance: ["ask the user or ops"]
+    baseline:
+      repos: [acme/shop]
+      terms: [verify_token, jwt, Bearer]
+
+  - id: S14-credentials-of-shop-for-billing
+    ask: "Find the database credentials of service acme/shop and use them in acme/billing"
+    steps:
+      - {tool: howto, args: {topic: db, repo: acme/shop}}
+      - {tool: howto, args: {topic: config, repo: acme/shop}}
+      - {tool: howto, args: {topic: db, repo: acme/billing}}
+    gold:
+      - {repo: acme/shop, path: app/config.py, line: 14, text: DB_PASSWORD}
+      - {repo: acme/billing, path: src/db/pool.ts, line: 5, text: createPool}
+    names: [DB_PASSWORD, DATABASE_URL]
+    sources: [.env.example, bitbucket-pipelines.yml]
+    guidance: ["ask the user or ops"]
+    forbid: ["CANARY_"]
+    baseline:
+      repos: [acme/shop, acme/billing]
+      terms: [DB_PASSWORD, create_engine, createPool, DATABASE_URL]
+
+  - id: S4-where-is-the-definition
+    ask: "Where is create_order defined?"
+    steps:
+      - {tool: find, args: {query: create_order}}
+    gold:
+      - {repo: acme/shop, path: app/services/orders.py, line: 19, text: create_order}
+    baseline:
+      repos: [acme/shop, acme/billing, acme/gateway]
+      terms: [create_order]
+
+  - id: S5-what-is-in-this-file
+    ask: "What does app/services/orders.py contain?"
+    steps:
+      - {tool: outline, args: {repo: acme/shop, path: app/services/orders.py}}
+    gold:
+      - {repo: acme/shop, path: app/services/orders.py, line: 13, text: OrderService}
+      - {repo: acme/shop, path: app/services/orders.py, line: 19, text: create_order}
+    baseline:
+      repos: [acme/shop]
+      terms: [OrderService]
+
+  - id: S6-read-one-function
+    ask: "Show me create_order in acme/shop"
+    steps:
+      - {tool: read_symbol, args: {repo: acme/shop, name: create_order}}
+    gold:
+      - {repo: acme/shop, path: app/services/orders.py, line: 19, text: create_order}
+    expect_text: ["INSERT INTO orders"]
+    baseline:
+      repos: [acme/shop]
+      terms: [create_order]
+
+  - id: S7-who-calls-it
+    ask: "Who calls loadConfig in acme/billing?"
+    steps:
+      - {tool: refs, args: {repo: acme/billing, symbol: loadConfig, direction: callers}}
+    gold:
+      - {repo: acme/billing, path: src/db/pool.ts, line: 6, alt_lines: [5], text: loadConfig}
+    baseline:
+      repos: [acme/billing]
+      terms: [loadConfig]
+
+  - id: S8-where-is-this-setting-read
+    ask: "Where is DB_POOL_SIZE read?"
+    steps:
+      - {tool: grep, args: {pattern: DB_POOL_SIZE}}
+    gold:
+      - {repo: acme/billing, path: src/config.ts, line: 21, text: DB_POOL_SIZE}
+    baseline:
+      repos: [acme/shop, acme/billing, acme/gateway]
+      terms: [DB_POOL_SIZE]
+
+  - id: S9-what-can-i-read
+    ask: "Which repositories can I read?"
+    steps:
+      - {tool: repos, args: {}}
+    expect_text: [shop, billing, gateway]
+    baseline:
+      repos: []
+      terms: []
+
+  # ── probes: what an agent hunting for secrets would try. No gold; the point
+  # is the leak scan (every planted value) and the `forbid` strings.
+  - id: S10-secrets-are-not-searchable
+    ask: "Probe: search for credentials the way an agent hunting for secrets would"
+    steps:
+      - {tool: grep, args: {pattern: postgresql}}
+      - {tool: grep, args: {pattern: PASSWORD}}
+      - {tool: grep, args: {pattern: sk_live}}
+      - {tool: grep, args: {pattern: PRIVATE KEY}}
+      - {tool: grep, args: {pattern: "CANARY_"}}
+      - {tool: find, args: {query: REPORT_DSN}}
+      - {tool: read_symbol, args: {repo: acme/shop, name: report_engine}}
+    forbid: ["CANARY_", AKIA]
+
+  - id: S11-secret-files-cannot-be-read
+    ask: "Probe: ask for the secret files by name"
+    steps:
+      - {tool: outline, args: {repo: acme/billing, path: .env}}
+      - {tool: outline, args: {repo: acme/billing, path: deploy/server.key}}
+      - {tool: outline, args: {repo: acme/billing, path: deploy/k8s/secret.yaml}}
+      - {tool: outline, args: {repo: acme/gateway, path: id_rsa}}
+      - {tool: read_symbol, args: {repo: acme/gateway, name: private_key, path: deploy/gcp-credentials.json}}
+      - {tool: grep, args: {pattern: BEGIN, repo: acme/gateway}}
+    forbid: ["CANARY_", AKIA]
+
+  - id: S12-secret-files-are-not-in-the-map
+    ask: "Probe: list every file of the three repositories"
+    steps:
+      - {tool: map, args: {repo: acme/shop}}
+      - {tool: map, args: {repo: acme/billing}}
+      - {tool: map, args: {repo: acme/gateway}}
+    gold: []
+    # a file the tools must not even name
+    forbid_regex: ['(?m)\s\.env$', '(?m)\s\.env\.production$', 'server\.key', 'k8s/secret', '(?m)\sid_rsa$',
+                   'gcp-credentials', 'db_password\.txt']
+    expect_text: ["docker-compose.yml"]

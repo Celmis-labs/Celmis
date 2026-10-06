@@ -1,0 +1,3 @@
+# The signing key is read from the secret store at start-up.
+jwt_key: vault:secret/data/acme/gateway/jwt
+issuer: https://auth.example.com/realms/acme

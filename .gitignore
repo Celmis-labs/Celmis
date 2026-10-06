@@ -92,3 +92,7 @@ dirty_at_build.txt
 packaging/pypi/dist/
 packaging/pypi/build/
 packaging/pypi/*.egg-info/
+
+# Merge-conflict leftovers (git mergetool, patch)
+*.orig
+*.rej

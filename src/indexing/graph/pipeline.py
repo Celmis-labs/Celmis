@@ -25,6 +25,7 @@ from src.config import Settings, get_settings
 from src.indexing.graph.configs import build_repo_context
 from src.indexing.graph.graph_store import make_graph_store
 from src.indexing.graph.languages.factory import build_default_registry, walk_repo_files
+from src.indexing.graph.pagerank import write_ranks
 from src.indexing.graph.resolver import HeuristicResolver
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,7 @@ def index_repo_graph(
     try:
         store.add_symbols_batch(all_symbols)
         n_edges = store.add_edges_batch(resolved)
+        write_ranks(store)
         store.commit()
     finally:
         store.close()

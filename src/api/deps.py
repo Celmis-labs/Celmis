@@ -162,15 +162,13 @@ def require_ops_access(
 #     'review' → can trigger a review, edit policy
 #     'admin'  → can add/remove repo, delete review history
 #
-# `is_admin=True` on the user bypasses all checks. If no team grants
-# access AND the user is not admin, we DENY (default-closed) — but only
-# when at least one grant exists for the repo; otherwise fall open, so a
-# fresh workspace with no team assignments still works.
-#
-# That last clause is a single-tenant convenience and a multi-tenant hole:
-# "no grant exists" is every repository until somebody writes one. It is
-# therefore gated on the deployment mode (src/deployment.py) rather than
-# being true everywhere — single_tenant keeps it, multi_tenant refuses.
+# `is_admin=True` on the user bypasses all checks, and so do the owner and
+# admins of the workspace that owns the repo. Everyone else needs a team grant
+# (or a research rule of a team of theirs, which reads as `read`). A repository
+# with neither is visible to those admins only, in BOTH deployment modes — see
+# src/access/policy.py; CELMIS_UNRULED_REPO_ACCESS=open restores the old
+# "everybody may read it" for single_tenant. A repository the caller may not
+# read at all is answered like one that does not exist (404).
 
 _PERM_RANK = {"read": 1, "review": 2, "admin": 3}
 
@@ -293,7 +291,7 @@ async def _effective_repo_permission(
 ) -> tuple[str | None, bool]:
     """Returns (permission, any_grants_exist). `permission` is None if the
     user has no grant. `any_grants_exist` = True if at least one team is
-    granted on this repo (used to decide fall-open vs default-deny).
+    granted on this repo (a repo with no grant and no rule is "unruled").
     """
     if user.is_admin:
         return "admin", True
@@ -334,8 +332,108 @@ async def _effective_repo_permission(
                 if r > best_rank:
                     best_rank = r
                     best = g.permission
+        if best is not None and await _narrowed_below_code(
+                repo_slug, user, workspace_id):
+            # A rule written for my team holds this repository below `code`:
+            # the rule is what I may do, not the grant (the resolver's reading,
+            # the one every MCP tool follows).
+            return None, True
         return best, True
     return None, False
+
+
+def _not_visible() -> HTTPException:
+    """What a person is told about a repository they cannot read at all: the
+    same 404 as one that does not exist, so a slug cannot be probed."""
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repo not registered")
+
+
+async def _research_rule_state(
+    repo_slug: str, user: User, workspace_id: str | None,
+    *, min_visibility: str = "code",
+) -> tuple[bool, bool]:
+    """``(any research rule exists, one of MY teams has a rule that reads)``
+    for this repository in this workspace.
+
+    "Reads" means ``code`` by default: the REST routes serve content (diffs,
+    findings, files), and a ``metadata`` rule is by definition not that. It is
+    the same meaning the MCP tools give it (``code_visible``). ``metadata``
+    suffices only for names and counts in a list (``min_visibility="metadata"``).
+
+    A research rule (``repo_access_rules``) is a way of saying who may read a
+    repository, the same as a team grant: a repository with only a rule is not
+    "unruled", and a team whose rule reads ``metadata`` or ``code`` may read it
+    here too. Without this the access page and the repos page disagreed, and a
+    rule an admin had just written did nothing for the REST surface.
+    """
+    if not workspace_id:
+        return False, False
+    from sqlalchemy import select
+
+    from src.db.models import RepoAccessRule, TeamMember
+    from src.db.session import get_async_session
+
+    candidates = repo_grant_candidates(repo_slug, workspace_id)
+    async for s in get_async_session():
+        rules = (await s.scalars(
+            select(RepoAccessRule).where(
+                RepoAccessRule.workspace_id == workspace_id,
+                RepoAccessRule.repo_slug.in_(candidates),
+            ))).all()
+        if not rules:
+            return False, False
+        mine = {m.team_id for m in (await s.scalars(
+            select(TeamMember).where(
+                TeamMember.user_id == user.id,
+                TeamMember.team_id.in_({r.team_id for r in rules}),
+            ))).all()}
+        def _reads(visibility: str) -> bool:
+            if min_visibility == "metadata":
+                return visibility != "none"
+            return visibility == "code"
+
+        return True, any(r.team_id in mine and _reads(r.visibility) for r in rules)
+    return False, False
+
+
+async def _narrowed_below_code(
+    repo_slug: str, user: User, workspace_id: str | None,
+) -> bool:
+    """Do the research rules of this repository take it out of my grant's
+    reach: a rule of one of MY teams holds it below ``code`` (``metadata`` or
+    ``none``), or rules exist and none of them names a team of mine?
+
+    The resolver (and so every MCP tool) lets a rule NARROW a team grant: with a
+    rule written for my team, the rule is what I may do, and once any rule
+    exists only the teams it names are let in (a rule of team B does not open
+    the repository to team A because A holds a read grant on it). The REST gate
+    has to read it the same way, or the same person reads through REST what the
+    tools hide. Owners/admins are never narrowed (the caller checks)."""
+    if not workspace_id:
+        return False
+    from sqlalchemy import select
+
+    from src.db.models import RepoAccessRule, TeamMember
+    from src.db.session import get_async_session
+
+    candidates = repo_grant_candidates(repo_slug, workspace_id)
+    async for s in get_async_session():
+        rules = (await s.scalars(
+            select(RepoAccessRule).where(
+                RepoAccessRule.workspace_id == workspace_id,
+                RepoAccessRule.repo_slug.in_(candidates),
+            ))).all()
+        if not rules:
+            return False
+        mine_ids = {m.team_id for m in (await s.scalars(
+            select(TeamMember).where(
+                TeamMember.user_id == user.id,
+                TeamMember.team_id.in_({r.team_id for r in rules}),
+            ))).all()}
+        mine = [r for r in rules if r.team_id in mine_ids]
+        # No rule of mine: the rules are somebody else's, and so is the repo.
+        return not any(r.visibility == "code" for r in mine)
+    return False
 
 
 async def enforce_repo_permission(
@@ -346,21 +444,24 @@ async def enforce_repo_permission(
 ) -> None:
     """Runtime version of the dep — for handlers that don't get the slug
     from URL path (e.g. it's in body or derived from `pr_ref`).
-    Same fall-open + rank rules as `require_repo_permission()`.
+    Same rank rules and unruled-repo policy as `require_repo_permission()`.
     """
     if min_perm not in _PERM_RANK:
         raise ValueError(f"unknown perm {min_perm!r}")
     perm, any_grants = await _effective_repo_permission(
         repo_slug, user, workspace_id)
-    if not any_grants:
-        from src.deployment import fall_open_allowed
-        if fall_open_allowed("api.deps.repo_permission",
-                             detail=f"repo={repo_slug} user={user.id}"):
-            return  # fall-open (single_tenant)
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"No team is granted access to {repo_slug}",
-        )
+    if perm is not None and _PERM_RANK.get(perm, 0) >= _PERM_RANK[min_perm]:
+        return  # admins, and a grant that is enough on its own
+    has_rule, rule_reads = await _research_rule_state(repo_slug, user, workspace_id)
+    if min_perm == "read" and rule_reads:
+        return  # a research rule of one of my teams lets me read it
+    if not any_grants and not has_rule:
+        from src.access.policy import unruled_repo_open
+        if unruled_repo_open(detail=f"repo={repo_slug} user={user.id}"):
+            return  # CELMIS_UNRULED_REPO_ACCESS=open, single_tenant only
+        raise _not_visible()
+    if perm is None and not rule_reads:
+        raise _not_visible()  # cannot even read it: it does not exist for them
     if perm is None or _PERM_RANK.get(perm, 0) < _PERM_RANK[min_perm]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -377,9 +478,49 @@ async def readable_repo_slugs(
     `list_workspace_repos`, counts in the review-settings snapshot): owners and
     admins of the workspace and global admins see all of it; everyone else sees
     the repositories a team of theirs grants `read` on — exactly
-    `enforce_repo_permission(slug, user, "read", workspace_id)`, including its
-    fall-open in single_tenant. A repository they may not read is not named and
-    not counted.
+    `enforce_repo_permission(slug, user, "read", workspace_id)`, including the
+    unruled-repo policy — plus the repositories one of their teams has a
+    ``metadata`` rule on, which may be NAMED here but never read. A repository
+    they may not read is not named and not counted.
+    """
+    import asyncio
+
+    if await asyncio.to_thread(is_workspace_admin, user, workspace_id):
+        return set(slugs)
+    allowed: set[str] = set()
+    for slug in dict.fromkeys(slugs):
+        try:
+            await enforce_repo_permission(slug, user, "read", workspace_id)
+        except HTTPException:
+            # A rule that reads at `metadata` is enough to be NAMED in a list,
+            # never to be read (enforce_repo_permission asks for `code`).
+            try:
+                _has, lists = await _research_rule_state(
+                    slug, user, workspace_id, min_visibility="metadata")
+            except Exception:  # noqa: BLE001 — an unreadable rule store names nothing
+                lists = False
+            if lists:
+                allowed.add(slug)
+            continue
+        allowed.add(slug)
+    return allowed
+
+
+async def code_readable_repo_slugs(
+    user: User, workspace_id: str, slugs: list[str],
+) -> set[str]:
+    """Which of `slugs` this person may READ THE CODE of.
+
+    :func:`readable_repo_slugs` answers "may this repository be NAMED to me"
+    and so also admits a repository held at ``metadata``. Anything that carries
+    what the repository contains — a finding with its snippet, a pull request's
+    diff, a memory taught on it, the feedback a team gave on it — must use this
+    one instead: *metadata is not code*. It is exactly
+    ``enforce_repo_permission(slug, user, "read", workspace_id)`` (the REST
+    mirror of the research resolver, unruled-repo policy included), so the
+    review features (issues, memories, learning, feedback) and the MCP tools
+    cannot disagree about who may read what. A repository the person may not
+    read is not named, not counted and not quoted.
     """
     import asyncio
 
@@ -658,7 +799,8 @@ def _require_repo_in_workspace(slug: str, workspace_id: str | None) -> None:
 def require_repo_permission(min_perm: str = "read"):
     """FastAPI dependency factory. Reads path parameter `repo_slug` (or
     `slug`) from the request and enforces the caller has at least
-    ``min_perm``. Default-open when no grants configured for the repo.
+    ``min_perm``. Default-DENY when no grants are configured for the repo
+    (only owners, admins and the superadmin pass) — see :mod:`src.access.policy`.
     """
     if min_perm not in _PERM_RANK:
         raise ValueError(f"unknown perm {min_perm!r}")
@@ -679,15 +821,18 @@ def require_repo_permission(min_perm: str = "read"):
         _require_repo_in_workspace(slug, workspace_id)
         perm, any_grants = await _effective_repo_permission(
             slug, user, workspace_id)
-        if not any_grants:
-            from src.deployment import fall_open_allowed
-            if fall_open_allowed("api.deps.repo_permission",
-                                 detail=f"repo={slug} user={user.id}"):
-                return user  # fall-open (single_tenant)
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"No team is granted access to {slug}",
-            )
+        if perm is not None and _PERM_RANK.get(perm, 0) >= needed:
+            return user  # admins, and a grant that is enough on its own
+        has_rule, rule_reads = await _research_rule_state(slug, user, workspace_id)
+        if min_perm == "read" and rule_reads:
+            return user
+        if not any_grants and not has_rule:
+            from src.access.policy import unruled_repo_open
+            if unruled_repo_open(detail=f"repo={slug} user={user.id}"):
+                return user  # CELMIS_UNRULED_REPO_ACCESS=open, single_tenant only
+            raise _not_visible()
+        if perm is None and not rule_reads:
+            raise _not_visible()
         if perm is None or _PERM_RANK.get(perm, 0) < needed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

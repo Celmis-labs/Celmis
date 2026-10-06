@@ -65,6 +65,10 @@ def store(tmp_path, monkeypatch) -> ReviewRunStore:
 def client(store, monkeypatch) -> TestClient:
     # Not about who may see the price: an ordinary member, no database.
     monkeypatch.setattr("src.api.deps.is_workspace_admin", lambda _u, _ws: False)
+    async def _may_read(*_a, **_k):
+        return None  # these tests are not about who may read a repository
+
+    monkeypatch.setattr(reviews_router, "enforce_repo_permission", _may_read)
     app = FastAPI()
     app.include_router(reviews_router.router)
     app.dependency_overrides[get_current_user] = lambda: User(

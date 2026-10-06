@@ -103,12 +103,12 @@ async def test_the_lists_and_counts_leave_out_repositories_one_may_not_read(
         assert (HIDDEN in str(summary) + str(listed)) is sees_hidden
 
 
-async def test_asking_for_an_unreadable_repository_is_a_403_for_an_editor(tmp_path, monkeypatch):
+async def test_asking_for_an_unreadable_repository_is_a_404_for_an_editor(tmp_path, monkeypatch):
     async with _world(tmp_path, monkeypatch) as w:
         await _seed(w)
         for url in (f"{URL}/summary", f"{URL}/signals"):
             r = await w.client.get(url, params={"repo": HIDDEN}, headers=w.h("editor_a", "ws-a"))
-            assert r.status_code == 403 and "Hidden" not in r.text
+            assert r.status_code == 404 and "Hidden" not in r.text
         ok = await w.client.get(f"{URL}/signals", params={"repo": HIDDEN},
                                 headers=w.h("admin_a", "ws-a"))
         assert [s["title"] for s in ok.json()["signals"]] == ["Hidden"]

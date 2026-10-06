@@ -79,6 +79,17 @@ def enforcing(scope: str) -> Callable[[Any], Any]:
             token = None
         if token is not None and (token.scopes or []):
             _check_scopes({scope}, name)
+        if scope.startswith("write:"):
+            # A write scope on the token is not enough: the grant behind it
+            # must allow writing (mcp_tokens.allow_write).
+            from src.mcp_server.identity import READ_ONLY_TOKEN, resolve_caller
+
+            caller = resolve_caller()
+            if caller.authenticated and not caller.allow_write:
+                from src.mcp_server import callctx
+
+                callctx.set_status("denied")
+                raise PermissionError(READ_ONLY_TOKEN)
 
     def decorator(fn: Any) -> Any:
         if asyncio.iscoroutinefunction(fn):
@@ -135,12 +146,10 @@ def register_ops_tools(
     @mcp.tool(
         name="get_spend",
         description=(
-            "LLM spend of the workspace over a period: totals, tokens, cache "
-            "hit, the top surfaces / models / agents / repositories / "
-            "operations, and a daily series. days 1-365 (default 30); "
-            "optional surface, model and repo_slug filters; bucket "
-            "hour|day|week|month for the series. Workspace owner or admin "
-            "only, as the Usage page."
+            "LLM spend of the workspace over a period: totals, tokens, "
+            "cache hit, top surfaces/models/agents/repos/operations and a "
+            "series. days 1-365 (default 30); optional surface, model, "
+            "repo_slug; bucket hour|day|week|month. Owner or admin only."
         ),
     )
     @scoped(READ_GRAPH)
@@ -331,17 +340,12 @@ def register_ops_tools(
     @mcp.tool(
         name="update_review_setting",
         description=(
-            "Change ONE code-review setting for the workspace "
-            "(scope='workspace', owner/admin) or one repository "
-            "(scope='repo' + repo_slug, editor or higher plus the repo's "
-            "review grant). key: run_on_drafts | approve_when_clean | "
-            "request_changes_on_critical | committable_suggestions | "
-            "comment_min_severity (info|warning|error|critical) | "
-            "max_inline_comments (1-100) | summary_enabled | review_language "
-            "| disabled_agents (list) | agent_prompt_guidelines "
-            "({agent: text}, ADDED to the built-in prompt). value null "
-            "inherits again. Validated by the same schema as the settings "
-            "page."
+            "Change ONE review setting: scope workspace|repo "
+            "(+ repo_slug). key: run_on_drafts, approve_when_clean, "
+            "request_changes_on_critical, committable_suggestions, "
+            "comment_min_severity, max_inline_comments, summary_enabled, "
+            "review_language, disabled_agents, agent_prompt_guidelines. "
+            "null value inherits."
         ),
     )
     @scoped(WRITE_CONFIG)

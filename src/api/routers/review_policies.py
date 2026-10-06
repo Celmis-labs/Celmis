@@ -1224,13 +1224,13 @@ async def _may_preview_memories(user: User, ws_id: str, repo_slug: str | None) -
     people who may open /memories (editor, admin, owner) and, for a repository,
     only when they may read it: a memory is the team's own words, and a viewer
     or member must not read them through the prompt."""
-    from src.api.deps import may_use_memories, readable_repo_slugs
+    from src.api.deps import code_readable_repo_slugs, may_use_memories
 
     if not await may_use_memories(user, ws_id):
         return False
     if repo_slug is None:
         return True
-    return repo_slug in await readable_repo_slugs(user, ws_id, [repo_slug])
+    return repo_slug in await code_readable_repo_slugs(user, ws_id, [repo_slug])
 
 
 def _compose_preview(

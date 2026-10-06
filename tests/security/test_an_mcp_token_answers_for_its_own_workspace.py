@@ -70,6 +70,13 @@ def world(tmp_path, monkeypatch):
     monkeypatch.delenv("MCP_JWT_SECRET_PREVIOUS", raising=False)
     monkeypatch.delenv("CELMIS_JWT_SECRET_PREVIOUS", raising=False)
     monkeypatch.setenv("CELMIS_DEPLOYMENT_MODE", "multi_tenant")
+    # Tokens without a grant row are the pre-grant kind: refused by default,
+    # accepted read-only in this mode. The tests that are about the workspace
+    # claim itself mint a real "self" grant row (see _mint); the legacy ones
+    # run in accept mode, which is what an operator mid-upgrade would have.
+    monkeypatch.setenv("CELMIS_MCP_LEGACY_TOKENS", "accept")
+    from src.config import get_settings
+    get_settings.cache_clear()
     reset_mode_cache()
 
     engine = create_engine(f"sqlite:///{tmp_path / 'celmis.db'}")
@@ -122,6 +129,8 @@ def world(tmp_path, monkeypatch):
     yield state
     engine.dispose()
     monkeypatch.delenv("CELMIS_DEPLOYMENT_MODE")
+    monkeypatch.delenv("CELMIS_MCP_LEGACY_TOKENS")
+    get_settings.cache_clear()
     reset_mode_cache()
 
 
@@ -262,18 +271,19 @@ def test_a_refused_caller_cannot_write(world):
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2] / "src" / "mcp_server"
-    for name in ("server.py", "http_app.py"):
-        tree = ast.parse((root / name).read_text(encoding="utf-8"))
-        actor = next(n for n in ast.walk(tree)
-                     if isinstance(n, ast.FunctionDef) and n.name == "_actor")
-        refused_checks = [
-            n for n in ast.walk(actor)
-            if isinstance(n, ast.If) and isinstance(n.test, ast.Attribute)
-            and n.test.attr == "refused"
-        ]
-        assert refused_checks, f"{name}:_actor does not stop a refused caller"
-        assert any(isinstance(x, ast.Raise) for c in refused_checks
-                   for x in ast.walk(c)), name
+    server = (root / "server.py").read_text(encoding="utf-8")
+    assert "actor_for(" in server, "server._actor no longer goes through identity.actor_for"
+    tree = ast.parse((root / "identity.py").read_text(encoding="utf-8"))
+    actor = next(n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == "actor_for")
+    refused_checks = [
+        n for n in ast.walk(actor)
+        if isinstance(n, ast.If) and isinstance(n.test, ast.Attribute)
+        and n.test.attr == "refused"
+    ]
+    assert refused_checks, "actor_for does not stop a refused caller"
+    assert any(isinstance(x, ast.Raise) for c in refused_checks
+               for x in ast.walk(c))
 
 
 # ─── the HTTP edge ──────────────────────────────────────────────────
@@ -431,9 +441,20 @@ def test_the_oauth_flow_carries_the_consent_workspace_into_every_token(
 
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+    # OAuth needs an oauth_grant row from the superadmin: consent without one
+    # is refused (covered in test_mcp_token_lifecycle).
+    from sqlalchemy.orm import Session
+
     from src.api.routers import oauth
     from src.db.models import OAuthClient
+    from src.mcp_server import token_store
     from src.users import get_user_store
+
+    with Session(world.engine) as gs:
+        grant = token_store.create_row(
+            gs, kind="oauth_grant", workspace_id=WS_A, user_id="u-dana",
+            issued_by="u-root", label="oauth", patterns=["*"])
+        grant_id = grant.id
 
     async def run():
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'celmis.db'}")
@@ -480,6 +501,7 @@ def test_the_oauth_flow_carries_the_consent_workspace_into_every_token(
         claims = pyjwt.decode(tok, world.secret, algorithms=["HS256"],
                               options={"verify_aud": False})
         assert claims["workspace_id"] == WS_A
+        assert claims["grant"] == grant_id
     # The scope the client sees is untouched by the binding.
     assert issued["scope"] == "read:graph" == refreshed["scope"]
 

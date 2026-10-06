@@ -18,7 +18,7 @@
         "headers": [
           {
             "name": "Authorization",
-            "description": "Bearer token minted with 'docker compose exec api analyzer mcp issue-token --scopes \"read:graph read:groups\" --duration 86400'",
+            "description": "Bearer token minted with 'docker compose exec api analyzer mcp issue-token --user <email> --workspace <workspace> --repos <slug-or-glob> --days 30'",
             "isRequired": true,
             "isSecret": true
           }

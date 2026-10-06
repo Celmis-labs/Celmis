@@ -315,6 +315,18 @@ async def erase_user(
             sa_update(FindingSignal).where(FindingSignal.actor == who)
             .values(actor=anon_actor))
         signals_unlinked += res.rowcount or 0
+
+    # MCP tokens too: they are signed for a person and valid until their own
+    # expiry, so without this an erased account kept its code-search access.
+    mcp_revoked = 0
+    try:
+        from src.mcp_server import token_store
+
+        mcp_revoked = await session.run_sync(
+            lambda s: token_store.revoke_all_for_user(
+                s, user_id, f"gdpr:{admin.id}"))
+    except Exception as exc:  # noqa: BLE001 — the identity check still refuses them
+        logger.warning("gdpr_mcp_revoke_failed err=%s", type(exc).__name__)
     await session.commit()
 
     logger.info(
@@ -329,6 +341,8 @@ async def erase_user(
         "tokens_revoked": len(tokens),
         "memories_unlinked": memories_unlinked,
         "signals_unlinked": signals_unlinked,
+
+        "mcp_tokens_revoked": mcp_revoked,
     }
 
 

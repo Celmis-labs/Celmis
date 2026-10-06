@@ -26,6 +26,7 @@ def test_server_builds_with_all_tools() -> None:
         "cross_repo_edges",
         "query_graph",
         "review_pr",  # Phase 17c
+        "howto",  # how a repo does db/auth/config/...: names and sources, never values
         # automation surface — an external caller registers a repo, audits it
         # and reads the findings back without a person clicking through pages
         "add_repo",

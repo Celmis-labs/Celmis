@@ -33,6 +33,7 @@ import subprocess
 from pathlib import Path
 
 from src.repos.index_state import (
+    clone_branch,
     read_index_state,
     record_index_failure,
     record_index_success,
@@ -87,6 +88,17 @@ def run_index(
         record_index_unchanged(repo_slug, sha=head_sha)
         return {"status": "noop", "repo": repo_slug, "sha": head_sha}
 
+    # The clone is shallow (`--single-branch`, depth 50). A repository that
+    # moved more than that since the last index no longer HAS the revision it
+    # was indexed at, so `git diff prior..head` fails and the pass raised on
+    # every push for ever — the repo stayed stale exactly when it was busiest.
+    # No old commit means no diff to take: rebuild from the checkout instead.
+    if prior_sha and not force_full and not _commit_present(repo_path, prior_sha):
+        logger.warning(
+            "incremental_base_missing repo=%s prior=%s — full rebuild",
+            repo_slug, prior_sha[:8])
+        force_full = True
+
     try:
         if force_full or not prior_sha:
             result = _run_full(repo_slug, repo_path)
@@ -106,6 +118,7 @@ def run_index(
         sha=head_sha,
         files=int(result.get("files_touched") or 0),
         full_rebuild=result.get("mode") == "full",
+        branch=clone_branch(repo_slug),
     )
 
     # Cross-repo edges tend to touch multiple repos — enqueue a
@@ -226,6 +239,8 @@ def _run_incremental(
             resolved = resolver.resolve_edges(res.edges)
             total_syms += store.add_symbols_batch(res.symbols)
             total_edges += store.add_edges_batch(resolved)
+        from src.indexing.graph.pagerank import write_ranks
+        write_ranks(store)
         store.commit()
     finally:
         store.close()
@@ -385,6 +400,19 @@ def _git_head(repo_path: Path) -> str | None:
         return r.stdout.strip() or None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _commit_present(repo_path: Path, sha: str) -> bool:
+    """Whether `sha` is a commit this clone still has (shallow history drops old ones)."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_path), "cat-file", "-e", f"{sha}^{{commit}}"],
+            capture_output=True, timeout=10, check=False,
+        )
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        # Cannot tell: let the diff try (and fail loudly) as it always did.
+        return True
 
 
 def _git_diff(

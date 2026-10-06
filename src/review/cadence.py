@@ -28,12 +28,11 @@ CADENCES: Final[tuple[str, ...]] = ("automatic", "auto_pause", "manual")
 
 #: Why a PR is paused. Only `auto_pause` is a mechanical pause: it lapses
 #: when the repository leaves the `auto_pause` cadence. A person's pause
-#: (`manual`: the Pause button, `command`: `@celmis pause`) holds whatever
+#: (`manual`: the Pause button on the pull-requests page) holds whatever
 #: the cadence says, until somebody resumes.
 REASON_AUTO: Final = "auto_pause"
 REASON_MANUAL: Final = "manual"
-REASON_COMMAND: Final = "command"
-PAUSE_REASONS: Final[tuple[str, ...]] = (REASON_AUTO, REASON_MANUAL, REASON_COMMAND)
+PAUSE_REASONS: Final[tuple[str, ...]] = (REASON_AUTO, REASON_MANUAL)
 
 
 def parse_time(value: object) -> datetime | None:
@@ -72,7 +71,7 @@ def pause_holds(cadence: str, paused: bool, reason: str | None) -> bool:
     person asked for always does."""
     if not paused:
         return False
-    if reason in (REASON_MANUAL, REASON_COMMAND):
+    if reason == REASON_MANUAL:
         return True
     return cadence == "auto_pause"
 

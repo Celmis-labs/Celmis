@@ -75,6 +75,16 @@ class McpCaller:
     #: Set when the token names a workspace the caller may no longer act in:
     #: the sentence to show. Every repository then resolves to denied.
     refused: str = ""
+    #: The ``mcp_tokens`` row behind the call, when there is one.
+    token_id: str | None = None
+    #: pat | cli | self | oauth | legacy | stdio — which kind of grant the call
+    #: runs under (``legacy``: a token that predates per-person grants).
+    kind: str = "legacy"
+    #: The token's repo list (exact slugs / globs). ``None`` = the token does
+    #: not narrow or widen anything: the person's own access decides.
+    repo_patterns: tuple[str, ...] | None = None
+    #: Write tools are refused unless the grant explicitly allows them.
+    allow_write: bool = False
 
 
 _WS_RANK = WORKSPACE_ROLE_RANK
@@ -226,9 +236,95 @@ def _no_identity(reason: str) -> McpCaller:
     from src.deployment import fall_open_allowed
 
     if fall_open_allowed("mcp.identity.no_auth_context", detail=reason):
-        return McpCaller("default", True, "default", (), authenticated=False)
+        return McpCaller("default", True, "default", (), authenticated=False,
+                         kind="stdio", allow_write=True)
     return McpCaller(
         "anonymous", False, "", (), authenticated=False, workspace_resolved=False,
+    )
+
+
+LEGACY_REFUSAL = ("This MCP token predates per-person grants — ask the "
+                  "superadmin to issue a new one (Admin > MCP tokens).")
+GRANT_UNKNOWN = ("This MCP token is not recognised (it was deleted or never "
+                 "issued here). Ask the administrator for a new one.")
+GRANT_MISMATCH = "This MCP token does not belong to the person using it."
+ACCOUNT_INACTIVE = ("The account this MCP token was issued for is no longer "
+                    "active. Ask the administrator.")
+
+
+def _person_is_inactive(user_id: str) -> bool:
+    """True only when the account EXISTS and is switched off. A lookup that
+    cannot be made refuses (fail closed): an unreadable user store must not
+    keep a deactivated person's token alive."""
+    try:
+        from src.users import get_user_store
+
+        user = get_user_store().get_by_id(user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("mcp_user_lookup_failed err=%s", type(exc).__name__)
+        return True
+    return user is not None and not getattr(user, "is_active", True)
+
+
+@dataclass
+class _Grant:
+    """What the ``mcp_tokens`` row behind a token says about the call."""
+
+    refused: str = ""
+    token_id: str | None = None
+    kind: str = "legacy"
+    patterns: tuple[str, ...] | None = None
+    allow_write: bool = False
+    workspace_id: str | None = None
+
+
+def grant_claim(payload: dict | None) -> str | None:
+    """The id of the grant row a token names: the OAuth ``grant`` claim, else ``jti``."""
+    for key in ("grant", "jti"):
+        value = (payload or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def resolve_grant(payload: dict, user_id: str) -> _Grant:
+    """Judge a token by its row. Never raises: a row that cannot be read is a
+    refusal, not an admission."""
+    gid = grant_claim(payload)
+    if gid is None:
+        from src.mcp_server.token_store import legacy_tokens_accepted
+
+        if legacy_tokens_accepted():
+            # Temporary: read-only, default-deny, the person's own access.
+            return _Grant(kind="legacy", allow_write=False)
+        return _Grant(refused=LEGACY_REFUSAL)
+    try:
+        from src.mcp_server import token_store
+
+        view = token_store.lookup(gid)
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        logger.warning("mcp_grant_lookup_failed grant=%s err=%s", gid, type(exc).__name__)
+        return _Grant(refused=_UNVERIFIABLE)
+    if view is None:
+        return _Grant(refused=GRANT_UNKNOWN)
+    problem = view.problem()
+    if problem:
+        return _Grant(refused=problem)
+    if view.user_id != user_id:
+        return _Grant(refused=GRANT_MISMATCH)
+    if _person_is_inactive(view.user_id):
+        # A grant is issued FOR a person. When the account is deactivated or
+        # erased the grant dies with it, at once and not at the end of its TTL.
+        return _Grant(refused=ACCOUNT_INACTIVE)
+    claimed = token_workspace(payload)
+    if claimed is not None and claimed != view.workspace_id:
+        return _Grant(refused=GRANT_MISMATCH)
+    return _Grant(
+        token_id=view.id,
+        kind="oauth" if view.kind == "oauth_grant" else view.kind,
+        patterns=view.patterns if view.authoritative else None,
+        allow_write=view.allow_write,
+        workspace_id=view.workspace_id,
     )
 
 
@@ -254,15 +350,28 @@ def resolve_caller() -> McpCaller:
         # Authenticated but unidentifiable (e.g. client_credentials with only
         # client_id) → treat as a non-admin principal with no team grants, so
         # research access defaults to whatever rules allow (restricted).
+        nameless = resolve_grant(payload, "")
         return McpCaller(
             f"client:{token.client_id}", False, "default",
             tuple(scopes or token.scopes or ()), authenticated=True,
-            workspace_resolved=False,
+            workspace_resolved=False, refused=nameless.refused or GRANT_UNKNOWN,
         )
 
     # `sub` may be prefixed (user:<id> / client:<id>); our issuer uses the
     # bare user_id, but strip a known prefix defensively.
     user_id = sub.split(":", 1)[1] if sub.startswith(("user:", "client:")) else sub
+
+    grant = resolve_grant(payload, user_id)
+    if grant.refused:
+        # Revoked, expired, unknown, legacy-and-refused: nothing is readable
+        # and nothing may be written, whatever the signature says.
+        return McpCaller(
+            user_id, False, "", tuple(scopes), authenticated=True,
+            workspace_resolved=False, refused=grant.refused,
+            token_id=grant.token_id, kind=grant.kind,
+        )
+    if grant.workspace_id is not None:
+        claimed_ws = grant.workspace_id
 
     is_admin = False
     workspace_id = "default"
@@ -283,6 +392,12 @@ def resolve_caller() -> McpCaller:
             user = _client_owner(store, user_id)
             if user is not None:
                 user_id = user.id
+        if user is not None and not getattr(user, "is_active", True):
+            return McpCaller(
+                user_id, False, "", tuple(scopes), authenticated=True,
+                workspace_resolved=False, refused=ACCOUNT_INACTIVE,
+                token_id=grant.token_id, kind=grant.kind,
+            )
         is_admin = bool(user and user.is_admin)
         if user is not None and claimed_ws is not None:
             # The token names its workspace: answer for that one or refuse.
@@ -320,6 +435,8 @@ def resolve_caller() -> McpCaller:
     return McpCaller(
         user_id, is_admin, workspace_id,
         tuple(scopes), authenticated=True, workspace_resolved=resolved,
+        token_id=grant.token_id, kind=grant.kind,
+        repo_patterns=grant.patterns, allow_write=grant.allow_write,
     )
 
 
@@ -361,11 +478,16 @@ def caller_access(repos: list[str]):
     """Resolve research-access decisions for ``repos`` for the current MCP
     caller. Returns ``(caller, {repo: RepoAccessDecision})``.
 
+    The decision is :func:`src.access.effective.effective_access`: only the
+    repositories registered in the caller's workspace exist, a token's repo
+    list is authoritative, a repository nobody granted anything on is closed.
+
     Unauthenticated (dev/stdio) callers get full access to every repo under
     single_tenant, and none at all under multi_tenant. Under multi_tenant a
     repo not registered to the caller's workspace (alone) is denied for
     everyone, admins included — see :mod:`src.mcp_server.tenancy`."""
-    from src.access import RepoAccessDecision, resolve_access
+    from src.access import RepoAccessDecision
+    from src.access.effective import Principal, effective_access
     from src.deployment import fall_open_allowed
 
     caller = resolve_caller()
@@ -379,15 +501,15 @@ def caller_access(repos: list[str]):
             return caller, {r: RepoAccessDecision.full(r) for r in repos}
         return caller, {r: RepoAccessDecision.denied(r) for r in repos}
 
-    # Tenant binding (multi_tenant only). The rules below are looked up in the
-    # caller's workspace, and a global admin bypasses them — neither says
-    # anything about whether the repository is this tenant's. Graphs, vaults
-    # and clones live flat on disk, keyed by slug alone, so the registry
-    # binding is the only thing that does. Applies to admins too: an operator
+    # Tenant binding (multi_tenant only). Graphs, vaults and clones live flat on
+    # disk, keyed by slug alone, so a slug registered to more than one
+    # workspace (or to none) is nobody's. Applies to admins too: an operator
     # reaches another tenant by switching workspace, not through a token
     # resolved to their own.
     from src.mcp_server import tenancy
 
+    decided: dict = {}
+    own = list(repos)
     if tenancy.enforced():
         if not tenancy.caller_may_bind(caller):
             return caller, {r: RepoAccessDecision.denied(r) for r in repos}
@@ -395,23 +517,56 @@ def caller_access(repos: list[str]):
                    if not tenancy.workspace_owns_slug(caller.workspace_id, r)]
         own = [r for r in repos if r not in foreign]
         decided = {r: RepoAccessDecision.denied(r) for r in foreign}
-        if caller.is_admin:
-            decided.update({r: RepoAccessDecision.full(r) for r in own})
-        elif own:
-            decided.update(resolve_access(
-                user_id=caller.user_id,
-                is_admin=caller.is_admin,
-                workspace_id=caller.workspace_id,
-                repos=own,
-            ))
-        return caller, decided
+    if own:
+        decided.update(effective_access(
+            Principal(caller.user_id, caller.is_admin, caller.repo_patterns),
+            caller.workspace_id, own,
+        ))
+    if len(repos) <= 20:
+        from src.mcp_server import callctx
 
-    if caller.is_admin:
-        return caller, {r: RepoAccessDecision.full(r) for r in repos}
-    access = resolve_access(
+        callctx.note_repos(*[r for r in repos
+                             if (decided.get(r) is not None and decided[r].researchable)])
+    return caller, decided
+
+
+READ_ONLY_TOKEN = ("This MCP token is read-only. Ask the administrator for a token "
+                   "that allows writing if you need to change something.")
+
+
+def actor_for(label: str, *, writing: bool = False):  # noqa: ANN201 — automation Actor
+    """The automation :class:`Actor` for the current MCP caller.
+
+    The verbs behind it (``src.automation.actions*``) resolve repositories
+    through ``Actor.token_filter``, so a token's repo list narrows them as it
+    narrows the graph tools. A write refuses unless the grant allows it.
+    """
+    from src.automation.actions import ActionError, Actor
+
+    caller = resolve_caller()
+    if caller.refused:
+        # The token names a workspace its holder has left. Neither a read
+        # nor a write may land anywhere else instead.
+        raise ActionError(caller.refused)
+    if writing and not caller.allow_write:
+        from src.mcp_server import callctx
+
+        callctx.set_status("denied")
+        raise ActionError(READ_ONLY_TOKEN)
+    if writing and caller.authenticated and not caller.workspace_resolved:
+        # A client_credentials token whose owner cannot be resolved lands
+        # on the "default" workspace by fallback. Reading there is
+        # harmless; writing would register a repository into a tenant
+        # nobody chose. Refuse and say what to fix.
+        raise ActionError(
+            "This token is not tied to a workspace. Register the OAuth "
+            "client from an account that belongs to the workspace you "
+            "want to write to, or use a user token.",
+        )
+    return Actor(
         user_id=caller.user_id,
-        is_admin=caller.is_admin,
+        email=getattr(caller, "email", "") or caller.user_id,
         workspace_id=caller.workspace_id,
-        repos=repos,
+        label=label,
+        token_filter=caller.repo_patterns,
     )
-    return caller, access

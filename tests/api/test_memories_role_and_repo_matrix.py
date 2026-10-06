@@ -145,13 +145,14 @@ async def test_the_list_and_its_counts_leave_out_repositories_one_may_not_read(
         assert body["counts"]["pending"] == (1 if sees_hidden else 0)
 
 
-async def test_asking_for_a_repository_one_may_not_read_is_a_403(tmp_path, monkeypatch):
+async def test_asking_for_a_repository_one_may_not_read_is_a_404(tmp_path, monkeypatch):
     async with _world(tmp_path, monkeypatch) as w:
         await _seed(w)
         h = w.h("editor_a", "ws-a")
         for url in (URL, f"{URL}/preview"):
             r = await w.client.get(url, params={"repo": HIDDEN}, headers=h)
-            assert r.status_code == 403, f"{url}: {r.status_code}"
+            # The same answer as for a repository that is not there.
+            assert r.status_code == 404, f"{url}: {r.status_code}"
             assert "Hidden repo fact." not in r.text
         for who in ("admin_a", "owner_a"):
             r = await w.client.get(URL, params={"repo": HIDDEN, "status": "pending"},

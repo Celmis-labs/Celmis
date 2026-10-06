@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api import repositories as repo
-from src.api.deps import current_workspace_id, get_current_user
+from src.api.deps import current_workspace_id, get_current_user, readable_repo_slugs
 from src.api.schemas import ChatIn, ChatOut, MessageOut
 from src.db.models import Chat
 from src.db.session import get_async_session
@@ -20,7 +20,46 @@ from src.users import User
 
 logger = logging.getLogger(__name__)
 
-async def _owned_chat(session: AsyncSession, chat_id: str, ws_id: str) -> Chat:
+async def _visible_chat_ids(
+    session: AsyncSession, user: User, ws_id: str, chats: list,
+) -> set[str]:
+    """Ids of the chats whose target (a repo, or a project) the caller may see.
+
+    A chat names the repository it asks about and holds answers quoting it, so
+    one aimed at a repository the caller may not read is not listed and not
+    fetchable. A project target stays visible while any member does.
+    """
+    from sqlalchemy import select
+
+    from src.db.models import ProjectRepo
+
+    project_ids = {c.project_id for c in chats if c.project_id and not c.repo_slug}
+    members: dict[str, list[str]] = {}
+    if project_ids:
+        for pid, slug in (await session.execute(
+            select(ProjectRepo.project_id, ProjectRepo.repo_slug)
+            .where(ProjectRepo.project_id.in_(project_ids))
+        )).all():
+            members.setdefault(str(pid), []).append(str(slug))
+    wanted = {c.repo_slug for c in chats if c.repo_slug}
+    wanted.update(slug for slugs in members.values() for slug in slugs)
+    readable = await readable_repo_slugs(user, ws_id, sorted(wanted)) if wanted else set()
+    out: set[str] = set()
+    for c in chats:
+        if c.repo_slug:
+            ok = c.repo_slug in readable
+        elif c.project_id and members.get(str(c.project_id)):
+            ok = any(m in readable for m in members[str(c.project_id)])
+        else:
+            ok = True
+        if ok:
+            out.add(str(c.id))
+    return out
+
+
+async def _owned_chat(
+    session: AsyncSession, chat_id: str, ws_id: str, user: User | None = None,
+) -> Chat:
     """The chat, or 404 — never another tenant's conversation.
 
     A chat holds the questions people asked about their own source and the
@@ -30,6 +69,9 @@ async def _owned_chat(session: AsyncSession, chat_id: str, ws_id: str) -> Chat:
     """
     chat = await session.get(Chat, chat_id)
     if chat is None or chat.workspace_id != ws_id:
+        raise HTTPException(status_code=404, detail="chat not found")
+    if user is not None and str(chat.id) not in await _visible_chat_ids(
+            session, user, ws_id, [chat]):
         raise HTTPException(status_code=404, detail="chat not found")
     return chat
 
@@ -82,6 +124,8 @@ async def list_chats(
         limit=limit,
         workspace_id=ws_id,
     )
+    visible = await _visible_chat_ids(session, user, ws_id, list(chats))
+    chats = [c for c in chats if str(c.id) in visible]
     out = []
     for c in chats:
         # messages_count via a separate count (because lazy='noload')
@@ -118,7 +162,9 @@ async def create_chat(
         await _owned_project(session, payload.project_id, ws_id)
     if payload.repo_slug:
         from src.api.auto_review import get_auto_review_store
-        if get_auto_review_store().get_in_workspace(ws_id, payload.repo_slug) is None:
+        if (get_auto_review_store().get_in_workspace(ws_id, payload.repo_slug) is None
+                or payload.repo_slug not in await readable_repo_slugs(
+                    user, ws_id, [payload.repo_slug])):
             raise HTTPException(status_code=404, detail="repo not registered")
 
     try:
@@ -147,7 +193,7 @@ async def get_chat(
     user: User = Depends(get_current_user),
     ws_id: str = Depends(current_workspace_id),
 ) -> ChatOut:
-    await _owned_chat(session, chat_id, ws_id)
+    await _owned_chat(session, chat_id, ws_id, user)
     chat = await repo.get_chat(session, chat_id, with_messages=True)
     if chat is None:
         raise HTTPException(status_code=404, detail="chat not found")
@@ -161,7 +207,7 @@ async def delete_chat(
     user: User = Depends(get_current_user),
     ws_id: str = Depends(current_workspace_id),
 ) -> None:
-    await _owned_chat(session, chat_id, ws_id)
+    await _owned_chat(session, chat_id, ws_id, user)
     ok = await repo.delete_chat(session, chat_id)
     if not ok:
         raise HTTPException(status_code=404, detail="chat not found")
@@ -175,7 +221,7 @@ async def clear_messages(
     user: User = Depends(get_current_user),
     ws_id: str = Depends(current_workspace_id),
 ) -> dict:
-    await _owned_chat(session, chat_id, ws_id)
+    await _owned_chat(session, chat_id, ws_id, user)
     chat = await repo.get_chat(session, chat_id, with_messages=False)
     if chat is None:
         raise HTTPException(status_code=404, detail="chat not found")

@@ -755,26 +755,51 @@ _RUNNING: set[tuple[str, str, str, str]] = set()
 _RUNNING_LOCK = threading.Lock()
 
 
+def _seed_state_row(bind, key: tuple[str, str, str, str]) -> None:
+    """Make sure the branch's recheck row exists - in a transaction of its own.
+
+    On Postgres a first-ever pass that inserted the row inside its long
+    transaction held the insert's uncommitted lock for the whole pass (git and
+    model calls included), and a second pass blocked on the same insert
+    instead of answering `busy`. A short committed insert leaves only the
+    `FOR UPDATE SKIP LOCKED` below to arbitrate."""
+    from sqlalchemy.dialects.postgresql import insert as _insert
+    from sqlalchemy.orm import Session
+
+    from src.db.models import ReviewIssueRecheckState as State
+
+    ws, prov, repo, base = key
+    with Session(bind) as seed:
+        seed.execute(_insert(State).values(
+            workspace_id=ws, pr_provider=prov, pr_repo=repo, base_ref=base,
+            llm_calls_total=0,
+        ).on_conflict_do_nothing(index_elements=[
+            "workspace_id", "pr_provider", "pr_repo", "base_ref"]))
+        seed.commit()
+
+
 def _state_row(s, key: tuple[str, str, str, str]):
     """The branch's recheck row, created if missing and LOCKED for this
-    transaction — or None when another pass holds it (Postgres: SKIP LOCKED;
-    SQLite has no row locks and the in-process guard serialises)."""
+    transaction - or None when another pass holds it (Postgres: SKIP LOCKED,
+    for a first pass too, because the row is created in its own short
+    transaction; SQLite has no row locks and the in-process guard serialises)."""
     from sqlalchemy import select
 
     from src.db.models import ReviewIssueRecheckState as State
 
     dialect = s.get_bind().dialect.name
+    ws, prov, repo, base = key
     if dialect == "postgresql":
-        from sqlalchemy.dialects.postgresql import insert as _insert
+        _seed_state_row(s.get_bind(), key)
     else:
         from sqlalchemy.dialects.sqlite import insert as _insert
-    ws, prov, repo, base = key
-    s.execute(_insert(State).values(
-        workspace_id=ws, pr_provider=prov, pr_repo=repo, base_ref=base,
-        llm_calls_total=0,
-    ).on_conflict_do_nothing(index_elements=[
-        "workspace_id", "pr_provider", "pr_repo", "base_ref"]))
-    s.flush()
+
+        s.execute(_insert(State).values(
+            workspace_id=ws, pr_provider=prov, pr_repo=repo, base_ref=base,
+            llm_calls_total=0,
+        ).on_conflict_do_nothing(index_elements=[
+            "workspace_id", "pr_provider", "pr_repo", "base_ref"]))
+        s.flush()
     q = select(State).where(
         State.workspace_id == ws, State.pr_provider == prov,
         State.pr_repo == repo, State.base_ref == base)

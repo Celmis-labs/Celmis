@@ -163,7 +163,7 @@ def test_a_persons_request_reviews_a_paused_pr(env, monkeypatch, rows, request_)
 
 
 def test_a_person_pause_holds_even_when_the_cadence_is_automatic(env, monkeypatch, rows):  # noqa: F811
-    _pause(rows, reason="command")
+    _pause(rows, reason="manual")
     provider = _Noting(_pr())
 
     result, _ = _review(monkeypatch, provider, review_cadence="automatic")
@@ -265,9 +265,9 @@ def test_a_lapsed_auto_pause_does_not_come_back_with_the_cadence(rows):
 
 
 def test_a_person_pause_survives_a_push_under_another_cadence(rows):
-    _pause(rows, reason="command")
+    _pause(rows, reason="manual")
 
     result = pr_state.register_push("ws-1", "github", "o/r", 1, "head00000002",
                                     cadence_name="automatic", engine=rows)
 
-    assert result.paused and result.paused_reason == "command"
+    assert result.paused and result.paused_reason == "manual"

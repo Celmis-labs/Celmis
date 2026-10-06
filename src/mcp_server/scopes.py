@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=Callable[..., Any])
 
 
+# Scope for the code-reading tools of the dev profile (``howto``, ``find``, ...).
+SCOPE_DEV = "read:code"
+
 # Special scope that grants everything — bypasses per-tool checks
 ADMIN_SCOPE = "admin"
 

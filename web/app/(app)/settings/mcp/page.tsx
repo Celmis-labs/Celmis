@@ -15,11 +15,11 @@
  */
 
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { CheckIcon, CopyIcon, KeyIcon, PlugIcon, TerminalIcon } from "lucide-react";
 
-import { api } from "@/lib/api";
+import { api, mcpTokensApi, type McpTokenRow } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { PageHeader, PageShell } from "@/components/page-shell";
@@ -88,6 +88,25 @@ export default function McpPage() {
   const [writeScopes, setWriteScopes] = useState<string[]>([]);
   const toggleScope = (scope: string) =>
     setWriteScopes((cur) => cur.includes(scope) ? cur.filter((x) => x !== scope) : [...cur, scope]);
+  const qc = useQueryClient();
+
+  // Tokens are issued by the superadmin unless the install turned self-service
+  // on. Until the server has answered, nothing is offered: a button that then
+  // answers 403 is the worse way to find out.
+  const mine = useQuery({
+    queryKey: ["mcp-tokens-me"],
+    queryFn: () => mcpTokensApi.mine(token!),
+    enabled: !!token,
+  });
+  const selfService = mine.data?.self_service_enabled === true;
+  const revokeMine = useMutation({
+    mutationFn: (id: string) => mcpTokensApi.revokeMine(token!, id),
+    onSuccess: () => {
+      toast.success(t("mcp.revoked"));
+      qc.invalidateQueries({ queryKey: ["mcp-tokens-me"] });
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
 
   const issue = useMutation({
     mutationFn: () =>
@@ -101,10 +120,12 @@ export default function McpPage() {
 
   // Shown before a token exists too, so the shape is readable without having
   // to generate anything first — the config is the part to understand.
-  const url = issued?.url && issued.url !== "/mcp/"
+  // The developer endpoint is the one a person connects an editor to: read-only
+  // tools over the repositories their token names.
+  const url = issued?.url && issued.url !== "/mcp/" && issued.url !== "/mcp/dev/"
     ? issued.url
-    : (typeof window !== "undefined" ? `${window.location.origin}/backend/mcp/` : "/mcp/");
-  const secret = issued?.token ?? "<paste the token from above>";
+    : (typeof window !== "undefined" ? `${window.location.origin}/backend/mcp/dev/` : "/mcp/dev/");
+  const secret = issued?.token ?? "${CELMIS_MCP_TOKEN}";
 
   const claudeCode = `claude mcp add --transport http celmis \\
   ${url} \\
@@ -138,7 +159,42 @@ export default function McpPage() {
         tabs={<SectionTabs set="settings" />}
       />
 
-      {/* Step 1 — the token, because everything below needs it. */}
+      {/* The person's own tokens: metadata and revoke, never a value. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <KeyIcon className="h-4 w-4" /> {t("mcp.myTokensTitle")}
+          </CardTitle>
+          <CardDescription>
+            {selfService ? t("mcp.selfServiceOn") : t("mcp.issuedByAdmin")}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {(mine.data?.tokens ?? []).length === 0 && !mine.isLoading && (
+            <div className="text-sm text-[var(--color-muted-foreground)]">{t("mcp.noTokens")}</div>
+          )}
+          {(mine.data?.tokens ?? []).map((row: McpTokenRow) => (
+            <div key={row.id} className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--color-border)] p-2 text-xs">
+              <Badge variant={row.status === "active" ? "success" : "outline"}>{row.status}</Badge>
+              <span>{row.matched_repos.length > 0 ? row.matched_repos.length : row.repos.length} {t("mcp.reposCount")}</span>
+              <span className="text-[var(--color-muted-foreground)]">
+                {t("mcp.expires", { date: row.expires_at.slice(0, 10) })}
+              </span>
+              {row.status === "active" && (
+                <Button size="sm" variant="outline" className="ml-auto"
+                        disabled={revokeMine.isPending}
+                        onClick={() => revokeMine.mutate(row.id)}>
+                  {t("mcp.revoke")}
+                </Button>
+              )}
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      {/* Step 1 — the token, because everything below needs it. Only when the
+          install lets people issue their own. */}
+      {selfService && (
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-base">
@@ -208,6 +264,7 @@ export default function McpPage() {
           </InlineHelp>
         </CardContent>
       </Card>
+      )}
 
       {/* Step 2 — Claude Code, the one-liner. */}
       <Card>

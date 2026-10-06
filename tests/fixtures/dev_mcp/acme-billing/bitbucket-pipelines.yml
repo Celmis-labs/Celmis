@@ -1,0 +1,11 @@
+image: node:24
+pipelines:
+  branches:
+    main:
+      - step:
+          name: Deploy
+          deployment: production
+          script:
+            - export DATABASE_URL=$DATABASE_URL
+            - export STRIPE_API_KEY=$STRIPE_API_KEY
+            - docker compose up -d --build

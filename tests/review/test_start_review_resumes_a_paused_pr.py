@@ -55,7 +55,7 @@ def _start():
 def test_a_paused_pr_is_resumed_and_the_review_covers_the_skipped_pushes(
         rows, requests_seen):
     pr_state.set_paused("ws", "github", "acme/shop", 7, paused=True,
-                        reason=cadence.REASON_COMMAND, by="auto")
+                        reason=cadence.REASON_MANUAL, by="auto")
     _start()
     assert requests_seen[0].resume is True
     assert pr_state.load("ws", "github", "acme/shop", 7).review_paused is False
@@ -76,3 +76,11 @@ def test_a_pr_state_that_cannot_be_written_does_not_stop_the_review(
     monkeypatch.setattr(pr_state, "resume", broken)
     _start()
     assert len(requests_seen) == 1 and requests_seen[0].resume is False
+
+
+def test_pause_is_not_a_comment_command():
+    """Pausing is a button on the pull-requests page; the docs promise no
+    `@celmis pause` comment, so the parser must not know one either."""
+    from src.review.commands import parser
+    assert "pause" not in parser.COMMAND_NAMES
+    assert not hasattr(cadence, "REASON_COMMAND")

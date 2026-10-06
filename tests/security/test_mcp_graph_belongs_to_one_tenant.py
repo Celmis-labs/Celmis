@@ -111,6 +111,11 @@ def env(graphs, monkeypatch):
         lambda *, user_id, is_admin, workspace_id, repos:  # noqa: ARG005
             {r: state["decide"](r) for r in repos},
     )
+    monkeypatch.setattr(
+        "src.access.effective.effective_access",
+        lambda principal, workspace_id, repos=None:  # noqa: ARG005
+            {r: state["decide"](r) for r in (repos or [])},
+    )
     yield state
     monkeypatch.delenv("CELMIS_DEPLOYMENT_MODE")
     reset_mode_cache()

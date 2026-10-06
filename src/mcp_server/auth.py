@@ -132,6 +132,8 @@ def issue_token(
     client_id: str = "code-analyzer-cli",
     expires_in: int = DEFAULT_EXPIRES_IN,
     extra_claims: dict | None = None,
+    jti: str | None = None,
+    typ: str | None = None,
 ) -> str:
     """Generate a JWT for local development / testing.
 
@@ -141,6 +143,10 @@ def issue_token(
         client_id: for tracing.
         expires_in: lifetime in seconds (default 1 hour).
         extra_claims: additional claims (for example tenant_id).
+        jti: the id of the ``mcp_tokens`` row behind this token. A token
+            without one is a *legacy* token (see ``CELMIS_MCP_LEGACY_TOKENS``).
+        typ: ``pat`` | ``cli`` | ``self`` | ``oauth`` — which kind of grant
+            the row is.
 
     Returns:
         Encoded JWT string ready for Authorization: Bearer <token>.
@@ -157,9 +163,13 @@ def issue_token(
     }
     if extra_claims:
         # Don't allow overriding standard claims
-        for k in ("iss", "aud", "sub", "iat", "exp", "scope"):
+        for k in ("iss", "aud", "sub", "iat", "exp", "scope", "jti", "typ"):
             extra_claims.pop(k, None)
         payload.update(extra_claims)
+    if jti:
+        payload["jti"] = jti
+    if typ:
+        payload["typ"] = typ
 
     token = jwt.encode(payload, config.secret, algorithm=config.algorithm)
     logger.info(
@@ -219,6 +229,17 @@ def _workspace_problem(payload: dict) -> str | None:
                 "token was issued for. Try again shortly.")
 
 
+def _audit_refused(payload: dict, reason: str) -> None:
+    """A signed token that was refused before any tool ran leaves an audit row
+    (token id, person, reason code — no arguments)."""
+    try:
+        from src.mcp_server import audit
+
+        audit.record_denied(payload, reason)
+    except Exception:  # noqa: BLE001 — an audit problem never changes the answer
+        pass
+
+
 # ─── TokenVerifier implementation ────────────────────────────────────
 
 
@@ -230,6 +251,8 @@ class JwtTokenVerifier(TokenVerifier):
         - exp claim (token is not expired)
         - iss claim (issuer matches expected)
         - aud claim (audience matches expected)
+        - the ``mcp_tokens`` row behind it (revoked / expired / unknown /
+          legacy tokens are refused, see ``CELMIS_MCP_LEGACY_TOKENS``)
 
     Returns an AccessToken instance or raises (per the verify_token contract).
     """
@@ -304,7 +327,27 @@ class JwtTokenVerifier(TokenVerifier):
             # rather than "Authentication required".
             logger.warning("jwt_workspace_refused sub=%s", payload.get("sub"))
             note_refusal(problem)
+            _audit_refused(payload, problem)
             return None
+
+        # The grant behind the token: revoked, expired, unknown or legacy
+        # tokens are refused here, before any tool runs. The row — not the
+        # claims the token was signed with — says what it may do now.
+        from src.mcp_server.identity import resolve_grant
+
+        sub = str(payload.get("sub") or "")
+        grant_user = sub.split(":", 1)[1] if sub.startswith(("user:", "client:")) else sub
+        grant = resolve_grant(payload, grant_user)
+        if grant.refused:
+            logger.warning("jwt_grant_refused sub=%s grant=%s", sub, grant.token_id)
+            note_refusal(grant.refused)
+            _audit_refused(payload, grant.refused)
+            return None
+        if grant.token_id:
+            from src.mcp_server import token_store
+
+            holder = _REFUSAL.get() or {}
+            token_store.touch(grant.token_id, holder.get("ip"))
 
         client_id = str(payload.get("client_id") or payload.get("sub") or "unknown")
         expires_at = int(payload["exp"]) if "exp" in payload else None

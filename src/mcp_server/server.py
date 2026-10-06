@@ -406,28 +406,9 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
     # use, so the tenancy check and the live-run rule are written once.
 
     def _actor(label: str, *, writing: bool = False):
-        from src.automation.actions import ActionError, Actor
-        from src.mcp_server.identity import resolve_caller
+        from src.mcp_server.identity import actor_for
 
-        caller = resolve_caller()
-        if caller.refused:
-            raise ActionError(caller.refused)
-        if writing and caller.authenticated and not caller.workspace_resolved:
-            # A client_credentials token whose owner cannot be resolved lands
-            # on the "default" workspace by fallback. Reading there is
-            # harmless; writing would register a repository into a tenant
-            # nobody chose. Refuse and say what to fix.
-            raise ActionError(
-                "This token is not tied to a workspace. Register the OAuth "
-                "client from an account that belongs to the workspace you "
-                "want to write to, or use a user token.",
-            )
-        return Actor(
-            user_id=caller.user_id,
-            email=getattr(caller, "email", "") or caller.user_id,
-            workspace_id=caller.workspace_id,
-            label=label,
-        )
+        return actor_for(label, writing=writing)
 
 
     async def _in_session(fn):
@@ -744,10 +725,18 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
     from src.mcp_server.ops_tools import register_ops_tools
     register_ops_tools(mcp, _actor, _in_session, require_scopes)
 
+    # "Do it like service X": names of env vars and where values come from,
+    # never a value (src/mcp_server/howto/).
+    from src.mcp_server.howto import register_howto
+    register_howto(mcp, scoped=require_scopes)
+
     # Defence in depth behind the verifier: every tool refuses a refused
     # caller itself (see src/mcp_server/guard.py).
     from src.mcp_server.guard import guard_every_tool
     guard_every_tool(mcp)
+    # One wrapper around every call: record it, redact it, audit it.
+    from src.mcp_server.call_envelope import install_call_envelope
+    install_call_envelope(mcp, profile="stdio")
 
     logger.info("mcp_server_built name=%s", SERVER_NAME)
     return mcp

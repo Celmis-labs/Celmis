@@ -92,6 +92,7 @@ def test_the_catalogue_reaches_what_actions_can_do():
     helpers = {
         "normalise_review_rules", "review_setting_value", "review_setting_keys",
         "resolve_repo", "rules_store_available", "rules_generation_available",
+        "workspace_configs",
     }
     unreachable = public - {"register_repo"} - helpers - {
         "list_repos", "get_dep_audit", "list_dep_findings", "generate_docs",

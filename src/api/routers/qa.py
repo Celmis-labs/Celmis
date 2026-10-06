@@ -463,8 +463,14 @@ async def _generate_full(
     is_admin: bool = True,
     workspace_id: str = "default",
     include_code: bool = True,
+    token_filter: tuple[str, ...] | None = None,
+    name_free_notice: bool = False,
 ) -> tuple[str, dict[str, Any]]:
-    """Non-streaming alternate — the full text + meta in one block."""
+    """Non-streaming alternate — the full text + meta in one block.
+
+    ``token_filter`` / ``name_free_notice`` are for the MCP path: access is the
+    token's, and neither the notice nor the meta names a repository the caller
+    cannot read."""
     from src.llm.gemini_client import _estimate_tokens
     from src.qa.multi_repo_retriever import MultiRepoRetriever
 
@@ -472,7 +478,8 @@ async def _generate_full(
     context = await retriever.retrieve(
         question=question, repos=target_repos, history=history,
         user_id=user_id, is_admin=is_admin, workspace_id=workspace_id,
-        include_code=include_code,
+        include_code=include_code, token_filter=token_filter,
+        name_free_notice=name_free_notice,
     )
     from src.llm.completion import stream_chat
     full = []
@@ -497,7 +504,7 @@ async def _generate_full(
         ],
         "files_read": context.files_read,
         "files_read_count": len(context.files_read),
-        "blocked_repos": context.blocked_repos,
+        "blocked_repos": [] if name_free_notice else context.blocked_repos,
         "hidden_files": context.hidden_files,
         "hidden_files_count": len(context.hidden_files),
         "code_included": context.code_included,

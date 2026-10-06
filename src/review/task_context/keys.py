@@ -2,12 +2,12 @@
 
 A key is `PROJECT-123`. Three things make finding one harder than a regex:
 
-* Teams write it into a branch name next to words: `PROJ-6066_порезка`,
-  `feature/PROJ-6066-порезка-профилей`. `\b` does not see the boundary in the
+* Teams write it into a branch name next to words: `PROJ-6066_експорт`,
+  `feature/PROJ-6066-експорт-звіту`. `\b` does not see the boundary in the
   first one (`_` is a word character), so the boundaries here are lookarounds
   over letters and digits only.
 * A Ukrainian keyboard layout types Cyrillic letters that LOOK Latin
-  (`ВР2D-1` for `BP2D-1`). The look-alikes are folded to Latin inside a
+  (`АВ2D-1` for `AB2D-1`). The look-alikes are folded to Latin inside a
   candidate — but only a candidate whose every Cyrillic letter has a Latin
   twin, so a Russian or Ukrainian word that happens to precede `-12` is not
   turned into a key.

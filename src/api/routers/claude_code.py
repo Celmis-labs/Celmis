@@ -467,6 +467,21 @@ async def create_session(
     owned = {c.repo_slug for c in get_auto_review_store().list_all()
              if c.workspace_id == workspace_id}
     unknown = [s for s in wanted if s not in owned]
+    # The session CLONES these repositories with the workspace's git token and
+    # hands the code to a model that talks back: that is a read of the whole
+    # repo, so it needs the person's own right to read it. Refused with the
+    # same words as an unregistered slug — no answer tells a closed repo from
+    # one that is not there.
+    from src.api import deps
+
+    for slug in [s for s in wanted if s in owned]:
+        try:
+            await deps.enforce_repo_permission(slug, user, "read", workspace_id)
+        except HTTPException:
+            logger.warning(
+                "agent_session_refused_unreadable_repo repo=%s user=%s ws=%s",
+                slug, user.id, workspace_id)
+            unknown.append(slug)
     if unknown:
         raise HTTPException(
             status_code=400,

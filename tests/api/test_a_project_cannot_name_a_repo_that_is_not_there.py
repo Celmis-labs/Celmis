@@ -17,6 +17,8 @@ answer is simply thinner.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi import HTTPException
 
@@ -38,14 +40,14 @@ def store(tmp_path, monkeypatch) -> AutoReviewStore:
 def test_a_registered_repo_is_accepted(store):
     from src.api.routers.projects import _require_registered
 
-    _require_registered(["github_acme-api"], "ws-1")
+    asyncio.run(_require_registered(["github_acme-api"], "ws-1"))
 
 
 def test_an_unregistered_repo_is_refused(store):
     from src.api.routers.projects import _require_registered
 
     with pytest.raises(HTTPException) as exc:
-        _require_registered(["github_does-not-exist-anywhere"], "ws-1")
+        asyncio.run(_require_registered(["github_does-not-exist-anywhere"], "ws-1"))
 
     assert exc.value.status_code == 404
     assert "github_does-not-exist-anywhere" in str(exc.value.detail)
@@ -57,7 +59,7 @@ def test_a_repo_in_another_workspace_is_refused(store):
     from src.api.routers.projects import _require_registered
 
     with pytest.raises(HTTPException):
-        _require_registered(["github_acme-api"], "ws-2")
+        asyncio.run(_require_registered(["github_acme-api"], "ws-2"))
 
 
 def test_every_missing_member_is_named_at_once(store):
@@ -66,7 +68,7 @@ def test_every_missing_member_is_named_at_once(store):
     from src.api.routers.projects import _require_registered
 
     with pytest.raises(HTTPException) as exc:
-        _require_registered(["nope-one", "github_acme-api", "nope-two"], "ws-1")
+        asyncio.run(_require_registered(["nope-one", "github_acme-api", "nope-two"], "ws-1"))
 
     detail = str(exc.value.detail)
     assert "nope-one" in detail
@@ -78,7 +80,7 @@ def test_an_empty_project_is_allowed(store):
     not a fix."""
     from src.api.routers.projects import _require_registered
 
-    _require_registered([], "ws-1")
+    asyncio.run(_require_registered([], "ws-1"))
 
 
 def test_the_two_endpoints_now_agree():

@@ -252,7 +252,10 @@ def test_list_reviews_narrows_and_hides_unreadable_repositories(world, monkeypat
 
     runs = [_out(id="r-1"), _out(id="r-2", pr_repo="acme/payments", pr_number=9),
             _out(id="r-3", status="failed")]
-    monkeypatch.setattr(reviews, "history", lambda limit, user, ws: runs)
+    async def _history(limit, user, ws):
+        return runs
+
+    monkeypatch.setattr(reviews, "history", _history)
 
     out = run(ar.list_reviews(ACTOR, None, limit=10))
     assert [r["run_id"] for r in out["runs"]] == ["r-1", "r-2", "r-3"]
@@ -274,8 +277,10 @@ def test_list_reviews_narrows_and_hides_unreadable_repositories(world, monkeypat
 def test_list_reviews_is_bounded(world, monkeypatch):
     from src.api.routers import reviews
 
-    monkeypatch.setattr(reviews, "history",
-                        lambda limit, user, ws: [_out(id=f"r-{i}") for i in range(60)])
+    async def _history(limit, user, ws):
+        return [_out(id=f"r-{i}") for i in range(60)]
+
+    monkeypatch.setattr(reviews, "history", _history)
     assert len(run(ar.list_reviews(ACTOR, None, limit=999))["runs"]) == ar.MAX_LIST
 
 

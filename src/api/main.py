@@ -562,6 +562,9 @@ def build_app() -> FastAPI:
     app.include_router(invites_router.router)
     from src.api.routers import mcp_access as mcp_access_router
     app.include_router(mcp_access_router.router)
+    from src.api.routers import mcp_tokens as mcp_tokens_router
+    app.include_router(mcp_tokens_router.router)
+    app.include_router(mcp_tokens_router.me_router)
     from src.api.routers import automation as automation_router
     app.include_router(automation_router.router)
 

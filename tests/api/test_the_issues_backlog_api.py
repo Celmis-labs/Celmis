@@ -101,6 +101,14 @@ async def api(*, role="member", monkeypatch):
             last_result={"reopened": 2, "resolved": 1}, llm_calls_total=3))
         await s.commit()
     monkeypatch.setattr(deps_module, "workspace_role", lambda uid, ws: role)
+
+    async def _everything_readable(_user, _ws, slugs):
+        # Which repos a caller may read is the access matrix's subject
+        # (tests/security/test_access_matrix.py); here the rows are the subject.
+        return set(slugs)
+
+    monkeypatch.setattr(issues_router, "code_readable_repo_slugs", _everything_readable)
+    monkeypatch.setattr(deps_module, "code_readable_repo_slugs", _everything_readable)
     app = FastAPI()
     app.include_router(issues_router.router)
 

@@ -128,7 +128,7 @@ def spend(monkeypatch) -> list:
     import src.agent.runner as runner_mod
     import src.review.agents.base as base_mod
 
-    monkeypatch.setattr(runner_mod, "_mint_mcp_token", lambda user_id: "mcp-token")
+    monkeypatch.setattr(runner_mod, "_mint_mcp_token", lambda user_id, workspace_id="default": "mcp-token")
     monkeypatch.setattr(base_mod, "_review_language_instruction", lambda ws: "")
     calls: list = []
     monkeypatch.setattr(

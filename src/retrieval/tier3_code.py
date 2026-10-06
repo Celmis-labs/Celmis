@@ -135,14 +135,15 @@ class CodeReader:
         redact_content: bool = True,
     ) -> CodeSnippet | None:
         """Read the file in full. Used with care — only for small/key files."""
-        fp = repo_path / file_rel
-        if not fp.exists() or not fp.is_file():
+        fp = _safe_path(repo_path, file_rel)
+        if fp is None or not fp.exists() or not fp.is_file():
             return None
         try:
             text = fp.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             logger.warning("read_failed file=%s err=%s", file_rel, exc)
             return None
+        text = _mask_if_keys_only(file_rel, text)
         if redact_content:
             from src.security.redactor import redact
 
@@ -165,15 +166,16 @@ class CodeReader:
         end: int | None,
         context_lines: int,
     ) -> CodeSnippet | None:
-        fp = repo_path / file_rel
-        if not fp.exists() or not fp.is_file():
+        fp = _safe_path(repo_path, file_rel)
+        if fp is None or not fp.exists() or not fp.is_file():
             logger.debug("file_not_found %s", file_rel)
             return None
         try:
-            lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+            text = fp.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             logger.warning("read_failed file=%s err=%s", file_rel, exc)
             return None
+        lines = _mask_if_keys_only(file_rel, text).splitlines()
 
         # If end is not given — we look for the end of the function heuristically (brace/indent balance)
         if end is None:
@@ -189,6 +191,27 @@ class CodeReader:
             language=_language_for_file(fp),
             content=snippet,
         )
+
+
+def _safe_path(repo_path: Path, file_rel: str) -> Path | None:
+    """``repo_path / file_rel`` unless it leaves the repository or is a secret
+    file (``.env``, keys, credential stores; see src/security/secret_files.py).
+    A refusal reads like a missing file: no oracle for what exists."""
+    from src.security.secret_files import SecretPathRefused, safe_join
+
+    try:
+        return safe_join(repo_path, file_rel)
+    except SecretPathRefused:
+        logger.info("secret_path_refused")
+        return None
+
+
+def _mask_if_keys_only(file_rel: str, text: str) -> str:
+    """``.env.example``-style files keep their names; values that are not an
+    obvious placeholder are withheld."""
+    from src.security.secret_files import classify, mask_env_values
+
+    return mask_env_values(text) if classify(file_rel) == "keys_only" else text
 
 
 def _language_for_file(fp: Path) -> str:

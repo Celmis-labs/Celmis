@@ -262,6 +262,11 @@ def _app(monkeypatch, tmp_path, *, provider: str, perm: str | None = "review",
         return perm, grants
 
     monkeypatch.setattr(deps_module, "_effective_repo_permission", _perm)
+
+    async def _no_rule(*_a, **_kw):
+        return False, False          # no research rule: grants alone decide here
+
+    monkeypatch.setattr(deps_module, "_research_rule_state", _no_rule)
     app = FastAPI()
     app.include_router(repos_router.router)
     app.dependency_overrides[get_current_user] = lambda: User(
@@ -384,9 +389,11 @@ def test_a_reader_can_list_but_not_review(server, store, jobs, monkeypatch, tmp_
 
 
 def test_no_grant_on_a_granted_repo_cannot_even_list(server, store, monkeypatch, tmp_path):
+    """Not a 403: a repository the caller may not read answers like one that
+    does not exist, so the slug cannot be probed."""
     server("github", total=3)
     c = _app(monkeypatch, tmp_path, provider="github", perm=None, grants=True)
-    assert c.get("/api/repos/acme-api/pulls").status_code == 403
+    assert c.get("/api/repos/acme-api/pulls").status_code == 404
 
 
 def test_an_unregistered_repo_is_a_404(server, store, monkeypatch, tmp_path):
@@ -477,6 +484,11 @@ def test_a_bitbucket_review_triggered_by_hand_runs_end_to_end(monkeypatch, tmp_p
         return "review", True
 
     monkeypatch.setattr(deps_module, "_effective_repo_permission", _perm)
+
+    async def _no_rule(*_a, **_kw):
+        return False, False          # no research rule: grants alone decide here
+
+    monkeypatch.setattr(deps_module, "_research_rule_state", _no_rule)
     app = FastAPI()
     monkeypatch.setattr("src.api.deps.is_workspace_admin", lambda _u, _ws: False)
     app.include_router(reviews_router.router)

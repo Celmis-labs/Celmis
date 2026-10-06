@@ -29,6 +29,7 @@ as a token that fails later. A scope outside this list is refused too.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -130,46 +131,56 @@ def issue_mcp_token(
     here are a ceiling, not a grant.
     """
     from src.config import get_settings
-    from src.mcp_server.auth import JwtConfig, JwtConfigError, issue_token
+    from src.mcp_server import token_store
+    from src.mcp_server.auth import JwtConfigError
 
+    # Default off: tokens are issued by the superadmin, per person and per repo
+    # list (POST /api/admin/mcp-tokens). A browser click minting a token that
+    # reaches everything its holder can see is exactly what that replaces.
+    if not token_store.self_service_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail=("MCP tokens are issued by the administrator. Ask your "
+                    "superadmin to issue one for the repositories you need."))
+
+    label = (payload.label if payload else None) or "celmis-mcp-client"
+    granted = _granted_scopes(user, workspace_id,
+                              payload.scopes if payload else None)
+    wants_write = any(sc.startswith("write:") for sc in granted)
     try:
-        config = JwtConfig.from_env()
+        # A self-issued token carries "*": the ceiling is the holder's OWN
+        # access (the resolver intersects it), not a list somebody chose.
+        token, view = token_store.mint(
+            kind="self", workspace_id=workspace_id, user_id=user.id,
+            issued_by=user.id, label=label, patterns=["*"],
+            allow_write=wants_write, profile="full" if wants_write else "dev",
+            expires_in_days=token_store.max_days(),
+            # exactly the write scopes the role allowed, not all of them
+            write_scopes=[sc for sc in granted if sc.startswith("write:")],
+        )
     except JwtConfigError as exc:
-        # A misconfigured install should say what is missing, not 500. This is
-        # the one prerequisite an operator has to set, and naming it is the
-        # difference between a five-minute fix and a support thread.
+        # A misconfigured install should say what is missing, not 500.
         raise HTTPException(
             status_code=503,
             detail=("MCP is not configured on this server: set MCP_JWT_SECRET "
                     "(or CELMIS_JWT_SECRET) and restart. " + str(exc)[:200]),
         ) from exc
-
-    label = (payload.label if payload else None) or "celmis-mcp-client"
-    granted = _granted_scopes(user, workspace_id,
-                              payload.scopes if payload else None)
-    token = issue_token(
-        config,
-        subject=user.id,
-        scopes=granted,
-        client_id=label,
-        expires_in=_TOKEN_TTL_SECONDS,
-        # The workspace travels in the token so the MCP server answers for the
-        # one the user was looking at, not whichever it would default to.
-        extra_claims={"workspace_id": workspace_id},
-    )
+    except token_store.TokenError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     settings = get_settings()
     base = str(getattr(settings, "public_base_url", "") or "").rstrip("/")
-    logger.info("mcp_token_issued user=%s ws=%s label=%s ttl=%ds scopes=%s",
-                user.email, workspace_id, label, _TOKEN_TTL_SECONDS,
-                " ".join(granted))
+    seconds = max(1, int((view.expires_at - datetime.now(UTC)).total_seconds()))
+    logger.info("mcp_token_issued id=%s kind=self user=%s ws=%s write=%s", view.id,
+                user.id, workspace_id, wants_write)
     return McpTokenOut(
         token=token,
-        expires_in=_TOKEN_TTL_SECONDS,
-        scopes=granted,
+        expires_in=seconds,
+        scopes=list(view.scopes),
         # Trailing slash on purpose: without it Starlette answers 307, and a
         # redirected POST is not something the MCP streamable-HTTP client is
         # guaranteed to follow.
-        url=f"{base}/mcp/" if base else "/mcp/",
+        url=(f"{base}/mcp/" if base else "/mcp/") if wants_write
+        else (f"{base}/mcp/dev/" if base else "/mcp/dev/"),
         workspace_id=workspace_id,
     )
 

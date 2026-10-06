@@ -486,7 +486,12 @@ def build_repo_context(repo_root: Path) -> RepoContext:
             ctx.parse_errors.append(f"package.json: {e}")
 
     # .env files
+    from src.security.secret_files import plain_file
+
     for env_path in _discover_files(repo_root, _ENV_GLOB):
+        # a real ``.env`` is a secret file: only the documented examples are parsed
+        if plain_file(repo_root, env_path.relative_to(repo_root).as_posix()) is None:
+            continue
         try:
             ctx.env_keys.update(parse_env_file(env_path))
         except Exception as e:  # noqa: BLE001

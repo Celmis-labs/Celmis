@@ -35,9 +35,12 @@ Each scope holds at most 200 memories, and the prompt takes at most
 ### Who is trusted
 
 A memory is active at once only when a trusted person wrote it: a Celmis user with
-the editor, admin or owner role, the owner of the provider token (on a human
-token, whoever types through it), or a name on `memory_trusted_commenters`.
-Anything else, and every machine proposal while `knowledge_approval` is on (the
+the editor, admin or owner role (a memory written on the Memories page or through
+the API), the owner of the provider token (on a human token, whoever types
+through it), or a name on `memory_trusted_commenters`. A commenter on a pull
+request is a provider identity, not a Celmis user, so for `@celmis remember:`
+only the last two count: a workspace editor who is not the token owner is put on
+`memory_trusted_commenters` to have their comments active at once. Anything else, and every machine proposal while `knowledge_approval` is on (the
 built-in), is stored as pending and waits for approval on the page. This is the
 second line of defence against text a stranger can put in a comment.
 
@@ -101,6 +104,18 @@ a rule that matched text, is never hidden.
 Start in `shadow`: the review summary and the run page say how many findings
 feedback would have hidden, so the effect can be judged before switching on.
 
+The thresholds are install settings (environment, prefix `REVIEW_`), not
+repository ones:
+
+| Variable | Built-in | Meaning |
+| --- | --- | --- |
+| `REVIEW_LEARNING_SIMILARITY` | 0.90 | The cosine a finding must reach against a dismissed one to count as the same finding (0.5 to 1.0). |
+| `REVIEW_LEARNING_MIN_DISMISSALS` | 2 | Weighted dismissals the embedding tier needs; an exact repeat needs one. |
+| `REVIEW_LEARNING_WINDOW_DAYS` | 180 | How far back signals count (7 to 730). |
+| `REVIEW_LEARNING_HALF_LIFE_DAYS` | 90 | How fast signals fade (7 to 730). |
+| `REVIEW_LEARNING_RULES_MIN_EVIDENCE` | 3 | Signals of one kind a rule proposal needs (2 to 50). |
+| `REVIEW_LEARNING_COLLECTION` | `celmis_finding_signals` | The vector collection holding the finding embeddings. |
+
 ### The Learning view
 
 `/memories` has a Learning view (editors and above, only repositories one can
@@ -111,5 +126,6 @@ with their repository and with the person on erasure.
 ### Rules from history
 
 A "from history" job on the rules page, and an optional weekly tick
-(`REVIEW_LEARNING_RULES_SCHEDULE=weekly`), propose rules where several pull
+(`REVIEW_LEARNING_RULES_SCHEDULE=weekly`; `CELMIS_DISABLE_LEARNING_SCHED=1` stops the
+loop entirely), propose rules where several pull
 requests agree. They arrive as pending, with the origin "learned".

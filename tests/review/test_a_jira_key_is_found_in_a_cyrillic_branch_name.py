@@ -1,7 +1,7 @@
 """A task key is found wherever a team writes it, and only where it is one.
 
-Teams type branches in Ukrainian next to the key (`AB2C-6066-порезка-профилей`),
-a Cyrillic keyboard layout turns the Latin `VP` into the lookalike `ВР`, and
+Teams type branches in Ukrainian next to the key (`AB2C-6066-експорт-звіту`),
+a Cyrillic keyboard layout turns the Latin `AB` into the lookalike `АВ`, and
 prose is full of things shaped like keys (`UTF-8`, `SHA-256`, `CVE-2024-1234`)
 that are not Jira tasks. A wrong key is a wasted request and, worse, a task
 that has nothing to do with the change handed to the model as its spec.
@@ -24,8 +24,8 @@ def _pr(*, title="", head_ref="main", description="") -> PullRequest:
 
 
 @pytest.mark.parametrize("branch", [
-    "AB2C-6066-порезка-профилей",
-    "feature/AB2C-6066_порезка",
+    "AB2C-6066-експорт-звіту",
+    "feature/AB2C-6066_експорт",
     "bugfix/ab2c-6066-lower-case",
 ])
 def test_a_key_in_a_branch_is_found_however_the_rest_is_written(branch):
@@ -33,8 +33,8 @@ def test_a_key_in_a_branch_is_found_however_the_rest_is_written(branch):
 
 
 def test_a_cyrillic_lookalike_of_a_latin_project_key_is_read_as_the_latin_one():
-    # ВР2D uses the Cyrillic В and Р, which look exactly like the Latin ones.
-    assert keys_in("ВР2D-1 порезка") == ["BP2D-1"]
+    # АВ2D uses the Cyrillic А and В, which look exactly like the Latin ones.
+    assert keys_in("АВ2D-1 експорт") == ["AB2D-1"]
 
 
 @pytest.mark.parametrize("text", [

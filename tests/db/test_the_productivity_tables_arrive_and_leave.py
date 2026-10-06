@@ -134,3 +134,29 @@ def test_no_other_table_is_touched(engine) -> None:
     _run(engine, "upgrade")
     _run(engine, "downgrade")
     assert sa.inspect(engine).has_table("review_pull_requests")
+
+
+def test_a_database_that_already_holds_the_tables_upgrades_instead_of_failing(engine) -> None:
+    """Stamped to the parent by hand, or created outside alembic: the second
+    run finds every table and index in place and leaves them as they are."""
+    _run(engine, "upgrade")
+    with Session(engine) as s:
+        from src.db.models import ProductivityPullRequest
+
+        s.add(ProductivityPullRequest(workspace_id="ws", provider="github", repo="o/r", number=1))
+        s.commit()
+    _run(engine, "upgrade")
+    with Session(engine) as s:
+        from src.db.models import ProductivityPullRequest
+
+        assert s.query(ProductivityPullRequest).count() == 1
+    inspector = sa.inspect(engine)
+    assert all(inspector.has_table(m.__tablename__) for m in _models())
+
+
+def test_the_downgrade_is_idempotent_too(engine) -> None:
+    _run(engine, "upgrade")
+    _run(engine, "downgrade")
+    _run(engine, "downgrade")
+    inspector = sa.inspect(engine)
+    assert not [m.__tablename__ for m in _models() if inspector.has_table(m.__tablename__)]

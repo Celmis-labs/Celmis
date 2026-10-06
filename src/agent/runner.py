@@ -974,7 +974,7 @@ async def _drive_agent(session_id: str, row, *,
     from src.agent.modes import get_spec
     spec = get_spec(getattr(row, "mode", None))
 
-    mcp_token = _mint_mcp_token(row.user_id)
+    mcp_token = _mint_mcp_token(row.user_id, row.workspace_id)
     options = _build_options(workspace, conn.env, mcp_token, resume=resume,
                              spec=spec, model=getattr(row, "model", "") or "")
     logger.info("agent_session_options session=%s mode=%s model=%s effort=%s",
@@ -1352,14 +1352,17 @@ def _build_options(workspace, auth_env: dict[str, str], mcp_token: str,
     )
 
 
-def _mint_mcp_token(user_id: str) -> str:
-    from src.mcp_server.auth import JwtConfig, issue_token
-    return issue_token(
-        JwtConfig.from_env(),
-        subject=user_id,
-        scopes=list(_MCP_SCOPES),
-        client_id="celmis-agent",
-        expires_in=SESSION_WALL_CLOCK_SECONDS + 20 * 60,
+def _mint_mcp_token(user_id: str, workspace_id: str = "default") -> str:
+    """A loopback MCP token bound to this person and workspace.
+
+    It goes through the grant store (an ``internal`` row): the verifier refuses
+    tokens that have no row, and the person's own access stays the ceiling.
+    """
+    from src.mcp_server.token_store import mint_internal
+    return mint_internal(
+        user_id=user_id, workspace_id=workspace_id,
+        ttl_seconds=SESSION_WALL_CLOCK_SECONDS + 20 * 60,
+        label="celmis-agent",
     )
 
 

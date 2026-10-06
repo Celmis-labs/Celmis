@@ -227,6 +227,38 @@ async def set_budget(
 # ─── alerts ──────────────────────────────────────────────────────────
 
 
+async def _alerts_the_caller_may_see(actor: Actor, user: Any, rows: list[Any]) -> list[Any]:
+    """Alerts narrowed to the repositories the caller may see.
+
+    An alert's ``repo_hint`` names a repository (slug or full name). A hint that
+    is a repository of the workspace needs ``read`` on it — the token's list
+    when the caller holds one, the person's own access otherwise. A hint that
+    names nothing registered, or no hint at all, is a workspace-level alert: a
+    caller whose token lists specific repositories does not get those, any
+    other caller does."""
+    from src.api.auto_review import get_auto_review_store
+    from src.automation.actions_reviews import _can_read
+
+    by_name: dict[str, str] = {}
+    for c in get_auto_review_store().list_for_workspace(actor.workspace_id):
+        by_name[c.repo_slug] = c.repo_slug
+        if getattr(c, "full_name", ""):
+            by_name[c.full_name] = c.repo_slug
+    narrowed = actor.token_filter is not None
+    cache: dict[str, bool] = {}
+    kept: list[Any] = []
+    for r in rows:
+        hint = (getattr(r, "repo_hint", "") or "").strip()
+        slug = by_name.get(hint) if hint else None
+        if slug is None:
+            if not narrowed:
+                kept.append(r)
+            continue
+        if await _can_read(actor, user, slug, cache):
+            kept.append(r)
+    return kept
+
+
 async def list_alerts(
     actor: Actor, session: Any, *, status: str | None = None, limit: int = 20,
 ) -> dict[str, Any]:
@@ -240,6 +272,7 @@ async def list_alerts(
         raise ActionError("status must be new, acked or fixed.")
     rows = await _as_action(alerts.list_alerts(
         limit=200, session=session, _user=user, workspace_id=actor.workspace_id))
+    rows = await _alerts_the_caller_may_see(actor, user, rows)
     counts: dict[str, int] = {}
     for r in rows:
         counts[r.status] = counts.get(r.status, 0) + 1
@@ -294,6 +327,21 @@ def _slim_job(row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+async def _sees_everything(actor: Actor, user: Any) -> bool:
+    """Owner/admin of the workspace, holding no token that narrows them. Only
+    they see free text that can name repositories they were not given
+    (job errors) and the roster's email addresses."""
+    if actor.token_filter is not None:
+        return False
+    from src.api.deps import require_workspace_admin
+
+    try:
+        await require_workspace_admin(user=user, workspace_id=actor.workspace_id)
+    except Exception:  # noqa: BLE001 — HTTPException (403) or anything else: no
+        return False
+    return True
+
+
 async def list_jobs(
     actor: Actor, *, status: str | None = None, kind: str | None = None,
     limit: int = 20,
@@ -302,13 +350,20 @@ async def list_jobs(
     `GET /api/jobs` and `/stats`, minus the global admin's cross-tenant view."""
     from src.sync import queue as jq
 
-    _user_for(actor)
+    user = _user_for(actor)
     ws = actor.workspace_id
     rows = await asyncio.to_thread(
         lambda: jq.list_jobs(status=_opt(status), kind=_opt(kind),
                              limit=_clamp(limit, 1, _PAGE_LIMIT, 20), workspace_id=ws))
     stats = await asyncio.to_thread(lambda: jq.stats(workspace_id=ws))
-    return {"jobs": [_slim_job(r) for r in rows], "count": len(rows), "stats": stats,
+    jobs = [_slim_job(r) for r in rows]
+    if not await _sees_everything(actor, user):
+        # An error line can carry a repository slug (a clone that failed): it
+        # is for the workspace's admins, not for a caller limited to some repos.
+        for j in jobs:
+            if j.get("last_error"):
+                j["last_error"] = "(hidden: ask a workspace admin)"
+    return {"jobs": jobs, "count": len(rows), "stats": stats,
             "links": [_link("jobs", "jobs")]}
 
 
@@ -410,8 +465,10 @@ async def audit_delta(
 
     user = _user_for(actor)
     run = await _run_or_latest(actor, session, run_id, statuses=("done",))
-    raw = await _as_action(deps.run_delta(
-        run_id=run.id, session=session, user=user, workspace_id=actor.workspace_id))
+    from src.automation.actions import _token_slugs
+
+    raw = await _as_action(deps._run_delta(
+        session, user, actor.workspace_id, run.id, only=_token_slugs(actor)))
     counts = raw.get("counts") or {}
     return {
         "run_id": run.id, "previous_run_id": raw.get("previous_run_id"),
@@ -438,6 +495,16 @@ async def export_sbom(
     run = await _run_or_latest(actor, session, run_id, statuses=("done",))
     if run.status != "done":
         raise ActionError("Audit is not finished — export once the run completes.")
+    from src.automation.actions import _token_slugs
+
+    listed = _token_slugs(actor)
+    if listed is not None:
+        # The download follows the person's own rights, not the token's list:
+        # a token-narrowed caller names one repository the token lists.
+        if not _opt(repo):
+            raise ActionError("Name one repository (repo=…): this token lists specific repositories.")
+        if str(repo).strip() not in listed:
+            raise ActionError("Run not found")
     path = f"/api/deps/{run.id}/sbom"
     if _opt(repo):
         path += f"?repo={quote(str(repo).strip(), safe='/')}"
@@ -468,7 +535,11 @@ async def list_members(actor: Actor, session: Any) -> dict[str, Any]:
     by_user: dict[str, list[str]] = {}
     for uid, name in teams:
         by_user.setdefault(uid, []).append(name)
-    members = [{"user_id": m.user_id, "name": m.name, "email": m.email, "role": m.role,
+    # The roster's addresses are for the workspace's admins; a member, and any
+    # caller holding a repo-limited token, gets names and roles.
+    show_email = await _sees_everything(actor, user)
+    members = [{"user_id": m.user_id, "name": m.name,
+                "email": m.email if show_email else "", "role": m.role,
                 "teams": sorted(by_user.get(m.user_id, []))} for m in rows]
     return {"members": members[:100], "count": len(members),
             "links": [_link("members", "members")]}

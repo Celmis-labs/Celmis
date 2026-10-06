@@ -207,3 +207,6 @@ markers = [
 ]
 # Skip integration tests за замовчуванням; -m integration або --override-ini увімкне
 addopts = "-m 'not integration'"
+# Fixture repositories carry test files of their own (tests/fixtures/dev_mcp/*/tests); they are
+# data for the E2E harness, never part of this suite. The rest is pytest's default list.
+norecursedirs = [".*", "build", "dist", "node_modules", "venv", "_darcs", "CVS", "{arch}", "*.egg", "tests/fixtures/dev_mcp"]

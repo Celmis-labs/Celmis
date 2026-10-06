@@ -99,12 +99,11 @@ _ALIASES: dict[str, DeploymentMode] = {
 #: (tests/security/test_every_fall_open_asks_the_deployment_mode.py)
 #: enumerates, so adding a site here without guarding it fails that test.
 FALL_OPEN_SITES: dict[str, str] = {
-    "api.deps.repo_permission":
-        "a repository with no team grant is readable/writable by any user",
     "api.deps.workspace_provision":
         "a user whose own workspace cannot be provisioned lands in 'default'",
-    "access.resolver.no_rule":
-        "a repository with no access rule grants full code access",
+    "access.policy.unruled_repo":
+        "a repository with no rule and no grant is readable by every member "
+        "(only when CELMIS_UNRULED_REPO_ACCESS=open; closed by default)",
     "mcp.identity.no_auth_context":
         "an MCP caller with no bearer identity is a global admin",
     "mcp.identity.unauthenticated_access":

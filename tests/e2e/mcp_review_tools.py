@@ -42,7 +42,7 @@ check("bootstrap: SHARED in blocked_repos", SHARED in res.get("blocked_repos", [
 
 # migrate_consumers with a nonsense symbol (no real callers) → SHARED skipped for access
 res2 = H._migrate_consumers_impl(project_id=PROJ, symbol="__nonexistent_symbol_zzz__",
-    old_text="a", new_text="b", user_id=CONTAINER_USER, commit_message=None)
+    old_text="a", new_text="b", commit_message=None)
 skips = {(x["repo_slug"], x.get("reason","")) for x in res2.get("results", [])}
 shared_access_skip = any(rs==SHARED and "research access" in reason for rs,reason in skips)
 check("migrate: SHARED skipped for access", shared_access_skip, f"skips={skips}")

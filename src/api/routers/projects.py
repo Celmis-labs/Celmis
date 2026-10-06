@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api import repositories as repo
-from src.api.deps import current_workspace_id, get_current_user
+from src.api.deps import current_workspace_id, get_current_user, readable_repo_slugs
 from src.api.schemas import (
     ProjectIn,
     ProjectOut,
@@ -48,7 +48,9 @@ async def _owned_project(session: AsyncSession, project_id: str, ws_id: str) -> 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
-def _to_out(project, chats_count: int = 0) -> ProjectOut:
+def _to_out(project, chats_count: int = 0, visible: set[str] | None = None) -> ProjectOut:
+    """``visible``: the repo slugs the caller may see; ``None`` = all of them.
+    A hidden repository is not named in the project's member list."""
     return ProjectOut(
         id=project.id,
         name=project.name,
@@ -63,6 +65,7 @@ def _to_out(project, chats_count: int = 0) -> ProjectOut:
                 added_at=r.added_at,
             )
             for r in (project.repos or [])
+            if visible is None or r.repo_slug in visible
         ],
         chats_count=chats_count,
     )
@@ -81,14 +84,21 @@ async def list_projects(
         select(Project).where(Project.workspace_id == ws_id)
         .order_by(Project.updated_at.desc())
     )).all()
+    every = list(dict.fromkeys(r.repo_slug for p in projects for r in (p.repos or [])))
+    visible = await readable_repo_slugs(user, ws_id, every)
     out = []
     for p in projects:
+        members = [r.repo_slug for r in (p.repos or [])]
+        if members and not any(m in visible for m in members):
+            continue  # every member is one the caller may not see
         c = await repo.count_chats_in_project(session, p.id)
-        out.append(_to_out(p, chats_count=c))
+        out.append(_to_out(p, chats_count=c, visible=visible))
     return out
 
 
-def _require_registered(repo_slugs: list[str], ws_id: str) -> None:
+async def _require_registered(
+    repo_slugs: list[str], ws_id: str, user: User | None = None,
+) -> None:
     """Every slug must name a repository registered in this workspace.
 
     `POST /api/chats` has always checked this and answers 404 "repo not
@@ -108,6 +118,11 @@ def _require_registered(repo_slugs: list[str], ws_id: str) -> None:
         slug for slug in repo_slugs
         if store.get_in_workspace(ws_id, slug) is None
     ]
+    if user is not None and not missing:
+        # A repository the caller may not read is "not registered" to them:
+        # the same answer as for one that does not exist.
+        readable = await readable_repo_slugs(user, ws_id, list(repo_slugs))
+        missing = [slug for slug in repo_slugs if slug not in readable]
     if missing:
         raise HTTPException(
             status_code=404,
@@ -129,7 +144,7 @@ async def create_project(
     user: User = Depends(get_current_user),
     ws_id: str = Depends(current_workspace_id),
 ) -> ProjectOut:
-    _require_registered([r.repo_slug for r in payload.repos], ws_id)
+    await _require_registered([r.repo_slug for r in payload.repos], ws_id, user)
     try:
         project = await repo.create_project(
             session,
@@ -161,7 +176,11 @@ async def get_project(
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
     chats_count = await repo.count_chats_in_project(session, project_id)
-    return _to_out(project, chats_count=chats_count)
+    members = [r.repo_slug for r in (project.repos or [])]
+    visible = await readable_repo_slugs(user, ws_id, members)
+    if members and not visible:
+        raise HTTPException(status_code=404, detail="project not found")
+    return _to_out(project, chats_count=chats_count, visible=visible)
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -171,7 +190,10 @@ async def delete_project(
     user: User = Depends(get_current_user),
     ws_id: str = Depends(current_workspace_id),
 ) -> None:
-    await _owned_project(session, project_id, ws_id)
+    project = await _owned_project(session, project_id, ws_id)
+    members = [r.repo_slug for r in (project.repos or [])]
+    if members and not await readable_repo_slugs(user, ws_id, members):
+        raise HTTPException(status_code=404, detail="project not found")
     ok = await repo.delete_project(session, project_id)
     if not ok:
         raise HTTPException(status_code=404, detail="project not found")
@@ -197,7 +219,7 @@ async def add_repo(
     await _owned_project(session, project_id, ws_id)
     # Same check as creation. Adding a member one at a time is the other way
     # into the same silently-bogus project.
-    _require_registered([payload.repo_slug], ws_id)
+    await _require_registered([payload.repo_slug], ws_id, user)
     link = await repo.add_repo_to_project(
         session,
         project_id,
@@ -243,7 +265,8 @@ async def remove_repo(
     ws_id: str = Depends(current_workspace_id),
 ) -> None:
     await _owned_project(session, project_id, ws_id)
-    ok = await repo.remove_repo_from_project(session, project_id, repo_slug)
+    ok = repo_slug in await readable_repo_slugs(user, ws_id, [repo_slug])
+    ok = ok and await repo.remove_repo_from_project(session, project_id, repo_slug)
     if not ok:
         raise HTTPException(
             status_code=404,

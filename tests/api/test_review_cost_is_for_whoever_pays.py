@@ -39,6 +39,12 @@ async def _seed(w) -> None:
     store.update(RUN_ID, cost_usd=COST, cost_source="litellm_estimate",
                  tokens_input=1000, tokens_output=200)
     async with w.factory() as s:
+        # Reading a run is reading its repository: the people below who see a
+        # run without its price are on the team that holds the grant.
+        from src.db.models import TeamMember
+
+        for who in ("viewer_a", "member_a"):
+            s.add(TeamMember(team_id="team-a", user_id=w.uid(who), role="member"))
         s.add(ReviewPullRequest(
             id=PR_ID, workspace_id=w.ws["ws-a"], provider="github", repo=A_REPO_FULL,
             number=7, repo_slug=A_REPO, title="t"))

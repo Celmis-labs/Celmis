@@ -7,12 +7,14 @@
 #
 #   ./scripts/e2e.sh            # everything that needs no credentials
 #   ./scripts/e2e.sh access qa  # just these
+#   ./scripts/e2e.sh mcp_dev    # the developer MCP profile (/mcp/dev/); skips until deployed,
+#                               # CELMIS_E2E_STRICT=1 makes "not deployed" a failure
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SUITES=("$@")
 if [ ${#SUITES[@]} -eq 0 ]; then
-  SUITES=(access qa mcp_tools mcp_review_tools gitcreds)
+  SUITES=(access qa mcp_tools mcp_review_tools gitcreds mcp_dev)
 fi
 
 failed=()
@@ -21,6 +23,8 @@ for s in "${SUITES[@]}"; do
   if out=$(docker compose run --rm --no-deps \
              -v "$PWD/tests:/app/tests:ro" \
              -e E2E_API_BASE="${E2E_API_BASE:-http://api:8000}" \
+             -e CELMIS_E2E_STRICT="${CELMIS_E2E_STRICT:-0}" \
+             -e E2E_MCP_TOKEN="${E2E_MCP_TOKEN:-}" \
              api python "tests/e2e/$s.py" 2>&1); then
     echo "$out" | grep -E '^RESULT' || echo 'PASS (no RESULT line)'
   else

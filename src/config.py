@@ -6,9 +6,10 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # ─── repo slugs as path segments ─────────────────────────────────────
 #
@@ -251,6 +252,26 @@ class Settings(BaseSettings):
     #: worker.
     generation_agent_timeout_seconds: int = 1800
 
+    # ─── MCP access (default-deny, superadmin-issued tokens, audit) ──
+    #: What a repository with no team rule and no team grant means. `deny`
+    #: (default): only owners, admins and the superadmin see it until a team
+    #: is granted. `open` restores the pre-2.3.7 behaviour for single_tenant
+    #: installs; it is ignored (with a warning) under multi_tenant.
+    celmis_unruled_repo_access: str = "deny"
+    #: May any signed-in user mint their own MCP token (Settings > MCP)? Off by
+    #: default: tokens are issued by the superadmin for a named person.
+    celmis_mcp_self_service: bool = False
+    #: Who may issue MCP tokens through /api/admin/mcp-tokens: `superadmin`
+    #: (default) or `platform_admin` (any global admin).
+    celmis_mcp_token_issuers: str = "superadmin"
+    #: Upper bound on a token's lifetime, in days.
+    celmis_mcp_token_max_days: int = 90
+    #: What to do with a token issued before per-person grants existed (no
+    #: `jti`): `refuse` (default) or `accept` (read-only, default-deny, audited).
+    celmis_mcp_legacy_tokens: str = "refuse"
+    #: How long MCP call-log rows are kept, in days.
+    celmis_mcp_audit_retention_days: int = 180
+
     #: Thinking budget for Gemini 3.x, in tokens. The provider default is a
     #: DYNAMIC budget — the model decides, and a review of a large diff can
     #: spend more on thinking than on the answer. That is invisible in the
@@ -399,6 +420,12 @@ class Settings(BaseSettings):
     audit_retention_days: int = 90
     redaction_fail_closed: bool = True
     redaction_enabled: bool = True
+    # Extra globs of files that are never indexed, read or returned through
+    # MCP (see src/security/secret_files.py). They add to the built-in list;
+    # nothing here can remove an entry from it.
+    # NoDecode: an empty or comma-separated value is accepted next to a JSON
+    # list, so a compose file can forward the variable when it is unset.
+    secret_path_globs_extra: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     # ─── Sync ────────────────────────────────────────────────────────
     git_clone_depth: int = 50
@@ -504,6 +531,21 @@ class Settings(BaseSettings):
     def repo_vault_path(self, repo_slug: str) -> Path:
         """Path inside the vault for a particular repo."""
         return repo_slug_dir(self.vault_dir / "projects", repo_slug)
+
+    @field_validator("secret_path_globs_extra", mode="before")
+    @classmethod
+    def read_the_extra_secret_globs(cls, v: object) -> object:
+        """`""` is none, `[...]` is JSON, anything else is comma-separated."""
+        if isinstance(v, str):
+            text = v.strip()
+            if not text:
+                return []
+            if text.startswith("["):
+                import json
+
+                return json.loads(text)
+            return [part.strip() for part in text.split(",") if part.strip()]
+        return v
 
     @field_validator("workspace_dir", "vault_dir", mode="before")
     @classmethod

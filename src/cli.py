@@ -1437,67 +1437,182 @@ def mcp_serve_cmd(
 
 @mcp_app.command("issue-token")
 def mcp_issue_token_cmd(
-    subject: str = typer.Option(
-        "default", "--subject", "-s",
-        help="JWT 'sub' claim — user id ('default' for single-user)",
-    ),
-    scopes: str = typer.Option(
-        "read:graph read:groups",
-        "--scopes",
-        help="Space-separated scopes for the 'scope' claim",
-    ),
-    duration: int = typer.Option(
-        3600, "--duration", "-d",
-        help="Token lifetime in seconds (default 1 hour)",
-    ),
-    client_id: str = typer.Option(
-        "code-analyzer-cli", "--client-id",
-        help="Client identifier for traceability",
-    ),
+    user: str = typer.Option(
+        ..., "--user", "-u", help="Who the token is for: the account's email or id."),
+    repos: str = typer.Option(
+        ..., "--repos", "-r",
+        help=("Comma-separated repository slugs and/or globs, e.g. "
+              "'acme/shop-*,acme/ui'. '*' is every repo of the workspace.")),
     workspace: str = typer.Option(
-        "", "--workspace", "-w",
-        help=("Workspace id the token answers for (the 'workspace_id' claim). "
-              "Without it the token is a legacy one and the MCP server picks "
-              "the subject's best-ranked membership."),
-    ),
+        ..., "--workspace", "-w", help="Workspace id or slug the token answers for."),
+    days: int = typer.Option(
+        30, "--days", "-d", help="Lifetime in days (capped by CELMIS_MCP_TOKEN_MAX_DAYS)."),
+    write: bool = typer.Option(
+        False, "--write", help="Allow write tools. Needs --profile full."),
+    profile: str = typer.Option(
+        "dev", "--profile", help="'dev' (read-only /mcp/dev/) or 'full' (/mcp/)."),
+    label: str = typer.Option("", "--label", help="Free text shown in the token list."),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Issue a JWT Bearer token for MCP HTTP transport (local dev / testing).
+    """Issue a per-person MCP token with an explicit repository list.
 
-    Token printed to stdout. Use as:
+    The token is printed once to stdout and never stored; the grant behind it
+    (who, which repos, until when, write or not) is a database row that the
+    superadmin can list, change and revoke without reissuing. Use as:
 
-        export TOKEN=$(analyzer mcp issue-token)
-        curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/mcp/...
+        export CELMIS_MCP_TOKEN=$(analyzer mcp issue-token \
+            --user dev@example.com --workspace acme --repos 'acme/shop-*')
 
-    Requires the MCP_JWT_SECRET env var.
+    Requires the MCP_JWT_SECRET env var and the database.
     """
     _setup_logging(verbose)
-    from src.mcp_server.auth import JwtConfig, JwtConfigError, issue_token
+    from sqlalchemy.orm import Session
+
+    from src.access.resolver import _sync_engine
+    from src.mcp_server import token_store
+    from src.mcp_server.auth import JwtConfig, JwtConfigError
 
     try:
-        config = JwtConfig.from_env()
+        JwtConfig.from_env()
     except JwtConfigError as exc:
         console.print(f"[red]✗[/red] {exc}")
         raise typer.Exit(1) from None
 
-    token = issue_token(
-        config,
-        subject=subject,
-        scopes=scopes.split(),
-        client_id=client_id,
-        expires_in=duration,
-        extra_claims={"workspace_id": workspace.strip()} if workspace.strip() else None,
-    )
+    from src.users import get_user_store
 
-    # Print to stdout (parseable for $(...) shell interpolation)
-    print(token)
-    # Metadata to stderr (via console.print → stderr if verbose)
-    if verbose:
-        import sys
-        sys.stderr.write(
-            f"# subject={subject} client_id={client_id} "
-            f"scopes={scopes} expires_in={duration}s\n"
+    store = get_user_store()
+    holder = store.get_by_id(user.strip()) or (
+        store.get_by_email(user.strip()) if "@" in user else None)
+    if holder is None:
+        console.print(f"[red]✗[/red] no such user: {user}")
+        raise typer.Exit(1)
+    with Session(_sync_engine()) as s:
+        from sqlalchemy import or_, select
+
+        from src.db.models import Workspace
+
+        ws = s.execute(select(Workspace).where(
+            or_(Workspace.id == workspace.strip(), Workspace.slug == workspace.strip())
+        )).scalars().first()
+    if ws is None:
+        console.print(f"[red]✗[/red] no such workspace: {workspace}")
+        raise typer.Exit(1)
+    with Session(_sync_engine()) as s:
+        from src.db.models import WorkspaceMember
+
+        is_member = s.get(WorkspaceMember, (ws.id, holder.id)) is not None
+    if not is_member and not holder.is_admin:
+        console.print(f"[red]✗[/red] {holder.email} is not a member of that workspace; add them first.")
+        raise typer.Exit(1)
+    try:
+        token, view = token_store.mint(
+            kind="cli", workspace_id=ws.id, user_id=holder.id, issued_by="cli",
+            label=label or f"{holder.email} cli",
+            patterns=[r for r in repos.split(",") if r.strip()],
+            allow_write=write, profile=profile, expires_in_days=days,
         )
+    except token_store.TokenError as exc:
+        console.print(f"[red]✗[/red] {exc}")
+        raise typer.Exit(1) from None
+
+    try:
+        from src.security.audit import record_action
+
+        record_action(
+            action="mcp.token_issued", actor="cli", workspace_id=ws.id,
+            target=view.id,
+            detail={"holder": holder.id, "repos": list(view.patterns),
+                    "allow_write": view.allow_write, "profile": view.profile,
+                    "expires_at": view.expires_at.isoformat(), "via": "cli"})
+    except Exception:  # noqa: BLE001 — never block the operation it records
+        pass
+
+    # stdout: just the token, so $(...) works. The details go to stderr.
+    print(token)
+    import sys
+    sys.stderr.write(
+        f"# id={view.id} user={holder.email} workspace={ws.id} "
+        f"repos={','.join(view.patterns)} write={view.allow_write} "
+        f"expires={view.expires_at.date().isoformat()}\n")
+
+
+# ─── Access bootstrap (default-deny rollout) ────────────────────────
+
+access_app = typer.Typer(
+    name="access",
+    help="Repository access: see which repos nobody has a rule for, and give a team one.",
+    no_args_is_help=True,
+)
+app.add_typer(access_app, name="access")
+
+
+@access_app.command("bootstrap")
+def access_bootstrap_cmd(
+    team: str = typer.Option(..., "--team", "-t", help="Team id or name that gets the rule."),
+    visibility: str = typer.Option(
+        "code", "--visibility", help="none | metadata | code (default code)."),
+    workspace: str = typer.Option(
+        "default", "--workspace", "-w", help="Workspace id or slug (default: 'default')."),
+    all_unruled: bool = typer.Option(
+        False, "--all-unruled",
+        help="Write the rule on EVERY unruled repo. Without it nothing is written."),
+    repos: str = typer.Option(
+        "", "--repos", "-r",
+        help="Only unruled repos matching these comma-separated slugs/globs."),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Give a team access to the repos that have none, so members keep working.
+
+    Since repositories with no rule are visible only to owners and admins, an
+    upgrade hides them from everyone else. This lists them (dry run) or, with
+    --all-unruled / --repos, writes one rule per repo for the team.
+    """
+    _setup_logging(verbose)
+    from sqlalchemy import or_, select
+    from sqlalchemy.orm import Session
+
+    from src.access.bootstrap import VISIBILITIES, bootstrap_team, unruled_repos
+    from src.access.resolver import _sync_engine
+    from src.db.models import Team, Workspace
+
+    if visibility not in VISIBILITIES:
+        console.print(f"[red]✗[/red] --visibility must be one of {', '.join(VISIBILITIES)}")
+        raise typer.Exit(1)
+    with Session(_sync_engine()) as s:
+        ws = s.execute(select(Workspace).where(
+            or_(Workspace.id == workspace.strip(), Workspace.slug == workspace.strip())
+        )).scalars().first()
+        if ws is None:
+            console.print(f"[red]✗[/red] no such workspace: {workspace}")
+            raise typer.Exit(1)
+        grp = s.execute(select(Team).where(
+            Team.workspace_id == ws.id, or_(Team.id == team.strip(), Team.name == team.strip())
+        )).scalars().first()
+        if grp is None:
+            console.print(f"[red]✗[/red] no such team in this workspace: {team}")
+            raise typer.Exit(1)
+        only = [r.strip() for r in repos.split(",") if r.strip()]
+        if not (all_unruled or only):
+            names = unruled_repos(s, ws.id)
+            console.print(f"{len(names)} repo(s) have no rule (admins only):")
+            for n in names:
+                console.print(f"  {n}")
+            console.print("Dry run. Re-run with --all-unruled (or --repos) to write.")
+            return
+        team_name = grp.name
+        written = bootstrap_team(
+            s, workspace_id=ws.id, team_id=grp.id, visibility=visibility,
+            only=only or None, created_by="cli")
+    try:
+        from src.security.audit import record_action
+
+        record_action(
+            action="access.bootstrap", actor="cli", workspace_id=ws.id, target=team_name,
+            detail={"rules": len(written), "visibility": visibility, "via": "cli"})
+    except Exception:  # noqa: BLE001 — never block the operation it records
+        pass
+    console.print(f"[green]✓[/green] {len(written)} rule(s) written for team {team_name} "
+                  f"at {visibility}.")
 
 
 # ─── Group commands ─────────────────────────────────────────────────

@@ -1,0 +1,11 @@
+image: python:3.14
+pipelines:
+  branches:
+    develop:
+      - step:
+          name: Deploy
+          deployment: production
+          script:
+            - export DB_PASSWORD=$DB_PASSWORD
+            - export JWT_JWKS_URL=$JWT_JWKS_URL
+            - docker compose up -d --build

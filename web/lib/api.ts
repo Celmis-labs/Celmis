@@ -3581,3 +3581,105 @@ export const alertsApi = {
   createIngestToken: (token: string) =>
     api<{ ingest_path: string }>("/api/alerts/ingest-token", { token, method: "POST" }),
 };
+
+// lane:access — per-person MCP tokens, the call log, repos nobody has a rule for.
+
+export type McpTokenRow = {
+  id: string;
+  /** pat | cli | self | oauth_grant */
+  kind: string;
+  workspace_id: string;
+  user_id: string;
+  user_email: string;
+  issued_by: string;
+  label: string;
+  repos: string[];
+  /** The workspace's registered repos the patterns cover right now. */
+  matched_repos: string[];
+  allow_write: boolean;
+  profile: string;
+  created_at: string | null;
+  expires_at: string;
+  revoked_at: string | null;
+  last_used_at: string | null;
+  /** active | revoked | expired */
+  status: string;
+};
+
+export type McpTokenIssued = McpTokenRow & {
+  /** Shown once; the server does not keep it. */
+  token: string;
+  url: string;
+  mcp_json: Record<string, unknown>;
+};
+
+export type McpTokenIssueIn = {
+  user_ref: string;
+  workspace_id: string;
+  label?: string;
+  repos: string[];
+  allow_write: boolean;
+  expires_in_days: number;
+  profile: "dev" | "full";
+};
+
+export type McpCallRow = {
+  ts: string;
+  workspace_id: string;
+  user_id: string;
+  token_id: string | null;
+  kind: string;
+  client_id: string;
+  tool: string;
+  profile: string;
+  repos: string[];
+  /** ok | denied | error */
+  status: string;
+  result_bytes: number;
+  result_items: number;
+  duration_ms: number;
+};
+
+export type McpMyTokens = {
+  self_service_enabled: boolean;
+  max_days: number;
+  tokens: McpTokenRow[];
+};
+
+export type McpRepo = { slug: string; full_name: string };
+
+export const mcpTokensApi = {
+  list: (token: string, f?: { user?: string; workspace?: string; status?: string }) => {
+    const qs = new URLSearchParams();
+    if (f?.user) qs.set("user", f.user);
+    if (f?.workspace) qs.set("workspace", f.workspace);
+    if (f?.status) qs.set("status", f.status);
+    const q = qs.toString() ? `?${qs.toString()}` : "";
+    return api<McpTokenRow[]>(`/api/admin/mcp-tokens${q}`, { token });
+  },
+  issue: (token: string, body: McpTokenIssueIn) =>
+    api<McpTokenIssued>("/api/admin/mcp-tokens", { token, method: "POST", json: body }),
+  patch: (token: string, id: string,
+          body: { repos?: string[]; expires_in_days?: number; allow_write?: boolean; label?: string }) =>
+    api<McpTokenRow>(`/api/admin/mcp-tokens/${id}`, { token, method: "PATCH", json: body }),
+  revoke: (token: string, id: string) =>
+    api<McpTokenRow>(`/api/admin/mcp-tokens/${id}/revoke`, { token, method: "POST" }),
+  repos: (token: string, workspace: string) =>
+    api<McpRepo[]>(`/api/admin/mcp-repos?workspace=${encodeURIComponent(workspace)}`, { token }),
+  calls: (token: string, f?: { user?: string; tool?: string; status?: string; days?: number }) => {
+    const qs = new URLSearchParams();
+    if (f?.user) qs.set("user", f.user);
+    if (f?.tool) qs.set("tool", f.tool);
+    if (f?.status) qs.set("status", f.status);
+    qs.set("days", String(f?.days ?? 7));
+    return api<McpCallRow[]>(`/api/admin/mcp-calls?${qs.toString()}`, { token });
+  },
+  mine: (token: string) => api<McpMyTokens>("/api/mcp/tokens/me", { token }),
+  revokeMine: (token: string, id: string) =>
+    api<McpTokenRow>(`/api/mcp/tokens/${id}/revoke`, { token, method: "POST" }),
+};
+
+export const unruledApi = {
+  list: (token: string) =>
+    api<{ count: number; repos: string[] }>("/api/access/unruled", { token }),
+};

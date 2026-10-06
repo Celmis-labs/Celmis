@@ -51,7 +51,10 @@ def _registered_tools() -> set[str]:
             for kw in dec.keywords:
                 if kw.arg == "name" and isinstance(kw.value, ast.Constant):
                     names.add(kw.value.value)
-    return names
+    # Tools another module registers on the mount (``register_howto(mcp, ...)``).
+    from src.mcp_server.howto import TOOL_NAME as HOWTO
+
+    return names | {HOWTO}
 
 
 def _scope_map() -> dict[str, str]:
@@ -85,7 +88,11 @@ def test_every_registered_tool_has_a_scope():
 
 
 def test_the_readme_states_the_counts_the_code_produces():
-    scopes = _scope_map()
+    # The loaded map, not the literal in the source: the operator tools join it
+    # at import time, and counting the literal gave 32/24 for a mount of 49/33.
+    from src.mcp_server import http_app
+
+    scopes = http_app._TOOL_SCOPES
     total = len(scopes)
     read_only = sum(1 for s in scopes.values() if s.startswith("read"))
     body = README.read_text(encoding="utf-8").lower()
@@ -115,7 +122,40 @@ def test_the_write_tools_are_named_so_a_reader_knows_what_is_hidden():
     """A client that sees eighteen tools should be able to find out what the
     other five are without reading the source. Naming them is the difference
     between a scoped surface and one that just looks incomplete."""
-    write_tools = {n for n, s in _scope_map().items() if s.startswith("write")}
+    from src.mcp_server import http_app
+
+    write_tools = {n for n, s in http_app._TOOL_SCOPES.items() if s.startswith("write")}
     body = README.read_text(encoding="utf-8")
     missing = [t for t in write_tools if f"`{t}`" not in body]
     assert not missing, f"write tools the README never names: {sorted(missing)}"
+
+
+def test_every_page_states_the_count_the_running_mount_serves():
+    """The literal in http_app.py is only the first 32 entries: the operator
+    tools join the map when the module loads. Counting the literal made a
+    wrong README pass, so the numbers here come from the loaded map, and every
+    page that quotes a count (README, landing page, package README) is held to
+    them."""
+    import re
+
+    from src.mcp_server import http_app
+
+    scopes = http_app._TOOL_SCOPES
+    total = len(scopes)
+    reads = sum(1 for s in scopes.values() if s.startswith("read"))
+    writes = total - reads
+    pages = [ROOT / "README.md", ROOT / "home.html", ROOT / "packaging" / "pypi" / "README.md"]
+    for page in pages:
+        body = page.read_text(encoding="utf-8").lower()
+        for m in re.finditer(
+                r"\b(\d+|[a-z]+(?:-[a-z]+)?)\s+(?:mcp\s+)?tools\b(?!\s+(?:from|the))", body):
+            token = m.group(1)
+            n = int(token) if token.isdigit() else {
+                "eighteen": 18, "nineteen": 19, "twenty-three": 23,
+                "forty-nine": 49, "thirty-three": 33}.get(token)
+            if n in (18, 23):
+                raise AssertionError(
+                    f"{page.name} still says {m.group(0)!r}; the mount serves {total}")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8").lower()
+    assert f"{total} tools" in readme and f"{reads} read" in readme
+    assert f"{writes} write" in readme

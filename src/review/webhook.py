@@ -248,6 +248,30 @@ def _extract_github_push(payload: dict) -> dict | None:
     return {"repo": repo, "ref": ref, "after": after}
 
 
+def _extract_bitbucket_push(payload: dict) -> dict | None:
+    """(repo, ref, after) from a Bitbucket `repo:push`, or None when it is not ours.
+
+    The same rule as :func:`_extract_github_push`, in Bitbucket's shape: one
+    delivery carries `push.changes[]`, each with the `new` state of a ref. Only
+    a BRANCH that still exists counts. A tag has `new.type == "tag"`; a deleted
+    branch arrives with `new: null` and nothing to index. The first branch
+    change wins — which branch the index tracks is decided later, by the same
+    freshness check the daily sweep uses.
+    """
+    repo = (payload.get("repository") or {}).get("full_name")
+    if not repo:
+        return None
+    for change in ((payload.get("push") or {}).get("changes") or []):
+        new = (change or {}).get("new")
+        if not isinstance(new, dict) or new.get("type") != "branch":
+            continue
+        after = str((new.get("target") or {}).get("hash") or "")
+        name = str(new.get("name") or "")
+        if after and name:
+            return {"repo": repo, "ref": f"refs/heads/{name}", "after": after}
+    return None
+
+
 def _extract_gitlab_mr(payload: dict) -> dict | None:
     """Get (action, project, mr_iid) from a GitLab merge_request hook."""
     if payload.get("object_kind") != "merge_request":
@@ -1555,6 +1579,19 @@ def build_webhook_app(
                 extract_bitbucket_comment(
                     payload, x_event_key or "", delivery=x_request_uuid or ""),
                 workspace_id, settings, stats_counter)
+
+        # `repo:push` is an INDEX trigger, not a review one — the same split the
+        # GitHub handler makes. It goes to the refresh path and never reaches
+        # the review dispatcher below.
+        if (x_event_key or "") == "repo:push":
+            push = _extract_bitbucket_push(payload)
+            if push is None:
+                return JSONResponse(
+                    {"status": "ignored", "reason": "not a branch update"})
+            asyncio.create_task(_dispatch_refresh(
+                "bitbucket", push["repo"], expected_workspace_id=workspace_id))
+            stats_counter["dispatched"] += 1
+            return JSONResponse({"status": "accepted", **push}, status_code=202)
 
         state_info = _extract_bitbucket_pr_state(payload, x_event_key or "")
         if state_info is not None:

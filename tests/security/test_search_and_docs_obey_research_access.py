@@ -105,12 +105,32 @@ async def _rules(w, tmp_path, monkeypatch):
     return engine
 
 
-def _single_tenant_no_rules(tmp_path, monkeypatch):
+@pytest.fixture(autouse=True)
+def _fresh_settings():
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _single_tenant_no_rules(tmp_path, monkeypatch, *, unruled="open"):
+    """``unruled="open"`` is the operator's opt back into the pre-upgrade
+    behaviour; the default is closed, which the sibling tests below assert."""
     from src.access import resolver
+    from src.config import get_settings
     from src.deployment import reset_mode_cache
+
+    if unruled:
+        monkeypatch.setenv("CELMIS_UNRULED_REPO_ACCESS", unruled)
+    else:
+        monkeypatch.delenv("CELMIS_UNRULED_REPO_ACCESS", raising=False)
+    get_settings.cache_clear()
 
     engine = create_engine(f"sqlite:///{tmp_path / 'celmis.db'}")
     event.listen(engine, "connect", _sqlite_booleans)
+    from src.db.models import Base
+    Base.metadata.create_all(engine)   # empty tables: "no rules", not "no database"
     monkeypatch.setattr(resolver, "_ENGINE", engine)
     monkeypatch.setenv("CELMIS_DEPLOYMENT_MODE", "single_tenant")
     reset_mode_cache()
@@ -183,7 +203,16 @@ async def test_a_global_admin_still_sees_everything(tmp_path, monkeypatch, stand
     assert len(body["notes"]) == 3
 
 
-async def test_single_tenant_without_rules_is_unchanged(tmp_path, monkeypatch, stand_ins):
+async def test_single_tenant_without_rules_is_closed_by_default(tmp_path, monkeypatch, stand_ins):
+    async with world(tmp_path, monkeypatch, extra_routers=_extra()) as w:
+        engine = _single_tenant_no_rules(tmp_path, monkeypatch, unruled=None)
+        body = await _search(w, "viewer_a")
+        engine.dispose()
+    assert body["symbols"] == []
+    assert body["notes"] == []
+
+
+async def test_single_tenant_without_rules_is_unchanged_when_opened(tmp_path, monkeypatch, stand_ins):
     async with world(tmp_path, monkeypatch, extra_routers=_extra()) as w:
         engine = _single_tenant_no_rules(tmp_path, monkeypatch)
         body = await _search(w, "viewer_a")
@@ -264,7 +293,20 @@ async def test_full_code_team_reads_every_note_but_the_denied_one(tmp_path, monk
     assert "KEY_BODY_SECRET" not in export.text
 
 
-async def test_docs_single_tenant_without_rules_is_unchanged(tmp_path, monkeypatch):
+async def test_docs_single_tenant_without_rules_is_closed_by_default(tmp_path, monkeypatch):
+    async with world(tmp_path, monkeypatch, extra_routers=_extra()) as w:
+        engine = _single_tenant_no_rules(tmp_path, monkeypatch, unruled=None)
+        _vault()
+        listing, secret, export, everything = await _docs(w, "viewer_a")
+        engine.dispose()
+    assert listing.status_code in (403, 404) or listing.json().get("notes") == []
+    assert secret.status_code in (403, 404)
+    assert "KEY_BODY_SECRET" not in export.text
+    assert everything.status_code in (403, 404) or (
+        "KEY_BODY_SECRET" not in _zip_text(everything))
+
+
+async def test_docs_single_tenant_without_rules_is_unchanged_when_opened(tmp_path, monkeypatch):
     async with world(tmp_path, monkeypatch, extra_routers=_extra()) as w:
         engine = _single_tenant_no_rules(tmp_path, monkeypatch)
         _vault()

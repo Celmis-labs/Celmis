@@ -28,10 +28,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select
 
 from src.api.deps import (
+    code_readable_repo_slugs,
     current_workspace_id,
     enforce_repo_permission,
     is_workspace_admin,
-    readable_repo_slugs,
     require_memories_access,
 )
 from src.api.routers.review_rules import _audit
@@ -123,7 +123,7 @@ async def _visible(user: User, ws: str, repo: str | None) -> list[str] | None:
     if await asyncio.to_thread(is_workspace_admin, user, ws):
         return None
     slugs = await asyncio.to_thread(_repos_with_signals, ws)
-    return sorted(await readable_repo_slugs(user, ws, slugs))
+    return sorted(await code_readable_repo_slugs(user, ws, slugs))
 
 
 @router.get("/summary")
@@ -177,7 +177,7 @@ async def forget(
     slug = await asyncio.to_thread(lookup)
     if slug is None:
         raise HTTPException(status_code=404, detail="No such signal in this workspace")
-    seen = await readable_repo_slugs(user, ws_id, [slug])
+    seen = await code_readable_repo_slugs(user, ws_id, [slug])
     if slug not in seen:
         raise HTTPException(status_code=404, detail="No such signal in this workspace")
     await enforce_repo_permission(slug, user, "review", ws_id)

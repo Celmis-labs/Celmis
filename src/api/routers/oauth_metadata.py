@@ -92,4 +92,16 @@ async def oauth_protected_resource(request: Request) -> dict[str, Any]:
     }
 
 
+@router.get("/.well-known/oauth-protected-resource/mcp/dev")
+async def oauth_protected_resource_dev(request: Request) -> dict[str, Any]:
+    """RFC 9728 path-suffixed metadata of the compact developer profile.
+
+    Same authorization server and audience as `/mcp`; the resource is
+    `/mcp/dev` and the scope that opens it is `read:code`.
+    """
+    base = await oauth_protected_resource(request)
+    return {**base, "resource": f"{_issuer_from(request)}/mcp/dev",
+            "scopes_supported": ["read:code"]}
+
+
 __all__ = ["router"]

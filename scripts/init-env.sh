@@ -106,6 +106,11 @@ NOT_OURS = {
     "SMTP_PASSWORD": "your mail server's — optional, only for digests/invites",
     "CELMIS_LICENSE_KEY": "a Celmis Enterprise licence — optional; without it "
                           "the community edition runs (no SSO, no analytics)",
+    # Empty except while a signing secret is being rotated (docs/KEY_ROTATION.md).
+    "CELMIS_JWT_SECRET_PREVIOUS": "the OLD signing secret, only during a rotation",
+    "MCP_JWT_SECRET_PREVIOUS": "the OLD MCP signing secret, only during a rotation",
+    # A list of globs, not a secret; empty adds nothing to the built-in list.
+    "SECRET_PATH_GLOBS_EXTRA": "extra paths never indexed or served — optional",
     # A switch whose NAME contains a secret word, not a secret: empty keeps
     # email+password sign-in on. Listed so the guard below does not exit 3
     # on every fresh install.

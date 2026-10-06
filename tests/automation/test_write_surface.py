@@ -201,10 +201,14 @@ def test_a_client_token_without_a_resolvable_owner_cannot_write():
     """
     from pathlib import Path
 
-    server = (Path(__file__).resolve().parents[2]
-              / "src" / "mcp_server" / "server.py").read_text()
-    idx = server.find("def _actor(")
-    body = server[idx:idx + 1200]
+    root = Path(__file__).resolve().parents[2] / "src" / "mcp_server"
+    server = (root / "server.py").read_text()
+    # Both servers build their Actor through identity.actor_for, the one place
+    # that decides whether a caller may write.
+    assert "actor_for(" in server[server.find("def _actor("):][:600]
+    identity = (root / "identity.py").read_text()
+    idx = identity.find("def actor_for(")
+    body = identity[idx:idx + 2400]
     assert "workspace_resolved" in body, "the write path does not check resolution"
     assert "writing" in body, "reads and writes are held to the same bar"
 

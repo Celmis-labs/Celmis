@@ -29,7 +29,12 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.api.deps import current_workspace_id, get_current_user
+from src.api.deps import (
+    current_workspace_id,
+    enforce_repo_permission,
+    get_current_user,
+    require_prompt_editor,
+)
 from src.users import User
 
 logger = logging.getLogger(__name__)
@@ -90,17 +95,138 @@ def _registered(workspace_id: str) -> dict[str, str]:
     }
 
 
-def _resolve_in_workspace(identifiers: list[str], workspace_id: str) -> list[str]:
+def _readable_slugs(user: User, workspace_id: str, slugs: list[str]) -> set[str]:
+    """Which of `slugs` this person may read the code of (the MCP resolver's
+    reading, owners and admins included)."""
+    from src.access.effective import Principal, effective_access
+
+    decisions = effective_access(
+        Principal(user.id, is_admin=bool(getattr(user, "is_admin", False))), workspace_id,
+        slugs)
+    return {s for s, d in decisions.items() if d.code_visible}
+
+
+def _member_slug(ident: str) -> str | None:
+    """The registry slug a stored group member (`provider:owner/name`) stands for."""
+    from src.sync.git_providers import parse_repo_url
+
+    try:
+        return parse_repo_url(ident).slug
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _visible_group(group, user: User, workspace_id: str) -> GroupOut | None:
+    """The group as this person may see it: only the members whose code they
+    may read, and not at all when they may read none (an empty group too, to
+    anybody but those who manage the workspace's repositories).
+
+    A group is a list of repository identifiers; naming one the caller cannot
+    read tells them it exists and what it is called."""
+    slugs = {m: _member_slug(m) for m in group.repos}
+    readable = _readable_slugs(
+        user, workspace_id, sorted({s for s in slugs.values() if s}))
+    shown = [m for m in group.repos if slugs[m] in readable]
+    if not shown and not _is_manager(user, workspace_id):
+        return None
+    out = _out(group)
+    out.repos = shown
+    return out
+
+
+def _is_manager(user: User, workspace_id: str) -> bool:
+    from src.api.deps import is_workspace_admin
+
+    return is_workspace_admin(user, workspace_id)
+
+
+async def _require_review_on(
+    idents: list[str], user: User, workspace_id: str, *, unreadable_is_refused: bool,
+) -> None:
+    """A change to a group is a change to what drift reads and quotes for each
+    of its repositories: the caller needs ``review`` on every one of them
+    (owners and admins always have it).
+
+    ``unreadable_is_refused`` is for the members a group ALREADY holds: one the
+    caller may not read at all is refused here (a group they cannot see is
+    answered like one that does not exist). For identifiers the caller is only
+    ADDING it is False: those are refused by `_resolve_in_workspace`, with the
+    text of an unregistered repository, so the answer is no existence oracle."""
+    for ident in idents:
+        slug = _member_slug(_canonical(ident, workspace_id))
+        if slug is None:
+            continue
+        try:
+            await enforce_repo_permission(slug, user, "review", workspace_id)
+        except HTTPException as exc:
+            if exc.status_code == 404:  # not visible: it does not exist for them
+                if unreadable_is_refused:
+                    raise HTTPException(status_code=404, detail="group not found") from None
+                continue
+            raise HTTPException(
+                status_code=403,
+                detail="Changing a group needs review access on every repository in it",
+            ) from None
+
+
+async def _guard_new_group(
+    payload: GroupCreate,
+    user: User = Depends(require_prompt_editor),
+    workspace_id: str = Depends(current_workspace_id),
+) -> None:
+    await _require_review_on(payload.repos, user, workspace_id, unreadable_is_refused=False)
+
+
+async def _guard_group(
+    name: str,
+    user: User = Depends(require_prompt_editor),
+    workspace_id: str = Depends(current_workspace_id),
+) -> None:
+    group = _load_owned(name, workspace_id)
+    await _require_review_on(list(group.repos), user, workspace_id, unreadable_is_refused=True)
+
+
+async def _guard_group_and_additions(
+    name: str,
+    payload: GroupRepos,
+    user: User = Depends(require_prompt_editor),
+    workspace_id: str = Depends(current_workspace_id),
+) -> None:
+    await _guard_group(name, user, workspace_id)
+    await _require_review_on(payload.repos, user, workspace_id, unreadable_is_refused=False)
+
+
+def _canonical(ident: str, workspace_id: str) -> str:
+    """The stored form (`provider:owner/name`) of a repository the caller named
+    by registry slug or by bare `owner/name`; anything else is returned as is."""
+    registered = _registered(workspace_id)
+    if ident in registered:
+        return registered[ident]
+    same = [v for v in registered.values() if v.split(":", 1)[-1] == ident]
+    return same[0] if len(same) == 1 else ident
+
+
+def _resolve_in_workspace(
+    identifiers: list[str], workspace_id: str, user: User | None = None,
+) -> list[str]:
     """Every identifier, checked against this workspace's registry.
 
     A group is a grep target. Accepting an identifier that resolves to a
     repository this workspace does not own would make drift read a stranger's
     source and quote it into a review comment, which is the one thing this
     router must not allow.
+
+    The same goes for a repository that IS registered here but that the caller
+    may not read: a group of someone else's repositories is a way to be quoted
+    their code. With ``user`` given, such an identifier is answered exactly like
+    an unregistered one (422, same text), so it is no existence oracle either.
     """
     from src.sync.git_providers import parse_repo_url
 
     known = _registered(workspace_id)
+    readable: set[str] | None = None
+    if user is not None:
+        readable = _readable_slugs(user, workspace_id, list(known))
     out: list[str] = []
     for ident in identifiers:
         slug = None
@@ -111,7 +237,8 @@ def _resolve_in_workspace(identifiers: list[str], workspace_id: str) -> list[str
                 slug = parse_repo_url(ident).slug
             except Exception:  # noqa: BLE001
                 slug = None
-        if slug is None or slug not in known:
+        if slug is None or slug not in known or (
+                readable is not None and slug not in readable):
             raise HTTPException(
                 status_code=422,
                 detail=(
@@ -156,22 +283,26 @@ def list_groups(
     out = []
     for name in mgr.list(workspace_id):
         try:
-            out.append(_out(mgr.load(name, workspace_id)))
+            shown = _visible_group(mgr.load(name, workspace_id), user, workspace_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("group_unreadable name=%s err=%s", name, exc)
+            continue
+        if shown is not None:
+            out.append(shown)
     return out
 
 
-@router.post("", response_model=GroupOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=GroupOut, status_code=status.HTTP_201_CREATED,
+             dependencies=[Depends(_guard_new_group)])
 def create_group(
     payload: GroupCreate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_prompt_editor),
     workspace_id: str = Depends(current_workspace_id),
 ) -> GroupOut:
     from src.groups.manager import GroupValidationError
 
     mgr = _manager()
-    identifiers = _resolve_in_workspace(payload.repos, workspace_id)
+    identifiers = _resolve_in_workspace(payload.repos, workspace_id, user)
     try:
         group = mgr.create(payload.name, payload.description,
                            workspace_id=workspace_id)
@@ -199,42 +330,45 @@ def create_group(
     return _out(group)
 
 
-@router.post("/{name}/repos", response_model=GroupOut)
+@router.post("/{name}/repos", response_model=GroupOut,
+             dependencies=[Depends(_guard_group_and_additions)])
 def add_repos(
     name: str,
     payload: GroupRepos,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_prompt_editor),
     workspace_id: str = Depends(current_workspace_id),
 ) -> GroupOut:
     group = _load_owned(name, workspace_id)
-    for slug in _resolve_in_workspace(payload.repos, workspace_id):
-        group.add_repo(slug)
+    for ident in _resolve_in_workspace(payload.repos, workspace_id, user):
+        group.add_repo(ident)
     _manager().save(group)
     logger.info("group_repos_added name=%s ws=%s total=%d by=%s",
                 name, workspace_id, len(group.repos), user.email)
     return _out(group)
 
 
-@router.delete("/{name}/repos", response_model=GroupOut)
+@router.delete("/{name}/repos", response_model=GroupOut,
+               dependencies=[Depends(_guard_group)])
 def remove_repos(
     name: str,
     payload: GroupRepos,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_prompt_editor),
     workspace_id: str = Depends(current_workspace_id),
 ) -> GroupOut:
     group = _load_owned(name, workspace_id)
     for ident in payload.repos:
-        group.remove_repo(ident)
+        group.remove_repo(_canonical(ident, workspace_id))
     _manager().save(group)
     logger.info("group_repos_removed name=%s ws=%s total=%d by=%s",
                 name, workspace_id, len(group.repos), user.email)
     return _out(group)
 
 
-@router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT,
+               dependencies=[Depends(_guard_group)])
 def delete_group(
     name: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_prompt_editor),
     workspace_id: str = Depends(current_workspace_id),
 ) -> None:
     _load_owned(name, workspace_id)

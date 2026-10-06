@@ -6,6 +6,7 @@ runs are visible in the UI, not just successful ones.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from src.api.deps import (
     current_workspace_id,
     enforce_repo_permission,
     get_current_user,
+    is_workspace_admin,
     slug_from_pr_ref,
 )
 from src.api.review_runs import (
@@ -189,55 +191,98 @@ def _new_manual_run(pr_ref: str, *, user_id: str, workspace_id: str) -> ReviewRu
     return run
 
 
-def _can_see(run, user: User, workspace_id: str) -> bool:
-    """Workspace members see every run of the workspace; the user_id
-    fallback covers legacy rows persisted before workspace tenancy."""
+def _in_workspace(run, user: User, workspace_id: str) -> bool:
+    """The run belongs to this workspace; the user_id fallback covers legacy
+    rows persisted before workspace tenancy."""
     return run.workspace_id == workspace_id or run.user_id == user.id
 
 
+async def _can_see(
+    run, user: User, workspace_id: str, verdicts: dict[str, bool] | None = None,
+) -> bool:
+    """May this person read this run: its diff, its findings, its summary?
+
+    Belonging to the workspace is not enough. A run is the content of ONE
+    repository, so it is readable exactly when the repository is — a team
+    grant or a ``code`` rule, or owner/admin of the workspace — and a
+    repository nobody granted anything on is closed (the same default-deny the
+    MCP tools apply). The answer for a repository the caller may not read is
+    the answer for a run that does not exist.
+
+    ``verdicts`` memoises per repository for a list.
+    """
+    if not _in_workspace(run, user, workspace_id):
+        return False
+    slug = getattr(run, "pr_repo", None) or slug_from_pr_ref(run.pr_ref)
+    if not slug:
+        # No repository to ask about: only its author and the admins.
+        if run.user_id == user.id:
+            return True
+        return await asyncio.to_thread(is_workspace_admin, user, workspace_id)
+    if verdicts is not None and slug in verdicts:
+        return verdicts[slug]
+    try:
+        await enforce_repo_permission(slug, user, "read", workspace_id)
+        ok = True
+    except HTTPException:
+        ok = False
+    if verdicts is not None:
+        verdicts[slug] = ok
+    return ok
+
+
+def _run_row(db_path, sql: str, run_id: str):
+    """One row of ``review_runs`` by id (blocking: call off the event loop)."""
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(sql, (run_id,)).fetchone()
+
+
 @router.get("/history", response_model=list[ReviewRunOut])
-def history(
+async def history(
     limit: int = 50,
     user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> list[ReviewRunOut]:
-    runs = get_review_run_store().list_for_workspace(
+    runs = await asyncio.to_thread(
+        get_review_run_store().list_for_workspace,
         workspace_id, user_id=user.id, limit=limit)
+    verdicts: dict[str, bool] = {}
+    runs = [r for r in runs if await _can_see(r, user, workspace_id, verdicts)]
     # The count only — see `_run_to_out`.
-    show_cost = can_see_review_cost(user, workspace_id)
+    show_cost = await asyncio.to_thread(can_see_review_cost, user, workspace_id)
     return [_run_to_out(r, with_adjustments=False, show_cost=show_cost) for r in runs]
 
 
 @router.get("/{run_id}", response_model=ReviewRunOut)
-def get_run(
+async def get_run(
     run_id: str,
     user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> ReviewRunOut:
-    run = get_review_run_store().get(run_id)
-    if run is None or not _can_see(run, user, workspace_id):
+    run = await asyncio.to_thread(get_review_run_store().get, run_id)
+    if run is None or not await _can_see(run, user, workspace_id):
         raise HTTPException(status_code=404, detail="Run not found")
-    return _run_to_out(run, show_cost=can_see_review_cost(user, workspace_id))
+    show_cost = await asyncio.to_thread(can_see_review_cost, user, workspace_id)
+    return _run_to_out(run, show_cost=show_cost)
 
 
 @router.get("/{run_id}/diff")
-def get_diff(
+async def get_diff(
     run_id: str,
     user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> dict:
     """Return the persisted unified diff for a run (Stage 21). Empty when
     the run predates diff persistence — the UI shows a hint instead."""
-    import sqlite3
     store = get_review_run_store()
-    run = store.get(run_id)
-    if run is None or not _can_see(run, user, workspace_id):
+    run = await asyncio.to_thread(store.get, run_id)
+    if run is None or not await _can_see(run, user, workspace_id):
         raise HTTPException(status_code=404, detail="Run not found")
-    with sqlite3.connect(store.db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT raw_diff FROM review_runs WHERE id = ?", (run_id,),
-        ).fetchone()
+    row = await asyncio.to_thread(
+        _run_row, store.db_path, "SELECT raw_diff FROM review_runs WHERE id = ?", run_id)
     diff = (row["raw_diff"] if row else None) or ""
     return {
         "run_id": run_id,
@@ -248,7 +293,7 @@ def get_diff(
 
 
 @router.get("/{run_id}/findings")
-def get_findings(
+async def get_findings(
     run_id: str,
     limit: int = 50,
     offset: int = 0,
@@ -263,18 +308,15 @@ def get_findings(
     with a note flag so the UI can degrade gracefully.
     """
     import json
-    import sqlite3
     store = get_review_run_store()
-    run = store.get(run_id)
-    if run is None or not _can_see(run, user, workspace_id):
+    run = await asyncio.to_thread(store.get, run_id)
+    if run is None or not await _can_see(run, user, workspace_id):
         raise HTTPException(status_code=404, detail="Run not found")
-    with sqlite3.connect(store.db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT findings_json, drift_json, pr_head_sha, pr_head_ref, "
-            "       pr_provider, pr_repo, pr_number FROM review_runs WHERE id = ?",
-            (run_id,),
-        ).fetchone()
+    row = await asyncio.to_thread(
+        _run_row, store.db_path,
+        "SELECT findings_json, drift_json, pr_head_sha, pr_head_ref, "
+        "       pr_provider, pr_repo, pr_number FROM review_runs WHERE id = ?",
+        run_id)
     findings: list = []
     if row and row["findings_json"]:
         try:

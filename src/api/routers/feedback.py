@@ -76,6 +76,22 @@ def _issue_scope(
     return True, found[1:]
 
 
+async def _readable_run(run_id: str, user: User, ws: str) -> None:
+    """A verdict on a finding is about a run, and a run is the content of one
+    repository: a person who may not read that repository gets the answer for
+    a run that does not exist (`reviews._can_see`, the same rule the run's own
+    pages apply). A run id nobody stored is not a repository's content, so the
+    old behaviour stands for it."""
+    import asyncio
+
+    from src.api.review_runs import get_review_run_store
+    from src.api.routers.reviews import _can_see
+
+    run = await asyncio.to_thread(get_review_run_store().get, run_id)
+    if run is not None and not await _can_see(run, user, ws):
+        raise HTTPException(status_code=404, detail="Run not found")
+
+
 async def _sync_issue(
     user: User, ws: str, run_id: str, *, state: str | None,
     file_path: str, title: str, rule_id: str | None,
@@ -176,9 +192,10 @@ class AgentStat(BaseModel):
 async def list_for_run(
     run_id: str,
     session: AsyncSession = Depends(get_async_session),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     ws: str = Depends(current_workspace_id),
 ) -> list[FeedbackOut]:
+    await _readable_run(run_id, user, ws)
     rows = (await session.scalars(
         select(FindingFeedback).where(
             FindingFeedback.run_id == run_id,
@@ -206,8 +223,10 @@ async def upsert_feedback(
         raise HTTPException(
             status_code=422, detail=f"state must be one of {sorted(_VALID_STATES)}",
         )
+    await _readable_run(run_id, user, ws)
     row = (await session.scalars(
         select(FindingFeedback).where(
+            FindingFeedback.workspace_id == ws,
             FindingFeedback.run_id == run_id,
             FindingFeedback.finding_key == payload.finding_key,
         )
@@ -254,8 +273,10 @@ async def clear_feedback(
     title: str | None = None,
     rule_id: str | None = None,
 ) -> None:
+    await _readable_run(run_id, user, ws)
     row = (await session.scalars(
         select(FindingFeedback).where(
+            FindingFeedback.workspace_id == ws,
             FindingFeedback.run_id == run_id,
             FindingFeedback.finding_key == fkey,
         )

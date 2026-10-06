@@ -1136,6 +1136,10 @@ class RepoIndexState(Base):
     #: an index that succeeded and a check that cannot reach the remote are
     #: unrelated conditions with unrelated remedies.
     last_check_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The branch the indexed revision was taken from. Written with the sha by
+    #: `record_index_success`: the MCP dev profile prints `branch@sha` on every
+    #: answer, and only the git clone could otherwise say which branch that is.
+    indexed_branch: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1530,7 +1534,7 @@ class ReviewPullRequest(Base):
     # (ISO times, pruned to the cadence window): what the push counter reads.
     last_seen_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
     recent_pushes: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    # Automatic reviews of this PR wait (auto-pause, `@celmis pause`, the
+    # Automatic reviews of this PR wait (auto-pause, the
     # pull-requests page), why, who said so, and when the one notice that
     # says so was posted.
     review_paused: Mapped[bool] = mapped_column(
@@ -2320,4 +2324,94 @@ class ProductivitySyncState(Base):
     prs_pending: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
+# MCP access — per-person tokens issued by the superadmin, and the call log
+# ════════════════════════════════════════════════════════════════════
+
+
+class McpToken(Base):
+    """A grant behind an MCP bearer token (the JWT's ``jti`` is ``id``).
+
+    The token value is never stored: this row is what the verifier consults on
+    every call (revocation, expiry, repo list), so changing the row changes
+    what an already-issued token may do. ``kind``:
+
+      * ``pat``          issued by the superadmin for ``user_id``; the repo
+                         list is authoritative (it grants ``code`` on the
+                         matching repos of the workspace).
+      * ``cli``          the same, issued by ``analyzer mcp issue-token``.
+      * ``self``         minted by the person themselves (only while
+                         ``CELMIS_MCP_SELF_SERVICE`` is on); the person's own
+                         access stays the ceiling, ``repo_patterns`` is ["*"].
+      * ``oauth_grant``  the permission an OAuth consent needs: tokens the
+                         OAuth flow mints for ``user_id`` carry ``grant=<id>``
+                         and are limited to this row's repo list.
+    """
+
+    __tablename__ = "mcp_tokens"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False, server_default="pat")
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    issued_by: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    label: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    #: Exact slugs and/or globs ("acme/shop-*"); "*" means every repo of the workspace.
+    repo_patterns: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    allow_write: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=func.false())
+    scopes: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    #: dev | full — which endpoint the token is meant for.
+    profile: Mapped[str] = mapped_column(Text, nullable=False, server_default="dev")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    revoked_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    last_used_ip: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_mcp_tokens_ws_user", "workspace_id", "user_id"),
+        Index("ix_mcp_tokens_user", "user_id"),
+    )
+
+
+class McpCallLog(Base):
+    """One row per MCP tool call: who, which token, which tool, which repos,
+    how big the answer was. Never the arguments' values, the result or a
+    secret — ``args_hash`` is a one-way digest that lets two calls be told
+    apart without being read."""
+
+    __tablename__ = "mcp_call_log"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    user_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    token_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    client_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    tool: Mapped[str] = mapped_column(Text, nullable=False)
+    profile: Mapped[str] = mapped_column(Text, nullable=False, server_default="full")
+    repos: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    #: ok | denied | error
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="ok")
+    result_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    result_items: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    args_hash: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+
+    __table_args__ = (
+        Index("ix_mcp_call_log_ts", "ts"),
+        Index("ix_mcp_call_log_ws_ts", "workspace_id", "ts"),
+        Index("ix_mcp_call_log_token", "token_id", "ts"),
     )

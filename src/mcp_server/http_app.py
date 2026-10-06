@@ -81,6 +81,12 @@ def _transport_security():
     )
 
 
+def _security_kwargs() -> dict[str, Any]:
+    """`transport_security=` for a FastMCP constructor, or nothing."""
+    sec = _transport_security()
+    return {"transport_security": sec} if sec else {}
+
+
 def _explain_invalid_host(host: str) -> str:
     """What the SDK's refusal should have said.
 
@@ -147,6 +153,21 @@ class _ExplainInvalidHost:
         await self.app(scope, receive, _send)
 
 
+def _scope_ip(scope) -> str:  # noqa: ANN001
+    """The caller's address for the token's last-used stamp: evidence, never a
+    decision (the leftmost X-Forwarded-For entry is the one a client can forge)."""
+    try:
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers", [])}
+        fwd = headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if fwd:
+            return fwd[:64]
+        client = scope.get("client")
+        return str(client[0])[:64] if client else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 class _ExplainRefusal:
     """Turn the SDK's bare 401 into a 403 that says why, when we know why.
 
@@ -171,7 +192,7 @@ class _ExplainRefusal:
 
         from src.mcp_server.auth import _REFUSAL
 
-        holder: dict = {}
+        holder: dict = {"ip": _scope_ip(scope)}
         reset = _REFUSAL.set(holder)
         replaced = False
 
@@ -238,11 +259,15 @@ def _build_mcp() -> FastMCP:  # noqa: F821 — quoted for typing without an impo
         mcp = FastMCP(
             "celmis",
             instructions=(
-                "Celmis code intelligence — query projects and their "
-                "repos, look up cross-repo API surfaces, callers, and "
-                "recent review findings. Designed for Claude Code to "
-                "write new services with awareness of sibling services in "
-                "the same project."
+                "Celmis code intelligence: projects and their repos, "
+                "cross-repo symbol search (search_symbols), callers "
+                "(find_consumers), HTTP routes (get_api_surface) and review "
+                "findings. Use it for definitions, callers and questions that "
+                "span repositories; use local Grep/Read for files you are "
+                "editing and for literals inside the current repo. Results "
+                "describe the last indexed revision, which may lag your "
+                "checkout. For day-to-day coding prefer the compact /mcp/dev "
+                "profile if your token has the read:code scope."
             ),
             token_verifier=verifier,
             # Serve at the sub-app ROOT. FastMCP defaults this to "/mcp", and
@@ -284,10 +309,14 @@ def _build_mcp() -> FastMCP:  # noqa: F821 — quoted for typing without an impo
 
     _register_tools(mcp, legacy_tools)
     _install_scope_filter(mcp)
+    _install_call_scope_gate(mcp)
     # Defence in depth behind the verifier: every tool refuses a refused
     # caller itself (see src/mcp_server/guard.py).
     from src.mcp_server.guard import guard_every_tool
     guard_every_tool(mcp)
+    # One wrapper around every call: record it, redact it, audit it.
+    from src.mcp_server.call_envelope import install_call_envelope
+    install_call_envelope(mcp, profile="full")
     return mcp
 
 
@@ -332,12 +361,54 @@ _TOOL_SCOPES: dict[str, str] = {
     "update_issue": "write:repos",
     "ask_code": "read:graph",
     "search_code": "read:graph",
+    # lane:howto: cross-repo patterns without secret values
+    "howto": "read:graph",
 }
 
 # Operations + review-configuration tools: scopes are defined next to the tools.
 from src.mcp_server.ops_tools import OPS_TOOL_SCOPES  # noqa: E402
 
 _TOOL_SCOPES.update(OPS_TOOL_SCOPES)
+
+
+def _install_call_scope_gate(mcp) -> None:  # noqa: ANN001
+    """Refuse a CALL to a tool the token's scopes do not cover.
+
+    ``tools/list`` hides such tools, but a hidden tool can be called by name:
+    a dev-profile token (``read:code`` only) must not reach the full profile's
+    read tools by naming them on this endpoint. Same rule as the listing: a
+    token with no scopes (legacy) passes, ``admin`` passes, a tool absent from
+    the table is not gated here."""
+    import mcp.types as types
+
+    from src.mcp_server.call_envelope import _error_result
+    from src.mcp_server.scopes import ADMIN_SCOPE, ScopeError
+
+    inner = mcp._mcp_server
+    key = types.CallToolRequest
+    original = inner.request_handlers.get(key)
+    if original is None:
+        raise RuntimeError("the MCP SDK registered no tool-call handler to gate")
+
+    async def gated(req):  # noqa: ANN001, ANN202
+        name = getattr(req.params, "name", "") or ""
+        required = _TOOL_SCOPES.get(name)
+        if required:
+            try:
+                from mcp.server.auth.middleware.auth_context import get_access_token
+
+                token = get_access_token()
+                scopes = list(token.scopes or []) if token else []
+            except Exception:  # noqa: BLE001 — no auth context: nothing to gate
+                scopes = []
+            if scopes and ADMIN_SCOPE not in scopes and required not in scopes:
+                from src.mcp_server import callctx
+
+                callctx.set_status("denied")
+                return _error_result(str(ScopeError((required,), scopes)))
+        return await original(req)
+
+    inner.request_handlers[key] = gated
 
 
 def _install_scope_filter(mcp) -> None:  # noqa: ANN001
@@ -422,28 +493,29 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="search_symbols",
         description=(
-            "Search for a function/class/endpoint by name across every "
-            "repo in a project. Returns file path, line, kind, and the "
-            "repo slug so you can follow up with find_callers / "
-            "get_symbol. Use before writing new code so you do not "
-            "reimplement an existing symbol."
+            "Search a function/class by name across the repos of a "
+            "project (or all your repos when project_id is omitted). "
+            "mode: auto (exact, then substring), exact, prefix, fuzzy. "
+            "Returns repo, file, start/end line, kind. Use before writing "
+            "new code so you do not reimplement an existing symbol."
         ),
     )
     def _search_symbols(
-        project_id: str,
         query: str,
+        project_id: str | None = None,
         kind: str | None = None,
         limit: int = 20,
+        mode: str = "auto",
     ) -> dict[str, Any]:
-        return _search_symbols_impl(project_id, query, kind, limit)
+        return _without_boundary_fields(
+            _search_symbols_impl(project_id, query, kind, limit, mode))
 
     @mcp.tool(
         name="find_consumers",
         description=(
-            "Find which repos in the project call a given symbol (by "
-            "fully-qualified name or repo_slug+symbol). This is the key "
-            "safety net when refactoring a shared endpoint/schema — the "
-            "returned list is who breaks if you change signature."
+            "Find which repos in the project call a symbol. The safety "
+            "net when changing a shared endpoint or schema: the list is "
+            "who breaks."
         ),
     )
     def _find_consumers(project_id: str, symbol: str) -> dict[str, Any]:
@@ -454,18 +526,17 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="get_api_surface",
         description=(
-            "Return the HTTP/RPC handlers detected in `repo_slug` — path "
-            "pattern, method, function name, file:line. Optional "
-            "path_glob filter (e.g. `api/users/*`). Use this before "
-            "writing a new endpoint, to check whether an equivalent "
-            "already exists."
+            "HTTP routes of a repo found from framework syntax (FastAPI, "
+            "Flask, Express, Laravel, Symfony, Go): method, path, handler, "
+            "file:line. Optional path_glob. Heuristic; supported=false "
+            "means it could not look."
         ),
     )
     def _get_api_surface(
         repo_slug: str,
         path_glob: str | None = None,
     ) -> dict[str, Any]:
-        return _get_api_surface_impl(repo_slug, path_glob)
+        return _without_boundary_fields(_get_api_surface_impl(repo_slug, path_glob))
 
     # ─── Stage 22: research-access introspection ──────────────────────
 
@@ -544,9 +615,7 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
         _caller, access = caller_access([repo_slug])
         dec = access.get(repo_slug)
         if dec is not None and (not dec.researchable or not dec.path_visible(path)):
-            return {"repo_slug": repo_slug, "path": path,
-                    "blocked_repos": [repo_slug],
-                    "access_notice": _boundary_note([repo_slug])}
+            return _not_accessible()
         from src.ownership.builder import lookup_owner
         result = lookup_owner(repo_slug, path)
         if result is None:
@@ -568,9 +637,7 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
         _caller, access = caller_access([repo_slug])
         dec = access.get(repo_slug)
         if dec is not None and not dec.researchable:
-            return {"repo_slug": repo_slug, "summary_md": "",
-                    "blocked_repos": [repo_slug],
-                    "access_notice": _boundary_note([repo_slug])}
+            return _not_accessible()
         from sqlalchemy.orm import Session
 
         from src.db.models import RepoSummary
@@ -633,12 +700,10 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="bootstrap_client",
         description=(
-            "Given a project + target repo you want to integrate with, "
-            "return: (1) the target's public API surface, (2) existing "
-            "usage examples in sibling repos, (3) suggested client "
-            "stub. Optional `target_endpoint` narrows to one endpoint. "
-            "This is the killer tool: it lets you write an integration "
-            "against team B's service without paging team B."
+            'Given a project and a target repo, return its API surface, usage '
+            'examples in sibling repos and a suggested client stub. '
+            '`target_endpoint` narrows to one endpoint. Use it to integrate '
+            "with another team's service without asking them."
         ),
     )
     def _bootstrap_client(
@@ -657,12 +722,10 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="start_integration_walk",
         description=(
-            "Return an ordered checklist for a cross-team integration "
-            "against `target_repo_slug` in the given project. Steps "
-            "include reading the architecture summary, listing owners, "
-            "picking endpoints, and drafting a client. Use this at the "
-            "start of a new integration task instead of firing 10 "
-            "separate tool calls."
+            'Ordered checklist for a cross-team integration against '
+            '`target_repo_slug`: read the architecture summary, list owners, '
+            'pick endpoints, draft a client. Use at the start of an integration'
+            ' task instead of ten separate calls.'
         ),
     )
     def _start_integration_walk(
@@ -703,13 +766,11 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="migrate_consumers",
         description=(
-            "Bulk-apply a text replacement across all consumers of "
-            "`symbol` in the given project. For each consumer repo we "
-            "open branch `celmis-migrate/<symbol>-<n>` and commit "
-            "`old_text` → `new_text` on the file/line where the "
-            "consumer sits. Best-effort: any repo whose provider isn't "
-            "wired for apply-fix (currently only github) is reported as "
-            "skipped. Use for coordinated renames or v1→v2 API rollouts."
+            'Bulk-apply a text replacement across all consumers of `symbol` in '
+            'the project: opens branch `celmis-migrate/<symbol>-<n>` per '
+            "consumer and commits old_text to new_text at the consumer's line. "
+            'Repos whose provider cannot apply fixes (only github can) are '
+            'skipped.'
         ),
     )
     @enforcing("write:reviews")
@@ -718,13 +779,14 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
         symbol: str,
         old_text: str,
         new_text: str,
-        user_id: str,
         commit_message: str | None = None,
     ) -> dict[str, Any]:
+        # No `user_id` argument: the branch, the commit and the PR are made with
+        # the git credentials of the CALLER, whoever the token says that is.
         return _migrate_consumers_impl(
             project_id=project_id, symbol=symbol,
             old_text=old_text, new_text=new_text,
-            user_id=user_id, commit_message=commit_message,
+            commit_message=commit_message,
         )
 
     @mcp.tool(
@@ -745,9 +807,7 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
         _caller, access = caller_access([repo_slug])
         dec = access.get(repo_slug)
         if dec is not None and not dec.researchable:
-            return {"repo_slug": repo_slug, "title": title,
-                    "blocked_repos": [repo_slug],
-                    "access_notice": _boundary_note([repo_slug])}
+            return _not_accessible()
         from src.ownership.builder import lookup_owner
         paths: list[str] = []
         import re as _re
@@ -785,30 +845,9 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     # tenancy check and the live-run rule.
 
     def _actor(label: str, *, writing: bool = False):
-        from src.automation.actions import ActionError, Actor
-        from src.mcp_server.identity import resolve_caller
+        from src.mcp_server.identity import actor_for
 
-        caller = resolve_caller()
-        if caller.refused:
-            # The token names a workspace its holder has left. Neither a read
-            # nor a write may land anywhere else instead.
-            raise ActionError(caller.refused)
-        if writing and caller.authenticated and not caller.workspace_resolved:
-            # A client_credentials token whose owner cannot be resolved lands
-            # on the "default" workspace by fallback. Reading there is
-            # harmless; writing would register a repository into a tenant
-            # nobody chose.
-            raise ActionError(
-                "This token is not tied to a workspace. Register the OAuth "
-                "client from an account that belongs to the workspace you "
-                "want to write to.",
-            )
-        return Actor(
-            user_id=caller.user_id,
-            email=getattr(caller, "email", "") or caller.user_id,
-            workspace_id=caller.workspace_id,
-            label=label,
-        )
+        return actor_for(label, writing=writing)
 
 
     async def _in_session(fn):
@@ -824,15 +863,11 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="add_repo",
         description=(
-            "Register a repository in the caller's workspace so it can be "
-            "indexed, audited and reviewed. Accepts a full URL, 'owner/name' "
-            "or 'provider:owner/name'. branch empty = the provider default. "
-            "Idempotent — an already-registered repo comes back with "
-            "already_registered=true. index (default true) queues the "
-            "code-graph build; pass false only for bulk registration that must "
-            "not clone. The reply carries index_status — queued | "
-            "already_queued | already_indexed | not_requested | "
-            "queue_unavailable — so an unindexed repo is never a silent one."
+            "Register a repository in the caller's workspace for indexing, "
+            "audits and review. Accepts a URL, 'owner/name' or "
+            "'provider:owner/name'; empty branch = provider default. "
+            'Idempotent. index (default true) queues the graph build; the '
+            "reply's index_status says what happened."
         ),
     )
     @enforcing("write:repos")
@@ -851,11 +886,10 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="start_dep_audit",
         description=(
-            "Queue a dependency + vulnerability audit over registered repos. "
-            "repo_slugs empty = every repo in the workspace; owner filters by "
-            "the 'owner/' prefix; branch overrides the branch for this run "
-            "only. report_engine none|api|claude_code chooses who writes the "
-            "prose — the findings are always deterministic. Returns run_id."
+            'Queue a dependency and vulnerability audit. repo_slugs empty = '
+            "every workspace repo; owner filters by 'owner/' prefix; branch "
+            'overrides for this run. report_engine none|api|claude_code picks '
+            'who writes the prose. Returns run_id.'
         ),
     )
     @enforcing("write:repos")
@@ -881,17 +915,11 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="generate_docs",
         description=(
-            "Queue documentation (module PRDs, feature docs, integration "
-            "guides) for a SET of repositories. repo_slugs names them "
-            "explicitly; owner selects everything under an 'owner/' prefix; "
-            "missing_only restricts it to repositories that have none yet — "
-            "which is usually what is meant, because without it the same "
-            "request regenerates everything. Omit all three to mean the whole "
-            "workspace. language and engine (api|claude_code) override the "
-            "workspace defaults for this run only. Returns which repositories "
-            "were queued and which were skipped, with a reason for each — a "
-            "repository that is not indexed yet is refused rather than "
-            "documented from its filenames."
+            "Queue docs (module PRDs, feature docs, guides) for repo_slugs, "
+            "an owner prefix or the whole workspace. missing_only skips "
+            "repos that already have docs; without it a rerun "
+            "regenerates everything. Replies queued and skipped repos; a "
+            "repo not indexed is refused."
         ),
     )
     @enforcing("write:repos")
@@ -918,15 +946,10 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="set_auto_review",
         description=(
-            "Turn automatic pull-request review on or off for a SET of "
-            "repositories, and optionally pin the branch. repo_slugs names "
-            "them explicitly; owner selects everything under an 'owner/' "
-            "prefix; omit both to mean the whole workspace. branch is not a "
-            "filter — it is the ref every surface then reads, so setting it "
-            "changes what indexing and dependency audits see too. Refuses "
-            "above a cap: this changes what happens to every future pull "
-            "request, so a misread 'turn it on everywhere' must not arm an "
-            "estate."
+            'Turn automatic PR review on or off for a set of repos (repo_slugs,'
+            ' owner prefix, or none for the whole workspace) and optionally pin'
+            ' the branch every surface then reads. Refuses above a cap, since '
+            'it changes every future pull request.'
         ),
     )
     @enforcing("write:repos")
@@ -951,13 +974,10 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="list_workspace_repos",
         description=(
-            "OPERATIONAL state of every repository in the workspace: "
-            "indexed, documented, automatic review on or off, and which "
-            "branch it reads. Run this before any verb that takes "
-            "repo_slugs — a slug invented rather than read is refused. "
-            "Not the same question as list_accessible_repos, which answers "
-            "what the CALLER is allowed to research; this one answers what "
-            "the workspace has and what state it is in."
+            'Operational state of every workspace repo: indexed, documented, '
+            'auto review on/off, branch. Run before any verb that takes '
+            'repo_slugs. Differs from list_accessible_repos, which says what '
+            'the CALLER may research.'
         ),
     )
     async def _list_workspace_repos() -> dict[str, Any]:
@@ -1023,14 +1043,10 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="review_pr",
         description=(
-            "Queue an AI review of ONE pull / merge request of a registered "
-            "repository (GitHub, GitLab or Bitbucket): repo_slug + number. "
-            "all_open=true reviews every open pull request instead (at most "
-            "25; numbers narrows it, branch filters by target branch). "
-            "post_comments (default true) posts the findings on the pull "
-            "request; false reviews without posting. Needs `review` on the "
-            "repository. Returns the run ids — read them with get_review_run "
-            "once status leaves queued/running."
+            'Queue an AI review of ONE pull request (repo_slug + number), or '
+            'all_open=true for up to 25 open ones (numbers, branch narrow it). '
+            'post_comments (default true) posts findings. Needs `review` on the'
+            ' repo. Returns run ids for get_review_run.'
         ),
     )
     @enforcing("write:repos")
@@ -1082,12 +1098,10 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="get_review_run",
         description=(
-            "One review run: summary, verdict, agents, and its findings "
-            "(severity, file, line, title, agent), bounded by limit (default "
-            "20, at most 40; `truncated` says it was cut). Give run_id, or "
-            "repo_slug + number for the latest run of that pull request. "
-            "Unlike get_review, which takes a PR reference, this reads the "
-            "stored run of the caller's workspace."
+            'One review run: summary, verdict, agents and findings (severity, '
+            'file, line, title), bounded by limit (default 20, max 40; '
+            '`truncated` says it was cut). Give run_id, or repo_slug + number '
+            'for the latest run of that pull request.'
         ),
     )
     async def _get_review_run(
@@ -1108,13 +1122,10 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="index_repo",
         description=(
-            "Queue a (re-)index of repositories — the code graph that search, "
-            "questions, reviews and architecture read. repo_slugs names them "
-            "(re-indexed even when a graph exists); omit to cover the whole "
-            "workspace (owner narrows by 'owner/' prefix; repositories that "
-            "already have a graph are left alone unless force=true). At most "
-            "50. Needs `review` on each repository; a repository whose index "
-            "is already queued is skipped, not cloned twice."
+            'Queue a (re-)index of repos, the code graph that search, Q&A and '
+            'reviews read. repo_slugs names them; omit for the workspace (owner'
+            ' narrows; existing graphs are skipped unless force=true). At most '
+            '50. Needs `review` on each repo.'
         ),
     )
     @enforcing("write:repos")
@@ -1135,12 +1146,10 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="list_issues",
         description=(
-            "Tracked review issues (findings followed across a pull "
-            "request's runs), worst severity first, with counts per status. "
-            "status is open|fixed|dismissed|resolved, comma-separated "
-            "(default open); optional severity, repo_slug, pr number and "
-            "text q; limit defaults to 15, at most 25. Each row's id is what "
-            "update_issue takes."
+            'Tracked review issues, worst severity first, with counts per '
+            'status. status open|fixed|dismissed|resolved, comma-separated '
+            '(default open); optional severity, repo_slug, pr number, text q; '
+            "limit default 15, max 25. A row's id is what update_issue takes."
         ),
     )
     async def _list_issues(
@@ -1184,14 +1193,11 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="ask_code",
         description=(
-            "Ask a question about the code of one or several repositories "
-            "(repo_slugs, at most 8; omit for all the caller can read) and "
-            "get a written answer built from the code Q&A pipeline: vault "
-            "notes, the code graph and the files it read, listed in `files`. "
-            "Costs one model call, booked as Q&A spend, and honours the "
-            "workspace budget and the caller's research access. The answer "
-            "is capped; for a symbol, an owner or an architecture summary "
-            "use search_code, which is free."
+            'Ask a question about the code of one or several repos (repo_slugs,'
+            ' max 8; omit for all you can read); the answer is built from vault'
+            ' notes, the graph and files read (listed in `files`). Costs one '
+            'model call against the workspace budget. For symbols or owners use'
+            ' search_code, which is free.'
         ),
     )
     async def _ask_code(
@@ -1210,14 +1216,10 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     @mcp.tool(
         name="search_code",
         description=(
-            "Find things in the code. kind=search (default): symbols and "
-            "documentation notes matching `query`, optionally within "
-            "repo_slug. kind=usages: what calls or imports the symbol "
-            "`query` in repo_slug. kind=owner: who owns `path` in repo_slug "
-            "(git blame authors and CODEOWNERS). kind=architecture: the "
-            "cached architecture summary of repo_slug. Results are bounded "
-            "by limit (default 15, at most 50) and filtered by the caller's "
-            "research access."
+            'Find things in code. kind=search (default): symbols and doc notes '
+            'matching `query`, optionally in repo_slug. kind=usages: callers of'
+            ' symbol `query`. kind=owner: owners of `path`. kind=architecture: '
+            'cached summary. Bounded by limit (default 15, max 50).'
         ),
     )
     async def _search_code(
@@ -1242,6 +1244,13 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     # hide the tools in tools/list (`_TOOL_SCOPES`) AND refuse the call itself
     # (`enforcing`): a hidden tool can otherwise still be called by name.
     register_ops_tools(mcp, _actor, _in_session, enforcing)
+
+    # "Do it like service X": code slices + the NAMES of env vars and where
+    # their values come from, never a value (src/mcp_server/howto/).
+    from src.mcp_server.howto import register_howto
+
+    register_howto(mcp, scoped=enforcing)
+
 
 def _run_async(coro):
     """Run coroutine to completion from sync tool context.
@@ -1277,6 +1286,17 @@ def _sync_engine():
     return _SYNC_ENGINE
 
 
+def _readable_slugs(slugs) -> set[str]:  # noqa: ANN001
+    """Which of ``slugs`` the current caller may research (one resolution)."""
+    from src.mcp_server.identity import caller_access
+
+    wanted = sorted(set(slugs))
+    if not wanted:
+        return set()
+    _caller, access = caller_access(wanted)
+    return {s for s, d in access.items() if d is not None and d.researchable}
+
+
 def _list_projects_impl(workspace_id: str) -> dict[str, Any]:
     """Projects of ONE tenant.
 
@@ -1294,16 +1314,26 @@ def _list_projects_impl(workspace_id: str) -> dict[str, Any]:
         rows = s.execute(
             select(Project).where(Project.workspace_id == workspace_id)
         ).scalars().all()
+        per_project = {
+            p.id: [r.repo_slug for r in s.execute(
+                select(ProjectRepo).where(ProjectRepo.project_id == p.id)
+            ).scalars().all()]
+            for p in rows
+        }
+        # The count covers only the repositories the caller may read: a total
+        # would say how many it is not being shown.
+        readable = _readable_slugs({x for v in per_project.values() for x in v})
         out = []
         for p in rows:
-            repos = s.execute(
-                select(ProjectRepo).where(ProjectRepo.project_id == p.id)
-            ).scalars().all()
+            if per_project[p.id] and not any(x in readable for x in per_project[p.id]):
+                # A project whose repositories the caller can read none of is
+                # not shown: its name and description are not theirs to see.
+                continue
             out.append({
                 "id": str(p.id),
                 "name": p.name,
                 "description": p.description,
-                "repo_count": len(repos),
+                "repo_count": sum(1 for x in per_project[p.id] if x in readable),
             })
         return {"projects": out, "count": len(out)}
 
@@ -1322,13 +1352,16 @@ def _get_project_impl(project_id: str, workspace_id: str) -> dict[str, Any]:
         repos = s.execute(
             select(ProjectRepo).where(ProjectRepo.project_id == p.id)
         ).scalars().all()
+        readable = _readable_slugs({r.repo_slug for r in repos})
+        if repos and not readable:
+            return {"error": f"project {project_id!r} not found"}
         return {
             "id": str(p.id),
             "name": p.name,
             "description": p.description,
             "repos": [
                 {"repo_slug": r.repo_slug, "role": r.role}
-                for r in repos
+                for r in repos if r.repo_slug in readable
             ],
         }
 
@@ -1369,14 +1402,6 @@ def _project_repo_slugs(project_id: str) -> list[str]:
 #   caller dicts have keys id/name/kind/file/start_line.
 
 
-def _legacy_find_symbol(name, slug, *, kind=None, limit=20):  # noqa: ANN001
-    from src.mcp_server import tools as legacy
-    rows = legacy.find_symbol(name=name, repo_slug=slug, limit=limit)
-    if kind:
-        rows = [r for r in rows if r.get("kind") == kind]
-    return rows
-
-
 def _legacy_callers(symbol, slug):  # noqa: ANN001
     from src.mcp_server import tools as legacy
     res = legacy.find_callers(symbol_id=symbol, repo_slug=slug)
@@ -1384,61 +1409,88 @@ def _legacy_callers(symbol, slug):  # noqa: ANN001
 
 
 def _boundary_note(blocked: list[str]) -> str:
-    if not blocked:
-        return ""
-    names = ", ".join(sorted(set(blocked)))
-    return (
-        f"Part of this functionality lives in repositories [{names}], which "
-        "you do not have research access to. Ask your administrators to "
-        "grant access."
-    )
+    """What a caller is told about repositories it may not read: nothing that
+    names them. A name, a count or a "blocked" flag would confirm that the
+    repository exists to somebody who has no business knowing, so a denied
+    repo in a fan-out is omitted without a trace and a named one reads exactly
+    like one that was never registered (:data:`src.access.effective.NOT_ACCESSIBLE`).
+    Kept (returning the empty string) so call sites need no second code path."""
+    return ""
+
+
+def _not_accessible() -> dict[str, Any]:
+    """The one answer for a named repository the caller may not read — the
+    same bytes whether it is denied or does not exist."""
+    from src.access.effective import NOT_ACCESSIBLE
+
+    return {"error": NOT_ACCESSIBLE}
 
 
 def _search_symbols_impl(
-    project_id: str, query: str, kind: str | None, limit: int,
+    project_id: str | None, query: str, kind: str | None, limit: int,
+    mode: str = "auto",
 ) -> dict[str, Any]:
-    repo_slugs = _project_repo_slugs(project_id)
-    if not repo_slugs:
-        return {"error": f"project {project_id!r} has no repos", "matches": []}
-    # Stage 22: gate by the caller's research access.
+    """Name search over the repos of a project, or over every repo the caller
+    may research when no project is given.
+
+    `kind` is applied inside the graph query (before the LIMIT), matching is
+    ranked (exact, prefix, token, substring, fuzzy), and repos are interleaved
+    so one large repo cannot fill the page. Repos the caller cannot research
+    are skipped without a trace: naming them would confirm they exist.
+    """
+    from src.mcp_server.dev_profile import common, rank
     from src.mcp_server.identity import caller_access
+
+    limit = max(1, min(int(limit or 20), 100))
+    if mode not in ("auto", "exact", "prefix", "fuzzy"):
+        mode = "auto"
+    if project_id:
+        repo_slugs = _project_repo_slugs(project_id)
+        if not repo_slugs:
+            return {"error": f"project {project_id!r} has no repos", "matches": []}
+    else:
+        from src.mcp_server.dev_profile.access import indexed_slugs
+        repo_slugs = indexed_slugs()
     _caller, access = caller_access(repo_slugs)
 
-    matches: list[dict[str, Any]] = []
-    blocked_repos: list[str] = []
-    hidden = 0
-    for slug in repo_slugs:
+    def one(slug: str) -> list[dict[str, Any]]:
         dec = access.get(slug)
         if dec is not None and not dec.researchable:
-            blocked_repos.append(slug)
-            continue
-        try:
-            for sym in _legacy_find_symbol(query, slug, kind=kind, limit=limit):
-                fpath = sym.get("file") or ""
-                if dec is not None and fpath and not dec.path_visible(fpath):
-                    hidden += 1
-                    continue
-                matches.append({
-                    "repo_slug": slug,
-                    "name": sym.get("name"),
-                    "kind": sym.get("kind"),
-                    "file": fpath,
-                    "line": sym.get("start_line"),
-                    "signature": sym.get("signature"),
-                })
-                if len(matches) >= limit:
-                    break
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("search_symbols_repo_failed repo=%s err=%s", slug, exc)
-        if len(matches) >= limit:
-            break
-    out: dict[str, Any] = {"query": query, "matches": matches, "count": len(matches)}
-    if blocked_repos:
-        out["blocked_repos"] = sorted(set(blocked_repos))
-        out["access_notice"] = _boundary_note(blocked_repos)
-    if hidden:
-        out["hidden_symbol_count"] = hidden
-    return out
+            return []  # silently omitted: naming it would confirm it exists
+        with common.open_store(slug) as store:
+            rows = store.find_symbols(query, mode=mode, kind=kind or None, limit=200)
+        out = []
+        for row in rows:
+            fpath = str(row.get("file") or "")
+            if dec is not None and fpath and not dec.path_visible(fpath):
+                continue
+            sc = rank.score(row, query)
+            if sc <= 0:
+                continue
+            match: dict[str, Any] = {
+                "repo_slug": slug, "name": row.get("name"), "kind": row.get("kind"),
+                "file": fpath, "line": row.get("start_line"),
+                "end_line": row.get("end_line"),
+            }
+            if row.get("signature"):
+                match["signature"] = row["signature"]
+            out.append((sc, match))
+        out.sort(key=lambda t: -t[0])
+        return [m for _s, m in out]
+
+    per_repo: list[list[dict[str, Any]]] = []
+    try:
+        per_repo = [v for _k, v in sorted(common.map_repos(repo_slugs, one).items()) if v]
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("search_symbols_failed err=%s", exc)
+    matches: list[dict[str, Any]] = []
+    depth = 0
+    while len(matches) < limit and any(depth < len(v) for v in per_repo):
+        for v in per_repo:
+            if depth < len(v) and len(matches) < limit:
+                matches.append(v[depth])
+        depth += 1
+    return {"query": query, "matches": matches, "count": len(matches)}
 
 
 def _find_consumers_impl(project_id: str, symbol: str) -> dict[str, Any]:
@@ -1449,12 +1501,10 @@ def _find_consumers_impl(project_id: str, symbol: str) -> dict[str, Any]:
     _caller, access = caller_access(repo_slugs)
 
     consumers: list[dict[str, Any]] = []
-    blocked_repos: list[str] = []
     for slug in repo_slugs:
         dec = access.get(slug)
         if dec is not None and not dec.researchable:
-            blocked_repos.append(slug)
-            continue
+            continue  # silently omitted: naming it would confirm it exists
         try:
             for c in _legacy_callers(symbol, slug):
                 fpath = c.get("file", "") or ""
@@ -1468,60 +1518,70 @@ def _find_consumers_impl(project_id: str, symbol: str) -> dict[str, Any]:
                 })
         except Exception as exc:  # noqa: BLE001
             logger.debug("find_consumers_repo_failed repo=%s err=%s", slug, exc)
-    out: dict[str, Any] = {
-        "symbol": symbol, "consumers": consumers, "count": len(consumers),
-    }
-    if blocked_repos:
-        out["blocked_repos"] = sorted(set(blocked_repos))
-        out["access_notice"] = _boundary_note(blocked_repos)
-    return out
+    return {"symbol": symbol, "consumers": consumers, "count": len(consumers)}
 
 
 def _get_api_surface_impl(
     repo_slug: str, path_glob: str | None,
 ) -> dict[str, Any]:
-    """Detect HTTP endpoints via existing symbol index. Heuristic — flags
-    functions decorated with FastAPI/Flask/Express-like routers by name
-    convention. Falls back to empty list if graph missing."""
-    import fnmatch
+    """HTTP routes of `repo_slug`, read from source at the indexed revision.
 
-    # Stage 22: block repos the caller may not research; hide denied files.
+    Heuristic (see :mod:`src.indexing.routes`): FastAPI/Flask decorators,
+    Express, Laravel, Symfony and Go registrations. `supported` is false when
+    the repository has no readable revision, so "nothing found" is never
+    confused with "could not look".
+    """
+    import fnmatch
+    from functools import partial
+
+    from src.indexing.routes import extract_routes
+    from src.mcp_server.dev_profile import git_io
+    from src.mcp_server.dev_profile.freshness import read_freshness
     from src.mcp_server.identity import caller_access
+
     _caller, access = caller_access([repo_slug])
     dec = access.get(repo_slug)
     if dec is not None and not dec.researchable:
-        return {
-            "repo_slug": repo_slug, "endpoints": [], "count": 0,
-            "blocked_repos": [repo_slug],
-            "access_notice": _boundary_note([repo_slug]),
-        }
+        return _not_accessible()
 
+    fresh = read_freshness([repo_slug]).get(repo_slug)
+    sha = fresh.sha if fresh is not None else (git_io.head_sha(repo_slug) or "")
+    if not sha or not git_io.has_commit(repo_slug, sha):
+        return {"repo_slug": repo_slug, "supported": False, "endpoints": [], "count": 0,
+                "reason": "no readable revision of this repository"}
+
+    def visible(path: str) -> bool:
+        return dec is None or dec.path_visible(path)
+
+    def show(path: str) -> list[str] | None:
+        return git_io.show_file(repo_slug, sha, path)
+
+    grep = partial(git_io.grep, repo_slug, sha, regex=True, max_hits=600, per_file=120)
     endpoints: list[dict[str, Any]] = []
     try:
-        # Match common HTTP-handler prefixes.
-        for prefix in ("get_", "post_", "put_", "delete_", "patch_", "route_"):
-            for sym in _legacy_find_symbol(prefix, repo_slug, kind="function"):
-                name = sym.get("name") or ""
-                fpath = sym.get("file") or ""
-                if dec is not None and fpath and not dec.path_visible(fpath):
-                    continue
-                path_hint = _infer_route_path(name)
-                if path_glob and not fnmatch.fnmatch(path_hint, path_glob):
-                    continue
-                endpoints.append({
-                    "path": path_hint,
-                    "method": prefix.rstrip("_").upper(),
-                    "handler": name,
-                    "file": fpath,
-                    "line": sym.get("start_line"),
-                })
+        for r in extract_routes(grep, show, path_filter=visible):
+            if path_glob and not fnmatch.fnmatch(r.path, path_glob):
+                continue
+            endpoints.append({
+                "path": r.path, "method": r.method, "handler": r.handler,
+                "file": r.file, "line": r.line, "framework": r.framework,
+            })
     except Exception as exc:  # noqa: BLE001
         logger.debug("api_surface_failed repo=%s err=%s", repo_slug, exc)
     return {
         "repo_slug": repo_slug,
         "endpoints": endpoints,
         "count": len(endpoints),
+        "note": "heuristic: routes found from framework syntax at the indexed revision",
     }
+
+
+def _without_boundary_fields(out: dict[str, Any]) -> dict[str, Any]:
+    """The public tools never say WHICH repos were withheld: a name in
+    `blocked_repos` confirms the repository exists to someone who may not
+    know it does."""
+    return {k: v for k, v in out.items()
+            if k not in ("blocked_repos", "access_notice", "hidden_symbol_count")}
 
 
 def _to_indexed_slug(candidate: str | None) -> str | None:
@@ -1539,7 +1599,7 @@ def _to_indexed_slug(candidate: str | None) -> str | None:
         return None
     try:
         from src.mcp_server import tools as legacy
-        indexed = [r.slug for r in legacy.list_repos()]
+        indexed = legacy.list_repo_slugs()
     except Exception as exc:  # noqa: BLE001
         logger.debug("indexed_slug_lookup_failed err=%s", exc)
         return candidate
@@ -1572,8 +1632,7 @@ def _list_accessible_repos_impl() -> dict[str, Any]:
     from src.mcp_server.identity import caller_access
 
     try:
-        repos = legacy.list_repos()
-        slugs = [r.slug for r in repos]
+        slugs = legacy.list_repo_slugs()
     except Exception as exc:  # noqa: BLE001
         logger.warning("list_accessible_repos_failed err=%s", exc)
         slugs = []
@@ -1592,13 +1651,6 @@ def _list_accessible_repos_impl() -> dict[str, Any]:
         "count": len(out),
         "authenticated": caller.authenticated,
     }
-
-
-def _infer_route_path(handler_name: str) -> str:
-    parts = handler_name.split("_", 1)
-    if len(parts) == 2 and parts[0] in {"get", "post", "put", "delete", "patch"}:
-        return "/" + parts[1].replace("_", "/")
-    return "/" + handler_name.replace("_", "/")
 
 
 def _get_review_impl(pr_ref: str) -> dict[str, Any]:
@@ -1639,17 +1691,19 @@ def _get_review_impl(pr_ref: str) -> dict[str, Any]:
     # and let every run through. Normalise before asking about access.
     repo_slug = _to_indexed_slug(raw_slug)
     dec = None
-    if tenancy.enforced() and not repo_slug:
+    if not repo_slug:
         # A run whose repository cannot be named cannot be checked against
-        # the access rules — and unchecked used to mean "shown".
+        # the access rules — and unchecked used to mean "shown". In every
+        # deployment mode: default-deny has no "unnamed, so open" reading.
         return {"error": f"no review found for {pr_ref!r}"}
     if repo_slug:
         from src.mcp_server.identity import caller_access
         _caller, access = caller_access([repo_slug])
         dec = access.get(repo_slug)
         if dec is not None and not dec.researchable:
-            return {"pr_ref": row["pr_ref"], "blocked_repos": [repo_slug],
-                    "access_notice": _boundary_note([repo_slug])}
+            # The same answer as "no such review": the run's repository is not
+            # named, and neither is the fact that a run exists.
+            return {"error": f"no review found for {pr_ref!r}"}
 
     import json
     findings_json = row["findings_json"] if "findings_json" in keys else "[]"
@@ -1708,7 +1762,6 @@ def _migrate_consumers_impl(
     symbol: str,
     old_text: str,
     new_text: str,
-    user_id: str,
     commit_message: str | None,
 ) -> dict[str, Any]:
     """Fan-out: for each repo in the project that calls `symbol`, apply
@@ -1717,22 +1770,36 @@ def _migrate_consumers_impl(
 
     Best-effort — provider must be github for now. Non-github repos are
     listed as `skipped` with a reason.
+
+    Who acts is always the authenticated caller. Changing code takes more than
+    reading it, so this needs the owner/admin role of the workspace (or a
+    global admin) AND `code` access to every repository it touches; the call is
+    audited by the envelope (the repositories are noted below).
     """
+    from src.mcp_server.identity import caller_access, resolve_caller
+
+    caller = resolve_caller()
+    if caller.refused:
+        return {"error": caller.refused, "results": []}
+    if not _may_change_code(caller):
+        return {"error": "migrate_consumers needs the owner or admin role of the workspace",
+                "results": []}
+    user_id = caller.user_id
     slugs = _project_repo_slugs(project_id)
     if not slugs:
         return {"error": f"project {project_id!r} has no repos", "results": []}
 
     # Stage 22: never enumerate/modify repos the caller may not research.
-    from src.mcp_server.identity import caller_access
     _caller, access = caller_access(slugs)
+
+    from src.mcp_server import callctx
 
     results: list[dict[str, Any]] = []
     for slug in slugs:
         dec = access.get(slug)
-        if dec is not None and not dec.researchable:
-            results.append({"repo_slug": slug, "status": "skipped",
-                            "reason": "no research access to this repo"})
-            continue
+        if dec is not None and not dec.code_visible:
+            continue  # not named: a repo the caller cannot read is omitted without a trace
+        callctx.note_repos(slug)
         try:
             nodes = _legacy_callers(symbol, slug)
         except Exception as exc:  # noqa: BLE001
@@ -1765,6 +1832,19 @@ def _migrate_consumers_impl(
         "attempted": len(results),
         "succeeded": sum(1 for r in results if r.get("status") == "ok"),
     }
+
+
+def _may_change_code(caller) -> bool:  # noqa: ANN001
+    """Global admin, or owner/admin of the workspace the token answers for."""
+    if getattr(caller, "is_admin", False):
+        return True
+    try:
+        from src.api.deps import workspace_role
+        from src.users.roles import WORKSPACE_ADMIN_ROLES
+
+        return workspace_role(caller.user_id, caller.workspace_id) in WORKSPACE_ADMIN_ROLES
+    except Exception:  # noqa: BLE001 — cannot tell: no
+        return False
 
 
 def _apply_replacement_via_apply_fix(
@@ -1847,8 +1927,6 @@ def _bootstrap_client_impl(
     sibling_repos = [s for s in slugs if s != target_repo_slug]
     from src.mcp_server.identity import caller_access
     _caller, sib_access = caller_access(sibling_repos)
-    blocked_siblings = [s for s in sibling_repos if sib_access.get(s) is not None
-                        and not sib_access[s].researchable]
     usage_examples: list[dict[str, Any]] = []
     for e in endpoints[:5]:
         handler = e.get("handler") or ""
@@ -1880,8 +1958,7 @@ def _bootstrap_client_impl(
     top_owners: list[Any] = []
     _c, target_access = caller_access([target_repo_slug])
     target_dec = target_access.get(target_repo_slug)
-    if (target_repo_slug not in api.get("blocked_repos", [])
-            and target_dec is not None and target_dec.researchable):
+    if "error" not in api and target_dec is not None and target_dec.researchable:
         from src.ownership.builder import load_snapshot
         snap = load_snapshot(target_repo_slug) or {}
         top_owners = (snap.get("stats") or {}).get("top_owners", [])[:3]
@@ -1901,11 +1978,10 @@ def _bootstrap_client_impl(
             "before shipping."
         ),
     }
-    # Propagate target-repo boundary + any sibling repos we couldn't research.
-    boundary = sorted(set(api.get("blocked_repos", [])) | set(blocked_siblings))
-    if boundary:
-        out["blocked_repos"] = boundary
-        out["access_notice"] = _boundary_note(boundary)
+    # A target or sibling the caller may not research contributes nothing and
+    # is not mentioned: no name, no count, no "blocked" marker.
+    if "error" in api:
+        return _not_accessible()
     return out
 
 
@@ -1962,9 +2038,7 @@ def _get_review_policy_impl(repo_slug: str) -> dict[str, Any]:
     _caller, access = caller_access([repo_slug])
     dec = access.get(repo_slug)
     if dec is not None and not dec.researchable:
-        return {"repo_slug": repo_slug, "exists": False,
-                "blocked_repos": [repo_slug],
-                "access_notice": _boundary_note([repo_slug])}
+        return _not_accessible()
     from sqlalchemy.orm import Session
 
     from src.db.models import RepoReviewPolicy
@@ -2006,10 +2080,17 @@ def _get_review_policy_impl(repo_slug: str) -> dict[str, Any]:
 # ─── FastAPI mount helper ────────────────────────────────────────────
 
 def mount_mcp(app: FastAPI, *, path: str = "/mcp") -> bool:
-    """Attach the FastMCP Streamable-HTTP ASGI app under ``path``.
+    """Attach the FastMCP Streamable-HTTP ASGI apps under ``path``.
+
+    Two servers are mounted: the full one at ``path`` and the compact,
+    read-only developer profile at ``path`` + ``/dev``
+    (:mod:`src.mcp_server.dev_profile`). The dev profile is mounted FIRST:
+    Starlette matches mounts by prefix in registration order, so ``/mcp``
+    registered first would swallow ``/mcp/dev``. A failure to build the dev
+    profile never takes the full server down with it.
 
     FastMCP's session manager requires an async task group that lives for
-    the process lifetime. We attach it to the FastAPI lifespan so it
+    the process lifetime. We attach each to the FastAPI lifespan so it
     starts on app startup and shuts down on teardown — otherwise the
     first request errors with "Task group is not initialized".
 
@@ -2025,18 +2106,31 @@ def mount_mcp(app: FastAPI, *, path: str = "/mcp") -> bool:
         logger.error("mcp_build_failed err=%s", exc, exc_info=True)
         return False
 
+    dev = None
+    try:
+        from src.mcp_server.dev_profile import build_dev_mcp
+
+        dev = build_dev_mcp()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("mcp_dev_build_failed err=%s", exc, exc_info=True)
+
     try:
         sub_app = mcp.streamable_http_app()
+        dev_app = dev.streamable_http_app() if dev is not None else None
         # Wrap FastAPI's existing lifespan (if any) so both MCP's session
-        # manager AND the app's own startup logic run. Router.lifespan_context
+        # managers AND the app's own startup logic run. Router.lifespan_context
         # returns an async CM; if none set it's a no-op.
-        from contextlib import asynccontextmanager
+        from contextlib import AsyncExitStack, asynccontextmanager
 
         original_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
         async def combined_lifespan(app_):
-            async with mcp.session_manager.run(), original_lifespan(app_):
+            async with AsyncExitStack() as stack:
+                await stack.enter_async_context(mcp.session_manager.run())
+                if dev is not None and dev_app is not None:
+                    await stack.enter_async_context(dev.session_manager.run())
+                await stack.enter_async_context(original_lifespan(app_))
                 yield
 
         app.router.lifespan_context = combined_lifespan
@@ -2044,6 +2138,10 @@ def mount_mcp(app: FastAPI, *, path: str = "/mcp") -> bool:
         # Read-only on some FastMCP builds; the mount below is what matters.
         with contextlib.suppress(Exception):
             mcp.settings.streamable_http_path = "/"
+        if dev is not None and dev_app is not None:
+            with contextlib.suppress(Exception):
+                dev.settings.streamable_http_path = "/"
+            app.mount(f"{path.rstrip('/')}/dev", _ExplainInvalidHost(_ExplainRefusal(dev_app)))
         app.mount(path, _ExplainInvalidHost(_ExplainRefusal(sub_app)))
         # Assert the endpoint is where we claim: a silent 404 here costs the
         # agent every mcp__celmis__* tool with no error anywhere.
@@ -2055,7 +2153,8 @@ def mount_mcp(app: FastAPI, *, path: str = "/mcp") -> bool:
                     "clients calling %s will 404", path, inner, path,
                 )
             else:
-                logger.info("mcp_http_mounted path=%s inner=%s", path, inner)
+                logger.info("mcp_http_mounted path=%s inner=%s dev=%s", path, inner,
+                            dev is not None)
         except Exception:  # noqa: BLE001
             logger.info("mcp_http_mounted path=%s", path)
         return True

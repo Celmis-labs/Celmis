@@ -12,7 +12,7 @@ page are Enterprise (`src/ee/analytics`, the `analytics` feature of the licence)
 
 ## Who can see it
 
-The page and every endpoint under `/api/productivity` are for workspace admins
+The page and every endpoint under `/api/analytics/productivity` are for workspace admins
 and owners only. Developer-level tables show names next to numbers, so the
 default is the narrow one. Editors and viewers do not see the page or the
 settings, and an API call from them is refused.
@@ -37,10 +37,19 @@ is the row with an empty repository. Nothing is synced until `enabled` is on.
 | `deploy_group_minutes` | 30 | Merges closer than this are one deployment. |
 
 A request to estimate the cost of the first sync is on the settings page
-(`GET /api/productivity/sync/estimate`), and a sync can be started by hand
-(`POST /api/productivity/sync/run`). A scheduler also ticks hourly and queues
+(`GET /api/analytics/productivity/sync/estimate`), and a sync can be started by hand
+(`POST /api/analytics/productivity/sync/run`). A scheduler also ticks hourly and queues
 one job per enabled repository. Requests to a provider share one rate limit per
 credential and honour `Retry-After`.
+
+The scheduler is an install setting, not a repository one:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CELMIS_PRODUCTIVITY_INTERVAL_MINUTES` | 60 | Minutes between ticks; `0` turns the tick off. |
+| `CELMIS_PRODUCTIVITY_FIRST_DELAY_SECONDS` | 180 | Wait after start-up before the first tick. |
+| `CELMIS_PRODUCTIVITY_JOB_BUDGET_SECONDS` | 480 | One sync job stops at this budget and queues the rest as a later slice, so a long history never holds a worker. |
+| `CELMIS_DISABLE_PRODUCTIVITY_SCHED` | unset | `1` never starts the scheduler (a hand-started sync still works). |
 
 ## Definitions
 

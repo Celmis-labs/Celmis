@@ -1,0 +1,53 @@
+#!/bin/sh
+# Prints {"Authorization": "Bearer <token>"} for Claude Code's `headersHelper`.
+#
+# The token comes from the OS keychain when one is available, else from
+# $CELMIS_TOKEN. It is printed only inside that JSON object, on stdout, which
+# Claude Code reads and does not log. Nothing else is ever written to stdout.
+#
+#   macOS:  security add-generic-password -s celmis-token -a "$USER" -w
+#   Linux:  secret-tool store --label celmis-token service celmis-token
+#
+# Exit 1 (message on stderr, never the token) when no token is found; the MCP
+# server then simply fails to connect and the agent falls back to Grep.
+set -u
+
+# A bearer token over plain http crosses the network readable. Refuse unless the
+# server is on this machine; the check is on CELMIS_URL, the address the plugin's
+# MCP entry connects to.
+url="${CELMIS_URL:-}"
+case "$url" in
+  "" | https://* ) ;;
+  http://localhost | http://localhost:* | http://localhost/* \
+  | http://127.0.0.1 | http://127.0.0.1:* | http://127.0.0.1/* \
+  | "http://[::1]" | "http://[::1]:"* | "http://[::1]/"* ) ;;
+  *)
+    echo "celmis-auth-header: CELMIS_URL is not https (only localhost may use http); the token is not sent" >&2
+    exit 1 ;;
+esac
+
+token=""
+case "$(uname -s 2>/dev/null)" in
+  Darwin)
+    if command -v security >/dev/null 2>&1; then
+      token=$(security find-generic-password -s celmis-token -w 2>/dev/null || true)
+    fi ;;
+  Linux)
+    if command -v secret-tool >/dev/null 2>&1; then
+      token=$(secret-tool lookup service celmis-token 2>/dev/null || true)
+    fi ;;
+esac
+[ -n "$token" ] || token="${CELMIS_TOKEN:-}"
+
+if [ -z "$token" ]; then
+  echo "celmis-auth-header: no token in the keychain (service celmis-token) or in CELMIS_TOKEN" >&2
+  exit 1
+fi
+# A bearer token is URL-safe base64 or a JWT. Anything else would need JSON
+# escaping, and is not a Celmis token: refuse rather than emit broken JSON.
+case "$token" in
+  *[!A-Za-z0-9._~+/=-]*)
+    echo "celmis-auth-header: the token has characters a Celmis token never has" >&2
+    exit 1 ;;
+esac
+printf '{"Authorization":"Bearer %s"}\n' "$token"

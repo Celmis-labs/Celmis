@@ -274,7 +274,8 @@ def test_build_repo_context_full(tmp_path: Path):
         "dependencies": {"vue": "3.4.0"},
         "scripts": {"build": "vite build"},
     }))
-    (tmp_path / ".env").write_text("API_URL=http://x\nSECRET=should-not-leak\n")
+    (tmp_path / ".env.example").write_text("API_URL=\nSECRET=\n")
+    (tmp_path / ".env").write_text("REAL_ONLY_IN_ENV=should-not-leak\n")  # a secret file: never parsed
     (tmp_path / "docker-compose.yml").write_text(
         'version: "3"\nservices:\n  app:\n    image: app:latest\n'
     )

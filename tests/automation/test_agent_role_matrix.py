@@ -396,10 +396,18 @@ def _stub_outside_world(monkeypatch) -> None:
             status_reason=None, agents_run=[], agents_failed=[])
 
     runs = {"run-a": _out("run-a", A_REPO_FULL), "run-secret": _out("run-secret", SECRET_FULL)}
-    monkeypatch.setattr(reviews, "history", lambda limit, user, ws: list(runs.values()))
-    monkeypatch.setattr(reviews, "get_run", lambda run_id, user, ws: runs[run_id])
-    monkeypatch.setattr(reviews, "get_findings",
-                        lambda run_id, limit, offset, user, ws: {"findings": [], "total": 0})
+    async def _history(limit, user, ws):
+        return list(runs.values())
+
+    async def _get_run(run_id, user, ws):
+        return runs[run_id]
+
+    async def _get_findings(run_id, limit, offset, user, ws):
+        return {"findings": [], "total": 0}
+
+    monkeypatch.setattr(reviews, "history", _history)
+    monkeypatch.setattr(reviews, "get_run", _get_run)
+    monkeypatch.setattr(reviews, "get_findings", _get_findings)
 
     async def _answer(**kw):
         return "an answer", {"files_read": [], "blocked_repos": []}
@@ -422,7 +430,9 @@ def _actor(w, who: Asker) -> Actor:
 #: one of these; anything else (a missing run, a job in the wrong state) is the
 #: verb running and finding nothing to do, which is not a refusal of the asker.
 _GATE_WORDS = ("requires", "no team is granted", "not a member", "could not tell who",
-               "needs one of these roles", "yours:", "name one you can read")
+               "needs one of these roles", "yours:", "name one you can read",
+               # a repository the asker may not read answers like one that is not there
+               "not registered")
 
 
 def _refused(text: str) -> bool:

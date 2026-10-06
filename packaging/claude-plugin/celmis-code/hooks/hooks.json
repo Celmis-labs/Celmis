@@ -1,0 +1,40 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/celmis_hook.py\" session || python -I \"${CLAUDE_PLUGIN_ROOT}/hooks/celmis_hook.py\" session",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/celmis_hook.py\" pregrep || python -I \"${CLAUDE_PLUGIN_ROOT}/hooks/celmis_hook.py\" pregrep",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__.*celmis.*__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/celmis_hook.py\" postmcp || python -I \"${CLAUDE_PLUGIN_ROOT}/hooks/celmis_hook.py\" postmcp",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

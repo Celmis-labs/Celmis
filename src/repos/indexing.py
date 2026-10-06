@@ -170,7 +170,11 @@ def index_repo_sync(
     from src.credentials.git_auth import git_auth_kwargs
     from src.groups.indexer import GroupIndexer
     from src.groups.models import RepoGroup
-    from src.repos.index_state import record_index_failure, record_index_success
+    from src.repos.index_state import (
+        clone_branch,
+        record_index_failure,
+        record_index_success,
+    )
 
     store = get_auto_review_store()
     cfg = store.get_in_workspace(workspace_id, repo_slug) or store.get(user_id, repo_slug)
@@ -272,6 +276,9 @@ def index_repo_sync(
             # stamping `last_full_rebuild_at` would date a rebuild that never
             # happened and make the row more optimistic than the run.
             full_rebuild=per_repo is not None,
+            # Which branch that revision is on: the configured one, else what
+            # the clone stands on (the provider default when nobody named one).
+            branch=(cfg.branch or "").strip() or clone_branch(cfg.repo_slug),
         )
 
         try:

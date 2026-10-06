@@ -163,6 +163,20 @@ def list_repos(
     return out
 
 
+def list_repo_slugs(settings: Settings | None = None) -> list[str]:
+    """The slugs of every repository checked out on disk, in order.
+
+    What `list_repos()` returns without its summaries: building a summary opens
+    the repository's graph (a FalkorDBLite server start and stop, seconds each),
+    so a caller that only needs the names must not go through it.
+    """
+    settings = settings or get_settings()
+    if not settings.repos_dir.exists():
+        return []
+    return [sub.name for sub in sorted(settings.repos_dir.iterdir())
+            if sub.is_dir() and (sub / ".git").exists()]
+
+
 # ─── Symbol queries ─────────────────────────────────────────────────
 
 
@@ -584,6 +598,7 @@ __all__ = [
     "find_symbol",
     "get_symbol",
     "list_groups",
+    "list_repo_slugs",
     "list_repos",
     "query_graph",
 ]

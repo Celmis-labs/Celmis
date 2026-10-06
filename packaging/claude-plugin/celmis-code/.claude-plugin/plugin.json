@@ -1,0 +1,12 @@
+{
+  "name": "celmis-code",
+  "description": "Search and read code across your organisation's repositories through a Celmis server: ranked symbol search, outlines, callers, and 'do it like service X' patterns, all with a token budget and no secret values.",
+  "author": {
+    "name": "Celmis Labs",
+    "url": "https://github.com/Celmis-labs"
+  },
+  "homepage": "https://github.com/Celmis-labs/Celmis/tree/main/packaging/claude-plugin/celmis-code",
+  "repository": "https://github.com/Celmis-labs/Celmis",
+  "license": "AGPL-3.0-or-later",
+  "keywords": ["mcp", "code-search", "cross-repo", "code-intelligence"]
+}

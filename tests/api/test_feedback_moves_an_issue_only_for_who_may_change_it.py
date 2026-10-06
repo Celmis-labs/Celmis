@@ -51,6 +51,9 @@ TITLE = "Unchecked return"
 class _Runs:
     """r1..r3 are runs of PR #7; r9 is a run of another workspace."""
 
+    def get(self, run_id: str):
+        return None  # no stored run body: the repository gate has nothing to ask
+
     def pr_of(self, run_id: str):
         if run_id == "r9":
             return ("ws-2", "github", "acme/api", 7)

@@ -259,6 +259,32 @@ def _split_code(text: str) -> list[tuple[bool, str]]:
     return out
 
 
+#: What a reply says in place of an answer the central redaction could not check.
+ANSWER_WITHHELD = "[answer withheld: it could not be checked for secrets]"
+
+
+def _redact_central(text: str) -> str:
+    """The answer through the central redaction (`src.security.mcp_redact`).
+
+    A reply is posted where anybody who can open the pull request reads it,
+    and it was written by a model that read repository code and configuration.
+    The prompt is redacted on the way in, but that layer can be switched off
+    (`redaction_enabled`) and was tuned to keep prompts readable; this one is
+    the always-on, deterministic layer every other outgoing text of the
+    product goes through (MCP tools, the code Q&A), so a secret the model
+    repeats is masked here whatever the setting. It runs BEFORE the cut to the
+    length limit, so a value is never shown half-masked, and it fails closed:
+    text that could not be checked is not posted.
+    """
+    try:
+        from src.security.mcp_redact import redact_for_mcp_floored
+
+        return redact_for_mcp_floored(text)[0]
+    except Exception:  # noqa: BLE001 — unchecked text is not posted
+        logger.warning("chat_answer_redaction_failed")
+        return ANSWER_WITHHELD
+
+
 def clean_answer(text: str, *, handle: str = "@celmis", limit: int = 6000) -> str:
     """The model's answer made safe to post as the reviewer.
 
@@ -270,7 +296,7 @@ def clean_answer(text: str, *, handle: str = "@celmis", limit: int = 6000) -> st
     @-mention (it would notify whoever the text names, the bot included). Code
     stays as it is. Cut at `limit`.
     """
-    s = markers.reveal(str(text or ""))
+    s = _redact_central(markers.reveal(str(text or "")))
     s = _HTML_COMMENT.sub("", s)
     s = _ZERO_WIDTH.sub("", s).replace("\r\n", "\n").strip()
     name = handle_name(handle)

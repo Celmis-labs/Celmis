@@ -310,12 +310,20 @@ def walk_repo_files(
     """Walk the repo with ignore patterns. Returns absolute paths.
 
     No filtering by extension — that is done by LanguageRegistry.match().
+
+    Secret files (``.env``, keys, credential stores, ``kind: Secret``
+    manifests; see ``src/security/secret_files.py``) are skipped: they are
+    not code, and nothing downstream of the walker should ever hold them.
     """
+    from src.security.secret_files import plain_file
     ignore = ignore_dirs or DEFAULT_IGNORE_DIRS
     results: list[Path] = []
     root = root.resolve()
     for path in root.rglob("*"):
         if not path.is_file():
+            continue
+        # A symlink is skipped (its target may be a secret or outside the repo).
+        if path.is_symlink():
             continue
         # Skip files that have ignore directories in their path
         try:
@@ -323,6 +331,9 @@ def walk_repo_files(
         except ValueError:
             continue
         if any(part in ignore for part in rel_parts):
+            continue
+        rel = "/".join(rel_parts)
+        if plain_file(root, rel) is None:  # secret file, symlink or outside the repo
             continue
         results.append(path)
     return results

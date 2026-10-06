@@ -18,6 +18,7 @@ Run them inside the api container, which already has the environment:
 | `qa.py`       | Retrieval honours access rules (embed + Qdrant mocked, access real) | Postgres |
 | `mcp_tools.py` | MCP tools enforce the same rules as the API | Postgres |
 | `mcp_review_tools.py` | Review-fix MCP tools (`route_incident`, `bootstrap_client`, …) are gated | Postgres |
+| `mcp_dev.py`  | Developer MCP profile `/mcp/dev/`: contract smoke (9 tools, `idx:` line, refusals); skips until deployed | live API |
 | `reset.py`    | Password reset is not an unauthenticated takeover path | live API |
 | `gitcreds.py` | Git tokens resolve workspace-first and survive their owner leaving | credential store |
 

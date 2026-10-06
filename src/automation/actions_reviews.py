@@ -80,10 +80,9 @@ _LINK_SEARCH = {"label": "search", "href": "/search"}
 
 def _registered(actor: Actor) -> dict[str, Any]:
     """slug → registration, for the actor's workspace only."""
-    from src.api.auto_review import get_auto_review_store
+    from src.automation.actions import workspace_configs
 
-    return {c.repo_slug: c
-            for c in get_auto_review_store().list_for_workspace(actor.workspace_id)}
+    return {c.repo_slug: c for c in workspace_configs(actor)}
 
 
 def _number(value: Any) -> int:
@@ -119,9 +118,23 @@ def _pr_url(cfg: Any, number: int | None) -> str | None:
     return f"{base}/pull/{number}"
 
 
+def _outside_token(actor: Actor, cfg: Any) -> bool:
+    """True when a token narrows this actor and the repository is not one of
+    the token's: a run, an issue or a finding of it does not exist for the
+    caller, whatever the person's own rights are."""
+    return actor.token_filter is not None and cfg is None
+
+
 async def _can_read(actor: Actor, user: Any, slug: str, cache: dict[str, bool]) -> bool:
     """The team's `read` grant on one repository, remembered per call."""
     if slug in cache:
+        return cache[slug]
+    if actor.token_filter is not None:
+        # A token with a repo list is authoritative: the superadmin who issued
+        # it said which repositories it may read, team grants or not.
+        from src.automation.actions import workspace_configs
+
+        cache[slug] = any(c.repo_slug == slug for c in workspace_configs(actor))
         return cache[slug]
     from src.api.deps import enforce_repo_permission
 
@@ -389,8 +402,7 @@ async def list_reviews(
         if not await _can_read(actor, user, wanted, {}):
             raise ActionError(f"Requires 'read' on {wanted}")
     n = _limit(limit, 10, MAX_LIST)
-    runs = await asyncio.to_thread(
-        reviews_router.history, 200, user, actor.workspace_id)
+    runs = await reviews_router.history(200, user, actor.workspace_id)
     by_name = _by_full_name(actor)
     allowed: dict[str, bool] = {}
     rows: list[dict[str, Any]] = []
@@ -400,6 +412,8 @@ async def list_reviews(
         if wanted and (cfg is None or cfg.repo_slug != wanted):
             continue
         if status and out.status != status and out.verdict != status:
+            continue
+        if _outside_token(actor, cfg):
             continue
         if cfg is not None and not await _can_read(actor, user, cfg.repo_slug, allowed):
             continue
@@ -441,15 +455,16 @@ async def get_review_run(
         run_id = found[0].id
 
     try:
-        out = await asyncio.to_thread(reviews_router.get_run, run_id, user, ws)
-        page = await asyncio.to_thread(
-            reviews_router.get_findings, run_id, _limit(limit, 20, MAX_FINDINGS),
-            0, user, ws)
+        out = await reviews_router.get_run(run_id, user, ws)
+        page = await reviews_router.get_findings(
+            run_id, _limit(limit, 20, MAX_FINDINGS), 0, user, ws)
     except HTTPException as exc:
         raise ActionError(str(exc.detail)) from None
 
     by_name = _by_full_name(actor)
     cfg = by_name.get((out.pr_provider, out.pr_repo))
+    if _outside_token(actor, cfg):
+        raise ActionError("No review run found.")
     if cfg is not None and not await _can_read(actor, user, cfg.repo_slug, {}):
         raise ActionError(f"Requires 'read' on {cfg.repo_slug}")
     findings = [{
@@ -555,6 +570,44 @@ def _issue_row(i: Any) -> dict[str, Any]:
     }
 
 
+async def _issue_names_outside_token(actor: Actor, session: Any) -> list[str]:
+    """Repository names (either spelling) in the workspace's issues that the
+    actor's token does not list. The page filters by the person's own access,
+    which knows nothing of the token: an admin holding a one-repo token would
+    otherwise see every issue of the workspace."""
+    from sqlalchemy import select
+
+    from src.automation.actions import workspace_configs
+    from src.db.models import ReviewIssue
+
+    listed: set[str] = set()
+    for cfg in workspace_configs(actor):
+        listed.update(n for n in (cfg.repo_slug, getattr(cfg, "full_name", "")) if n)
+    names: set[str] = set()
+    for a, b in (await session.execute(
+        select(ReviewIssue.repo_slug, ReviewIssue.pr_repo)
+        .where(ReviewIssue.workspace_id == actor.workspace_id).distinct()
+    )).all():
+        names.update(str(n) for n in (a, b) if n)
+    return sorted(names - listed)
+
+
+async def _issue_outside_token(actor: Actor, session: Any, issue_id: str) -> bool:
+    """True when the issue's repository is not one the actor's token lists (an
+    issue that names none is treated the same way). An unknown id is left to
+    the route to refuse."""
+    from src.automation.actions import workspace_configs
+    from src.db.models import ReviewIssue
+
+    row = await session.get(ReviewIssue, issue_id)
+    if row is None or row.workspace_id != actor.workspace_id:
+        return False
+    listed: set[str] = set()
+    for cfg in workspace_configs(actor):
+        listed.update(n for n in (cfg.repo_slug, getattr(cfg, "full_name", "")) if n)
+    return not ({row.repo_slug, row.pr_repo} & listed)
+
+
 async def list_issues(
     actor: Actor, session: Any, *, status: str | None = "open",
     severity: str | None = None, repo_slug: str | None = None,
@@ -582,6 +635,8 @@ async def list_issues(
         for slug, cfg in _registered(actor).items():
             if not await _can_read(actor, user, slug, allowed):
                 hidden += [slug, cfg.full_name]
+        if actor.token_filter is not None:
+            hidden += await _issue_names_outside_token(actor, session)
     status_csv = ",".join(s for s in (status or "").split(",")
                           if s.strip() in ISSUE_STATUSES) or None
     out = await _as_action(issues_router.list_issues(
@@ -590,7 +645,7 @@ async def list_issues(
         pr=_number(pr) if pr not in (None, "") else None,
         scope=None, resolution=None, outcome=None, include_duplicates=False,
         q=q or None, sort="severity", limit=_limit(limit, 15, MAX_LIST),
-        offset=0, session=session, _user=user, ws=actor.workspace_id))
+        offset=0, session=session, user=user, ws=actor.workspace_id))
     return {
         "issues": [_issue_row(i) for i in out.items],
         "count": len(out.items), "total": out.total,
@@ -601,6 +656,7 @@ async def list_issues(
 
 async def apply_issue_status(
     session: Any, user: Any, ws: str, issue_id: str, status: str,
+    *, check_repo: bool = True,
 ) -> tuple[Any, Any]:
     """Set an issue's status. Returns `(row, pull_request_row_or_None)`.
 
@@ -627,6 +683,16 @@ async def apply_issue_status(
     row = await session.get(ReviewIssue, issue_id)
     if row is None or row.workspace_id != ws:
         raise HTTPException(status_code=404, detail="Issue not found")
+    if check_repo:
+        # An issue is a finding of ONE repository, with its snippet: it exists
+        # for the people who may read that repository's code, and for nobody
+        # else (the answer is the one for an id that is not there). A token
+        # with its own repository list is checked against that list by the
+        # caller (`check_repo=False`).
+        names = [n for n in dict.fromkeys((row.repo_slug, row.pr_repo)) if n]
+        if names and len(await deps_module.code_readable_repo_slugs(
+                user, ws, names)) != len(names):
+            raise HTTPException(status_code=404, detail="Issue not found")
 
     if status != row.status:
         row.status = status
@@ -709,9 +775,15 @@ async def update_issue(
     done: list[dict[str, Any]] = []
     failed: list[dict[str, str]] = []
     for one in issue_ids(issue_id, ids):
+        if actor.token_filter is not None and await _issue_outside_token(actor, session, one):
+            # An issue of a repository the token does not list does not exist
+            # for it — the same sentence as an unknown id.
+            failed.append({"repo": one, "reason": "Issue not found"})
+            continue
         try:
             row, _pr = await apply_issue_status(
-                session, user, actor.workspace_id, one, wanted)
+                session, user, actor.workspace_id, one, wanted,
+                check_repo=actor.token_filter is None)
         except HTTPException as exc:
             if exc.status_code == 403:
                 raise ActionError(str(exc.detail)) from None
@@ -769,7 +841,8 @@ async def ask_code(
             qa_router._generate_full(
                 target_repos=slugs, question=text[:MAX_QUESTION_CHARS], history=[],
                 user_id=user.id, is_admin=bool(getattr(user, "is_admin", False)),
-                workspace_id=actor.workspace_id, include_code=bool(include_code)),
+                workspace_id=actor.workspace_id, include_code=bool(include_code),
+                token_filter=actor.token_filter, name_free_notice=True),
             timeout=ASK_TIMEOUT_S)
     except TimeoutError:
         raise ActionError("The answer took too long — narrow the question or the repositories.") from None
@@ -791,7 +864,6 @@ async def ask_code(
         "repos": slugs,
         "files": files,
         "files_total": len(meta.get("files_read") or []),
-        "blocked_repos": list(meta.get("blocked_repos") or []),
         "links": [_LINK_SEARCH],
     }
 
@@ -850,7 +922,7 @@ async def search_code(
 
     if slug is None:
         raise ActionError(f"Name the repository for kind={kind}.")
-    access = await _access(user, actor.workspace_id, slug)
+    access = await _access(user, actor.workspace_id, slug, actor.token_filter)
 
     if kind == "architecture":
         from src.db.models import RepoSummary
@@ -906,13 +978,14 @@ async def search_code(
             "links": [_LINK_SEARCH]}
 
 
-async def _access(user: Any, workspace_id: str, slug: str) -> Any:
-    from src.access import resolve_access
+async def _access(user: Any, workspace_id: str, slug: str,
+                  token_filter: tuple[str, ...] | None = None) -> Any:
+    from src.access.effective import Principal, effective_access
 
     decisions = await asyncio.to_thread(
-        lambda: resolve_access(user_id=user.id,
-                               is_admin=bool(getattr(user, "is_admin", False)),
-                               workspace_id=workspace_id, repos=[slug]))
+        lambda: effective_access(
+            Principal(user.id, bool(getattr(user, "is_admin", False)), token_filter),
+            workspace_id, [slug]))
     return decisions.get(slug)
 
 

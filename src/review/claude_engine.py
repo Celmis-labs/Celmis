@@ -383,7 +383,7 @@ async def _run(
                     # and a redirected POST is not something the MCP
                     # streamable-HTTP client is guaranteed to follow.
                     "url": f"http://localhost:{api_port}/mcp/",
-                    "headers": {"Authorization": f"Bearer {_mint_mcp_token(user_id)}"},
+                    "headers": {"Authorization": f"Bearer {_mint_mcp_token(user_id, workspace_id)}"},
                 },
             },
         )

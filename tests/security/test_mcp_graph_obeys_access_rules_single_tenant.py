@@ -119,6 +119,18 @@ def env(graphs, tmp_path, monkeypatch):
                                  repo_slug=RULED, visibility=vis, deny_globs=deny))
         s.commit()
 
+    # Only repositories registered in the caller's workspace exist for the
+    # resolver, so the two repos are registered the way the app does it.
+    from src.api.auto_review import AutoReviewStore, RepoConfig
+    store = AutoReviewStore(graphs / "secrets" / "auto_review.db")
+    for slug in (RULED, UNRULED):
+        if store.get_in_workspace(WS, slug) is None:
+            store.upsert(RepoConfig(
+                user_id="owner", repo_slug=slug, provider="github",
+                full_name=slug.split("_", 1)[1].replace("-", "/", 1),
+                url=f"https://github.com/{slug}", workspace_id=WS))
+    monkeypatch.setattr("src.api.auto_review._default_store", store)
+
     state = {"caller": None}
 
     def as_(user: str | None, **kw):
@@ -189,11 +201,11 @@ def test_a_team_without_a_rule_reads_nothing(env, mcp_tools, tool):
 def test_list_repos_hides_a_repository_the_rules_hide(env, mcp_tools):
     env("outsider")
     slugs = {r["slug"] for r in mcp_tools["list_repos"]()["repos"]}
-    assert slugs == {UNRULED}
+    assert slugs == set()   # the unruled one is closed too, not just the ruled one
     env("neighbour")
     # Metadata is research access: the repository is listed, its code is not.
     slugs = {r["slug"] for r in mcp_tools["list_repos"]()["repos"]}
-    assert slugs == {RULED, UNRULED}
+    assert slugs == {RULED}
 
 
 # ─── metadata ───────────────────────────────────────────────────────
@@ -262,12 +274,42 @@ def test_raw_cypher_is_allowed_at_full_code_with_no_globs(env, mcp_tools):
 # ─── unchanged ──────────────────────────────────────────────────────
 
 
+@pytest.fixture
+def unruled_open(monkeypatch):
+    """The operator's escape hatch: the pre-upgrade behaviour, single_tenant only."""
+    from src.config import get_settings
+
+    monkeypatch.setenv("CELMIS_UNRULED_REPO_ACCESS", "open")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("tool", GRAPH_TOOLS)
+@pytest.mark.parametrize("who", ["outsider", "coder"])
+def test_an_unruled_repository_is_closed_to_a_member_by_default(env, mcp_tools, tool, who):
+    env(who)
+    out = _payload(tool, _call(mcp_tools, tool, UNRULED))
+    assert "load_key" not in out and "helper" not in out and "handler" not in out, (
+        tool, who, out)
+
+
 @pytest.mark.parametrize("tool", GRAPH_TOOLS)
 @pytest.mark.parametrize("who", ["outsider", "coder", None])
-def test_an_unruled_repository_stays_fully_readable(env, mcp_tools, tool, who):
+def test_an_unruled_repository_is_readable_when_the_operator_opens_it(
+        env, unruled_open, mcp_tools, tool, who):
     env(who)
     out = _payload(tool, _call(mcp_tools, tool, UNRULED))
     assert "load_key" in out or "helper" in out or "name" in out, (tool, who, out)
+
+
+@pytest.mark.parametrize("tool", GRAPH_TOOLS)
+def test_a_stdio_caller_with_no_identity_still_reads_an_unruled_repository(
+        env, mcp_tools, tool):
+    """The subprocess boundary is the trust boundary on stdio, as before."""
+    env(None)
+    out = _payload(tool, _call(mcp_tools, tool, UNRULED))
+    assert "load_key" in out or "helper" in out or "name" in out, (tool, out)
 
 
 @pytest.mark.parametrize("tool", GRAPH_TOOLS)

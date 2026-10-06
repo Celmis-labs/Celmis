@@ -103,13 +103,24 @@ def _token(scopes):
                        resource="r")
 
 
+def _writer(token):
+    """The caller a grant that allows writing resolves to. What these tests
+    are about is the SCOPE on the token; whether the grant behind it permits
+    writes is covered in tests/security/test_mcp_tokens.py."""
+    from src.mcp_server.identity import McpCaller
+
+    return McpCaller("u", False, "default", tuple(getattr(token, "scopes", ()) or ()),
+                     authenticated=token is not None, allow_write=True)
+
+
 def _called(token, scope="write:config"):
     @ops_tools.enforcing(scope)
     async def _tool():
         return "ran"
 
     with patch("mcp.server.auth.middleware.auth_context.get_access_token",
-               return_value=token):
+               return_value=token), patch(
+            "src.mcp_server.identity.resolve_caller", return_value=_writer(token)):
         return asyncio.run(_tool())
 
 
@@ -157,7 +168,9 @@ def test_the_stdio_server_denies_a_read_token_a_write_tool():
 
     tool = build_server()._tool_manager._tools["set_budget"]
     with patch("mcp.server.auth.middleware.auth_context.get_access_token",
-               return_value=_token(["read:graph"])), pytest.raises(ScopeError):
+               return_value=_token(["read:graph"])), patch(
+            "src.mcp_server.identity.resolve_caller",
+            return_value=_writer(_token(["read:graph"]))), pytest.raises(ScopeError):
         asyncio.run(tool.fn(monthly_usd_cap=10))
 
 

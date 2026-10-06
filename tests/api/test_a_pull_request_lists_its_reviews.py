@@ -91,6 +91,11 @@ async def api(tmp_path, monkeypatch):
         await s.commit()
 
     monkeypatch.setattr("src.api.deps.is_workspace_admin", lambda _u, _ws: False)
+
+    async def _may_read(*_a, **_k):
+        return None  # not about who may read a repository
+
+    monkeypatch.setattr("src.api.deps.enforce_repo_permission", _may_read)
     app = FastAPI()
     app.include_router(prs_router.router)
 

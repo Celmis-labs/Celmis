@@ -221,7 +221,7 @@ class ClaudeDocsEngine:
                         "url": f"http://localhost:{api_port}/mcp/",
                         "headers": {
                             "Authorization":
-                                f"Bearer {_mint_mcp_token(self.user_id or 'system')}",
+                                f"Bearer {_mint_mcp_token(self.user_id or 'system', self.workspace_id)}",
                         },
                     },
                 },

@@ -10,6 +10,16 @@ route's dependency tree. A route that names a surface in its path but is not in
 the table fails too: add it with its gate, or choose a path that is not about
 that surface.
 
+The table covers both halves of the product: the review features (memories,
+learning, productivity, task context, connections) and the repository-access
+and MCP-token surface (access rules, access requests, token issuing and the
+call log, OAuth client registration). WHICH repositories a role may see on
+these surfaces is `tests/security/test_every_review_feature_obeys_repository_
+access.py` and `tests/security/test_access_matrix.py`; the MCP tools are walked
+by `tests/security/test_every_mcp_tool_output_is_redacted.py` (redaction, every
+tool of every server) and `tests/security/test_no_mcp_tool_bypasses_a_role_
+gated_surface.py` (no tool carries a role-gated feature around its gate).
+
 The gates are matched by name, so a rename of one has to be made here as well.
 """
 
@@ -27,16 +37,46 @@ SURFACES: dict[str, set[str]] = {
     "/api/learning": {"require_memories_access"},
     "/api/analytics/productivity": {"require_workspace_admin"},
     "/api/task-context": {"require_workspace_admin"},
+    # repository access and per-person MCP tokens
+    "/api/access/": {"require_workspace_admin"},
+    "/api/admin/access-requests": {"require_superadmin"},
+    "/api/admin/mcp-": {"_require_issuer"},
+    "/oauth/clients": {"require_workspace_admin"},
+    "/oauth/register": {"require_workspace_admin"},
 }
 
 #: words that make a path "about" a restricted surface even if its prefix is new.
-SURFACE_WORDS = ("memor", "productivity", "task-context", "task_context", "learning", "jira")
+SURFACE_WORDS = ("memor", "productivity", "task-context", "task_context", "learning", "jira",
+                 "mcp", "access", "oauth")
 
 #: (method, path) -> gates, for the few routes that sit on a surface by name but
 #: have their own rule. The connection list is open on purpose: it says only
 #: whether a provider is connected, and withholds the account from non-admins.
 EXCEPTIONS: dict[tuple[str, str], set[str]] = {
     ("GET", "/api/connections"): {"get_current_user"},
+    # A person's own view of their own access, and their own request for it:
+    # a login, answering for the caller only (tests/security/test_access_matrix.py).
+    ("GET", "/api/access/my"): {"get_current_user"},
+    ("GET", "/api/access/rules"): {"get_current_user"},
+    ("POST", "/api/access-requests"): {"get_current_user"},
+    ("GET", "/api/access-requests/me"): {"get_current_user"},
+    ("DELETE", "/api/access-requests/me"): {"get_current_user"},
+    # Self-service token: a login, and the handler answers 403 unless
+    # CELMIS_MCP_SELF_SERVICE is on (tests/api/test_mcp_tokens_endpoints.py).
+    ("POST", "/api/mcp/token"): {"get_current_user"},
+}
+
+#: Protocol endpoints: discovery documents are public by specification, the
+#: consent and token endpoints authenticate in their handlers (a session, a
+#: client secret, a grant) and are exercised by tests/security/test_the_consent_
+#: page_does_not_take_dictation.py and tests/api/test_mcp_tokens_endpoints.py.
+PROTOCOL: set[tuple[str, str]] = {
+    ("GET", "/.well-known/oauth-authorization-server"),
+    ("GET", "/.well-known/oauth-protected-resource"),
+    ("GET", "/.well-known/oauth-protected-resource/mcp/dev"),
+    ("GET", "/oauth/authorize"),
+    ("POST", "/oauth/authorize/consent"),
+    ("POST", "/oauth/token"),
 }
 
 #: Routes that write or remove a credential: owner/admin of the workspace.
@@ -87,14 +127,16 @@ ROUTES = _routes()
 def test_the_walk_finds_the_surfaces_it_guards() -> None:
     """Guards the guard: an empty walk would make every test below pass."""
     paths = {path for _, path, _ in ROUTES}
-    for prefix in ("/api/memories", "/api/task-context", "/api/connections"):
+    for prefix in ("/api/memories", "/api/task-context", "/api/connections", "/api/learning",
+                   "/api/access/", "/api/admin/mcp-tokens", "/api/admin/mcp-calls"):
         assert any(p.startswith(prefix) for p in paths), prefix
     assert len(ROUTES) > 150
 
 
 @pytest.mark.parametrize(
     ("method", "path", "gates"),
-    [r for r in ROUTES if any(r[1].startswith(p) for p in SURFACES)],
+    [r for r in ROUTES
+     if any(r[1].startswith(p) for p in SURFACES) and (r[0], r[1]) not in EXCEPTIONS],
     ids=lambda v: v if isinstance(v, str) else "",
 )
 def test_a_route_on_a_restricted_surface_has_that_surfaces_gate(method, path, gates) -> None:
@@ -125,7 +167,25 @@ def test_a_path_that_names_a_restricted_surface_is_in_the_table() -> None:
         if any(word in path.lower() for word in SURFACE_WORDS)
         and not any(path.startswith(prefix) for prefix in SURFACES)
         and (method, path) not in EXCEPTIONS
+        and (method, path) not in PROTOCOL
     ]
     assert not stray, (
         "These routes are about a restricted surface but belong to none of the SURFACES "
         f"prefixes, so nothing proves their role gate: {stray}")
+
+
+def test_every_exception_and_protocol_entry_is_a_route_that_exists() -> None:
+    """An entry for a route that was renamed would silently exempt nothing and
+    hide the new name from the table."""
+    mounted = {(m, p) for m, p, _ in ROUTES}
+    missing = [e for e in (*EXCEPTIONS, *PROTOCOL) if e not in mounted]
+    assert not missing, f"not mounted any more: {missing}"
+
+
+def test_the_two_projects_are_both_in_the_table() -> None:
+    """The review features and the access/MCP surface share one walk."""
+    mounted = {p for _, p, _ in ROUTES}
+    assert any(p.startswith("/api/learning") for p in mounted)
+    assert any(p.startswith("/api/admin/mcp-tokens") for p in mounted)
+    for prefix in SURFACES:
+        assert any(p.startswith(prefix) for p in mounted), f"{prefix} matches no route"

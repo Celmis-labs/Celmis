@@ -67,7 +67,6 @@ def test_the_limit_is_reached_not_exceeded(count, limit, expected):
     ("manual", True, "auto_pause", "skip", "cadence_manual"),
     # ... a person's pause holds whatever the cadence says
     ("automatic", True, "manual", "skip", "paused"),
-    ("automatic", True, "command", "skip", "paused"),
     ("garbage", False, None, "review", "ok"),
     (None, False, None, "review", "ok"),
 ])
@@ -158,10 +157,10 @@ def test_resume_clears_the_pause_and_the_pushes_that_caused_it(engine):
 
 
 def test_a_person_can_pause_a_pr_that_was_never_seen(engine):
-    assert pr_state.set_paused("ws-1", "github", "o/r", 9, reason="command",
+    assert pr_state.set_paused("ws-1", "github", "o/r", 9, reason="manual",
                                by="alice", engine=engine) is True
     state = pr_state.load("ws-1", "github", "o/r", 9, engine=engine)
-    assert state.review_paused and state.paused_reason == "command"
+    assert state.review_paused and state.paused_reason == "manual"
     assert state.paused_by == "alice"
     with pytest.raises(ValueError):
         pr_state.set_paused("ws-1", "github", "o/r", 9, reason="because", engine=engine)

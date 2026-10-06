@@ -177,8 +177,16 @@ class MultiRepoRetriever:
         is_admin: bool = True,
         workspace_id: str,
         include_code: bool = True,
+        token_filter: tuple[str, ...] | None = None,
+        name_free_notice: bool = False,
     ) -> RetrievalContext:
         """Returns a ready prompt + meta for streaming.
+
+        ``token_filter`` is the repo list of the MCP token the question comes
+        in on: access is then the token's (see :mod:`src.access.effective`).
+        ``name_free_notice`` is for callers that must not learn which other
+        repositories exist (MCP): related repositories are not probed and the
+        boundary notice names none, nor is ``blocked_repos`` filled.
 
         `workspace_id` is required (it used to default to "default"). Every
         Qdrant read below is scoped by it, so a caller that does not name a
@@ -194,12 +202,19 @@ class MultiRepoRetriever:
             raise ValueError("repos list cannot be empty")
 
         # ── Stage 22: resolve research access for the target repos ────
-        access = resolve_access(
-            user_id=user_id or "default",
-            is_admin=is_admin,
-            workspace_id=workspace_id,
-            repos=repos,
-        )
+        if token_filter is not None:
+            from src.access.effective import Principal, effective_access
+
+            access = effective_access(
+                Principal(user_id or "default", is_admin, token_filter),
+                workspace_id, repos)
+        else:
+            access = resolve_access(
+                user_id=user_id or "default",
+                is_admin=is_admin,
+                workspace_id=workspace_id,
+                repos=repos,
+            )
         accessible = [r for r in repos if access[r].researchable]
         denied_targets = [r for r in repos if not access[r].researchable]
 
@@ -208,7 +223,7 @@ class MultiRepoRetriever:
         if not accessible:
             notice = self._build_access_notice(
                 denied_repos=denied_targets, related_repos=[], hidden_files=[],
-                access=access, no_accessible=True,
+                access=access, no_accessible=True, anonymous=name_free_notice,
             )
             prompt = (
                 notice + "\n\n"
@@ -226,7 +241,7 @@ class MultiRepoRetriever:
                 vault_hits=[],
                 files_read=[],
                 access_notice=notice,
-                blocked_repos=denied_targets,
+                blocked_repos=[] if name_free_notice else denied_targets,
                 hidden_files=[],
                 code_included=include_code,
             )
@@ -254,7 +269,7 @@ class MultiRepoRetriever:
 
             # Cross-repo boundary: probe the whole collection for repos the
             # caller is NOT allowed to research but which are relevant.
-            related_inaccessible = self._probe_related_repos(
+            related_inaccessible = [] if name_free_notice else self._probe_related_repos(
                 query_vec,
                 exclude=set(accessible),
                 user_id=user_id or "default",
@@ -300,6 +315,7 @@ class MultiRepoRetriever:
             hidden_files=hidden_files,
             access=access,
             no_accessible=False,
+            anonymous=name_free_notice,
         )
 
         # Nothing readable at all — say why, and say what fixes it. Silence
@@ -355,7 +371,8 @@ class MultiRepoRetriever:
             vault_hits=hits,
             files_read=files_read,
             access_notice=notice,
-            blocked_repos=sorted(set(denied_targets) | set(related_inaccessible)),
+            blocked_repos=([] if name_free_notice
+                           else sorted(set(denied_targets) | set(related_inaccessible))),
             hidden_files=hidden_files,
             code_included=include_code,
             vault_unavailable=self.vault_unavailable,
@@ -790,6 +807,7 @@ class MultiRepoRetriever:
         hidden_files: list[str],
         access: dict[str, RepoAccessDecision],
         no_accessible: bool,
+        anonymous: bool = False,
     ) -> str:
         """Compose the Ukrainian boundary message injected into the prompt so
         the answer explicitly tells the user what is out of bounds and to ask
@@ -801,7 +819,8 @@ class MultiRepoRetriever:
                 "# ⚠️ Access restrictions (you must tell the user in the answer)"
             )
         if no_accessible:
-            names = ", ".join(f"`{r}`" for r in denied_repos) or "(all)"
+            names = ("the requested repositories" if anonymous
+                     else ", ".join(f"`{r}`" for r in denied_repos) or "(all)")
             lines.append(
                 "You do NOT have research access to these repositories: "
                 f"{names}. Do not invent an answer — tell the user that "
@@ -810,7 +829,8 @@ class MultiRepoRetriever:
             )
             return "\n".join(lines)
         if blocked:
-            names = ", ".join(f"`{r}`" for r in blocked)
+            names = ("other repositories" if anonymous
+                     else ", ".join(f"`{r}`" for r in blocked))
             lines.append(
                 "The question partly concerns functionality located in "
                 f"repository(ies) {names}, to which you do NOT have research "

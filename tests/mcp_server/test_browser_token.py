@@ -108,9 +108,11 @@ def test_a_global_admin_may_ask_for_any_requestable_scope(monkeypatch):
 
 
 def test_the_issue_call_passes_what_was_granted_not_the_request():
-    """The token is signed with the checked list, never with payload.scopes."""
-    assert "scopes=granted" in ROUTER
+    """Write permission is derived from the checked list, never from payload.scopes."""
+    assert "wants_write = any(sc.startswith(\"write:\") for sc in granted)" in ROUTER
+    assert "allow_write=wants_write" in ROUTER
     assert "scopes=payload" not in ROUTER
+    assert "allow_write=payload" not in ROUTER
 
 
 def test_the_default_constant_stays_read_only():
@@ -123,8 +125,8 @@ def test_the_token_is_bound_to_the_caller_and_their_workspace():
     """Issued against the user's own identity, so what the MCP server answers
     is already filtered by what that user can see — and against the workspace
     they were looking at rather than whichever one would be the default."""
-    assert "subject=user.id" in ROUTER
-    assert '"workspace_id": workspace_id' in ROUTER
+    assert "user_id=user.id" in ROUTER
+    assert "workspace_id=workspace_id" in ROUTER
     assert "Depends(current_workspace_id)" in ROUTER
     assert "Depends(get_current_user)" in ROUTER
 
@@ -141,9 +143,11 @@ def test_the_url_carries_the_trailing_slash():
     """Without it Starlette answers 307, and a redirected POST is not something
     the MCP streamable-HTTP client is guaranteed to follow. This is the single
     most common reason a correct-looking config does not connect."""
-    assert '/mcp/' in ROUTER
-    assert re.search(r'url=f"\{base\}/mcp/"', ROUTER), (
+    assert re.search(r'f"\{base\}/mcp/"', ROUTER), (
         "the advertised URL lost its trailing slash"
+    )
+    assert re.search(r'f"\{base\}/mcp/dev/"', ROUTER), (
+        "the advertised dev URL lost its trailing slash"
     )
 
 
@@ -235,31 +239,51 @@ def test_every_locale_has_the_page_strings(locale):
     assert not missing, f"{locale} is missing {missing}"
 
 
-def test_the_endpoint_signs_the_granted_scopes_only(monkeypatch):
-    """End to end through the route: the claim carries the read defaults plus
-    exactly the write scopes the role allowed, and a role that may not gets a 403
-    instead of a token."""
-    import jwt as pyjwt
+def test_the_endpoint_mints_a_self_token_with_the_granted_write_flag(monkeypatch):
+    """End to end through the route: a self token carries the wildcard ceiling,
+    write is on only when a write scope was granted, and a role that may not
+    gets a 403 instead of a token."""
+    from types import SimpleNamespace
+
     from fastapi import HTTPException
 
     from src.api import deps
     from src.api.routers.mcp_access import McpTokenIn, issue_mcp_token
+    from src.config import get_settings
+    from src.mcp_server import token_store
 
-    secret = "test-secret-long-enough-for-hs256-aaaaaaaaaaaa"
-    monkeypatch.setenv("MCP_JWT_SECRET", secret)
+    monkeypatch.setenv("CELMIS_MCP_SELF_SERVICE", "on")
+    get_settings.cache_clear()
+    seen: list[dict] = []
+
+    def fake_mint(**kw):
+        from datetime import UTC, datetime, timedelta
+
+        seen.append(kw)
+        scopes = ["read:repos", *(["write:config"] if kw["allow_write"] else [])]
+        view = SimpleNamespace(id="t1", scopes=scopes,
+                               expires_at=datetime.now(UTC) + timedelta(days=1))
+        return "tok", view
+
+    monkeypatch.setattr(token_store, "mint", fake_mint)
+    monkeypatch.setattr(token_store, "self_service_enabled", lambda: True)
     monkeypatch.setattr(deps, "workspace_role", lambda uid, ws: "admin")
     user = _user()
+    try:
+        out = issue_mcp_token(McpTokenIn(scopes=["write:config"]), user, "ws-1")
+        assert seen[-1]["kind"] == "self"
+        assert seen[-1]["patterns"] == ["*"]
+        assert seen[-1]["allow_write"] is True
+        assert seen[-1]["user_id"] == "u1"
+        assert out.url.endswith("/mcp/")
 
-    out = issue_mcp_token(McpTokenIn(scopes=["write:config"]), user, "ws-1")
-    claims = pyjwt.decode(out.token, secret, algorithms=["HS256"],
-                          options={"verify_aud": False})
-    assert "write:config" in str(claims["scope"]).split()
-    assert out.scopes == str(claims["scope"]).split()
+        plain = issue_mcp_token(None, user, "ws-1")
+        assert seen[-1]["allow_write"] is False
+        assert plain.url.endswith("/mcp/dev/")
 
-    plain = issue_mcp_token(None, user, "ws-1")
-    assert not any(s.startswith("write:") for s in plain.scopes)
-
-    monkeypatch.setattr(deps, "workspace_role", lambda uid, ws: "member")
-    with pytest.raises(HTTPException) as exc:
-        issue_mcp_token(McpTokenIn(scopes=["write:config"]), user, "ws-1")
-    assert exc.value.status_code == 403
+        monkeypatch.setattr(deps, "workspace_role", lambda uid, ws: "member")
+        with pytest.raises(HTTPException) as exc:
+            issue_mcp_token(McpTokenIn(scopes=["write:config"]), user, "ws-1")
+        assert exc.value.status_code == 403
+    finally:
+        get_settings.cache_clear()

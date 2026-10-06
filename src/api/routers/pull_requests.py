@@ -24,7 +24,7 @@ from typing import Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import false as sa_false
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import current_workspace_id, get_current_user
@@ -417,6 +417,49 @@ class PullRequestList(BaseModel):
     repos: list[str]
 
 
+async def _readable_pr_scope(
+    session: AsyncSession, user: User, ws: str,
+) -> set[tuple[str, str]]:
+    """The ``(provider, repo)`` pairs whose pull requests this person may list.
+
+    The rule `/{id}/runs`, the summary cards and the awaiting list apply: the
+    repositories the caller may READ THE CODE of (owners and admins: all of
+    them). A title, a branch, a count of findings and the repository's name are
+    what the repository contains, so a repository closed to the caller is not
+    named, not listed and not counted.
+    """
+    from fastapi import HTTPException
+
+    from src.api import deps
+    from src.api.auto_review import get_auto_review_store
+
+    pairs = (await session.execute(
+        select(ReviewPullRequest.provider, ReviewPullRequest.repo,
+               ReviewPullRequest.repo_slug)
+        .where(ReviewPullRequest.workspace_id == ws,
+               ReviewPullRequest.reviews_count > 0)
+        .distinct()
+    )).all()
+    if not pairs:
+        return set()
+    cfgs = {(c.provider, c.full_name): c for c in await asyncio.to_thread(
+        get_auto_review_store().list_for_workspace, ws)}
+    verdicts: dict[str, bool] = {}
+    allowed: set[tuple[str, str]] = set()
+    for prov, rp, rs in pairs:
+        cfg = cfgs.get((prov, rp))
+        slug = (cfg.repo_slug if cfg else None) or rs or rp
+        if slug not in verdicts:
+            try:
+                await deps.enforce_repo_permission(slug, user, "read", ws)
+                verdicts[slug] = True
+            except HTTPException:
+                verdicts[slug] = False
+        if verdicts[slug]:
+            allowed.add((prov, rp))
+    return allowed
+
+
 @router.get("", response_model=PullRequestList)
 async def list_pull_requests(
     q: str | None = Query(default=None, max_length=200),
@@ -441,6 +484,10 @@ async def list_pull_requests(
                                     q, limit, offset)
     reviewed = ReviewPullRequest.reviews_count > 0
     where = [ReviewPullRequest.workspace_id == ws, reviewed]
+    scope = await _readable_pr_scope(session, _user, ws)
+    readable = (tuple_(ReviewPullRequest.provider, ReviewPullRequest.repo)
+                .in_(sorted(scope)) if scope else sa_false())
+    where.append(readable)
     if repo:
         where.append(or_(ReviewPullRequest.repo == repo,
                          ReviewPullRequest.repo_slug == repo))
@@ -496,7 +543,7 @@ async def list_pull_requests(
     repos = sorted({
         str(r) for (r,) in (await session.execute(
             select(ReviewPullRequest.repo).where(
-                ReviewPullRequest.workspace_id == ws, reviewed)
+                ReviewPullRequest.workspace_id == ws, reviewed, readable)
             .distinct()
         )).all() if r
     })
@@ -601,6 +648,19 @@ async def pull_request_runs(
     )).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Pull request not found")
+    # Its runs are the content of its repository: a repository the caller may
+    # not read has no PR to show, answered like one that does not exist.
+    from src.api import deps
+    from src.api.auto_review import get_auto_review_store
+
+    cfgs = {(c.provider, c.full_name): c for c in await asyncio.to_thread(
+        get_auto_review_store().list_for_workspace, ws)}
+    cfg = cfgs.get((row.provider, row.repo))
+    slug = (cfg.repo_slug if cfg else None) or row.repo_slug or row.repo
+    try:
+        await deps.enforce_repo_permission(slug, user, "read", ws)
+    except HTTPException:
+        raise HTTPException(status_code=404, detail="Pull request not found") from None
     from src.api.review_runs import get_review_run_store
     from src.api.routers.reviews import _run_to_out
 
@@ -649,7 +709,7 @@ async def pull_request_commands(
 ) -> PullRequestCommands:
     """The comment commands given on one PR, newest first — the timeline beside
     its reviews. Another workspace's PR is a 404; a repository the caller may
-    not read is a 403 (the rows carry what people typed after the handle)."""
+    not read is a 404 (the rows carry what people typed after the handle)."""
     row = (await session.execute(
         select(ReviewPullRequest).where(
             ReviewPullRequest.id == pr_id, ReviewPullRequest.workspace_id == ws)

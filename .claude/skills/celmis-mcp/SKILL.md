@@ -14,8 +14,10 @@ string; the graph finds the callers, including the ones that reach a symbol
 under an alias or through a re-export.
 
 **THE TWO TRANSPORTS EXPOSE DIFFERENT TOOLS.** This is the first thing to know
-and it surprises everyone: the HTTP mount at `/mcp/` serves **18** tools built
-for multi-repo work (projects, API surfaces, ownership, incident routing);
+and it surprises everyone: the HTTP mount at `/mcp/` serves **49** tools built
+for multi-repo work and administration (projects, API surfaces, ownership,
+incident routing, repository and review settings; the 18 read tools a developer
+reaches for first are tabled below);
 `analyzer mcp serve` over stdio serves **13** older, graph-shaped ones
 (`find_symbol`, `find_callers`, `query_graph`). Neither is a subset of the
 other. Sections 4 and 5 below describe the HTTP set, which is what a
@@ -41,22 +43,42 @@ MCP is mounted at `/mcp/` on the same port.
 
 ## 2. Get a token
 
-Two ways. Both mint a JWT; the difference is who signs it.
+A token belongs to one person and names the repositories it reaches. There is
+no anonymous or shared token, and `issue-token` no longer takes a subject, a
+scope list or a duration in seconds.
 
-**From the UI** — Settings → MCP → issue a token. Scoped to your account and
-its workspace. This is the one to use day to day.
+**From the UI** — Administration, MCP tokens (superadmin only): pick the person,
+the workspace, the repositories (exact slugs and/or globs such as `acme/shop-*`;
+`*` is every repository of the workspace), the lifetime and whether writing is
+allowed.
 
-**From the CLI** — for local development:
+**From the CLI** — on the server:
 
 ```bash
 docker compose exec api analyzer mcp issue-token \
-  --subject default \
-  --scopes "read:graph read:groups" \
-  --duration 86400
+  --user dev@example.com --workspace acme --repos 'acme/shop-*,acme/ui' --days 30
 ```
 
-Requires `MCP_JWT_SECRET` (or `CELMIS_JWT_SECRET`) in the environment; the
-command fails loudly if neither is set rather than issuing something unsigned.
+`--profile dev` (the default) mints a read-only token for `/mcp/dev/`;
+`--profile full --write` reaches `/mcp/` and the write tools. The token is
+printed once and never stored; the grant behind it (person, workspace,
+repositories, expiry) can be listed, narrowed and revoked without reissuing.
+Requires `MCP_JWT_SECRET` (or `CELMIS_JWT_SECRET`) and the database; the command
+fails loudly if the secret is missing rather than issuing something unsigned.
+
+**Self-service** — `POST /api/mcp/token` answers 403 unless the operator set
+`CELMIS_MCP_SELF_SERVICE=true`. Such a token carries `*` and is capped by what
+its holder may reach.
+
+**Default-deny.** A token only ever reaches repositories its holder may read as
+code: a repository nobody gave a grant or an access rule is invisible to it, and
+an unreachable repository answers exactly like one that does not exist. If a
+repo you expect is missing, ask `get_my_access`, then ask the operator for the
+repository to be added to the token's list (see `docs/mcp-access.md`).
+
+**Two endpoints.** `/mcp/dev/` is the compact read-only profile (nine tools, scope
+`read:code`); `/mcp/` is the full mount (49 tools). A dev token is refused on the
+full mount and the other way round.
 
 ### Scopes
 
@@ -80,14 +102,12 @@ URL, not the file) and `list_members`.
 Ask for the narrowest set that answers your question. A read-only token cannot
 register a repository or spend money on a review, which is the point.
 
-A token minted from the UI is scoped to your account and its workspace, and it
-carries what that account may reach — `get_my_access` reports the result.
-
-A UI token is read-only unless you tick "Allow changes" on the MCP settings
-page (or send `scopes` to `POST /api/mcp/token`). Only the write scopes your
-workspace role allows are issued — `write:config` and `write:repos` need owner
-or admin, `write:reviews` editor or above — and each tool still applies your
-role on top of the scope. `admin` and unknown scopes are refused.
+A self-service token (when the operator enabled it) is read-only unless writing
+is ticked on the MCP settings page or `scopes` is sent to `POST /api/mcp/token`.
+Only the write scopes your workspace role allows are issued — `write:config`
+and `write:repos` need owner or admin, `write:reviews` editor or above — and
+exactly those are stored, nothing wider. Each tool still applies your role on
+top of the scope. `admin` and unknown scopes are refused.
 
 ---
 
@@ -134,7 +154,15 @@ Restart the client after editing the config, then confirm with `/mcp`.
 
 ## 4. The tools
 
-Eighteen over HTTP, verified against a live instance on 2026-08-25.
+The HTTP mount serves 49 tools in all; the 18 below are the ones a developer
+uses first (the rest are operator tools for repositories, reviews and
+settings; list them with `tools/list`). Verified against a live instance on
+2026-08-25 and recounted against the tool registry on 2026-10-06.
+
+For day-to-day development there is a second, compact endpoint, `/mcp/dev`
+(nine read-only tools, a few hundred tokens of tool list), and a Claude Code
+plugin that wires it up: `packaging/claude-plugin/celmis-code`. This skill is
+for operators; the plugin carries its own search-workflow skill.
 
 ### Finding your way in
 
@@ -215,8 +243,9 @@ before `find_consumers` can see an edge that crosses between them.
 | Symptom | Cause |
 |---|---|
 | `421 Invalid Host header` | the host you reached it at is not declared — set `MCP_ALLOWED_HOSTS` (or `PUBLIC_BASE_URL`) in `.env` and restart. It hides behind the 401: without a valid token the same request answers `401`, so fix the token first or you will chase the wrong one |
-| `401` / `invalid token` | expired (default lifetime 1 hour) — mint another |
-| `403` / `missing scope` | the token lacks the scope that tool needs — see the table above |
+| `401` | the token is expired, forged or unknown — mint another |
+| `403` with a reason | the token is recognised but refused, and the body says why: issued before per-person grants (`token predates per-person grants`, reissue it), revoked, or its holder left the workspace. A tool whose scope the token lacks is absent from `tools/list` and refused if called by name — see the scope table above |
+| a repository is "not found" | default-deny: the token's list, a team grant or a rule does not cover it; `get_my_access` says why |
 | `307` then nothing | the trailing slash is missing from `/mcp/` |
 | server never starts (stdio) | `-T` missing from `docker compose exec` |
 | `mcp_auth_unavailable` in the API log | neither `MCP_JWT_SECRET` nor `CELMIS_JWT_SECRET` is set |

@@ -20,7 +20,124 @@ derives it from there.
 
 ## [Unreleased]
 
+### BREAKING: repository access is closed by default, and MCP tokens are per person
+
+Read this before upgrading. The full guide is [`docs/mcp-access.md`](docs/mcp-access.md).
+
+- **A repository nobody has a rule for is now visible only to the workspace
+  owner, its admins and the superadmin.** Until now a repository with no team
+  grant and no access rule was readable by every member (in `single_tenant`
+  through both the REST API and MCP, in `multi_tenant` through MCP). After the
+  upgrade members stop seeing such repositories everywhere: the repository
+  list, projects, issues, dependency runs, chats, search, and all MCP tools.
+  - To give a team its old access in one step:
+    `analyzer access bootstrap --team <team> --visibility code --all-unruled`
+    (without `--all-unruled` it only lists what is affected).
+  - To restore the old behaviour as a stopgap on a single-tenant install, set
+    `CELMIS_UNRULED_REPO_ACCESS=open`. It is ignored, with a warning, in
+    `multi_tenant`. `GET /api/access/unruled` and a banner on the Team pages
+    say how many repositories are affected.
+- **A repository the caller may not read is answered like one that does not
+  exist.** MCP tools no longer return `blocked_repos`, `access_notice`,
+  `hidden_symbol_count` or any note naming a hidden repository, and the REST
+  routes answer 404 where they used to answer 403 for a repository the caller
+  cannot see. `/api/access/my` and `/api/access/rules` list only what the caller
+  may read.
+- **MCP tokens are issued by the superadmin, per person, with an explicit
+  repository list.** `POST /api/admin/mcp-tokens` takes the person, the
+  workspace, slugs and/or globs, an expiry (capped by
+  `CELMIS_MCP_TOKEN_MAX_DAYS`, default 90) and `allow_write` (default false).
+  The token is shown once. The list can be changed (PATCH) or the token revoked
+  without reissuing; a change applies within 30 seconds. The new page is
+  Administration, MCP tokens.
+  - `POST /api/mcp/token` (self-service) now answers 403 unless
+    `CELMIS_MCP_SELF_SERVICE=true`. When on, the token carries `*` and is still
+    limited to what the person can see.
+  - Tokens issued before this release carry no grant and are refused with 403 and
+    a reason (an expired, forged or unknown token still gets 401).
+    `CELMIS_MCP_LEGACY_TOKENS=accept` accepts them, read-only, for a
+    transition; reissue them instead.
+  - `analyzer mcp issue-token` now requires `--user`, `--repos` and
+    `--workspace` (it used to take `--subject` and `--scopes`).
+  - OAuth keeps working, but only for a person who holds an `oauth_grant`
+    (`POST /api/admin/mcp-grants`); consent refuses without one, every OAuth
+    token is limited to that grant's repositories, and refresh fails once the
+    grant is gone. There is no dynamic client registration.
+- **Every MCP call is audited**: who, token id, tool, repositories touched,
+  result size and a hash of the arguments. Argument values and results are never
+  stored. Read it at `GET /api/admin/mcp-calls` (CSV with `?format=csv`) or on
+  the Calls tab. Retention is `CELMIS_MCP_AUDIT_RETENTION_DAYS` (default 180).
+- Two migrations, `a7c41e9b2d10` (`mcp_tokens`) and `a7c41e9b2d11`
+  (`mcp_call_log`), sit in the same chain as the review-feature revisions.
+  Rolling back the code needs no downgrade.
+- **Review fixes to the above.**
+  - The in-app agent, the claude-engine review and documentation generation
+    reach `/mcp/` with a short-lived `internal` grant (a row in `mcp_tokens`,
+    read-only, never listed, bound to the workspace and the acting person).
+    They had lost their Celmis tools because the verifier refuses a token with
+    no row; the person's own access is still the ceiling.
+  - The dependency tools (`get_dep_audit`, `list_dep_findings`, `audit_delta`),
+    `list_issues`, `update_issue`, `list_reviews`, `get_review_run` and
+    `list_alerts` now obey a token's repository list even when the person's own
+    access is wider, and default-deny when there is no list. A run summary is
+    rebuilt from what the caller may see. `export_sbom` for a repo-limited token
+    must name one listed repository.
+  - `ask_code` no longer returns `blocked_repos` and the model is told only
+    that "other repositories" exist: no slug a caller cannot read reaches the
+    prompt, and retrieval uses the token's list.
+  - A team's read grant no longer overrides a research rule written for another
+    team; a grant is the fallback only when the repo has no rule. A grant with an
+    unknown permission value grants nothing.
+  - A call refused at the HTTP edge (revoked, expired, unknown, legacy,
+    wrong-holder token) leaves a `mcp_call_log` row (`status=denied`, tool
+    `(refused:<reason>)`, token id, no arguments), at most once a minute per
+    token. The queue counts and warns about dropped rows and is flushed at exit;
+    `analyzer mcp issue-token` and `analyzer access bootstrap` write audit
+    actions; `args_hash` is keyed to the installation.
+  - A grant can be narrowed, not widened: PATCH rejects a repo list on a
+    self-service token, a later expiry, and switching write on (the signed token
+    carries them); issue a new token instead.
+  - Smaller: the roster's emails and job error lines are for workspace admins
+    only, a project none of whose repositories the caller can read is not shown,
+    `get_review` treats a run whose repo cannot be named as unknown in every
+    mode, a dev-profile token cannot call the full profile's read tools by name,
+    and the token issue response warns when an entry like `acme/shop` matches the
+    same repository on two providers.
+- **Memories and learning answer 404, not 403, for a repository the caller
+  cannot read.** The review features follow the same rule as the rest: a
+  repository without a rule for the caller is not there. An editor who used to
+  see a 403 now sees the same answer as for a repository that does not exist.
+  The role gates stay: memories are for editors and above, productivity, Jira
+  task context and credentials for owners and admins.
+- **Review features are limited to repositories the caller may read.** The issues
+  backlog and its summary and recheck, memories, learning, productivity
+  developer tables, review feedback, the PR commands list, chat replies,
+  the Jira task context and the requirements check all resolve visibility with
+  the same resolver as MCP. A caller sees nothing of a repository that is closed
+  to them; a repository that is only named (`metadata`) is listed by name, never
+  opened.
+- **New webhook events: every GitHub, GitLab and Bitbucket hook installed
+  before this release needs "Repair all webhooks".** A hook from an earlier
+  version does not send what the comment commands, the feedback learning, the
+  productivity history and the index refresh read: on GitHub
+  `issue_comment`, `pull_request_review_comment`, `pull_request_review_thread` and
+  `push`; on GitLab `note_events`; on Bitbucket `pullrequest:comment_created`,
+  `pullrequest:comment_updated`, `pullrequest:approved`, `pullrequest:unapproved`
+  and `repo:push`. Reviews keep working without the repair, but `@celmis`
+  commands, thumbs and thread resolutions are silently ignored and the webhooks
+  page lists the hook as outdated. The installer subscribes new hooks only.
+- **MCP calls are limited by default**: 120 calls per minute per token, 4 running at once and 60 seconds
+  per call, and a developer-profile call that fans out names at most 40
+  repositories. A client that bursts, or a slow call, now gets an error where it
+  used to get an answer. Raise `CELMIS_MCP_RATE_PER_MINUTE`,
+  `CELMIS_MCP_MAX_CONCURRENT` or `CELMIS_MCP_CALL_TIMEOUT_SECONDS` (`0` switches the
+  rate limit off); the compose file forwards all three.
+- **`migrate_consumers` no longer takes `user_id`.** It acts as the caller. A
+  client or script that passed `user_id` must drop it and use a token of a person
+  who is owner or admin of the workspace.
+
 ### Added
+
 
 - **Ask the reviewer a question in a pull request comment, and get the answer in the thread.**
   Any text after `@celmis` that is not a command word (`@celmis why is this a race?`) is
@@ -198,6 +315,65 @@ derives it from there.
   which branches deliveries are reviewed for and how many repositories override
   it. `GET /api/repos` carries `target_branches` and `target_branches_source`,
   resolved by the same repo > workspace > install resolver the orchestrator uses.
+
+- **A compact, read-only MCP profile for coding assistants at `/mcp/dev`.** Nine
+  tools (`repos`, `find`, `outline`, `read_symbol`, `refs`, `grep`, `map`, `ask`,
+  `howto`) that answer in plain text, not JSON:
+  the whole tool list is under 6,000 characters, every description is at most 200,
+  and there is no output schema. Every answer starts with
+  `idx: repo branch@sha age fresh|STALE|unknown`, so line numbers always say what
+  revision they refer to; every list has a token budget, a stateless cursor and a
+  "narrow with" hint. `find` ranks exact, prefix, token, substring and fuzzy
+  matches, puts tests and vendored copies last, uses how often a symbol is called,
+  and never lets one repository fill the page. `read_symbol` prints exactly the
+  lines of one symbol from the indexed commit, with the middle elided past a
+  limit; `grep` reads committed text only, never secret files, and names the
+  enclosing symbol. The scope is `read:code`; a token without it is refused at the
+  transport and again inside each tool. A repository the caller may not read looks
+  exactly like one that does not exist, and all body text goes through one
+  redaction hook.
+- **A push to Bitbucket re-indexes the repository.** The hook now subscribes to
+  `repo:push`, and a push to a branch goes to the same freshness check the daily
+  sweep and the GitHub handler use; tags and deleted branches are ignored.
+- **`get_api_surface` reads routes from source.** FastAPI/Flask decorators, Express,
+  Laravel, Symfony and Go registrations are found with one `git grep` at the
+  indexed revision (heuristic, and it says so); a repository with no readable
+  revision answers `supported: false` instead of an empty list.
+- **The index remembers which branch it indexed** (`repo_index_state.indexed_branch`,
+  migration `b3e9d27f5a40`), and each symbol carries a usage rank written at index
+  time.
+
+- **A Claude Code plugin for the developer MCP profile (`celmis-code`).** Install
+  with `/plugin marketplace add <repo>` then `/plugin install celmis-code@celmis`.
+  It wires `${CELMIS_URL}/mcp/dev/` with `Authorization: Bearer ${CELMIS_TOKEN}`,
+  and ships the `celmis-search` skill (search order, howto rules, freshness,
+  cursors, guardrails), a read-only `celmis-explore` agent, and three hooks that
+  are stdlib-only and fail open: a one-time session note on index freshness, a
+  one-time hint before the first identifier-like Grep/Glob, and a post-call check
+  that says which files the index sha is stale for (`git diff <sha> -- <paths>`,
+  no shell) so the agent reads those locally. There is no local proxy and no
+  `version` in `plugin.json`, so a plugin update follows each commit. Docs:
+  `packaging/claude-plugin/celmis-code/README.md`, including the
+  `headersHelper` form (`bin/celmis-auth-header`, keychain first) and a
+  managed-settings snippet.
+- **A local end-to-end harness for the developer profile.** `tests/e2e_local/`
+  boots the real app in-process (random port, SQLite, real indexing, real MCP
+  client over HTTP) on three fixture repositories (Python, TypeScript, Go) whose
+  secrets are planted at run time only. `scripts/dev_mcp_e2e.py` runs 12 gold
+  scenarios (howto, find, outline, symbols, refs, grep, and three secret probes),
+  scores them against a deterministic no-Celmis baseline (tokens and calls),
+  and fails on any leaked value, reporting only labels. Run it with `--spawn`
+  or `--url`. Lane-dependent tests (ACL and token matrix, audit rows, scenarios,
+  canary scan) skip by feature probe; set `CELMIS_E2E_STRICT=1` to make a skip a
+  failure. `./scripts/e2e.sh mcp_dev` is a contract smoke against a live stack; it
+  needs a real issued token (`E2E_MCP_TOKEN`) and skips without one, because a
+  self-signed JWT is refused by `/mcp/dev/`. The runner's report now says whether
+  the leak scan was armed (`--require-leak-scan` makes "not armed" a failure),
+  `--min-scenarios N` fails a run that skipped too much, secrets are scanned in
+  both the text and the raw JSON, and a name counts as listed only inside a
+  howto answer's `inputs` section. New HTTP tests cover cursors (no gaps, no
+  duplicates, stale cursor), default token budgets per tool, the fresh and STALE
+  freshness line around a push, and single_tenant installs.
 
 - **A review closes with "Code Review Completed", and the PR hears a greeting first.**
   The started comment says hello on a PR's first review ("Hi! I'm Celmis.
@@ -404,7 +580,103 @@ derives it from there.
   both policy tables, the four API schemas, `api.ts`, `model.ts`, the settings
   section and the English texts, so a new setting cannot be wired halfway.
 
+- **`howto(topic, repo)` on the MCP server.** Asks how a repository does one of seven
+  things (`db`, `auth`, `config`, `http_client`, `logging`, `messaging`, `cache`) and
+  answers with the code slices that show the pattern, the names of the environment
+  variables and settings it reads, and where each value comes from (`.env.example`,
+  compose, Kubernetes `secretKeyRef`, CI variables, Dockerfile, app config). It never
+  returns a value, and ends by telling the agent to copy the pattern, take the values
+  from those sources and ask the user or ops. It answers only for repos the caller may
+  read as code; a denied repo and a missing one give the same reply. Registered on
+  `/mcp/` and stdio under the `read:graph` scope (carried by every token kind), and exposed as `register_howto(mcp)`
+  for other servers.
+- **Every MCP tool output goes through one redactor.** `redact_for_mcp`
+  (`src/security/mcp_redact.py`) replaces secrets with `[REDACTED:label]` in DSNs
+  (including URL-encoded ones), auth headers, `key = value` assignments in code, YAML,
+  JSON and properties, PEM blocks, provider keys, Kubernetes `Secret` data and
+  high-entropy strings. References stay (`os.getenv`, `${X}`, `secretKeyRef`, vault
+  paths, `changeme`), as do SHAs, UUIDs and integrity hashes. It is always on and
+  ignores `redaction_enabled`. `output_guard.install_output_guard` applies it to the
+  result of every tool and fails closed: if redaction raises, the caller gets
+  "output withheld: redaction failed" and nothing else.
+- **Secret files are not indexed and not readable through the tools.**
+  `src/security/secret_files.py` classifies a path as `deny` (`.env*`, private keys,
+  credential stores, `*.tfstate`, kubeconfig, `kind: Secret`), `keys_only` (names kept,
+  values masked) or `ok`. The graph walker skips denied files, the file readers and
+  the exploration agent's grep refuse them with one message that does not say whether
+  the path exists, and `GIT_PATHSPEC_EXCLUDES` keeps them out of git-backed scans.
+  `secret_path_globs_extra` adds repo-specific patterns.
+- **Review fixes for howto and the redactor.**
+  - A committed symlink is never followed: `.env` behind a link, or a file outside the
+    clone, was readable through `howto` and indexed by the walker. Symlinks are skipped
+    by the file lists, the readers, the trace and the walker; the indexer no longer
+    parses a real `.env`. The deny list gained `.envrc`, `.env-*`, `.pgpass`,
+    `.my.cnf`, `.dockercfg`, `.s3cfg`, `client_secret*.json`, `*.keytab` and
+    `*.pem.*`, and the git pathspecs ignore case.
+  - Redaction no longer takes quadratic time on one long word (20k characters took
+    12 s and stalled the loop). Runs of 2048+ non-space characters are replaced by
+    `[REDACTED:long-literal]`, the PEM and PuTTY rules are linear, the guard runs the
+    redaction off the event loop, and a redaction past its time budget is withheld.
+  - Secret names are split on `_`, `-`, `.` and camelCase: `db_pass`, `dbPass`, `PGPASS`,
+    `pw`, `creds`, `HMAC_KEY`, `AccountKey`, `PEPPER`, `SEED` and `{"name":
+    "DB_PASSWORD", "value": ...}` pairs are redacted. A quoted 40/64-digit hex under a
+    neutral name or a key-like name is redacted; SHAs after a hash-like word stay.
+  - New forms: Azure `AccountKey` and `SharedAccessKey`, Slack, Discord, Teams and
+    Telegram webhook secrets, pre-signed URL signatures, `curl -u`, `mysql -p`,
+    `--password x`, `Cookie` and `Set-Cookie`, and `user:pw@host/db` without a scheme.
+  - The detailed `howto` answer applies the caller's path rules to dependencies and
+    related tests, slices are cut at 400 characters per line and at the caller's
+    token budget, and the tool description is under 200 characters.
+
 ### Security
+
+Found by the access audit of the dev MCP, and by wiring the review features onto it.
+Each item has a regression test.
+
+
+- **Reading a repository's reviews needs the right to read the repository.**
+  `GET /api/reviews/{id}`, `/diff`, `/findings`, the history list and
+  `GET /api/pull-requests/{id}/runs` used to check only the workspace. They now
+  apply the same default-deny as MCP; a closed repository answers 404, exactly
+  like a run that does not exist. A team access rule below `code` (`metadata`,
+  `none`) now also narrows a team grant on the REST side, as it already did in
+  MCP; owners and admins are never narrowed. `metadata` still lets a repository
+  be named in a list, never opened.
+- **Groups, Claude Code sessions and "who works on what".** A group only takes
+  repositories its creator may read (a refused one gets the same 422 as an
+  unregistered one); cross-repo drift greps only the siblings the reviewer may
+  read, never `.env*`, keys or credential files, and masks secrets on the quoted
+  line; `POST /api/agent-sessions` refuses a repository the caller may not read;
+  `GET /api/repos/developers` lists only repositories the caller may see.
+- **An MCP token dies with its account.** A deactivated person is refused on
+  every call, and erasing a person (GDPR) revokes all their tokens
+  (`mcp_tokens_revoked` in the answer).
+- **`migrate_consumers` no longer takes `user_id`.** It acts as the caller,
+  needs the owner or admin role of the workspace (or a global admin) and `code`
+  access to each repository it changes. Breaking for clients that passed
+  `user_id`.
+- **`ask` honours the repository list of its token**, like every other tool.
+- **`grep` is no longer an oracle for redacted values.** A hit whose match lies
+  inside a redacted region is dropped, so a value cannot be recovered one
+  character at a time by guessing the pattern.
+- **Redaction** now also covers Kubernetes `name:` / `value:` pairs, XML
+  elements and attribute pairs, `.npmrc` tokens, `docker login -p`, setter and
+  `define('X_PASSWORD', ...)` calls, `Pwd=` in code strings, Dockerfile `ENV`,
+  htpasswd/crypt hashes, full-width `:` and `=`, and "the password is ..." prose.
+- **Credential files** added to the deny list: `*.tfvars.json`, PKCS12, GCP and
+  Firebase key files, `wp-config.php`, `local_settings.py`, Ansible vault files,
+  `values-secret*`, `htpasswd`, `vault-password.txt` and similar names; `.env `,
+  `.env.` and names with zero-width characters no longer slip past.
+- **`howto` output is not an injection channel.** Secret-store names and file
+  names printed from a repository are validated and shown as inline code.
+- **The Claude Code plugin refuses plain http.** `celmis-auth-header` will not
+  print a token for a `CELMIS_URL` that is not https (localhost excepted), and
+  the hooks say so instead of nudging towards the server.
+- **Per-token limits on the MCP server** (against one token starving the rest):
+  `CELMIS_MCP_RATE_PER_MINUTE` (default 120, `0` = off),
+  `CELMIS_MCP_MAX_CONCURRENT` (default 4) and `CELMIS_MCP_CALL_TIMEOUT_SECONDS`
+  (default 60). A call over a limit is answered as denied and audited. A dev
+  call fans out to at most 40 repositories.
 
 - **Role limits on the new surfaces are one rule, checked everywhere.**
   Memories are for editors and above (an editor sees only the memories of
@@ -425,6 +697,21 @@ derives it from there.
   real membership rows for the Jira and credential endpoints and for every
   productivity endpoint.
 
+- **One access model for every review feature.** `code_readable_repo_slugs`
+  (REST) mirrors the MCP resolver: memories, learning, review policies, the
+  issues backlog (list, summary, recheck, status change), review feedback and
+  the PR commands list read repositories the caller may open, not merely name.
+  A test compares it with `effective_access` for every principal, and a test
+  walks every route and every MCP tool of both projects.
+- **Chat replies and the business-logic answer go through the central
+  redactor** (`redact_for_mcp`) before they are posted; if it fails, the answer
+  is withheld, not posted.
+- **Review feedback routes check the run.** `GET`, `PUT` and `DELETE` on
+  `/api/feedback/run/...` answer 404 for a run in a repository the caller cannot
+  read, and look rows up inside the workspace.
+- **An MCP tool cannot open a role-gated surface the REST API closes** (a test
+  checks the memories, issues, productivity and task-context tools).
+
 ### Fixed
 
 - **Learning from feedback: review fixes.** A finding posted twice on one pull
@@ -443,6 +730,60 @@ derives it from there.
   written by the same account as the finding. A comment of the token's account with none of
   Celmis's markers now counts as a person's words and protects its thread from the cleanup,
   on all three providers.
+
+- **`howto` and the full `/mcp` server no longer start every repository's graph on each
+  call.** Working out which repositories a caller may reach listed them through a call that
+  opens each repository's graph to count its symbols (a graph server start and stop, seconds
+  each), so a `howto` call cost about four seconds per repository in the workspace (sixteen
+  seconds with four repositories). It now lists the checkouts on disk by name. Measured on
+  one repository: 3.7 s to 0.1 to 0.4 s.
+- **`howto` slices start at the code, not at a comment.** A library named in a comment or a
+  docstring ("PyJWKClient cannot load keys behind the proxy ...") counted as a use and
+  anchored the slice there, so the answer showed a file's header instead of the code that
+  verifies the token. Comment and docstring lines are now ignored when looking for the
+  pattern. The header line also reads "indexed just now" instead of "indexed now ago".
+
+- **`/mcp/dev` masks the secrets people actually commit.** `DB_PASSWORD=value`,
+  `password: value`, `password='value'`, `redis://:value@host`, JSON `"token": "value"`
+  and secret defaults in `os.environ.get(...)` / `process.env.X || '...'` are masked
+  in `grep`, `read_symbol`, `refs`, `find` and `outline` (a pointer such as
+  `${DB_PASSWORD}`, `settings.db_password` or `changeme` is left readable). Output
+  is redacted before it is cut to a line or signature length, so a secret straddling
+  the cut is no longer half-printed. `outline` prints names only for a repository the
+  caller may see as metadata.
+- **`/mcp/dev` cursors are about 20 characters** whatever the number of repositories
+  (they were several kilobytes over a large fleet) and are pinned to the revisions of
+  the repositories that produced hits, so a push elsewhere does not reset page 2.
+- **`find` keeps the best candidates on large repositories.** Candidates were the 200
+  shortest names; they are now ordered by how the name matches, then by how often it
+  is called, so a typo or a common word still reaches the symbol that is used most.
+- `grep` and the sibling-repository text refs say when the indexed revision is no
+  longer in the clone instead of answering "no matches"; `repos` pages exactly as many
+  repositories as the `idx:` line can describe; `ask` never lists a secret file as a
+  source; root-level `.env`, `.npmrc` and similar are recognised as secret paths; a
+  symbol that lost its last caller loses its usage rank on the next index pass.
+- **`search_symbols` finds what was meant.** `kind` filters inside the query before
+  the limit (twenty variables called `user` no longer hide the one function),
+  matching is ranked and tolerates a typo (`mode`: auto, exact, prefix, fuzzy),
+  repositories are interleaved, `end_line` is returned, `project_id` is optional,
+  and the answer no longer lists repositories the caller may not read
+  (`blocked_repos`, `access_notice`, `hidden_symbol_count` are gone from
+  `search_symbols`, `find_consumers` and `get_api_surface`).
+- **An incremental index no longer fails for ever on a busy repository.** When the
+  shallow clone has moved past the revision the index was built from, the pass
+  rebuilds from the checkout instead of asking git for a diff that cannot be taken.
+- **Tool descriptions over 300 characters on `/mcp` are shortened.**
+- **`howto` follows the code into its config loader.** A connection or auth pattern
+  that reads `config.databaseUrl` now also shows the loader that reads
+  `process.env.DATABASE_URL` or `os.Getenv(...)` (TypeScript, Go and others, not only
+  pydantic settings), lists the names it reads that belong to the topic, and the
+  secret-store path it names. Helper calls such as `required("DATABASE_URL")` count
+  as reads inside a loader file.
+- **Credential files named `<anything>credentials<anything>.json` are never indexed or
+  returned**, and a JSON file whose content says `"type": "service_account"` is
+  refused by the content check whatever its name.
+- The `celmis-mcp` skill gave the tool count as 18; the server has 48 on `/mcp`, and the
+  developer profile adds nine more on `/mcp/dev`. The skill now says so.
 - **A refused finding folded into the summary no longer breaks it.** A body cut inside a
   code fence is closed again, so the rest of the summary (and Bitbucket's tag
   rewriting) is not swallowed as code; a malformed `Retry-After` on Bitbucket no
@@ -498,13 +839,110 @@ derives it from there.
     wording of `start-review` and `review --force` says what each really does.
   - "Same commit already reviewed" is decided only by the commit of the last
     complete, posted review, so a failed or partial run is retried.
-  - `GET /api/pull-requests/{id}/commands` answers 403 to somebody who may not
+  - `GET /api/pull-requests/{id}/commands` answers 404 to somebody who may not
     read the repository.
   - Memories hide the repository, pull request and author they were taught from
     when the reader may not read that repository.
   - A redundant index on the productivity events table was removed from its
     migration (the model never had it), so the migration chain and the models
     agree; every new revision downgrades.
+
+### Tests
+
+
+- `scripts/dev_mcp_journey.py` runs the whole developer journey over real HTTP on an
+  in-process Celmis: users in six roles, teams and rules over REST, tokens issued by the
+  superadmin over REST (developer A, developer B, expired, revoked), the scenarios through
+  a real MCP client with per-call size and latency against a grep-and-read baseline, a
+  security matrix (84 checks), and a leak scan of every captured output, log and audit row.
+  `--real` runs the three developer requests on clones of real local services and keeps the
+  results outside the repository. Two scenarios were added to the gold file (auth like
+  service X; credentials of service X used in service Y).
+
+- Leak tests plant runtime-generated fake secrets in a synthetic repo (DSNs, headers,
+  YAML/JSON, PEM, base64, URL-encoded) and assert none reaches the output of `howto`
+  or of any existing tool; a table of every tool on both servers fails when a tool is
+  missing from it, and a negative control proves the check can fail.
+
+### Integration review fixes
+
+- **The pull-requests list names only repositories the caller may read.**
+  `GET /api/pull-requests` (rows, the total and the repository facet) filters by
+  the same per-repository permission as the other review routes; a member no
+  longer sees titles and authors of a closed repository.
+- **REST and MCP read a repository the same way.** When an access rule names only
+  another team, a team that holds a read grant on the repository is now refused by
+  REST too, as MCP already did: a rule narrows, a grant is only the fallback.
+- **The repository groups API is scoped.** The list shows only the repositories
+  the caller may read (a group with none is hidden, except from workspace
+  managers); creating, renaming, adding to, removing from and deleting a group
+  needs editor or above and `review` permission on every repository in it. A
+  group the caller cannot see answers 404.
+- **An access rule names a registered repository.** `PUT /api/access/rules`
+  resolves the slug (`provider:owner/name`, a bare `owner/name`, or the registry
+  slug) to the registered one and answers 404 for an unknown repository, so a
+  rule can no longer be written against a spelling that never matches.
+- **A self-service token carries exactly the write scopes it was granted**, not
+  every write scope the profile allows.
+- **Redaction ReDoS closed.** The central redactor and the secret scanner no
+  longer take quadratic time on a long run of whitespace: runs longer than 64
+  whitespace characters are collapsed before matching and every whitespace
+  quantifier is bounded. One crafted file could pin a worker for minutes.
+- **More real secret shapes are redacted:** markdown table rows and bold or
+  code-quoted names, XML name/value pairs in either order, SQL
+  `PASSWORD '...'` and `IDENTIFIED BY`, `sshpass -p`, and `netrc` entries.
+- **The literals floor reaches every model-bound text.** `howto`, the PR chat,
+  the cross-repository drift check and the exploration agent mask the values of
+  secrets the instance itself knows, on top of the central rules. The floor moved
+  to `src/security/secret_literals.py`.
+- **Two more grep oracles closed.** The developer profile's `grep` and the
+  exploration agent's `grep_in_file` match against the redacted text, so whether
+  a guessed prefix "hits" no longer says anything about the hidden value.
+- **The issue resolver's first check of a branch no longer waits on another
+  pass.** On PostgreSQL the state row is created in its own transaction with
+  `ON CONFLICT DO NOTHING`, so a second pass sees the row locked and reports
+  busy at once.
+- **The productivity migration is idempotent.** `e3b8d0f2a478` skips tables and
+  indexes that already exist and its downgrade tolerates a second run, so a
+  database that had them created by hand upgrades cleanly.
+- **The compose file forwards every documented setting** the API reads (MCP
+  limits, the previous JWT secrets, trusted proxy, extra secret path globs, the
+  background-job intervals and budgets, the PR chat and bot-handle settings and
+  the learning thresholds). The API service has no `env_file`, so a variable not
+  listed there never reached it.
+- **Docs corrected.** `@celmis pause` never existed (the Pause button does; the
+  dead `command` pause reason is gone); `@celmis remember:` trust follows the token
+  owner and `memory_trusted_commenters`, and workspace roles apply on the
+  Memories page; the productivity API lives under `/api/analytics/productivity`;
+  the MCP skill and `server.json` teach `issue-token --user --workspace --repos
+  --days`; a refused token answers 403 with the reason; the howto scope is
+  `read:graph` on `/mcp/` and `read:code` on `/mcp/dev/`; the MCP tool count is 49
+  (33 read, 16 write) everywhere, and a test now reads it from the loaded tool
+  map instead of the source literal; the Jira, learning, issue-sweep and
+  productivity settings are documented; the plugin README says `CELMIS_URL` must
+  be `https://`.
+- A tracked merge leftover (`models.py.orig`) was removed and `*.orig` and `*.rej`
+  are ignored; `scripts/dev_mcp_journey.py` and `scripts/dev_mcp_e2e.py` are
+  executable.
+
+### Upgrade notes
+
+- Every GitHub, GitLab and Bitbucket webhook installed before this release lacks the
+  comment, thread, approval or push events (see the BREAKING section for the list per
+  provider) until it is repaired: use "Repair all webhooks" on the webhooks page. The
+  installer subscribes new hooks only, so a hook nobody repairs keeps reviewing but
+  ignores `@celmis` commands and feedback.
+- The database moves in one chain with a single head. From v2.3.5 run
+  `alembic upgrade head`: twelve revisions apply in order, ending at
+  `b3e9d27f5a40`, and each one downgrades. The MCP token and audit tables sit
+  between the feedback-learning revision and the index-branch column.
+- Before the first start of this release: issue per-person MCP tokens, and run
+  `analyzer access bootstrap --team <team> --visibility code --all-unruled` for
+  the teams that need their old access (see the BREAKING section).
+- The webhook repair above, the per-person MCP tokens and the access bootstrap are the
+  only manual steps.
+- `CELMIS_UNRULED_REPO_ACCESS=open` also restores the old reading of the review
+  features on a single-tenant install. It is a stopgap.
 
 ## [2.3.5] — 2026-10-06
 

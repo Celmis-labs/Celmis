@@ -9,10 +9,17 @@ Endpoints:
     PUT    /api/access/rules                         — upsert rule (admin)
     DELETE /api/access/rules/{rule_id}               — delete rule (admin)
     GET    /api/access/my[?repo_slug=]               — caller's effective access
+    GET    /api/access/unruled                       — repos only admins can see (admin)
+
+A repository with no rule and no team grant is visible to the workspace owner,
+its admins and the superadmin only. Nobody else is told such a repository
+exists: the rule list and ``/my`` name only repositories the caller may read,
+and an unknown slug answers exactly like one that is hidden.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 
@@ -25,6 +32,7 @@ from src.access import resolve_access
 from src.api.deps import (
     current_workspace_id,
     get_current_user,
+    is_workspace_admin,
     require_workspace_admin,
 )
 from src.db.models import RepoAccessRule, Team
@@ -105,6 +113,14 @@ async def list_rules(
     if team_id:
         stmt = stmt.where(RepoAccessRule.team_id == team_id)
     rules = (await session.scalars(stmt.order_by(RepoAccessRule.repo_slug))).all()
+    if not await asyncio.to_thread(is_workspace_admin, _user, ws_id):
+        # A member sees the rules of the repositories they can read, nothing
+        # else: a rule's slug, team and globs describe a repository.
+        slugs = list(dict.fromkeys(r.repo_slug for r in rules))
+        access = (await asyncio.to_thread(
+            resolve_access, user_id=_user.id, is_admin=False,
+            workspace_id=ws_id, repos=slugs)) if slugs else {}
+        rules = [r for r in rules if access[r.repo_slug].researchable]
     # team-name lookup for display
     team_ids = {r.team_id for r in rules}
     names: dict[str, str] = {}
@@ -114,6 +130,22 @@ async def list_rules(
         )).all():
             names[t.id] = t.name
     return [_to_out(r, names.get(r.team_id)) for r in rules]
+
+
+def _registry_slug(value: str, workspace_id: str) -> str | None:
+    """The registry slug of the workspace repository `value` names: the slug
+    itself, `provider:owner/name`, or a bare `owner/name` that only one
+    repository carries. None when the workspace has no such repository."""
+    from src.access.effective import registered_repos
+
+    registry = registered_repos(workspace_id)
+    value = value.strip()
+    if value in registry:
+        return value
+    wanted = value.split(":", 1)[-1].lower()
+    hits = [slug for slug, names in registry.items()
+            if any(n.lower() == wanted for n in names[1:])]
+    return hits[0] if len(hits) == 1 else None
 
 
 @router.put("/rules", response_model=AccessRuleOut)
@@ -133,6 +165,16 @@ async def upsert_rule(
         raise HTTPException(
             status_code=404, detail="team not found in this workspace",
         )
+    # Rules are matched on the registry slug, exactly. A rule saved under any
+    # other spelling (`owner/name`) would match nothing - and a deny rule that
+    # matches nothing leaves the repository open - so the repository is
+    # resolved here and an unknown one is refused.
+    repo_slug = await asyncio.to_thread(_registry_slug, payload.repo_slug, ws_id)
+    if repo_slug is None:
+        raise HTTPException(
+            status_code=404, detail="repository not registered in this workspace",
+        )
+    payload = payload.model_copy(update={"repo_slug": repo_slug})
     existing = (await session.scalars(
         select(RepoAccessRule).where(
             RepoAccessRule.workspace_id == ws_id,
@@ -205,11 +247,42 @@ async def my_access(
         )).all())
     if not repos:
         return []
-    access = resolve_access(
-        user_id=user.id, is_admin=user.is_admin,
+    access = await asyncio.to_thread(
+        resolve_access, user_id=user.id, is_admin=user.is_admin,
         workspace_id=ws_id, repos=repos,
     )
+    # A repository the caller cannot research is not listed: the list must not
+    # tell a member which repositories have rules. Asked about one slug, the
+    # answer for a hidden repository is the same as for one that does not exist.
+    from src.access.resolver import RepoAccessDecision
+
     return [
-        MyAccessItem(**access[r].to_dict())  # to_dict keys match the schema
-        for r in repos
+        MyAccessItem(**(access[r] if access[r].researchable
+                        else RepoAccessDecision.denied(r)).to_dict())
+        for r in repos if repo_slug or access[r].researchable
     ]
+
+
+class UnruledOut(BaseModel):
+    count: int
+    repos: list[str]
+
+
+@router.get("/unruled", response_model=UnruledOut)
+async def unruled_repos_endpoint(
+    _user: User = Depends(require_workspace_admin),
+    ws_id: str = Depends(current_workspace_id),
+) -> UnruledOut:
+    """Repositories of this workspace that have no rule and no team grant, so
+    only admins can see them. Backs the "N repos visible to admins only" banner."""
+    from sqlalchemy.orm import Session
+
+    from src.access.bootstrap import unruled_repos
+    from src.access.resolver import _sync_engine
+
+    def _find() -> list[str]:
+        with Session(_sync_engine()) as s:
+            return unruled_repos(s, ws_id)
+
+    names = await asyncio.to_thread(_find)
+    return UnruledOut(count=len(names), repos=names)

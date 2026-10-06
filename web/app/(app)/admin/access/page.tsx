@@ -25,6 +25,7 @@ import {
 import { useT } from "@/lib/i18n";
 import { PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
+import { UnruledBanner } from "@/components/unruled-banner";
 import { useToken } from "@/lib/use-token";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
@@ -147,6 +148,7 @@ export default function AccessPage() {
       </div>
 
       <SectionTabs set="team" />
+      <UnruledBanner />
 
       {/* Create / upsert */}
       <Card>

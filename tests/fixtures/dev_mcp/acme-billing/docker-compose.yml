@@ -1,0 +1,9 @@
+services:
+  billing:
+    build: .
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      DB_POOL_SIZE: "10"
+      STRIPE_API_KEY: ${STRIPE_API_KEY}
+    ports:
+      - "127.0.0.1:3000:3000"
