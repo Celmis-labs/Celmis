@@ -62,7 +62,7 @@ MAX_PER_FILE = 15
 #: A job not touched for this long is not running any more.
 STALE_AFTER = timedelta(minutes=30)
 
-JOB_KINDS = ("generate", "import")
+JOB_KINDS = ("generate", "import", "history")
 
 _SKIP_DIRS = frozenset({
     ".git", "node_modules", "vendor", "dist", "build", ".next", ".venv", "venv",
@@ -876,6 +876,10 @@ async def run_job(job_id: str, actor: Any = None, *, llm: Any = None) -> dict | 
     try:
         if kind == "generate":
             result = await generate_rules(ws, repo_slug, actor, llm=llm, progress=progress)
+        elif kind == "history":
+            from src.review.learning.history_rules import learn_rules
+
+            result = await learn_rules(ws, repo_slug, actor, llm=llm, progress=progress)
         else:
             result = await import_rules(ws, repo_slug, actor, progress=progress)
     except RulesJobError as exc:

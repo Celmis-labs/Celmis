@@ -36,6 +36,15 @@ from collections import OrderedDict
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from src.review import messages
+from src.review.commands.events import (
+    BITBUCKET_COMMENT_EVENTS,
+    GITHUB_COMMENT_EVENTS,
+    GITLAB_NOTE_EVENT,
+    extract_bitbucket_comment,
+    extract_github_comment,
+    extract_gitlab_note,
+)
 from src.review.settings import ReviewSettings, get_review_settings
 from src.review.webhook_secrets import resolve_webhook_secret
 
@@ -185,21 +194,30 @@ def _verify_bitbucket_signature(
 def _extract_github_pr(payload: dict) -> dict | None:
     """Get (action, repo, pr_number) from a GitHub pull_request payload.
 
-    Triggers on opened / synchronize / ready_for_review / reopened.
+    Triggers on opened / synchronize / ready_for_review / reopened — and on
+    `edited` when the TITLE changed, so a pull request skipped for a title
+    keyword ("WIP") is reviewed once the keyword is removed. The same-commit
+    check keeps every other title edit quiet.
     """
     action = payload.get("action")
-    if action not in ("opened", "synchronize", "ready_for_review", "reopened"):
+    if action == "edited":
+        if "title" not in (payload.get("changes") or {}):
+            return None
+    elif action not in ("opened", "synchronize", "ready_for_review", "reopened"):
         return None
     pr = payload.get("pull_request") or {}
     repo = (payload.get("repository") or {}).get("full_name")
     if not pr or not repo:
         return None
+    if action == "edited" and pr.get("state") not in (None, "open"):
+        return None  # a title fixed on a closed pull request needs no review
     return {
         "provider": "github",
         "repo": repo,
         "number": int(pr.get("number") or 0),
         "head_sha": str((pr.get("head") or {}).get("sha") or ""),
         "action": action,
+        "title": pr.get("title"),
     }
 
 
@@ -247,6 +265,7 @@ def _extract_gitlab_mr(payload: dict) -> dict | None:
         "number": int(attrs.get("iid") or 0),
         "head_sha": str((attrs.get("last_commit") or {}).get("id") or ""),
         "action": mr_action,
+        "title": attrs.get("title"),
     }
 
 
@@ -267,6 +286,7 @@ def _extract_bitbucket_pr(payload: dict, event_key: str) -> dict | None:
         "number": int(pr.get("id") or 0),
         "head_sha": str(head_sha),
         "action": event_key,
+        "title": pr.get("title"),
     }
 
 
@@ -295,6 +315,7 @@ def _extract_github_pr_state(payload: dict) -> dict | None:
         "provider": "github", "repo": repo, "number": int(pr.get("number") or 0),
         "state": state, "title": pr.get("title"),
         "author": (pr.get("user") or {}).get("login"), "url": pr.get("html_url"),
+        "base_ref": (pr.get("base") or {}).get("ref"),
     }
 
 
@@ -311,6 +332,7 @@ def _extract_gitlab_mr_state(payload: dict) -> dict | None:
         "provider": "gitlab", "repo": project, "number": int(attrs.get("iid") or 0),
         "state": state, "title": attrs.get("title"),
         "author": (payload.get("user") or {}).get("username"), "url": attrs.get("url"),
+        "base_ref": attrs.get("target_branch"),
     }
 
 
@@ -327,7 +349,42 @@ def _extract_bitbucket_pr_state(payload: dict, event_key: str) -> dict | None:
         "author": (pr.get("author") or {}).get("nickname")
                   or (pr.get("author") or {}).get("display_name"),
         "url": ((pr.get("links") or {}).get("html") or {}).get("href"),
+        "base_ref": (((pr.get("destination") or {}).get("branch") or {}).get("name")),
     }
+
+
+#: Bitbucket events that only say "this PR changed": the productivity sync marks
+#: the PR stale for its next tick (no API call). The merge/decline events go
+#: through `_dispatch_pr_state` instead.
+_BITBUCKET_TOUCH_EVENTS = {
+    "pullrequest:created": "created", "pullrequest:updated": "updated",
+    "pullrequest:approved": "approved", "pullrequest:unapproved": "unapproved",
+}
+
+
+def _extract_bitbucket_pr_touch(payload: dict, event_key: str) -> dict | None:
+    event = _BITBUCKET_TOUCH_EVENTS.get(event_key)
+    pr = payload.get("pullrequest") or {}
+    repo = (payload.get("repository") or {}).get("full_name")
+    if event is None or not pr or not repo or not pr.get("id"):
+        return None
+    return {"provider": "bitbucket", "repo": repo, "number": int(pr["id"]), "event": event}
+
+
+async def _dispatch_pr_touch(info: dict, *, expected_workspace_id: str | None) -> None:
+    """Tell the productivity sync a PR changed. Same tenant binding as `_dispatch_pr_state`. Never raises."""
+    try:
+        from src.api.auto_review import get_auto_review_store
+        cfg = get_auto_review_store().config_for_repo(info["provider"], info["repo"])
+        if cfg is None or (
+                expected_workspace_id is not None and cfg.workspace_id != expected_workspace_id):
+            return
+        from src.productivity.sync import on_lifecycle_event
+        await asyncio.to_thread(
+            on_lifecycle_event, cfg.workspace_id, info["provider"], cfg.full_name,
+            info["number"], info["event"], user_id=cfg.user_id, repo_slug=cfg.repo_slug)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pr_touch_dispatch_failed repo=%s err=%s", info.get("repo"), exc)
 
 
 async def _dispatch_pr_state(
@@ -357,10 +414,70 @@ async def _dispatch_pr_state(
             provider=info["provider"], repo=info["repo"], number=info["number"],
             state=info["state"], title=info.get("title"),
             author=info.get("author"), url=info.get("url"),
+            base_ref=info.get("base_ref") or None,
         )
+        if info["state"] == "merged":
+            await _schedule_backlog_recheck(
+                cfg.workspace_id, info["provider"], info["repo"],
+                info.get("base_ref"), merged_pr=info["number"])
+        # Productivity history: a merge or close queues a single-PR refresh
+        # (when the repository opted in). Never raises.
+        from src.productivity.sync import on_lifecycle_event
+        await asyncio.to_thread(
+            on_lifecycle_event, cfg.workspace_id, info["provider"], cfg.full_name,
+            info["number"], {"merged": "merged", "closed": "closed"}.get(info["state"], "reopened"),
+            user_id=cfg.user_id, repo_slug=cfg.repo_slug)
     except Exception as exc:  # noqa: BLE001
         logger.warning("pr_state_dispatch_failed repo=%s err=%s",
                        info.get("repo"), exc)
+
+
+async def _schedule_backlog_recheck(
+    workspace_id: str, provider: str, repo: str, base_ref: str | None, *,
+    merged_pr: int | None = None, reason: str = "merge",
+) -> None:
+    """A branch moved: look at its issues backlog soon (debounced; a burst of
+    merges is one recheck). The branch is the webhook's word, else the one the
+    ledger stored for the PR. Never raises."""
+    try:
+        from src.review import issues as ledger
+        from src.review.issue_resolver import has_backlog, schedule_recheck
+
+        branch = base_ref
+        if not branch and merged_pr:
+            branch = await asyncio.to_thread(
+                ledger.pr_base_ref, workspace_id=workspace_id, provider=provider,
+                repo=repo, number=merged_pr)
+        if not branch:
+            return
+        if not await asyncio.to_thread(has_backlog, workspace_id, provider, repo, branch):
+            return
+        await schedule_recheck(workspace_id, provider, repo, branch,
+                               reason=reason, merged_pr=merged_pr)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("issue_recheck_trigger_failed repo=%s err=%s", repo, exc)
+
+
+async def _dispatch_issue_recheck(
+    provider: str, repo: str, branch: str, *, expected_workspace_id: str | None,
+) -> None:
+    """A push to `branch`: recheck its backlog if it has one. Same tenant
+    binding as the other dispatchers: an unbound or mismatched repo does
+    nothing. Never raises."""
+    try:
+        from src.api.auto_review import get_auto_review_store
+
+        cfg = get_auto_review_store().config_for_repo(provider, repo)
+        if cfg is None:
+            return
+        if expected_workspace_id is not None and cfg.workspace_id != expected_workspace_id:
+            logger.warning("issue_recheck_workspace_mismatch url_ws=%s bound_ws=%s repo=%s",
+                           expected_workspace_id, cfg.workspace_id, repo)
+            return
+        await _schedule_backlog_recheck(
+            cfg.workspace_id, provider, repo, branch, reason="push")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("issue_recheck_dispatch_failed repo=%s err=%s", repo, exc)
 
 
 # ─── Background review dispatch ────────────────────────────────
@@ -438,6 +555,86 @@ async def _reviews_drafts(provider_name: str, repo: str) -> bool:
     return await asyncio.to_thread(run_on_drafts_for_repo, provider_name, repo)
 
 
+#: Deliveries that fire for ANY change to the pull request, not only a push:
+#: Bitbucket's `pullrequest:updated` and GitLab's `update` also arrive when the
+#: title or description is edited. Those are the ones the same-commit check
+#: applies to. GitHub's `edited` (a title change only) is one too; opened /
+#: reopened / ready_for_review mean somebody wants a review now.
+_ANY_CHANGE_EVENTS = frozenset({
+    ("github", "edited"),
+    ("bitbucket", "pullrequest:updated"),
+    ("gitlab", "update"),
+})
+
+
+def _same_commit_already_reviewed(
+    provider_name: str, repo: str, pr_number: int, head_sha: str, workspace_id: str,
+) -> bool:
+    """True when this commit of the PR already has a finished review that was
+    POSTED: `pr_state.last_reviewed_sha` is the head delivered.
+
+    What stops a description edit from starting another review — and, with
+    `summary_target=description`, what stops Celmis's own description write
+    from doing it forever: every PUT fires `pullrequest:updated`, which would
+    queue a review, which writes the description again.
+
+    Only a complete run whose comments went up moves `last_reviewed_sha`. A
+    dry run, a run whose posting failed, a partial run, a skipped or failed
+    one, a different head or a PR never seen does not, so the delivery is
+    reviewed: nothing was ever shown on the pull request for that commit.
+    Fails OPEN: if the database cannot answer, the review runs — a duplicate
+    is cheaper than a lost one.
+    """
+    if not head_sha:
+        return False
+    try:
+        from src.review import pr_state
+
+        state = pr_state.load(workspace_id, provider_name, repo, pr_number)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "same_commit_check_failed provider=%s repo=%s pr=%d err=%s",
+            provider_name, repo, pr_number, exc,
+        )
+        return False
+    return bool(state and _same_sha(state.last_reviewed_sha, head_sha))
+
+
+def _same_sha(stored: str | None, delivered: str) -> bool:
+    """Two commit ids of one commit (see `pr_state.same_sha`)."""
+    from src.review.pr_state import same_sha
+
+    return same_sha(stored, delivered)
+
+
+def _bitbucket_pr_meta(payload: dict) -> dict:
+    """What a Bitbucket pull request delivery says about the PR, for the gates
+    and for the run rows they write."""
+    pr = payload.get("pullrequest") or {}
+    return {
+        "title": pr.get("title"),
+        "author": (pr.get("author") or {}).get("nickname")
+                  or (pr.get("author") or {}).get("display_name"),
+        "url": ((pr.get("links") or {}).get("html") or {}).get("href"),
+        "head_ref": (((pr.get("source") or {}).get("branch")) or {}).get("name"),
+        "base_ref": (((pr.get("destination") or {}).get("branch")) or {}).get("name"),
+    }
+
+
+def _cadence_reason(decision, registered, gates) -> str:
+    """The sentence the run row of a cadence skip carries — the orchestrator
+    gate's own text, so the two write one reason and `record_gate_skip` folds
+    repeats."""
+    from src.review import cadence as cadence_mod
+
+    sentence = cadence_mod.gate_reason(
+        decision, "en", handle=cadence_mod.bot_handle(),
+        pushes=int(gates["auto_pause_pushes"]),
+        minutes=int(gates["auto_pause_window_minutes"]),
+        reason=registered.paused_reason)
+    return sentence[:1].upper() + sentence[1:] + "."
+
+
 async def _dispatch_review(
     provider_name: str,
     repo: str,
@@ -448,6 +645,7 @@ async def _dispatch_review(
     expected_workspace_id: str | None = None,
     skip_reason: str | None = None,
     pr_meta: dict | None = None,
+    event: str = "",
 ) -> None:
     """Enqueue the review as a durable job. If the sync queue fails,
     fall back to inline dispatch (legacy behaviour) so a broken DB
@@ -566,6 +764,82 @@ async def _dispatch_review(
         )
         return
 
+    # The title and cadence gates, answered here from the same rows the
+    # orchestrator's gates read, so a PR they would skip never costs a job.
+    # One settings read for both; unreadable is the built-in (review).
+    from src.review import cadence as cadence_mod
+    from src.review.review_defaults import gate_settings_for_repo
+    from src.review.scope import title_keyword_match
+
+    gates = await asyncio.to_thread(gate_settings_for_repo, provider_name, repo)
+    matched = title_keyword_match(
+        (pr_meta or {}).get("title"), gates["ignored_title_keywords"])
+    if matched:
+        logger.info(
+            "webhook_skipped reason=title_keyword provider=%s repo=%s pr=%d "
+            "keyword=%s ws=%s", provider_name, repo, pr_number, matched,
+            workspace_id)
+        sentence = messages.t("gate.title", "en", keyword=matched)
+        await asyncio.to_thread(
+            record_gate_skip, provider_name, repo, pr_number,
+            user_id=cfg.user_id, workspace_id=workspace_id, source="webhook",
+            gate_key="gate_title", gate_name="Check title keywords",
+            reason=sentence[:1].upper() + sentence[1:] + ".",
+            pr_meta=pr_meta,
+        )
+        return
+
+    # A delivery that only says "something about this PR changed" for a commit
+    # that is already reviewed is a description or title edit: nothing to read.
+    # Quiet on purpose — no run row, since nothing was skipped by a gate.
+    if (provider_name, event) in _ANY_CHANGE_EVENTS and await asyncio.to_thread(
+        _same_commit_already_reviewed,
+        provider_name, repo, pr_number, head_sha, workspace_id,
+    ):
+        logger.info(
+            "webhook_skipped reason=same_commit provider=%s repo=%s pr=%d "
+            "head=%s ws=%s", provider_name, repo, pr_number, head_sha[:12],
+            workspace_id,
+        )
+        return
+
+    # Count the push, then ask the cadence. Fails OPEN: a PR whose state
+    # cannot be written is reviewed, as it was before cadence existed.
+    cadence_name = str(gates["review_cadence"])
+    try:
+        from src.review import pr_state
+
+        registered = await asyncio.to_thread(
+            pr_state.register_push, workspace_id, provider_name, repo, pr_number,
+            head_sha, cadence_name=cadence_name,
+            limit=int(gates["auto_pause_pushes"]),
+            window_minutes=int(gates["auto_pause_window_minutes"]),
+            meta=pr_meta,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("push_register_failed provider=%s repo=%s pr=%d err=%s",
+                       provider_name, repo, pr_number, exc)
+        registered = None
+    if registered is not None:
+        decision = cadence_mod.decide(
+            cadence_name, registered.paused, registered.paused_reason)
+        if decision.action == "skip":
+            logger.info(
+                "webhook_skipped reason=%s provider=%s repo=%s pr=%d ws=%s",
+                decision.code, provider_name, repo, pr_number, workspace_id)
+            # The orchestrator's gate posts the one note that says how to
+            # resume; every later delivery is only written down.
+            if not (registered.notice_pending and gates["status_feedback"]):
+                await asyncio.to_thread(
+                    record_gate_skip, provider_name, repo, pr_number,
+                    user_id=cfg.user_id, workspace_id=workspace_id,
+                    source="webhook", gate_key="gate_cadence",
+                    gate_name="Check review cadence",
+                    reason=_cadence_reason(decision, registered, gates),
+                    pr_meta=pr_meta,
+                )
+                return
+
     from src.review.stages import now_iso
 
     payload = {
@@ -624,6 +898,190 @@ async def _dispatch_review(
             "review_dispatch_unhandled provider=%s repo=%s pr=%d err=%s",
             provider_name, repo, pr_number, exc,
         )
+
+# ─── Comment commands (`@celmis ...`) ──────────────────────────
+#
+# A comment webhook is the cheapest delivery there is to abuse: anybody who can
+# comment on a pull request produces one. So the receiver stays small. The
+# delivery is verified like every other (signature or token, then dedup), the
+# extractor turns it into a `CommentEvent`, and a text filter drops everything
+# that does not name the bot before any task is created. What is left is
+# bound to ONE workspace through the repo (fail closed, and the URL's
+# workspace must agree, exactly as for a review) and handed to
+# `commands.handlers.accept`, which claims the comment in the ledger and
+# applies the rate limits. The answer is produced by a queue job.
+#
+# `cfg.enabled` (auto-review) is deliberately NOT consulted: a person asking
+# for a review in a comment is not the automatic review that switch governs.
+# The repository's `commands_enabled` setting is the switch for commands.
+
+
+def _resolve_tenant(
+    provider_name: str, repo: str, pr_number: int, expected_workspace_id: str | None,
+):
+    """The auto-review config of the ONE workspace this repo is bound to, or
+    None — with the reason logged — when the repo is bound to none or several
+    workspaces, or to a workspace other than the one whose secret signed the
+    delivery. The tenant binding every dispatcher shares."""
+    from src.api.auto_review import get_auto_review_store
+
+    cfg = get_auto_review_store().config_for_repo(provider_name, repo)
+    if cfg is None:
+        logger.warning(
+            "webhook_no_workspace_binding provider=%s repo=%s pr=%d — skipping "
+            "(repo is not bound to exactly one workspace; fail closed)",
+            provider_name, repo, pr_number,
+        )
+        return None
+    if expected_workspace_id is not None and cfg.workspace_id != expected_workspace_id:
+        logger.warning(
+            "webhook_workspace_mismatch url_ws=%s bound_ws=%s provider=%s repo=%s "
+            "pr=%d — skipping (a delivery may only act on repos bound to the "
+            "workspace whose secret signed it)",
+            expected_workspace_id, cfg.workspace_id, provider_name, repo, pr_number,
+        )
+        return None
+    return cfg
+
+
+def _command_candidate(ev, settings: ReviewSettings):
+    """The parsed command when this comment is one the bot should look at;
+    None for everything else. Pure text work, safe to run per delivery."""
+    from src.review import markers
+    from src.review.commands.parser import might_address_bot, parse_comment
+
+    if ev is None or ev.actor_is_bot:
+        return None
+    if not might_address_bot(ev.body, settings.bot_handle):
+        return None
+    # Our own words (a reply, a summary) never start a command.
+    if markers.is_bot_text(ev.body):
+        return None
+    return parse_comment(ev.body, settings.bot_handle)
+
+
+def _may_be_feedback(ev, command) -> bool:
+    """A reply that could be feedback on one of our findings: a human comment
+    in a thread, written for nobody in particular (no command) or as a question
+    to the bot. A named command (`review`, `remember`, ...) is never feedback.
+    Pure text work, like `_command_candidate`."""
+    from src.review.commands.parser import CHAT
+    from src.review.learning.replies import is_reply_candidate
+
+    return (command is None or command.name == CHAT) and is_reply_candidate(ev)
+
+
+def _is_our_text(ev) -> bool:
+    from src.review import markers
+
+    return markers.is_bot_text(ev.body)
+
+
+async def _dispatch_command(
+    ev, command, *, expected_workspace_id: str | None,
+) -> None:
+    """Read the comment as feedback on a finding, then (unless it was) accept
+    it as a command and queue its answer. Never raises.
+
+    Feedback goes first: `@celmis dismiss` or a thumbs-down in a finding's
+    thread parses as a question for the chat, which would swallow it. A reply
+    the learning loop took is not also a chat question; one it read as a
+    question goes to the chat even without the handle (a reply in the bot's own
+    thread is addressed to it)."""
+    try:
+        cfg = _resolve_tenant(ev.provider, ev.repo, ev.pr_number, expected_workspace_id)
+        if cfg is None:
+            return
+        if _may_be_feedback(ev, command):
+            from src.review.commands.parser import CHAT, MAX_ARGS_CHARS, ParsedCommand
+            from src.review.learning.receiver import learn_from_comment
+            from src.review.learning.replies import written_text
+
+            learned = await asyncio.to_thread(
+                learn_from_comment, ev, workspace_id=cfg.workspace_id, user_id=cfg.user_id)
+            if learned.handled:
+                return
+            if command is None:
+                if learned.handoff != "chat":
+                    return
+                command = ParsedCommand(CHAT, args=written_text(ev.body)[:MAX_ARGS_CHARS])
+        from src.review.commands.handlers import accept, execute
+
+        payload = await asyncio.to_thread(
+            accept, ev, command, workspace_id=cfg.workspace_id, user_id=cfg.user_id)
+        if payload is None:
+            return
+        try:
+            from src.sync.queue import KIND_PR_COMMAND, enqueue
+
+            enqueue(
+                kind=KIND_PR_COMMAND, payload=payload,
+                dedup_key=f"cmd:{ev.provider}:{ev.repo}#{ev.pr_number}:{ev.comment_id}",
+                enqueued_by=f"webhook:{ev.provider}", max_attempts=2,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "command_enqueue_failed_falling_back_inline provider=%s pr=%d err=%s",
+                ev.provider, ev.pr_number, type(exc).__name__)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, lambda: execute(payload))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("command_dispatch_failed provider=%s repo=%s err=%s",
+                       getattr(ev, "provider", "?"), getattr(ev, "repo", "?"),
+                       type(exc).__name__)
+
+
+def _comment_response(
+    ev, workspace_id: str | None, settings: ReviewSettings, stats: dict,
+) -> JSONResponse:
+    """The receiver's answer to a comment delivery, and the dispatch behind it."""
+    if ev is None:
+        return JSONResponse({"status": "ignored", "reason": "not a pull request comment"})
+    command = _command_candidate(ev, settings)
+    if command is None:
+        # Not a command, but possibly the answer to one of our findings: that is
+        # read in the background and never changes this response.
+        if _may_be_feedback(ev, None) and not _is_our_text(ev):
+            asyncio.create_task(_dispatch_command(
+                ev, None, expected_workspace_id=workspace_id))
+        return JSONResponse({"status": "ignored", "reason": "no command"})
+    asyncio.create_task(_dispatch_command(
+        ev, command, expected_workspace_id=workspace_id))
+    stats["commands"] = stats.get("commands", 0) + 1
+    return JSONResponse({"status": "accepted", "command": command.name}, status_code=202)
+
+
+#: GitHub tells us a person resolved or reopened a review thread; the learning
+#: loop reads it as a weak signal on the finding the thread carries.
+GITHUB_THREAD_EVENT = "pull_request_review_thread"
+
+
+async def _dispatch_thread_event(ev, *, expected_workspace_id: str | None) -> None:
+    """Hand a resolved / reopened thread to the learning loop. Never raises."""
+    try:
+        cfg = _resolve_tenant(ev.provider, ev.repo, ev.pr_number, expected_workspace_id)
+        if cfg is None:
+            return
+        from src.review.learning.receiver import learn_from_thread
+
+        await asyncio.to_thread(
+            learn_from_thread, ev, workspace_id=cfg.workspace_id, user_id=cfg.user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("thread_event_dispatch_failed provider=%s err=%s",
+                       getattr(ev, "provider", "?"), type(exc).__name__)
+
+
+def _thread_response(payload: object, workspace_id: str | None) -> JSONResponse:
+    from src.review.learning.resolve import extract_github_thread_event
+
+    ev = extract_github_thread_event(payload) if isinstance(payload, dict) else None
+    if ev is None or ev.actor_is_bot:
+        return JSONResponse({"status": "ignored", "reason": "not a thread we read"})
+    asyncio.create_task(_dispatch_thread_event(ev, expected_workspace_id=workspace_id))
+    return JSONResponse({"status": "accepted", "thread": "resolved" if ev.resolved else "reopened"},
+                        status_code=202)
+
 
 # ─── FastAPI app factory ───────────────────────────────────────
 
@@ -705,6 +1163,7 @@ def build_webhook_app(
         "deduped": 0,
         "dispatched": 0,
         "rejected": 0,
+        "commands": 0,
     }
 
     @app.get("/healthz")
@@ -777,8 +1236,28 @@ def build_webhook_app(
                 return JSONResponse({"status": "ignored", "reason": "not the tracked branch"})
             asyncio.create_task(_dispatch_refresh(
                 "github", info["repo"], expected_workspace_id=workspace_id))
+            asyncio.create_task(_dispatch_issue_recheck(
+                "github", info["repo"], info["ref"][len("refs/heads/"):],
+                expected_workspace_id=workspace_id))
             stats_counter["dispatched"] += 1
             return JSONResponse({"status": "accepted", **info}, status_code=202)
+
+        if x_github_event in GITHUB_COMMENT_EVENTS:
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                raise HTTPException(400, "Invalid JSON") from None
+            return _comment_response(
+                extract_github_comment(
+                    payload, x_github_event, delivery=x_github_delivery or ""),
+                workspace_id, settings, stats_counter)
+
+        if x_github_event == GITHUB_THREAD_EVENT:
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                raise HTTPException(400, "Invalid JSON") from None
+            return _thread_response(payload, workspace_id)
 
         if x_github_event != "pull_request":
             return JSONResponse({"status": "ignored", "event": x_github_event})
@@ -828,7 +1307,14 @@ def build_webhook_app(
             "github", pr_info["repo"], pr_info["number"],
             head_sha=pr_info.get("head_sha", ""),
             expected_workspace_id=workspace_id,
-            pr_meta={"base_ref": (gh_pr.get("base") or {}).get("ref")},
+            event=pr_info["action"],
+            pr_meta={
+                "title": gh_pr.get("title"),
+                "author": (gh_pr.get("user") or {}).get("login"),
+                "url": gh_pr.get("html_url"),
+                "head_ref": (gh_pr.get("head") or {}).get("ref"),
+                "base_ref": (gh_pr.get("base") or {}).get("ref"),
+            },
         ))
         stats_counter["dispatched"] += 1
         return JSONResponse(
@@ -892,7 +1378,7 @@ def build_webhook_app(
         stats_counter["verified"] += 1
 
         # 2. Filter event
-        if x_gitlab_event != "Merge Request Hook":
+        if x_gitlab_event not in ("Merge Request Hook", GITLAB_NOTE_EVENT):
             return JSONResponse({"status": "ignored", "event": x_gitlab_event})
 
         # 3. Parse
@@ -914,6 +1400,11 @@ def build_webhook_app(
             raise HTTPException(
                 403, "This event comes from a GitLab instance this workspace is "
                      "not connected to")
+
+        # 3c. A comment is a command, not a merge request event.
+        if x_gitlab_event == GITLAB_NOTE_EVENT:
+            return _comment_response(
+                extract_gitlab_note(payload), workspace_id, settings, stats_counter)
 
         # 4. Filter FIRST, then dedup.
         #
@@ -977,8 +1468,15 @@ def build_webhook_app(
         asyncio.create_task(_dispatch_review(
             "gitlab", mr_info["repo"], mr_info["number"],
             head_sha=mr_info.get("head_sha", ""),
+            event=mr_info["action"],
             expected_workspace_id=workspace_id,
-            pr_meta={"base_ref": attrs.get("target_branch")},
+            pr_meta={
+                "title": attrs.get("title"),
+                "author": (payload.get("user") or {}).get("username"),
+                "url": attrs.get("url"),
+                "head_ref": attrs.get("source_branch"),
+                "base_ref": attrs.get("target_branch"),
+            },
         ))
         stats_counter["dispatched"] += 1
         return JSONResponse(
@@ -1052,23 +1550,35 @@ def build_webhook_app(
             # The decoder's offset is noise to a webhook sender; 400 is the answer.
             raise HTTPException(400, "Invalid JSON") from None
 
+        if (x_event_key or "") in BITBUCKET_COMMENT_EVENTS:
+            return _comment_response(
+                extract_bitbucket_comment(
+                    payload, x_event_key or "", delivery=x_request_uuid or ""),
+                workspace_id, settings, stats_counter)
+
         state_info = _extract_bitbucket_pr_state(payload, x_event_key or "")
         if state_info is not None:
             asyncio.create_task(_dispatch_pr_state(
                 state_info, expected_workspace_id=workspace_id))
             return JSONResponse({"status": "recorded", "state": state_info["state"]})
 
+        touch = _extract_bitbucket_pr_touch(payload, x_event_key or "")
+        if touch is not None:
+            asyncio.create_task(_dispatch_pr_touch(
+                touch, expected_workspace_id=workspace_id))
+
         pr_info = _extract_bitbucket_pr(payload, x_event_key or "")
         if pr_info is None:
+            if touch is not None:
+                return JSONResponse({"status": "recorded", "event": x_event_key})
             return JSONResponse({"status": "ignored", "event": x_event_key})
 
         asyncio.create_task(_dispatch_review(
             "bitbucket", pr_info["repo"], pr_info["number"],
             head_sha=pr_info.get("head_sha", ""),
+            event=pr_info["action"],
             expected_workspace_id=workspace_id,
-            pr_meta={"base_ref": (((payload.get("pullrequest") or {})
-                                   .get("destination") or {}).get("branch") or {})
-                     .get("name")},
+            pr_meta=_bitbucket_pr_meta(payload),
         ))
         stats_counter["dispatched"] += 1
         return JSONResponse(

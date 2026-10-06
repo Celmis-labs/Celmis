@@ -10,6 +10,8 @@ Export collects everything keyed to the user across stores:
     * oauth refresh tokens (metadata only, hashes excluded)
     * credentials rows (provider names + masked, never secrets)
     * workspace + team memberships
+    * review memories they created or last edited (matched by e-mail)
+    * feedback signals they gave (matched by e-mail or user id)
 
 Erasure is SOFT: `is_active=false`, email → `deleted-{id}@erased.local`,
 name cleared, credentials rows hard-deleted (they're the user's own
@@ -167,6 +169,21 @@ async def export_user_data(
         select(TeamMember).where(TeamMember.user_id == user_id)
     )).all()
 
+    from src.db.models import ReviewMemory
+
+    memories = (await session.scalars(
+        select(ReviewMemory).where(
+            (ReviewMemory.created_by == target.email)
+            | (ReviewMemory.updated_by == target.email))
+    )).all()
+
+    from src.db.models import FindingSignal
+
+    me = {str(target.email or "").casefold(), str(user_id).casefold()} - {""}
+    signals_given = (await session.scalars(
+        select(FindingSignal).where(FindingSignal.actor.in_(me)).limit(5000)
+    )).all() if me else []
+
     logger.info("gdpr_export user=%s by=%s", user_id, caller.email)
     return {
         "exported_at": datetime.now(UTC).isoformat(),
@@ -180,6 +197,20 @@ async def export_user_data(
         ],
         "team_memberships": [
             {"team_id": m.team_id, "role": m.role} for m in team_members
+        ],
+        "feedback_signals": [
+            {"id": x.id, "workspace_id": x.workspace_id, "repo_slug": x.repo_slug,
+             "signal": x.signal, "source": x.source, "title": x.title,
+             "file_path": x.file_path,
+             "created_at": x.created_at.isoformat() if x.created_at else None}
+            for x in signals_given
+        ],
+        "review_memories": [
+            {"id": m.id, "workspace_id": m.workspace_id, "repo_slug": m.repo_slug,
+             "path_glob": m.path_glob, "text": m.text, "status": m.status,
+             "created_by_me": m.created_by == target.email,
+             "created_at": m.created_at.isoformat() if m.created_at else None}
+            for m in memories
         ],
     }
 
@@ -237,17 +268,67 @@ async def erase_user(
     )).all()
     for t in tokens:
         t.revoked = True
+
+    # The team's memories keep their text (it is the workspace's knowledge) but
+    # lose the link to the person: the e-mail they were attributed to becomes
+    # the anonymised one, like the user row's.
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import update as sa_update
+
+    from src.db.models import ReviewMemory
+
+    memories_unlinked = 0
+    for column in (ReviewMemory.created_by, ReviewMemory.updated_by):
+        res = await session.execute(
+            sa_update(ReviewMemory).where(column == old_email)
+            .values({column.key: anonymised.email}))
+        memories_unlinked += res.rowcount or 0
+    # The feedback signals keep what was said about a finding (the workspace's
+    # knowledge) and lose the person: the actor becomes the anonymised e-mail.
+    # Only signals recorded under the Celmis e-mail or user id are matched: a
+    # reply or a thumb is stored under the provider login, which Celmis does not
+    # link to the account (documented limit of the export too).
+    from sqlalchemy import and_, exists
+    from sqlalchemy.orm import aliased
+
+    from src.db.models import FindingSignal
+
+    signals_unlinked = 0
+    anon_actor = str(anonymised.email).casefold()
+    twin = aliased(FindingSignal)
+    for who in {str(old_email or "").casefold(), str(user_id).casefold()} - {""}:
+        # A row the anonymised actor already has (the person signalled under both
+        # the e-mail and the user id) would break uq_finding_signal: drop the
+        # duplicate instead of moving it.
+        await session.execute(sa_delete(FindingSignal).where(
+            FindingSignal.actor == who,
+            exists().where(and_(
+                twin.actor == anon_actor,
+                twin.workspace_id == FindingSignal.workspace_id,
+                twin.pr_provider == FindingSignal.pr_provider,
+                twin.pr_repo == FindingSignal.pr_repo,
+                twin.pr_number == FindingSignal.pr_number,
+                twin.fingerprint == FindingSignal.fingerprint,
+                twin.signal == FindingSignal.signal,
+                twin.source == FindingSignal.source))))
+        res = await session.execute(
+            sa_update(FindingSignal).where(FindingSignal.actor == who)
+            .values(actor=anon_actor))
+        signals_unlinked += res.rowcount or 0
     await session.commit()
 
     logger.info(
-        "gdpr_erasure user=%s old_email_hash=%s creds_deleted=%d tokens_revoked=%d by=%s",
-        user_id, hash(old_email) & 0xFFFFFFFF, deleted_creds, len(tokens), admin.email,
+        "gdpr_erasure user=%s old_email_hash=%s creds_deleted=%d tokens_revoked=%d memories_unlinked=%d by=%s",
+        user_id, hash(old_email) & 0xFFFFFFFF, deleted_creds, len(tokens),
+        memories_unlinked, admin.email,
     )
     return {
         "user_id": user_id,
         "erased": True,
         "credentials_deleted": deleted_creds,
         "tokens_revoked": len(tokens),
+        "memories_unlinked": memories_unlinked,
+        "signals_unlinked": signals_unlinked,
     }
 
 

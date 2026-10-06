@@ -37,6 +37,8 @@ from src.api.schemas import (
     OpenPullListOut,
     OpenPullOut,
     QueuedReviewOut,
+    RepairedRepoOut,
+    RepairOutdatedOut,
     RepoAddRequest,
     RepoBranchesOut,
     RepoBranchUpdate,
@@ -108,6 +110,10 @@ def _workspace_repos(workspace_id: str) -> list[RepoOut]:
     # has to load without one.
     states = read_index_states(cfg_by_slug)
     hooks = _webhook_states(workspace_id)
+    from src.review.review_defaults import target_branches_for_workspace_repos
+
+    branches = target_branches_for_workspace_repos(
+        workspace_id, [(slug, c.full_name) for slug, c in cfg_by_slug.items()])
 
     out: list[RepoOut] = []
     # Primary source: auto_review_config (user-registered repos)
@@ -136,6 +142,8 @@ def _workspace_repos(workspace_id: str) -> list[RepoOut]:
             last_check_error=st.last_check_error if st else None,
             up_to_date=st.up_to_date if st else None,
             webhook=_webhook_out(hooks.get(slug)),
+            target_branches=(branches[slug][0] if slug in branches else None),
+            target_branches_source=(branches[slug][1] if slug in branches else None),
         ))
     return out
 
@@ -1704,9 +1712,18 @@ def _remember_webhook_state(workspace_id: str, slug: str, st: Any) -> None:
 
 
 def _webhook_out(st: Any) -> RepoWebhookOut | None:
+    """The last known hook as the API reports it, with `outdated` worked out
+    from the events it subscribed to (a hook from before comment commands
+    existed is installed, and still needs repairing)."""
     if st is None:
         return None
-    return RepoWebhookOut(**st.as_dict())
+    data = st.as_dict()
+    if st.status == "installed" and st.events and not data.get("missing_events"):
+        from src.review.webhook_install import missing_events
+
+        data["missing_events"] = missing_events(st.provider, list(st.events))
+        data["outdated"] = bool(data["missing_events"])
+    return RepoWebhookOut(**data)
 
 
 def _bind_to_installed_hook(cfg: RepoConfig, st: Any) -> None:
@@ -1864,7 +1881,7 @@ def get_repo_webhook(
         )
     if not live:
         if known is not None:
-            return RepoWebhookOut(**known.as_dict())
+            return _webhook_out(known)
         return RepoWebhookOut(provider=cfg.provider, status="unknown",
                               url=wi.webhook_url(base, cfg.provider, workspace_id),
                               events=wi.EVENTS.get(cfg.provider, []))
@@ -1872,6 +1889,47 @@ def get_repo_webhook(
     if st.status in ("installed", "not_installed"):
         _remember_webhook_state(workspace_id, slug, st)
     return RepoWebhookOut(**st.as_dict())
+
+
+@router.post("/webhooks/repair-outdated", response_model=RepairOutdatedOut)
+def repair_outdated_webhooks(
+    request: Request,
+    user: User = Depends(require_workspace_admin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> RepairOutdatedOut:
+    """Re-subscribe every installed hook that predates the comment events.
+
+    The same idempotent `install` the single-repository button runs (an
+    existing hook with our URL is updated in place, never duplicated), over
+    each repository whose last known hook is installed and lacks an event the
+    receiver now acts on. A repository whose repair fails keeps its state and
+    is reported with the reason; the others are not held up by it.
+    """
+    from src.review import webhook_install as wi
+
+    base = _require_public_base()
+    store = get_auto_review_store()
+    repaired: list[RepairedRepoOut] = []
+    for slug, known in sorted(_webhook_states(workspace_id).items()):
+        out = _webhook_out(known)
+        if out is None or not out.outdated:
+            continue
+        cfg = store.get_in_workspace(workspace_id, slug)
+        if cfg is None:
+            continue
+        st = wi.install(cfg, user_id=user.id, base=base)
+        if st.status == "installed":
+            _bind_to_installed_hook(cfg, st)
+        _remember_webhook_state(workspace_id, slug, st)
+        repaired.append(RepairedRepoOut(
+            repo_slug=slug, status=st.status, reason=st.reason, message=st.message))
+    record_action(
+        action="repo.webhooks_repaired", actor=user.email, actor_id=user.id,
+        workspace_id=workspace_id, target=workspace_id, ip=client_ip(request),
+        detail={"repaired": sum(1 for r in repaired if r.status == "installed"),
+                "failed": sum(1 for r in repaired if r.status != "installed")},
+    )
+    return RepairOutdatedOut(repos=repaired)
 
 
 @router.delete("/{slug}/webhook", response_model=RepoWebhookOut)

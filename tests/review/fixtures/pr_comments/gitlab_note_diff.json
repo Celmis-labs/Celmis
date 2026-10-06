@@ -1,0 +1,35 @@
+{
+  "object_kind": "note",
+  "user": {
+    "id": 7,
+    "username": "carol"
+  },
+  "project": {
+    "path_with_namespace": "acme/shop",
+    "visibility_level": 0,
+    "web_url": "https://gitlab.example.com/acme/shop"
+  },
+  "object_attributes": {
+    "id": 9001,
+    "note": "/celmis review",
+    "noteable_type": "MergeRequest",
+    "system": false,
+    "discussion_id": "d1d1d1",
+    "type": "DiffNote",
+    "action": "create",
+    "position": {
+      "new_path": "src/cart.py",
+      "new_line": 17
+    }
+  },
+  "merge_request": {
+    "iid": 42,
+    "state": "opened",
+    "title": "Add basket totals",
+    "draft": false,
+    "target_branch": "develop",
+    "last_commit": {
+      "id": "abc123def456"
+    }
+  }
+}

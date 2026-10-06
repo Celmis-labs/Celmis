@@ -40,7 +40,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 STATUSES: tuple[str, ...] = ("active", "pending", "rejected")
-ORIGINS: tuple[str, ...] = ("manual", "library", "generated", "imported", "agent")
+ORIGINS: tuple[str, ...] = (
+    "manual", "library", "generated", "imported", "agent", "learned")
 SEVERITIES: tuple[str, ...] = ("info", "warning", "error", "critical")
 
 MAX_TITLE = 200
@@ -500,7 +501,7 @@ async def propose_rules(
         # A machine's proposal for a repository that repeats a workspace rule
         # is noise, not an override: an override is a person's decision.
         taken = dict(titles)
-        if repo_slug and origin in ("generated", "imported"):
+        if repo_slug and origin in ("generated", "imported", "learned"):
             taken.update(await _scope_titles(s, ws, None))
         rows = []
         for fields, source_ref in prepared:

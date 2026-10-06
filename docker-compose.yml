@@ -433,6 +433,10 @@ services:
       # PEM bundle for a private CA (path inside this container — mount it).
       # JSON lists default to `[]` for the same reason as above.
       GITLAB_ALLOWED_HOSTS: '${GITLAB_ALLOWED_HOSTS:-[]}'
+      JIRA_ALLOWED_HOSTS: '${JIRA_ALLOWED_HOSTS:-[]}'
+      JIRA_CACHE_TTL_SECONDS: '${JIRA_CACHE_TTL_SECONDS:-600}'
+      JIRA_TIMEOUT_SECONDS: '${JIRA_TIMEOUT_SECONDS:-8}'
+      JIRA_MAX_DESCRIPTION_CHARS: '${JIRA_MAX_DESCRIPTION_CHARS:-12000}'
       GITLAB_HTTP_ALLOWED_HOSTS: '${GITLAB_HTTP_ALLOWED_HOSTS:-[]}'
       GITLAB_CA_BUNDLE: "${GITLAB_CA_BUNDLE:-}"
       # Path overrides — у container працюємо з mount points

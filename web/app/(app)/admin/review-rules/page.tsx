@@ -26,6 +26,7 @@ import {
   CheckIcon,
   ChevronRightIcon,
   FileDownIcon,
+  HistoryIcon,
   ListChecksIcon,
   Loader2Icon,
   PlusIcon,
@@ -188,9 +189,11 @@ export default function ReviewRulesPage() {
   };
 
   const startJob = useMutation({
-    mutationFn: (kind: "generate" | "import") => kind === "generate"
+    mutationFn: (kind: "generate" | "import" | "history") => kind === "generate"
       ? reviewRulesApi.generate(token!, repo!)
-      : reviewRulesApi.importFromRepo(token!, repo!),
+      : kind === "history"
+        ? reviewRulesApi.generateFromHistory(token!, repo!)
+        : reviewRulesApi.importFromRepo(token!, repo!),
     onSuccess: (j) => { void pollJob(j); },
     onError: (e) => toast.error(t("admin.reviewRules.jobFailed", { message: (e as Error).message })),
   });
@@ -319,6 +322,15 @@ export default function ReviewRulesPage() {
             title={repo ? undefined : t("admin.reviewRules.needsRepo")}
           >
             <FileDownIcon /> {t("admin.reviewRules.import")}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => startJob.mutate("history")}
+            disabled={!repo || running || startJob.isPending}
+            loading={startJob.isPending && startJob.variables === "history"}
+            title={repo ? t("admin.reviewRules.historyNote") : t("admin.reviewRules.needsRepo")}
+          >
+            <HistoryIcon /> {t("admin.reviewRules.generateFromHistory")}
           </Button>
           {!repo && (
             <p className="w-full text-xs text-[var(--color-muted-foreground)]">

@@ -303,6 +303,7 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
         from src.review.orchestrator import ReviewOrchestrator
         from src.review.providers import get_provider_for
         from src.review.providers.base import PullRequestProviderError
+        from src.review.scope import ReviewRequest
 
         # Resolve the authenticated caller's tenant so the review uses THEIR
         # git token + LLM key/policy, not the shared default workspace.
@@ -326,6 +327,7 @@ def build_server(*, enable_auth: bool = False) -> FastMCP:
                 provider=pr_provider,
                 user_id=caller.user_id,
                 workspace_id=caller.workspace_id,
+                request=ReviewRequest(trigger="mcp"),
             )
         except PullRequestProviderError as exc:
             return {"ok": False, "error": str(exc)}

@@ -51,6 +51,23 @@ EXPECTED_BUILTINS = {
     "base_instruction": None,
     "message_started": None,
     "message_finished_header": None,
+    "completed_comment": "completed",
+    "commands_guide_enabled": True,
+    "review_cadence": "automatic",
+    "auto_pause_pushes": 3,
+    "auto_pause_window_minutes": 15,
+    "ignored_title_keywords": [],
+    "review_scope": "incremental",
+    "commands_enabled": True,
+    "chat_enabled": True,
+    "command_permission": "repo_access",
+    "memories_enabled": True,
+    "knowledge_approval": True,
+    "memory_trusted_commenters": [],
+    "issues_auto_resolve": True,
+    "issues_resolve_llm_verify": True,
+    "issues_resolve_max_llm": 8,
+    "issues_announce_resolved": True,
 }
 
 #: Per key: (workspace value, repo value) — each different from the built-in
@@ -69,11 +86,31 @@ LAYER_VALUES = {
     "base_instruction": ("Be terse.", "Explain the why."),
     "message_started": ("Reviewing {commit}", "On it: {files} files"),
     "message_finished_header": ("Done #{pr_number}", "Review of {commit}"),
+    "completed_comment": ("classic", "completed"),
+    "commands_guide_enabled": (False, True),
+    "review_cadence": ("manual", "auto_pause"),
+    "auto_pause_pushes": (5, 4),
+    "auto_pause_window_minutes": (30, 10),
+    "ignored_title_keywords": (["WIP"], ["Revert"]),
+    "review_scope": ("full", "incremental"),
+    "commands_enabled": (False, True),
+    "chat_enabled": (False, True),
+    "command_permission": ("participants", "anyone"),
+    "memories_enabled": (False, True),
+    "knowledge_approval": (False, True),
+    "memory_trusted_commenters": (["alice"], ["bob"]),
+    "issues_auto_resolve": (False, True),
+    "issues_resolve_llm_verify": (False, True),
+    "issues_resolve_max_llm": (3, 12),
+    "issues_announce_resolved": (False, True),
 }
 
 
 def test_the_new_keys_and_their_builtins_are_the_promised_ones():
-    assert tuple(EXPECTED_BUILTINS) == V23_FIELDS
+    # The Jira task settings joined V23_FIELDS later; they have their own tests.
+    assert tuple(EXPECTED_BUILTINS) == tuple(
+        f for f in V23_FIELDS if f in EXPECTED_BUILTINS)
+    assert tuple(EXPECTED_BUILTINS) == V23_FIELDS[: len(EXPECTED_BUILTINS)]
     assert set(V23_FIELDS) <= set(INHERITABLE_FIELDS)
     for name, value in EXPECTED_BUILTINS.items():
         assert BUILTIN_DEFAULTS[name] == value, name

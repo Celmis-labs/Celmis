@@ -98,7 +98,7 @@ _SCHEME = {
                list(EVENTS["github"])),
     "gitlab": ("X-Gitlab-Token", "plaintext token comparison (GitLab does not "
                                  "sign the body)",
-               ["Merge request events"]),
+               ["Merge request events", "Comments"]),
     "bitbucket": ("X-Hub-Signature", "HMAC-SHA256 over the request body",
                   list(EVENTS["bitbucket"])),
 }

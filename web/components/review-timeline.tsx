@@ -19,7 +19,7 @@ import {
   CheckIcon, ChevronRightIcon, LoaderIcon, MinusIcon, XIcon,
 } from "lucide-react";
 
-import { pullRequestsApi, type ReviewRunOut } from "@/lib/api";
+import { pullRequestsApi, type PullRequestCommand, type ReviewRunOut } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import {
@@ -28,6 +28,7 @@ import {
 } from "@/lib/review-stages";
 import { useToken } from "@/lib/use-token";
 import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
 import { QueryState } from "@/components/ui/query-state";
 import { StatusPill, toRunStatus, type RunStatus } from "@/components/ui/status";
 
@@ -71,6 +72,60 @@ export function PullRequestReviews({ prId }: { prId: string }) {
         )
       }
     </QueryState>
+  );
+}
+
+/** What became of a comment command, as a badge variant. */
+const COMMAND_VARIANT: Record<string, "success" | "warning" | "default" | "destructive" | "info"> = {
+  done: "success",
+  claimed: "info",
+  failed: "destructive",
+  denied: "warning",
+  rate_limited: "warning",
+  ignored: "default",
+};
+
+/** The `@celmis ...` comments given on this pull request, newest first —
+ *  rendered under its reviews. Renders nothing while there are none, so a PR
+ *  nobody commanded looks as it always did. */
+export function PullRequestCommands({ prId }: { prId: string }) {
+  const token = useToken();
+  const { t, locale } = useI18n();
+  const commands = useQuery({
+    queryKey: ["pr-commands", prId],
+    queryFn: () => pullRequestsApi.commands(token!, prId),
+    enabled: !!token,
+  });
+  const items: PullRequestCommand[] = commands.data?.items ?? [];
+  if (items.length === 0) return null;
+  return (
+    <section className="mt-3" aria-label={t("prs.commands.title")}>
+      <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted-foreground)]">
+        {t("prs.commands.title")}
+      </h4>
+      <ul className="flex flex-col gap-1.5">
+        {items.map((c) => (
+          <li key={c.id} className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm">
+            <span className="font-medium">
+              {t(`prs.commands.name.${c.command}`)}
+              {c.force ? ` · ${t("prs.commands.forced")}` : ""}
+            </span>
+            <Badge variant={COMMAND_VARIANT[c.status] ?? "default"} className="px-1.5 py-0">
+              {t(`prs.commands.status.${c.status}`)}
+            </Badge>
+            {c.actor_name && (
+              <span className="text-xs text-[var(--color-muted-foreground)]">
+                {t("prs.commands.by", { name: c.actor_name })}
+              </span>
+            )}
+            <span className="text-xs text-[var(--color-subtle-foreground)]"
+              title={formatDateTime(c.created_at)}>
+              {relativeTime(c.created_at, locale)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

@@ -704,6 +704,8 @@ def apply_replacement_on_default_branch_bitbucket(
     """Bitbucket Cloud 2.0. Uses Basic auth (email:app_password) stored as
     single secret with `auth_scheme=basic`; falls back to Bearer for
     workspace access tokens."""
+    import urllib.parse
+
     from src.credentials import resolve_git_credential
     from src.credentials.store import CredentialStoreError
     try:
@@ -729,8 +731,15 @@ def apply_replacement_on_default_branch_bitbucket(
                     "reason": f"repo lookup failed {info.status_code}"}
         default = (info.json().get("mainbranch") or {}).get("name") or "main"
 
-        # Read raw file at default.
-        f = http.get(f"{api}/src/{default}/{file_path}", headers=headers)
+        # Read raw file at default. `/src/...` can answer with a redirect
+        # (to the commit-pinned URL); the client never follows one by itself
+        # and a bare 302 here read as "file fetch failed 302". Followed for
+        # this one request — the allowlist still checks every hop.
+        f = http.get(
+            f"{api}/src/{urllib.parse.quote(default, safe='/')}/"
+            f"{urllib.parse.quote(file_path, safe='/')}",
+            headers=headers, follow_redirects=True,
+        )
         if f.status_code != 200:
             return {"status": "skipped",
                     "reason": f"file fetch failed {f.status_code}"}

@@ -4,6 +4,9 @@
     GET /api/pull-requests/stats — the three summary cards above the list
     GET /api/pull-requests/{id}/runs — one PR's review runs, each with its
         ordered stages (the Kodus-style timeline)
+    POST /api/pull-requests/{id}/pause — hold the PR's automatic reviews
+    POST /api/pull-requests/{id}/resume — release them and review everything
+        pushed meanwhile (`ReviewRequest(resume=True)`)
 
 Rows come from `review_pull_requests`, upserted after every review run and on
 the provider's close/merge webhook (src/review/issues.py). Finding counts are
@@ -18,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import false as sa_false
 from sqlalchemy import func, or_, select
@@ -233,6 +236,7 @@ async def _awaiting(
         (repo policy > workspace default > every branch; the orchestrator's
         matcher);
       * it is not a draft, unless the repo's effective run_on_drafts is true;
+      * its title contains none of the effective ignored_title_keywords;
       * no complete/partial review exists at its CURRENT head: the provider's
         head sha differs from the head the latest completed review stored
         (`review_pull_requests.head_sha`), or there is no such review. When
@@ -247,6 +251,7 @@ async def _awaiting(
     from src.api import deps
     from src.api.auto_review import get_auto_review_store
     from src.review.branch_patterns import branch_targeted
+    from src.review.scope import title_keyword_match
 
     out = _Awaiting()
     unique: dict[tuple[str, str], object] = {}
@@ -294,14 +299,16 @@ async def _awaiting(
         return out
 
     # Effective settings per repo, and what the DB knows of each PR's review.
-    policies = {slug: (tb, rd) for slug, tb, rd in (await session.execute(
+    policies = {slug: (tb, rd, tk) for slug, tb, rd, tk in (await session.execute(
         select(RepoReviewPolicy.repo_slug, RepoReviewPolicy.target_branches,
-               RepoReviewPolicy.run_on_drafts)
+               RepoReviewPolicy.run_on_drafts, RepoReviewPolicy.ignored_title_keywords)
     )).all()}
-    ws_tb, ws_rd = (await session.execute(
+    ws_tb, ws_rd, ws_tk = (await session.execute(
         select(WorkspaceReviewDefaults.target_branches,
-               WorkspaceReviewDefaults.run_on_drafts).where(
-            WorkspaceReviewDefaults.workspace_id == ws))).one_or_none() or (None, None)
+               WorkspaceReviewDefaults.run_on_drafts,
+               WorkspaceReviewDefaults.ignored_title_keywords).where(
+            WorkspaceReviewDefaults.workspace_id == ws))).one_or_none() or (
+        None, None, None)
     known = {(r.provider, r.repo, r.number): r for r in (await session.execute(
         select(ReviewPullRequest).where(
             ReviewPullRequest.workspace_id == ws,
@@ -313,13 +320,20 @@ async def _awaiting(
             slug = parse_repo_url(f"{c.provider}:{c.full_name}").slug
         except Exception:  # noqa: BLE001
             slug = c.repo_slug
-        pol_tb, pol_rd = policies.get(slug, policies.get(c.repo_slug, (None, None)))
+        pol_tb, pol_rd, pol_tk = policies.get(
+            slug, policies.get(c.repo_slug, (None, None, None)))
+        tk = pol_tk if pol_tk is not None else ws_tk
+        keywords = [str(v) for v in tk] if isinstance(tk, list) else []
         tb = pol_tb if pol_tb is not None else ws_tb
         patterns = [str(v) for v in tb] if isinstance(tb, list) else []
         rd = pol_rd if pol_rd is not None else ws_rd
         drafts_ok = bool(rd)
         for p in listing.items:
             if p.draft and not drafts_ok:
+                continue
+            # A title the repository ignores is never reviewed by itself, so
+            # it is not "waiting" either.
+            if keywords and title_keyword_match(p.title, keywords):
                 continue
             if patterns and p.target_branch and not branch_targeted(
                     p.target_branch, patterns):
@@ -387,6 +401,12 @@ class PullRequestOut(BaseModel):
     opened_at: datetime
     updated_at: datetime
     closed_at: datetime | None
+    #: Automatic reviews of this PR wait (auto-pause, `pause`, the Pause
+    #: button) — `paused_reason` says which: auto_pause | manual | command.
+    review_paused: bool = False
+    paused_reason: str | None = None
+    #: The commit the last complete, posted review read.
+    last_reviewed_sha: str | None = None
 
 
 class PullRequestList(BaseModel):
@@ -507,6 +527,8 @@ async def list_pull_requests(
             by_severity={s: sev.get(s, 0)
                          for s in ("critical", "error", "warning", "info")},
             opened_at=r.opened_at, updated_at=r.updated_at, closed_at=r.closed_at,
+            review_paused=bool(r.review_paused), paused_reason=r.paused_reason,
+            last_reviewed_sha=r.last_reviewed_sha,
         ))
     return PullRequestList(items=items, total=total, limit=limit, offset=offset,
                            repos=repos)
@@ -594,3 +616,198 @@ async def pull_request_runs(
         items=[_run_to_out(r, with_adjustments=False, with_stages=True,
                            show_cost=show_cost) for r in runs],
     )
+
+
+class PullRequestCommandOut(BaseModel):
+    """One `@celmis ...` comment on the PR and what became of it."""
+
+    id: str
+    command: str
+    args: str | None = None
+    force: bool = False
+    actor_name: str | None = None
+    #: claimed | done | denied | rate_limited | failed | ignored
+    status: str
+    error: str | None = None
+    run_id: str | None = None
+    created_at: datetime
+    finished_at: datetime | None = None
+
+
+class PullRequestCommands(BaseModel):
+    pr_id: str
+    items: list[PullRequestCommandOut]
+
+
+@router.get("/{pr_id}/commands", response_model=PullRequestCommands)
+async def pull_request_commands(
+    pr_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(get_current_user),
+    ws: str = Depends(current_workspace_id),
+) -> PullRequestCommands:
+    """The comment commands given on one PR, newest first — the timeline beside
+    its reviews. Another workspace's PR is a 404; a repository the caller may
+    not read is a 403 (the rows carry what people typed after the handle)."""
+    row = (await session.execute(
+        select(ReviewPullRequest).where(
+            ReviewPullRequest.id == pr_id, ReviewPullRequest.workspace_id == ws)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Pull request not found")
+    from src.api.deps import enforce_repo_permission
+
+    await enforce_repo_permission(row.repo_slug or row.repo, user, min_perm="read",
+                                  workspace_id=ws)
+    from src.review.commands import ledger
+
+    rows = await asyncio.to_thread(
+        ledger.for_pr, ws, row.provider, row.repo, int(row.number), limit=limit)
+    return PullRequestCommands(
+        pr_id=pr_id,
+        items=[PullRequestCommandOut(**{k: v for k, v in r.items() if k != "comment_id"})
+               for r in rows],
+    )
+
+
+class PullRequestTaskOut(BaseModel):
+    key: str
+    url: str = ""
+    summary: str = ""
+    status: str = ""
+    issue_type: str = ""
+
+
+class PullRequestRequirementOut(BaseModel):
+    key: str
+    id: str
+    text: str
+    verdict: str
+    evidence: str = ""
+
+
+class PullRequestRequirementsOut(BaseModel):
+    pr_id: str
+    #: The Jira tasks the last review read; empty when it read none.
+    tasks: list[PullRequestTaskOut] = []
+    #: The last requirements check, one row per acceptance criterion.
+    requirements: list[PullRequestRequirementOut] = []
+
+
+@router.get("/{pr_id}/requirements", response_model=PullRequestRequirementsOut)
+async def pull_request_requirements(
+    pr_id: str,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(get_current_user),
+    ws: str = Depends(current_workspace_id),
+) -> PullRequestRequirementsOut:
+    """The Jira task(s) behind a PR and the latest requirements check.
+
+    The task text comes from somebody's tracker, so it is shown to people who
+    may read the repository, like the PR itself: a PR of another workspace is
+    a 404, a repository the caller cannot read a 403. Never the token, never
+    the raw Jira answer — only what the review curated and stored.
+    """
+    row = (await session.execute(
+        select(ReviewPullRequest).where(
+            ReviewPullRequest.id == pr_id, ReviewPullRequest.workspace_id == ws)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Pull request not found")
+    from src.api.deps import enforce_repo_permission
+
+    await enforce_repo_permission(row.repo_slug or row.repo, user, min_perm="read",
+                                  workspace_id=ws)
+    from src.review.task_context.checklist import Requirement
+
+    tasks = []
+    for t in row.task_refs if isinstance(row.task_refs, list) else []:
+        if isinstance(t, dict) and t.get("key"):
+            url = str(t.get("url") or "")
+            tasks.append(PullRequestTaskOut(
+                key=str(t["key"])[:40], url=url if url.startswith("https://") else "",
+                summary=str(t.get("summary") or "")[:300],
+                status=str(t.get("status") or "")[:60],
+                issue_type=str(t.get("issue_type") or "")[:60]))
+    rows = [
+        Requirement.from_dict(r) for r in
+        (row.requirements_check if isinstance(row.requirements_check, list) else [])
+        if isinstance(r, dict)
+    ]
+    return PullRequestRequirementsOut(
+        pr_id=pr_id, tasks=tasks,
+        requirements=[PullRequestRequirementOut(**r.to_dict()) for r in rows])
+
+
+class PullRequestPauseOut(BaseModel):
+    pr_id: str
+    review_paused: bool
+    #: resume only: the review that covers the pushes skipped meanwhile.
+    run_id: str | None = None
+    status: str | None = None
+
+
+async def _own_pr(session: AsyncSession, pr_id: str, user: User, ws: str) -> ReviewPullRequest:
+    """The PR of this workspace, 404 for anything else, and the caller must be
+    allowed to review its repository (the same rule as the Review button)."""
+    row = (await session.execute(
+        select(ReviewPullRequest).where(
+            ReviewPullRequest.id == pr_id, ReviewPullRequest.workspace_id == ws)
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Pull request not found")
+    from src.api.deps import enforce_repo_permission
+
+    slug = row.repo_slug or row.repo
+    await enforce_repo_permission(slug, user, min_perm="review", workspace_id=ws)
+    return row
+
+
+@router.post("/{pr_id}/pause", response_model=PullRequestPauseOut)
+async def pause_pull_request(
+    pr_id: str,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(get_current_user),
+    ws: str = Depends(current_workspace_id),
+) -> PullRequestPauseOut:
+    """Hold the automatic reviews of one PR until somebody resumes it. A
+    person's pause holds whatever the repository's cadence says."""
+    row = await _own_pr(session, pr_id, user, ws)
+    from src.review import cadence, pr_state
+
+    await asyncio.to_thread(
+        pr_state.set_paused, ws, row.provider, row.repo, int(row.number),
+        paused=True, reason=cadence.REASON_MANUAL, by=user.email or user.id)
+    return PullRequestPauseOut(pr_id=pr_id, review_paused=True)
+
+
+@router.post("/{pr_id}/resume", response_model=PullRequestPauseOut)
+async def resume_pull_request(
+    pr_id: str,
+    background: BackgroundTasks,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(get_current_user),
+    ws: str = Depends(current_workspace_id),
+) -> PullRequestPauseOut:
+    """Release a paused PR and queue the review of everything pushed while it
+    waited. A PR that is not paused is left alone (no review is queued)."""
+    row = await _own_pr(session, pr_id, user, ws)
+    from src.review import pr_state
+    from src.review.dispatch import enqueue_review_run
+    from src.review.scope import ReviewRequest
+
+    was_paused = await asyncio.to_thread(
+        pr_state.resume, ws, row.provider, row.repo, int(row.number))
+    if not was_paused:
+        return PullRequestPauseOut(pr_id=pr_id, review_paused=False)
+    queued = await asyncio.to_thread(
+        enqueue_review_run, row.provider, row.repo, int(row.number),
+        user_id=user.id, workspace_id=ws, source="manual",
+        request=ReviewRequest(trigger="manual", resume=True))
+    if queued.status == "inline":
+        from src.automation.actions_reviews import run_review_inline
+
+        background.add_task(run_review_inline, queued.payload)
+    return PullRequestPauseOut(
+        pr_id=pr_id, review_paused=False, run_id=queued.run_id, status=queued.status)

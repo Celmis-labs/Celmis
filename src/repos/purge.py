@@ -227,18 +227,23 @@ def _purge_groups(slug: str, report: PurgeReport) -> None:
             report.groups_touched.append(name)
 
 
-async def _purge_postgres(slug: str, session: Any, report: PurgeReport) -> None:
+async def _purge_postgres(
+    slug: str, session: Any, report: PurgeReport, workspace_id: str | None = None,
+) -> None:
     from sqlalchemy import delete
 
     from src.db.models import (
         DeprecatedSymbol,
+        FindingSignal,
         OwnershipSnapshot,
+        PostedFindingComment,
         ProjectRepo,
         RepoAccessRule,
         RepoIndexState,
         RepoReviewPolicy,
         RepoSummary,
         RepoTeamAccess,
+        ReviewMemory,
     )
 
     result = await session.execute(
@@ -250,10 +255,18 @@ async def _purge_postgres(slug: str, session: Any, report: PurgeReport) -> None:
     # summaries and index state if the same repo is ever re-added.
     for model in (
         RepoReviewPolicy, RepoIndexState, RepoSummary, OwnershipSnapshot,
-        DeprecatedSymbol, RepoTeamAccess, RepoAccessRule,
+        DeprecatedSymbol, RepoTeamAccess, RepoAccessRule, ReviewMemory,
+        FindingSignal, PostedFindingComment,
     ):
         try:
-            res = await session.execute(delete(model).where(model.repo_slug == slug))
+            stmt = delete(model).where(model.repo_slug == slug)
+            # Memories are hand-written and belong to one workspace: two
+            # workspaces that registered the same slug must not lose each
+            # other's, and neither must the feedback signals and the posted
+            # comment map. (The other tables are rebuilt from the repository.)
+            if model in (ReviewMemory, FindingSignal, PostedFindingComment) and workspace_id:
+                stmt = stmt.where(model.workspace_id == workspace_id)
+            res = await session.execute(stmt)
             report.orphan_rows_removed += res.rowcount or 0
         except Exception as exc:  # noqa: BLE001
             report.errors.append(f"{model.__tablename__}: {exc}")
@@ -282,6 +295,15 @@ async def purge_repo(
         except Exception as exc:  # noqa: BLE001
             report.errors.append(f"qdrant: {exc}")
 
+    if not skip_qdrant and workspace_id:
+        # The feedback signals' vectors live in a collection of their own.
+        try:
+            from src.review.learning.similarity import delete_repo_vectors
+
+            delete_repo_vectors(workspace_id, slug)
+        except Exception as exc:  # noqa: BLE001
+            report.errors.append(f"learning vectors: {exc}")
+
     if not skip_disk:
         try:
             _purge_disk(slug, report)
@@ -289,7 +311,7 @@ async def purge_repo(
             report.errors.append(f"disk: {exc}")
 
     try:
-        await _purge_postgres(slug, session, report)
+        await _purge_postgres(slug, session, report, workspace_id)
     except Exception as exc:  # noqa: BLE001
         report.errors.append(f"postgres: {exc}")
         with contextlib.suppress(Exception):

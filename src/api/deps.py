@@ -590,6 +590,37 @@ async def require_prompt_editor(
     )
 
 
+async def may_use_memories(user: User, workspace_id: str) -> bool:
+    """Is this person allowed to see team memories at all in the ACTIVE
+    workspace: a global admin, or editor / admin / owner of it. Members and
+    viewers are not — a memory is what the team told the reviewers, and that
+    is a lead's view, like review rules."""
+    if user.is_admin:
+        return True
+    import asyncio
+
+    from src.users.roles import PROMPT_EDITOR_ROLES
+
+    role = await asyncio.to_thread(workspace_role, user.id, workspace_id)
+    return role in PROMPT_EDITOR_ROLES
+
+
+async def require_memories_access(
+    user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> User:
+    """The gate of every /api/memories endpoint, reads included: editor,
+    admin or owner of the ACTIVE workspace (or a global admin). Viewers and
+    members get 403. Which repositories' memories an editor may then see is
+    `readable_repo_slugs`, applied by the endpoints."""
+    if await may_use_memories(user, workspace_id):
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Team memories require editor, admin or owner on this workspace",
+    )
+
+
 def _require_repo_in_workspace(slug: str, workspace_id: str | None) -> None:
     """404 unless ``slug`` is a repository registered to ``workspace_id``.
 

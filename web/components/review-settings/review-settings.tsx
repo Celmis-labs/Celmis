@@ -68,7 +68,9 @@ import { PromptsSection } from "@/components/review-settings/section-prompts";
 import { SummarySection } from "@/components/review-settings/section-summary";
 import { RulesSection } from "@/components/review-settings/section-rules";
 import { MessagesSection, messagesBlocked } from "@/components/review-settings/section-messages";
+import { LearningSection } from "@/components/review-settings/section-learning";
 import { AdvancedSection } from "@/components/review-settings/section-advanced";
+import { CommandsSection } from "@/components/review-settings/section-commands";
 
 const SECTION_VIEW: Record<SectionId, () => React.ReactNode> = {
   general: GeneralSection,
@@ -78,6 +80,8 @@ const SECTION_VIEW: Record<SectionId, () => React.ReactNode> = {
   summary: SummarySection,
   rules: RulesSection,
   messages: MessagesSection,
+  commands: CommandsSection,
+  learning: LearningSection,
   advanced: AdvancedSection,
 };
 

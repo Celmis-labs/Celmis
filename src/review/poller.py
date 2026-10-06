@@ -254,8 +254,13 @@ def _poll_gitlab_project(token: str, cfg: RepoConfig, gitlab=None) -> None:
     for mr in items:
         iid = int(mr.get("iid", 0))
         if iid <= (cfg.last_seen_pr_id or 0):
+            # Seen before — unless the title gate held it: an edited title
+            # (the "WIP" removed) brings it back into the listing.
+            if _title_hold_released("gitlab", cfg, iid, mr):
+                _trigger_review("gitlab", cfg.full_name, iid,
+                                user_id=cfg.user_id, workspace_id=cfg.workspace_id)
             continue
-        if _skip_untargeted("gitlab", cfg, iid, mr):
+        if _skip_untargeted("gitlab", cfg, iid, mr) or _skip_gated("gitlab", cfg, iid, mr):
             new_max_iid = max(new_max_iid, iid)
             continue
         _trigger_review("gitlab", cfg.full_name, iid,
@@ -299,6 +304,81 @@ def _skip_untargeted(provider: str, cfg: RepoConfig, number: int, mr: dict) -> b
         return True
     except Exception as exc:  # noqa: BLE001 — the gate in the orchestrator decides
         logger.warning("poller_target_check_failed repo=%s err=%s",
+                       cfg.full_name, type(exc).__name__)
+        return False
+
+
+#: Merge requests the title gate held, per (provider, repo). The poller only
+#: lists numbers above the last one it saw, so without this a "WIP" MR would
+#: never be looked at again after its title is fixed. In memory: a restart
+#: forgets it, and the next push (webhook) or a Review click still reviews.
+_TITLE_HELD: dict[tuple[str, str], set[int]] = {}
+
+
+def _title_hold_released(provider: str, cfg: RepoConfig, number: int, mr: dict) -> bool:
+    """True once a held merge request's title no longer carries an ignored
+    keyword; the hold is then dropped. Never raises."""
+    held = _TITLE_HELD.get((provider, cfg.full_name))
+    if not held or number not in held:
+        return False
+    try:
+        from src.review.review_defaults import gate_settings_for_repo
+        from src.review.scope import title_keyword_match
+
+        gates = gate_settings_for_repo(provider, cfg.full_name)
+        if title_keyword_match(mr.get("title"), gates["ignored_title_keywords"]):
+            return False
+    except Exception as exc:  # noqa: BLE001 — keep the hold, look again next poll
+        logger.warning("poller_title_hold_check_failed repo=%s err=%s",
+                       cfg.full_name, type(exc).__name__)
+        return False
+    held.discard(number)
+    return True
+
+
+def _skip_gated(provider: str, cfg: RepoConfig, number: int, mr: dict) -> bool:
+    """True when the title gate or a manual review cadence stops this MR, the
+    skip recorded as the webhook records it. The listing names the title;
+    GitHub notifications do not, so that path leaves it to the orchestrator.
+
+    A manual cadence with `status_feedback` on is NOT skipped here: the
+    orchestrator's gate then posts the one note that says how to ask for a
+    review, and records the skip itself."""
+    try:
+        from src.review import cadence, messages
+        from src.review.dispatch import record_gate_skip
+        from src.review.review_defaults import gate_settings_for_repo
+        from src.review.scope import title_keyword_match
+
+        gates = gate_settings_for_repo(provider, cfg.full_name)
+        meta = {"title": mr.get("title"),
+                "author": (mr.get("author") or {}).get("username"),
+                "url": mr.get("web_url"), "head_ref": mr.get("source_branch"),
+                "base_ref": mr.get("target_branch")}
+        matched = title_keyword_match(mr.get("title"), gates["ignored_title_keywords"])
+        if matched:
+            _TITLE_HELD.setdefault((provider, cfg.full_name), set()).add(number)
+            sentence = messages.t("gate.title", "en", keyword=matched)
+            record_gate_skip(
+                provider, cfg.full_name, number, user_id=cfg.user_id,
+                workspace_id=cfg.workspace_id, source="poller",
+                gate_key="gate_title", gate_name="Check title keywords",
+                reason=sentence[:1].upper() + sentence[1:] + ".", pr_meta=meta)
+            return True
+        if gates["review_cadence"] == "manual" and not gates["status_feedback"]:
+            decision = cadence.decide("manual")
+            sentence = cadence.gate_reason(
+                decision, "en", handle=cadence.bot_handle(), pushes=0, minutes=0,
+                reason=None)
+            record_gate_skip(
+                provider, cfg.full_name, number, user_id=cfg.user_id,
+                workspace_id=cfg.workspace_id, source="poller",
+                gate_key="gate_cadence", gate_name="Check review cadence",
+                reason=sentence[:1].upper() + sentence[1:] + ".", pr_meta=meta)
+            return True
+        return False
+    except Exception as exc:  # noqa: BLE001 — the gates in the orchestrator decide
+        logger.warning("poller_gate_check_failed repo=%s err=%s",
                        cfg.full_name, type(exc).__name__)
         return False
 

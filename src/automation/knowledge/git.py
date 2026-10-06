@@ -178,7 +178,8 @@ Setting up the webhook:
 4. Events: GitHub `pull_request` (a `push` event also keeps the index fresh);
    GitLab Merge request events; Bitbucket `pullrequest:created` and
    `pullrequest:updated` (add `pullrequest:fulfilled` / `pullrequest:rejected`
-   to record merges and declines).
+   to record merges and declines, and `pullrequest:approved` /
+   `pullrequest:unapproved` for the productivity history).
 5. Make sure the repository's switch in "Auto-review PRs" is on.
 
 How a delivery is checked: GitHub `X-Hub-Signature-256` (HMAC-SHA256),
@@ -212,7 +213,7 @@ URLs and secrets:
    hook (the workspace's webhook secret and the right events: GitHub
    `pull_request` and `push`; GitLab merge request events; Bitbucket
    `pullrequest:created`, `pullrequest:updated`, `pullrequest:fulfilled`,
-   `pullrequest:rejected`) and switches auto-review on for that repository.
+   `pullrequest:rejected`, `pullrequest:approved`, `pullrequest:unapproved`) and switches auto-review on for that repository.
 3. Success says "Webhook installed — new pull requests will be reviewed automatically". "Repair webhook" re-applies URL, events and secret and
    never creates a duplicate — use it after replacing a token or rotating
    the secret.

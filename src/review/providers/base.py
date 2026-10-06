@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+import re
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, replace
+from datetime import datetime
 
+from src.review import messages
+from src.review.markers import has_marker
 from src.review.models import (
     Finding,
     HunkSide,
@@ -11,16 +17,427 @@ from src.review.models import (
     ReviewBatch,
     ReviewVerdict,
 )
+from src.review.pr_summary import sanitize_prose
+from src.review.scope import CommitInfo  # noqa: F401 — the provider API's commit type
+
+logger = logging.getLogger(__name__)
 
 
 class PullRequestProviderError(Exception):
     """Provider operation failed (auth/network/api error)."""
 
 
+class EmptyDiffError(PullRequestProviderError):
+    """The provider lists changed files but sent no diff, even after retries.
+
+    Carries the pull request as far as it could be read (`pr`: metadata, empty
+    diff, `reported_files` set) so the caller can say so ON the pull request
+    instead of failing where nobody on it can see. `files` is None when the
+    provider could not even say how many files the pull request changes.
+    """
+
+    def __init__(self, message: str, *, pr: PullRequest | None = None,
+                 files: int | None = 0) -> None:
+        super().__init__(message)
+        self.pr = pr
+        self.files = files
+
+
+@dataclass(frozen=True)
+class OurThread:
+    """One comment thread of ours on a PR, as `our_inline_threads` lists it.
+
+    `comment_id` is the root comment; `thread_id` is what resolving needs
+    (GitHub's GraphQL node id, GitLab's discussion id; None on Bitbucket,
+    which resolves by comment id). `fingerprint` is the 16-hex token of the
+    finding marker, None for a comment that has none (an older review).
+    """
+
+    comment_id: int | str
+    path: str
+    line: int | None = None
+    side: str = "RIGHT"
+    resolved: bool = False
+    thread_id: str | None = None
+    fingerprint: str | None = None
+    sha: str | None = None
+    #: Somebody else replied: such a thread is a conversation, not a leftover.
+    replied: bool = False
+    #: `line` is where the code stands NOW (GitHub's `line`), not where the
+    #: comment was created (GitLab, Bitbucket, GitHub's `originalLine`).
+    line_is_current: bool = False
+
+
+@dataclass(frozen=True)
+class PostedComment:
+    """An inline comment this run created, for whoever follows it later
+    (the learning loop links replies and reactions back to the finding).
+
+    `fingerprint` is the 16-hex token in the comment's finding marker;
+    `finding_key` the full issue fingerprint (`issues.fingerprint`), the key
+    the issue ledger uses.
+    """
+
+    comment_id: int | str
+    path: str
+    line: int
+    fingerprint: str
+    finding_key: str
+    #: What a reply to this comment names instead of its id (GitLab: the
+    #: discussion id); None where the comment id is that name.
+    thread_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ThreadMessage:
+    """One comment of a conversation, as `get_thread` lists it.
+
+    `text` is the comment as written (a hidden marker revealed, nothing
+    removed); the reader decides what to drop. `ours` is True only when this
+    provider's token wrote it: authorship, never the marker, because a quote
+    reply copies the marker into somebody else's comment.
+    """
+
+    comment_id: str
+    author: str
+    text: str
+    ours: bool = False
+    #: Where the comment is anchored on the diff; None for a plain comment.
+    path: str | None = None
+    line: int | None = None
+    created_at: str | None = None
+
+
+def trim_thread(found: list[ThreadMessage], limit: int) -> list[ThreadMessage]:
+    """At most `limit` messages: the root, then the latest ones."""
+    limit = max(1, int(limit))
+    if len(found) <= limit:
+        return found
+    return [found[0], *found[-(limit - 1):]] if limit > 1 else found[-1:]
+
+
+def finding_fingerprint(finding: Finding) -> tuple[str, str]:
+    """(16-hex marker token, full issue fingerprint) of a finding."""
+    from src.review.issues import fingerprint
+
+    full = fingerprint(finding.rule_id, finding.file_path, finding.title)
+    return full[:16], full
+
+
+def finding_marker_for(finding: Finding, head_sha: str | None) -> str:
+    """The `celmis:finding` marker line of an inline comment. The commit is
+    informational (the fingerprint is what a later run matches on), so a head
+    that is not a 12-hex commit id is written as twelve zeros rather than
+    leaving the comment without a marker."""
+    from src.review.markers import finding_marker
+
+    short = (head_sha or "").lower()[:12]
+    if not re.fullmatch(r"[0-9a-f]{12}", short):
+        short = "0" * 12
+    return finding_marker(finding_fingerprint(finding)[0], short)
+
+
+@dataclass
+class IncrementalPost:
+    """What an incremental `post_review` knows before it posts: our earlier
+    threads sorted into outdated and standing, and the findings it will not
+    post inline (already on the PR, or on the old side, which an increment
+    cannot anchor)."""
+
+    threads: list[OurThread]
+    to_resolve: list[OurThread]
+    open_threads: list[OurThread]
+    resolved_before: int = 0
+    demoted: list[Finding] = None  # type: ignore[assignment]
+    duplicates: int = 0
+    #: False when the provider could not list our threads (no dedupe, no resolve).
+    listed: bool = True
+
+    def __post_init__(self) -> None:
+        if self.demoted is None:
+            self.demoted = []
+
+
+def begin_incremental_post(
+    provider: PullRequestProvider, batch: ReviewBatch, marker: str,
+) -> IncrementalPost | None:
+    """Plan an incremental post, or None for a full review (nothing changes).
+
+    Lists our earlier threads once and sorts them: a thread on code the new
+    commits removed is outdated (resolved after posting), the rest stay open
+    and are what `select` compares new findings with.
+    """
+    pr = batch.pull_request
+    if pr.scope is None:
+        return None
+    from src.review import scope as scope_mod
+
+    listed = True
+    try:
+        threads = provider.our_inline_threads(pr, marker)
+    except Exception as exc:  # noqa: BLE001 — an incremental problem never fails a review
+        logger.warning("incremental_threads_failed err=%s", type(exc).__name__)
+        threads = None
+    if threads is None:
+        threads, listed = [], False
+    plan = scope_mod.plan_threads(
+        threads, pr.scope.removed_lines, pr.scope.deleted_files,
+        base_sha=pr.scope.base_sha)
+    # A thread somebody replied in is a conversation, not a leftover: it stays
+    # open whatever happened to the line.
+    to_resolve = [t for t in plan.resolve if not t.replied]
+    kept = list(plan.keep_open) + [t for t in plan.resolve if t.replied]
+    # What the new findings are compared with is where the code stands now: a
+    # thread posted at the last reviewed commit is moved through the increment.
+    kept = [_at_head(t, pr) for t in kept]
+    return IncrementalPost(
+        threads=threads, to_resolve=to_resolve, open_threads=kept,
+        resolved_before=plan.resolved_before, listed=listed,
+    )
+
+
+def _at_head(thread: OurThread, pr: PullRequest) -> OurThread:
+    """`thread` with its line carried from the last reviewed commit to the
+    head, when it can be (see `scope.base_line`); else as is."""
+    from src.review import scope as scope_mod
+
+    base = scope_mod.base_line(thread, pr.scope.base_sha)
+    if base is None:
+        return thread
+    moved = scope_mod.map_old_line(pr.hunks, thread.path, base)
+    if moved is None or moved == thread.line:
+        return thread
+    return replace(thread, line=moved, line_is_current=True)
+
+
+def incremental_skip(state: IncrementalPost | None):
+    """The `skip` callable for `ReviewBatch.inline_findings`, or None for a
+    full review. Counts into `state` what it drops."""
+    if state is None:
+        return None
+    from src.review import scope as scope_mod
+
+    def skip(finding: Finding) -> bool:
+        if finding.side == HunkSide.LEFT:
+            # The old side of an increment is the old side of the last
+            # reviewed commit, not of the PR's target: no valid anchor.
+            state.demoted.append(finding)
+            return True
+        fp = finding_fingerprint(finding)[0]
+        if scope_mod.already_posted(fp, finding.file_path, finding.line, state.open_threads):
+            state.duplicates += 1
+            return True
+        return False
+
+    return skip
+
+
+def finish_incremental_post(
+    provider: PullRequestProvider, batch: ReviewBatch, state: IncrementalPost | None,
+    *, posted: int, refused: list[Finding] | None = None,
+) -> dict:
+    """After the inline comments are up: resolve the outdated threads, put the
+    banner (and the cumulative line) in the summary, fold the findings that
+    could not be anchored into it. Returns the response keys to merge.
+    Never raises."""
+    if state is None:
+        return {}
+    pr = batch.pull_request
+    language = batch.review_language
+    resolution = {"resolved": 0, "failed": 0, "unsupported": 0}
+    if state.to_resolve:
+        try:
+            # Before the call: the webhook for a closed thread can be faster
+            # than the reply to the call that closed it.
+            from src.review.learning import resolve as learning_resolve
+
+            learning_resolve.note_closed_by_us(
+                pr.provider, pr.repo, pr.number, [t.comment_id for t in state.to_resolve])
+        except Exception:  # noqa: BLE001 — a missing note only costs a weak signal
+            logger.debug("note_closed_by_us_failed")
+        try:
+            resolution.update(provider.resolve_threads(pr, state.to_resolve))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("resolve_threads_failed err=%s", type(exc).__name__)
+            resolution["failed"] = len(state.to_resolve)
+    standing = len(state.open_threads) + len(state.to_resolve) - resolution["resolved"]
+    batch.add_section(
+        "incremental", incremental_banner(pr, language, open_threads=standing + posted,
+                                          resolved=state.resolved_before + resolution["resolved"],
+                                          with_threads=state.listed),
+        order=50, targets={"comment"})
+    left_out = list(state.demoted) + list(refused or [])
+    if left_out:
+        batch.add_section(
+            "unanchored", _format_unanchored(left_out, pr, language),
+            order=900, targets={"comment"})
+    return {
+        "incremental": True,
+        "threads_resolved": resolution["resolved"],
+        "threads_resolve_failed": resolution["failed"],
+        "threads_resolve_unsupported": resolution["unsupported"],
+        "findings_already_posted": state.duplicates,
+        "findings_demoted_to_summary": len(state.demoted),
+    }
+
+
+def incremental_banner(
+    pr: PullRequest, language: str | None, *, open_threads: int | None = None,
+    resolved: int | None = None, with_threads: bool = True,
+) -> str:
+    """The summary's first block of an incremental review: what was read, and
+    how the earlier comments stand."""
+    scope = pr.scope
+    if scope is None:
+        return ""
+    files = len({h.file_path for h in pr.hunks})
+    text = messages.t(
+        "incremental.banner", language,
+        commits=messages.tn("incremental.commits", scope.new_commits, language,
+                            count=scope.new_commits),
+        sha=(scope.base_sha or "")[:7],
+        files=messages.tn("started.files_count", files, language, count=files),
+    )
+    if with_threads and open_threads is not None and resolved is not None:
+        text += "\n\n" + messages.t(
+            "incremental.threads", language, open=open_threads, resolved=resolved)
+    return text
+
+
+@dataclass(frozen=True)
+class PathCommit:
+    """One commit of a branch, as far as a path-filtered history says it."""
+
+    sha: str
+    subject: str = ""
+    #: ISO-8601 as the provider wrote it; None when it did not say.
+    date: str | None = None
+    url: str | None = None
+
+
+#: The largest file a head check will read. A file over it is "unreadable",
+#: never an empty answer: a prompt cannot hold it and a hash of half of it
+#: would call an unchanged file changed.
+MAX_FILE_BYTES = 1_000_000
+
+
+def committed_since(date: str | None, since: datetime | None) -> bool:
+    """Is a commit dated `date` (ISO-8601) not older than `since`?
+
+    An unreadable or missing date counts as recent: dropping a commit because
+    its date could not be read would hide the very commit that fixed an issue.
+    """
+    if since is None or not date:
+        return True
+    try:
+        when = datetime.fromisoformat(str(date).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=since.tzinfo)
+    return when >= since
+
+
+@dataclass(frozen=True)
+class FileChange:
+    """What one commit did to one path: added | modified | deleted | renamed.
+
+    `path` is the path AFTER the commit (the new name for a rename, the old
+    one for a deletion); `previous_path` is set for a rename only.
+    """
+
+    status: str
+    path: str
+    previous_path: str | None = None
+
+
 class PullRequestProvider(ABC):
     """Provider-agnostic PR ops: fetch + post comments."""
 
     name: str = ""
+
+    #: The longest PR description this provider stores, for `compose_description`
+    #: to fit our block into; None means `pr_actions.DESCRIPTION_MAX_CHARS`.
+    description_max_chars: int | None = None
+
+    #: The repository's review language for the notes a provider writes by
+    #: itself (`upsert_feedback_comment`); set by the review's lifecycle once
+    #: the policy is known. None reads as English.
+    review_language: str | None = None
+
+    @staticmethod
+    def _expect_ok(resp, what: str):
+        """`resp` when it is a 2xx; PullRequestProviderError otherwise.
+
+        The guarded clients never follow a redirect on their own, so a 301/302
+        reaches the caller as a response with an EMPTY body. Reading `.text`
+        off it was how a moved repository (or Bitbucket's diff endpoint, which
+        answers 302) turned into "the pull request has no diff": a quiet skip
+        of a PR that had one. A 3xx is therefore an error that names where it
+        pointed, not a result.
+        """
+        code = resp.status_code
+        if 200 <= code < 300:
+            return resp
+        if 300 <= code < 400:
+            where = resp.headers.get("location") or "no Location header"
+            raise PullRequestProviderError(
+                f"{what} answered with a redirect (HTTP {code} to {where[:200]})"
+            )
+        raise PullRequestProviderError(f"{what} error {code}: {resp.text[:200]}")
+
+    # ─── Reading the target branch (the issues backlog) ──────────
+    #
+    # Non-abstract on purpose: a provider that cannot read a branch answers
+    # with an error, and the backlog check then calls the issue UNREADABLE and
+    # leaves it open — never fixed. All four take the full repository name as
+    # the review calls it (`owner/name`, `workspace/slug`, `group/project`).
+
+    def branch_head_sha(self, repo: str, branch: str) -> str:
+        """The sha `branch` points at now. Raises PullRequestProviderError on
+        any failure — a missing branch included: the caller must not mistake
+        "could not ask" for "nothing there"."""
+        raise PullRequestProviderError(
+            f"{self.name or 'this provider'} cannot read a branch head")
+
+    def read_file_at(self, repo: str, ref: str, path: str) -> str | None:
+        """The text of `path` at `ref` (a sha or a branch); None when the file
+        does not exist there. Raises PullRequestProviderError when it could
+        not be read (no scope, a rate limit, too large, an outage)."""
+        raise PullRequestProviderError(
+            f"{self.name or 'this provider'} cannot read a file")
+
+    def commits_touching(
+        self, repo: str, ref: str, path: str, *,
+        since: datetime | None = None, limit: int = 10,
+    ) -> list[PathCommit]:
+        """The commits on `ref` that touched `path`, newest first, none older
+        than `since`, at most `limit`."""
+        raise PullRequestProviderError(
+            f"{self.name or 'this provider'} cannot list a file's commits")
+
+    def file_change_in_commit(
+        self, repo: str, sha: str, path: str,
+    ) -> FileChange | None:
+        """What commit `sha` did to `path` (None when it did not touch it).
+        Tells a deletion or a rename from an edit — the one thing a missing
+        file at the branch head cannot say by itself."""
+        raise PullRequestProviderError(
+            f"{self.name or 'this provider'} cannot read a commit's files")
+
+    def commit_url(self, repo: str, sha: str) -> str | None:
+        """A web link to a commit, or None."""
+        return None
+
+    def list_comment_reactions(
+        self, repo: str, pr_number: int, comment_id: str,
+    ) -> list[tuple[str, str]]:
+        """The thumbs on one review comment as (user, "up" | "down") pairs, a
+        person at most once per direction. Raises PullRequestProviderError when
+        the provider has no such reactions or the read failed — the learning
+        poll then simply skips that comment."""
+        raise PullRequestProviderError(
+            f"{self.name or 'this provider'} cannot list reactions")
 
     @abstractmethod
     def fetch_pull_request(
@@ -61,6 +478,76 @@ class PullRequestProvider(ABC):
         things.
         """
         return []
+
+    # ─── Incremental review (all optional: None / [] keeps a double working,
+    # and every failure means "review the whole PR") ─────────────────────
+
+    def list_pr_commits(self, repo: str, pr_number: int) -> list[CommitInfo] | None:
+        """The commits of the PR with their parents, or None when this provider
+        cannot say (or the list was cut short: a truncated list proves nothing
+        about ancestry)."""
+        return None
+
+    def fetch_incremental_diff(
+        self, repo: str, pr_number: int, base_sha: str, head_sha: str,
+    ) -> str | None:
+        """The unified diff between two commits of the PR, or None when it
+        could not be read (an empty string is a real, empty answer)."""
+        return None
+
+    def our_inline_threads(self, pr: PullRequest, marker: str) -> list[OurThread] | None:
+        """The inline comment threads of OURS on the PR (marker AND author),
+        or None when they could not be listed."""
+        return None
+
+    def resolve_threads(self, pr: PullRequest, threads: list[OurThread]) -> dict[str, int]:
+        """Mark threads resolved. Returns {"resolved", "failed", "unsupported"}
+        counts. Never raises: an outdated thread left open is harmless."""
+        return {"resolved": 0, "failed": 0, "unsupported": len(threads)}
+
+    # ─── Conversation: what the comment commands need ───────────
+    #
+    # Non-abstract on purpose: a provider that has not implemented them keeps
+    # every other behaviour, and the command receiver answers "not supported"
+    # instead of crashing. Each reply carries the chat marker (never the review
+    # marker, so a push does not clean it up).
+
+    def viewer_ids(self) -> frozenset[str]:
+        """The stable ids this token posts as; empty when unknown."""
+        return frozenset()
+
+    def post_reply(self, ev, body: str) -> str | None:
+        """Answer the comment `ev` (a `CommentEvent`) in its own thread; the new
+        comment's id. Raises PullRequestProviderError when the write fails."""
+        raise PullRequestProviderError(f"{self.name or 'this provider'} cannot reply to comments")
+
+    def update_comment(
+        self, repo: str, pr_number: int, comment_id: str, body: str, *, kind: str = "issue",
+    ) -> bool:
+        """Rewrite a comment of ours (the "working on it" note, once it is done)."""
+        return False
+
+    def get_thread(self, ev, limit: int = 30) -> list[ThreadMessage]:
+        """The conversation `ev` belongs to, oldest first, root first, `ev`'s own
+        comment included; at most `limit` messages (the root and the latest).
+        Empty when the provider cannot tell or the read fails: a chat answer
+        without its thread is worse than one with it, never an error."""
+        return []
+
+    def acknowledge(self, ev) -> bool:
+        """React to the comment `ev` so its author sees it was received. False
+        when the provider has no reactions (the caller replies instead)."""
+        return False
+
+    def actor_permission(
+        self, repo: str, *, actor_id: str = "", actor_name: str = "",
+    ) -> str:
+        """`write`, `read`, `none` — or `unknown` when the provider cannot say."""
+        return "unknown"
+
+    def pr_participants(self, repo: str, pr_number: int) -> frozenset[str]:
+        """Ids and handles of the PR's author, reviewers and assignees."""
+        return frozenset()
 
     #: The id of the lifecycle comment this provider instance posted or
     #: adopted for the current review — "🔄 reviewing…" first, the final
@@ -116,7 +603,9 @@ class PullRequestProvider(ABC):
 
         return get_review_settings().comment_marker
 
-    def upsert_feedback_comment(self, pr: PullRequest, reason: str) -> int | None:
+    def upsert_feedback_comment(
+        self, pr: PullRequest, reason: str, language: str | None = None,
+    ) -> int | None:
         """The brief "not reviewed: <reason>" note, written at most once per PR.
 
         For a review skipped or blocked before any placeholder existed, when
@@ -130,10 +619,12 @@ class PullRequestProvider(ABC):
         marker = self._comment_marker()
         existing = [
             cid for cid, text in self._our_summary_comments(pr, marker)
-            if STATUS_FEEDBACK_MARK in (text or "")
+            if has_marker(text, STATUS_FEEDBACK_MARK)
         ]
         return self._write_top_level_comment(
-            pr, _format_feedback_comment(pr, reason=reason, marker=marker),
+            pr, _format_feedback_comment(
+                pr, reason=reason, marker=marker,
+                language=language or self.review_language),
             existing[-1] if existing else None,
         )
 
@@ -146,6 +637,13 @@ class PullRequestProvider(ABC):
         Returns {"written": bool, "error": str | None}. Default: unsupported.
         """
         return {"written": False, "error": "not supported by this provider"}
+
+    def fetch_commit_messages(self, pr: PullRequest, limit: int = 50) -> list[str]:
+        """The full messages of the pull request's commits, newest first, at
+        most `limit`. Where teams also write the task key ("PROJ-6066 fix
+        cutting") when the title does not. Never raises; [] when the provider
+        cannot say."""
+        return []
 
     def _status_target(
         self, pr: PullRequest, marker: str, *, replace: bool, create: bool,
@@ -160,7 +658,7 @@ class PullRequestProvider(ABC):
             # killed run left behind is stale in either mode. The newest one
             # wins — with history kept, older finished summaries are records.
             for cid, text in reversed(self._our_summary_comments(pr, marker)):
-                if STATUS_IN_PROGRESS_MARK in (text or ""):
+                if has_marker(text, STATUS_IN_PROGRESS_MARK):
                     return True, cid
             return False, None
         existing = (
@@ -181,6 +679,19 @@ def _with_marker(body: str, marker: str) -> str:
     if not marker or marker in body:
         return body
     return f"{marker}\n{body}"
+
+
+def _count(value: object) -> int | None:
+    """A provider's "how many files" as a non-negative int, None when it is
+    missing or not a number (GitLab sends `changes_count` as a string, and
+    "1000+" for a huge MR — that stays unknown, never a wrong small number)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
 
 
 # ─── Factory ─────────────────────────────────────────────────────
@@ -300,7 +811,7 @@ def _new_side_text(pr: PullRequest) -> dict[tuple[str, int], str]:
     removed lines do not. Used to show what a suggested change replaces.
     """
     out: dict[tuple[str, int], str] = {}
-    for hunk in pr.hunks:
+    for hunk in pr.anchor_hunks:
         if not hunk.file_path or hunk.is_binary:
             continue
         n = hunk.new_start
@@ -362,7 +873,7 @@ def _committable_enabled(batch: ReviewBatch) -> bool:
 
 def _format_finding_body(
     finding: Finding, marker: str = "", *, committable: str | None = None,
-    original: list[str] | None = None,
+    original: list[str] | None = None, head_sha: str | None = None,
 ) -> str:
     """Markdown body for an inline comment — universal cross-provider.
 
@@ -415,6 +926,14 @@ def _format_finding_body(
         # account (see `_is_ours` in the github/gitlab providers) — a substring
         # match on its own would delete that human's words.
         parts.append("")
+        # The finding's own marker: its fingerprint and the commit it was
+        # posted on. A later incremental run reads it to tell that this
+        # finding is already on the PR (and the learning loop to link a reply
+        # back to it). Inside the same marked body, never alone: the
+        # authorship check of the marker below still applies to it.
+        own = finding_marker_for(finding, head_sha)
+        if own:
+            parts.append(own)
         parts.append(marker)
 
     return "\n".join(parts)
@@ -427,19 +946,19 @@ _VERDICT_EMOJI = {
     ReviewVerdict.SKIPPED: "⏭️",
 }
 
-_VERDICT_TEXT = {
-    ReviewVerdict.APPROVE: "**APPROVED** — no blocking findings",
-    ReviewVerdict.COMMENT: "**COMMENT** — findings to consider",
-    ReviewVerdict.REQUEST_CHANGES: "**CHANGES REQUESTED** — blocking findings",
+_VERDICT_KEY = {
+    ReviewVerdict.APPROVE: "completed.verdict.approve",
+    ReviewVerdict.COMMENT: "completed.verdict.comment",
+    ReviewVerdict.REQUEST_CHANGES: "completed.verdict.request_changes",
     # SKIPPED used to fall through both .get() defaults and render as
     # "💬 " — a bare speech bubble above "_No issues detected._" on a PR
     # nothing had reviewed. The banner in the summary carries the why; this
     # line only has to stop impersonating a verdict about the code.
-    ReviewVerdict.SKIPPED: "**SKIPPED** — nothing was reviewed",
+    ReviewVerdict.SKIPPED: "completed.verdict.skipped",
 }
 
 
-def _verdict_line(batch: ReviewBatch) -> str:
+def _verdict_line(batch: ReviewBatch, language: str | None = None) -> str:
     """One verdict line, rendered once for every surface that shows it.
 
     Both the persistent summary comment and GitHub's immutable review body
@@ -449,7 +968,8 @@ def _verdict_line(batch: ReviewBatch) -> str:
     it points at says otherwise.
     """
     emoji = _VERDICT_EMOJI.get(batch.verdict, "💬")
-    return f"{emoji} {_VERDICT_TEXT.get(batch.verdict, '')}"
+    key = _VERDICT_KEY.get(batch.verdict)
+    return f"{emoji} {messages.t(key, language) if key else ''}"
 
 
 def _format_review_pointer(batch: ReviewBatch, summary_url: str | None = None) -> str:
@@ -481,20 +1001,20 @@ def _format_review_pointer(batch: ReviewBatch, summary_url: str | None = None) -
         else "the review summary comment on this pull request"
     )
     return (
-        f"{_verdict_line(batch)}\n\n"
+        f"{_verdict_line(batch, batch.review_language)}\n\n"
         f"Full findings and scope are in {where} — one persistent comment, "
         f"updated in place on every run."
     )
 
 
-_THRESHOLD_LABEL = {
-    "critical": "critical only",
-    "error": "critical + error",
-    "warning": "warning and above",
+_THRESHOLD_KEY = {
+    "critical": "threshold.critical",
+    "error": "threshold.error",
+    "warning": "threshold.warning",
 }
 
 
-def _posting_line(batch: ReviewBatch) -> str:
+def _posting_line(batch: ReviewBatch, language: str | None = None) -> str:
     """How many of the counted findings became inline comments, and why not
     the rest.
 
@@ -521,20 +1041,20 @@ def _posting_line(batch: ReviewBatch) -> str:
     # "up to": this text is composed before the comments are sent, and a
     # provider can still refuse some of them one by one (GitLab, Bitbucket
     # post per finding). The number is what was SELECTED, said as such.
-    parts = [f"up to **{shown}** shown inline"]
+    parts = [messages.t("completed.posting_shown", language, n=shown)]
     if below:
-        label = _THRESHOLD_LABEL.get(
-            str(batch.comment_min_severity or "").lower(), "the threshold")
-        parts.append(
-            f"{below} below the comment threshold ({label}) — recorded in "
-            f"Celmis, not posted"
-        )
+        label = messages.t(
+            _THRESHOLD_KEY.get(str(batch.comment_min_severity or "").lower(),
+                               "threshold.fallback"), language)
+        parts.append(messages.t("completed.posting_below", language, n=below, label=label))
     if over_cap:
-        parts.append(f"{over_cap} over the {cap}-comment limit")
+        parts.append(messages.t("completed.posting_over", language, n=over_cap, cap=cap))
     return "_" + " · ".join(parts) + "_"
 
 
-def _files(n: int) -> str:
+def _files(n: int, language: str | None = None) -> str:
+    if messages.normalise_language(language) == "uk":
+        return {"one": "файл", "few": "файли"}.get(messages.plural_form(n, "uk"), "файлів")
     return "file" if n == 1 else "files"
 
 
@@ -548,6 +1068,9 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
     a per-file walkthrough table, findings by severity and by source with the
     top ones listed, and the scope/telemetry folded into <details>.
     """
+    actions = getattr(batch, "pr_actions", None)
+    if getattr(actions, "completed_comment", "classic") == "completed":
+        return _format_completed_comment(batch, marker)
     if getattr(batch, "rich_summary", False):
         return _format_rich_summary(batch, marker)
     lines: list[str] = []
@@ -570,7 +1093,7 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
         lines.append(banner.strip())
         lines.append("")
 
-    lines.append(_verdict_line(batch))
+    lines.append(_verdict_line(batch, batch.review_language))
     lines.append("")
 
     # Severity summary
@@ -579,7 +1102,7 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
         lines.append("")
         lines.extend(_severity_count_lines(batch))
         lines.append("")
-        posting = _posting_line(batch)
+        posting = _posting_line(batch, batch.review_language)
         if posting:
             lines.append(posting)
             lines.append("")
@@ -592,6 +1115,8 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
         # runs instead.
         lines.append("_No issues detected._")
         lines.append("")
+
+    lines.extend(_section_lines(batch, "comment"))
 
     # PR scope
     lines.append("### Scope")
@@ -642,17 +1167,15 @@ def _severity_count_lines(batch: ReviewBatch) -> list[str]:
     return lines
 
 
-def _scope_lines(batch: ReviewBatch) -> list[str]:
+def _scope_lines(batch: ReviewBatch, language: str | None = None) -> list[str]:
     pr = batch.pull_request
     lines = [
-        f"- Files changed: **{len(pr.changed_files)}**",
-        f"- Lines: **+{pr.total_added_lines} / -{pr.total_removed_lines}**",
+        messages.t("scope.files", language, n=len(pr.changed_files)),
+        messages.t("scope.lines", language,
+                   added=pr.total_added_lines, removed=pr.total_removed_lines),
     ]
     if batch.cross_repo_callers:
-        lines.append(
-            f"- Cross-repo callers: **{batch.cross_repo_callers}** "
-            f"(blast radius via materialized edges)"
-        )
+        lines.append(messages.t("scope.callers", language, n=batch.cross_repo_callers))
     if batch.skipped_files:
         # Two causes with two owners: the install's skip lists and size limit,
         # and this repository's own ignore globs (tagged by the orchestrator).
@@ -660,27 +1183,29 @@ def _scope_lines(batch: ReviewBatch) -> list[str]:
                       if str(p).endswith(" (ignore glob)"))
         other = len(batch.skipped_files) - by_glob
         if other:
-            lines.append(
-                f"- Skipped: {other} {_files(other)} (lock/binary/generated/too large)")
+            lines.append(messages.t("scope.skipped", language, n=other,
+                                    files=_files(other, language)))
         if by_glob:
-            lines.append(
-                f"- Ignored by this repository's ignore globs: {by_glob} {_files(by_glob)}")
+            lines.append(messages.t("scope.ignored", language, n=by_glob,
+                                    files=_files(by_glob, language)))
     # An agent that had nothing to check — said here, folded away, rather
     # than in the banner: it is not a gap in the review, and the author who
     # wonders why the business-logic check said nothing finds the answer.
     for agent, why in (getattr(batch, "skip_reasons", None) or {}).items():
-        lines.append(f"- Not run: `{agent}` — {_md_cell(why, 200)}")
+        lines.append(messages.t("scope.not_run", language, agent=agent,
+                                why=_md_cell(why, 200)))
     return lines
 
 
-def _performance_line(batch: ReviewBatch) -> str:
+def _performance_line(batch: ReviewBatch, language: str | None = None) -> str:
     if not batch.elapsed_seconds:
         return ""
     parts = [
-        f"Analysis time: **{batch.elapsed_seconds:.1f}s**",
+        messages.t("perf.time", language, seconds=f"{batch.elapsed_seconds:.1f}"),
         # "agents: none" and not "agents: " — this line is reachable for
         # skipped/failed runs now that they post a real comment.
-        f"agents: {', '.join(batch.agents_run) or 'none'}",
+        messages.t("perf.agents", language,
+                   agents=", ".join(batch.agents_run) or messages.t("perf.none", language)),
     ]
     # Only when there are any. The Claude Code engine bills by
     # subscription and never populates these, so every review it produced
@@ -688,7 +1213,8 @@ def _performance_line(batch: ReviewBatch) -> str:
     # measurement and is an absent field. A missing line is honest; a zero
     # is not.
     if batch.tokens_in or batch.tokens_out:
-        parts.append(f"tokens: {batch.tokens_in:,}/{batch.tokens_out:,}")
+        parts.append(messages.t("perf.tokens", language,
+                                tin=f"{batch.tokens_in:,}", tout=f"{batch.tokens_out:,}"))
     return "- " + " · ".join(parts)
 
 
@@ -749,7 +1275,10 @@ def _blob_link(pr: PullRequest, path: str, line: int) -> str | None:
 
 
 def _finding_location(pr: PullRequest, finding: Finding) -> str:
-    label = f"`{finding.file_path}:{finding.line}`"
+    # A path comes from the diff; a backtick or angle bracket in it could break
+    # out of the code span or forge a marker comment.
+    safe_path = re.sub(r"[`<>]", "_", str(finding.file_path))
+    label = f"`{safe_path}:{finding.line}`"
     # A LEFT-side finding sits on a line that no longer exists in the head
     # commit, so a link to the head blob would land on the wrong code.
     if getattr(finding, "side", HunkSide.RIGHT) != HunkSide.RIGHT:
@@ -766,7 +1295,7 @@ def _category_of(finding: Finding) -> str:
     return finding_category(finding)
 
 
-def _walkthrough_lines(batch: ReviewBatch) -> list[str]:
+def _walkthrough_lines(batch: ReviewBatch, language: str | None = None) -> list[str]:
     pr = batch.pull_request
     walkthrough = getattr(batch, "walkthrough", None) or {}
     if not walkthrough:
@@ -775,9 +1304,9 @@ def _walkthrough_lines(batch: ReviewBatch) -> list[str]:
     files = pr.changed_files
     shown = files[:WALKTHROUGH_MAX_FILES]
     lines = [
-        "### Changes walkthrough",
+        messages.t("walk.title", language),
         "",
-        "| File | +/- | Change summary |",
+        f"| {messages.t('walk.file', language)} | +/- | {messages.t('walk.change', language)} |",
         "|---|---|---|",
     ]
     for path in shown:
@@ -788,7 +1317,7 @@ def _walkthrough_lines(batch: ReviewBatch) -> list[str]:
         )
     more = len(files) - len(shown)
     if more > 0:
-        lines.append(f"| _+{more} more {_files(more)}_ | | |")
+        lines.append(f"| {messages.tn('walk.more', more, language, count=more)} | | |")
     lines.append("")
     return lines
 
@@ -841,14 +1370,269 @@ def _rich_findings_lines(batch: ReviewBatch) -> list[str]:
             lines.append("")
             lines.append(f"_…and {rest} more in the inline comments._")
         lines.append("")
-    posting = _posting_line(batch)
+    posting = _posting_line(batch, batch.review_language)
     if posting:
         lines.append(posting)
         lines.append("")
     return lines
 
 
-def _failure_headline(batch: ReviewBatch) -> str:
+def _section_lines(batch: ReviewBatch, target: str) -> list[str]:
+    """The `batch.summary_sections` shown on `target`, each followed by a blank line."""
+    lines: list[str] = []
+    for section in batch.sections_for(target):
+        lines.append(section.markdown)
+        lines.append("")
+    return lines
+
+
+def _category_label(category: str, language: str | None) -> str:
+    key = f"category.{category}"
+    return messages.t(key, language) if key in messages.EN else category
+
+
+def _severity_breakdown(batch: ReviewBatch, language: str | None) -> str:
+    """'🔴 Critical 1 · 🟠 Error 2' — only the levels that have findings."""
+    return " · ".join(
+        f"{_severity_emoji(level)} {messages.t(f'severity.{level}', language)} {count}"
+        for level, count in (
+            ("critical", batch.critical_count), ("error", batch.error_count),
+            ("warning", batch.warning_count), ("info", batch.info_count),
+        )
+        if count
+    )
+
+
+def _category_items(batch: ReviewBatch, language: str | None) -> str:
+    by_cat: dict[str, int] = {}
+    for f in batch.findings:
+        cat = _category_of(f)
+        by_cat[cat] = by_cat.get(cat, 0) + 1
+    return " · ".join(
+        f"{_category_label(cat, language)} **{n}**"
+        for cat, n in sorted(by_cat.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
+
+
+#: Findings listed by title in the completed comment and the description.
+COMPLETED_TOP_FINDINGS = 5
+
+
+def _top_findings_lines(batch: ReviewBatch, language: str | None) -> list[str]:
+    pr = batch.pull_request
+    postable = batch.postable_findings
+    top = postable[:COMPLETED_TOP_FINDINGS]
+    if not top:
+        return []
+    lines: list[str] = []
+    for i, f in enumerate(top, 1):
+        # The title is model output written after reading the author's diff:
+        # no marker comment, link, image or @-mention may ride in with it.
+        title = _md_cell(
+            sanitize_prose(f.title or f.severity.value.upper(), 160), 160)
+        lines.append(
+            f"{i}. {_severity_emoji(f.severity.value)} **{title}** — "
+            f"{_finding_location(pr, f)}"
+        )
+    rest = len(postable) - len(top)
+    if rest > 0:
+        lines.append("")
+        lines.append(messages.t("completed.more", language, n=rest))
+    return lines
+
+
+def _completed_header(batch: ReviewBatch, language: str | None) -> str:
+    """The repository's own `message_finished_header` when it set one, else
+    the "Code Review Completed" heading."""
+    from src.review.pr_actions import (
+        HEADER_TEMPLATE_MAX_CHARS,
+        render_template,
+        template_values,
+    )
+
+    actions = getattr(batch, "pr_actions", None)
+    custom = render_template(
+        getattr(actions, "message_finished_header", None),
+        template_values(batch.pull_request, list(batch.agents_run)),
+        limit=HEADER_TEMPLATE_MAX_CHARS,
+    )
+    return custom or messages.t("completed.title", language)
+
+
+def _commands_guide_lines(language: str | None, off: tuple[str, ...] = ()) -> list[str]:
+    """What the bot can be told in a comment — only the commands this
+    installation can run and this repository has not switched off. Shown under
+    `commands_guide_enabled`."""
+    from src.review.commands.handlers import available_commands
+    from src.review.commands.parser import guide_lines
+    from src.review.settings import get_review_settings
+
+    return guide_lines(
+        get_review_settings().bot_handle, language,
+        available=[name for name in available_commands() if name not in off],
+    )
+
+
+def _settings_link(batch: ReviewBatch, language: str | None) -> str:
+    """A link to this repository's review settings; "" when the install has
+    no usable public address (the link would point nowhere)."""
+    from urllib.parse import quote
+
+    try:
+        from src.review.webhook_install import public_base_url
+
+        base, _problem = public_base_url()
+    except Exception:  # noqa: BLE001 — a link never fails a summary
+        return ""
+    if not base:
+        return ""
+    slug = quote(batch.pull_request.local_slug or "", safe="")
+    url = f"{base}/review-settings" + (f"?repo={slug}" if slug else "")
+    return messages.t("completed.settings", language, url=url)
+
+
+def _format_completed_comment(batch: ReviewBatch, marker: str) -> str:
+    """The "Code Review Completed" comment (`completed_comment="completed"`).
+
+    The same persistent comment the classic summary is, rewritten in place, so
+    there is no second thread and nothing for the review to answer to. What it
+    leads with is the answer: the verdict, how many findings and of what kind,
+    the first few by name. Then the change summary when it is not already in
+    the description, the blocks other stages added (`batch.summary_sections`),
+    the scope in one line, the technical details folded away, the commands
+    (when they exist) and a link to this repository's settings.
+    """
+    from src.review.models import ReviewRunStatus
+
+    language = batch.review_language
+    pr = batch.pull_request
+    lines: list[str] = [marker, _completed_header(batch, language), ""]
+
+    if batch.run_status == ReviewRunStatus.FAILED:
+        lines.append(_failure_headline(batch, language))
+        lines.append("")
+    banner = batch.partial_banner
+    if banner:
+        lines.append(banner.strip())
+        lines.append("")
+    lines.append(_verdict_line(batch, language))
+    lines.append("")
+
+    if batch.findings:
+        lines.append(messages.t(
+            "completed.found", language, n=len(batch.findings),
+            breakdown=_severity_breakdown(batch, language)))
+        lines.append("")
+        lines.append(messages.t(
+            "completed.by_category", language, items=_category_items(batch, language)))
+        lines.append("")
+        top = _top_findings_lines(batch, language)
+        if top:
+            lines.append(messages.t("completed.top", language))
+            lines.append("")
+            lines.extend(top)
+            lines.append("")
+        posting = _posting_line(batch, language)
+        if posting:
+            lines.append(posting)
+            lines.append("")
+    elif batch.agents_run:
+        # Same rule as the classic form: "no issues" says something looked.
+        lines.append(messages.t("completed.clean", language))
+        lines.append("")
+
+    if getattr(batch, "summary_in_description", False):
+        lines.append(messages.t("completed.in_description", language))
+        lines.append("")
+    else:
+        overview = (getattr(batch, "pr_overview", "") or "").strip()
+        if overview:
+            lines.append(messages.t("completed.summary", language))
+            lines.append("")
+            lines.append(overview)
+            lines.append("")
+        lines.extend(_walkthrough_lines(batch, language))
+    lines.extend(_section_lines(batch, "comment"))
+
+    lines.append(messages.t(
+        "completed.scope", language, files=len(pr.changed_files),
+        added=pr.total_added_lines, removed=pr.total_removed_lines,
+        sha=(pr.head_sha or "")[:7] or "unknown"))
+    lines.append("")
+    details = [*_scope_lines(batch, language)]
+    perf = _performance_line(batch, language)
+    if perf:
+        details += ["", perf]
+    lines.append("<details>")
+    lines.append(f"<summary>{messages.t('completed.details', language)}</summary>")
+    lines.append("")
+    lines.extend(details)
+    lines.append("")
+    lines.append("</details>")
+    lines.append("")
+
+    actions = getattr(batch, "pr_actions", None)
+    if getattr(actions, "commands_guide_enabled", False):
+        lines.extend(_commands_guide_lines(language, getattr(actions, "guide_commands_off", ())))
+    link = _settings_link(batch, language)
+    if link:
+        lines.append(link)
+        lines.append("")
+
+    lines.append("---")
+    powered = messages.t("completed.powered", language, provenance=_provenance(batch))
+    lines.append(f"<sub>{powered}</sub>")
+    return "\n".join(lines)
+
+
+def _format_unanchored(
+    findings: list[Finding], pr: PullRequest, language: str | None = None,
+) -> str:
+    """Findings the git provider would not attach to a line, as a list for the
+    summary — the position kept as text, the explanation kept whole (cut at a
+    sane length), so a refused comment costs the reader a click, not the
+    finding. Empty when there is nothing to say."""
+    if not findings:
+        return ""
+    lines = [messages.t("unanchored.title", language), "",
+             messages.t("unanchored.intro", language), ""]
+    for i, f in enumerate(findings, 1):
+        # The title is model output written after reading the author's diff:
+        # no marker comment, link, image or @-mention may ride in with it.
+        title = _md_cell(
+            sanitize_prose(f.title or f.severity.value.upper(), 160), 160)
+        lines.append(
+            f"{i}. {_severity_emoji(f.severity.value)} **{title}** — "
+            f"{_finding_location(pr, f)}"
+        )
+        body = (f.body or "").strip()
+        if len(body) > UNANCHORED_BODY_MAX:
+            body = _close_open_fence(
+                body[: UNANCHORED_BODY_MAX - 1].rstrip()) + "…"
+        if body:
+            lines.extend("   " + ln if ln.strip() else "" for ln in body.splitlines())
+    return "\n".join(lines)
+
+
+#: How much of one refused finding's explanation the summary keeps.
+UNANCHORED_BODY_MAX = 1200
+
+
+def _close_open_fence(text: str) -> str:
+    """Close a code fence a cut left open, so the rest of the summary is not
+    swallowed as code (and Bitbucket's flavouring still sees the real tags)."""
+    fence = None
+    for ln in text.splitlines():
+        stripped = ln.strip()
+        if fence is None:
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                fence = stripped[:3]
+        elif stripped.startswith(fence):
+            fence = None
+    return text if fence is None else f"{text}\n{fence}\n"
+
+
+def _failure_headline(batch: ReviewBatch, language: str | None = None) -> str:
     """'❌ Review failed: <reason>' for a run in which no stage completed.
 
     The reason comes from `agent_errors`, which holds curated sentences only
@@ -863,7 +1647,7 @@ def _failure_headline(batch: ReviewBatch) -> str:
         reason = f"no review stage completed ({', '.join(batch.agents_failed)})"
     else:
         reason = "no review stage completed"
-    return f"### ❌ Review failed: {_md_cell(reason, 300)}"
+    return messages.t("status.failed", language, reason=_md_cell(reason, 300))
 
 
 def _format_rich_summary(batch: ReviewBatch, marker: str) -> str:
@@ -872,13 +1656,13 @@ def _format_rich_summary(batch: ReviewBatch, marker: str) -> str:
     lines: list[str] = [marker, _summary_header(batch), ""]
 
     if batch.run_status == ReviewRunStatus.FAILED:
-        lines.append(_failure_headline(batch))
+        lines.append(_failure_headline(batch, batch.review_language))
         lines.append("")
     banner = batch.partial_banner
     if banner:
         lines.append(banner.strip())
         lines.append("")
-    lines.append(_verdict_line(batch))
+    lines.append(_verdict_line(batch, batch.review_language))
     lines.append("")
 
     if getattr(batch, "summary_in_description", False):
@@ -893,8 +1677,9 @@ def _format_rich_summary(batch: ReviewBatch, marker: str) -> str:
             lines.append("")
             lines.append(overview)
             lines.append("")
-        lines.extend(_walkthrough_lines(batch))
+        lines.extend(_walkthrough_lines(batch, batch.review_language))
     lines.extend(_rich_findings_lines(batch))
+    lines.extend(_section_lines(batch, "comment"))
 
     details = ["**Scope**", "", *_scope_lines(batch)]
     perf = _performance_line(batch)
@@ -922,13 +1707,19 @@ STATUS_IN_PROGRESS_MARK = "<!-- celmis:review-status:in-progress -->"
 
 def _format_started_comment(
     pr: PullRequest, *, agents: list[str], started_at: str, marker: str = "",
-    template: str | None = None,
+    template: str | None = None, language: str | None = None,
+    first_review: bool | None = None,
 ) -> str:
     """The "🔄 reviewing…" placeholder posted as soon as a review begins.
 
     `template` is the repository's `message_started`; when it renders to
     anything it replaces the built-in text. The in-progress mark stays either
     way — it is how a later skip or crash recognises the placeholder.
+
+    `first_review` shapes the built-in text: True greets ("Hi! I'm Celmis…")
+    on the PR's first review, False says the review is being updated for new
+    commits, None (not known — a hand-built call, a database that could not
+    answer) keeps the plain "reviewing" heading.
     """
     from src.review.pr_actions import (
         STARTED_TEMPLATE_MAX_CHARS,
@@ -944,40 +1735,57 @@ def _format_started_comment(
         return "\n".join([*lines, STATUS_IN_PROGRESS_MARK, custom])
     sha = (pr.head_sha or "")[:7] or "unknown"
     files = len(pr.changed_files)
-    roster = ", ".join(f"`{a}`" for a in agents) if agents else "_none_"
+    roster = (", ".join(f"`{a}`" for a in agents) if agents
+              else messages.t("started.none", language))
+    if first_review is None:
+        lines += [
+            STATUS_IN_PROGRESS_MARK,
+            messages.t("started.title", language),
+            "",
+            f"- {messages.t('started.commit', language)}: `{sha}`",
+            f"- {messages.t('started.agents', language)}: {roster}",
+            f"- {messages.t('started.files', language)}: **{files}**",
+            f"- {messages.t('started.started', language)}: {started_at}",
+            "",
+            messages.t("started.footer", language),
+        ]
+        return "\n".join(lines)
+    title = messages.t(
+        "started.first_title" if first_review else "started.update_title",
+        language, sha=sha,
+        files=messages.tn("started.files_count", files, language, count=files),
+    )
     lines += [
         STATUS_IN_PROGRESS_MARK,
-        "## 🔄 Celmis is reviewing this PR…",
+        title,
         "",
-        f"- Commit: `{sha}`",
-        f"- Agents: {roster}",
-        f"- Files to review: **{files}**",
-        f"- Started: {started_at}",
+        f"- {messages.t('started.agents', language)}: {roster}",
+        f"- {messages.t('started.started', language)}: {started_at}",
         "",
-        "_The results will replace this comment when the review finishes._",
+        messages.t("started.footer", language),
     ]
     return "\n".join(lines)
 
 
 def _format_status_comment(
     pr: PullRequest, *, outcome: str, reason: str, marker: str = "",
+    language: str | None = None,
 ) -> str:
     """A terminal state that is not a review: `outcome` is 'skipped' or 'failed'."""
     sha = (pr.head_sha or "")[:7] or "unknown"
     if outcome == "skipped":
-        head = f"### ⏭️ Skipped: {_md_cell(reason, 400)}"
-        tail = "_Nothing was reviewed for this commit._"
+        head = messages.t("status.skipped", language, reason=_md_cell(reason, 400))
+        tail = messages.t("status.tail_skipped", language)
     else:
-        head = f"### ❌ Review failed: {_md_cell(reason, 300)}"
-        tail = ("_No review was delivered for this commit. Re-run it once the "
-                "cause is fixed._")
+        head = messages.t("status.failed", language, reason=_md_cell(reason, 300))
+        tail = messages.t("status.tail_failed", language)
     lines = [marker] if marker else []
     lines += [
-        f"## 🤖 Code Review for PR #{pr.number}",
+        messages.t("status.title", language, number=pr.number),
         "",
         head,
         "",
-        f"- Commit: `{sha}`",
+        f"- {messages.t('status.commit', language)}: `{sha}`",
         "",
         tail,
     ]
@@ -990,14 +1798,15 @@ def _format_status_comment(
 STATUS_FEEDBACK_MARK = "<!-- celmis:review-status:feedback -->"
 
 
-def _format_feedback_comment(pr: PullRequest, *, reason: str, marker: str = "") -> str:
+def _format_feedback_comment(
+    pr: PullRequest, *, reason: str, marker: str = "", language: str | None = None,
+) -> str:
     """The brief note for a review that never started: why, and for which commit."""
     sha = (pr.head_sha or "")[:7] or "unknown"
     lines = [marker] if marker else []
     lines += [
         STATUS_FEEDBACK_MARK,
-        f"⏭️ **Celmis did not review this pull request** (commit `{sha}`): "
-        f"{_md_cell(reason, 400)}.",
+        messages.t("feedback.note", language, sha=sha, reason=_md_cell(reason, 400)),
     ]
     return "\n".join(lines)
 
@@ -1052,7 +1861,7 @@ def _anchorable_ranges(pr: PullRequest) -> dict[tuple[str, str], list[tuple[int,
     the finding names whichever one the agent saw.
     """
     ranges: dict[tuple[str, str], list[tuple[int, int]]] = {}
-    for hunk in pr.hunks:
+    for hunk in pr.anchor_hunks:
         if hunk.new_count > 0 and hunk.file_path:
             ranges.setdefault((hunk.file_path, "RIGHT"), []).append(
                 (hunk.new_start, hunk.new_start + hunk.new_count - 1),
@@ -1063,6 +1872,40 @@ def _anchorable_ranges(pr: PullRequest) -> dict[tuple[str, str], list[tuple[int,
                 if path:
                     ranges.setdefault((path, "LEFT"), []).append(span)
     return ranges
+
+
+def _old_line_for(pr: PullRequest, path: str, new_line: int) -> int | None:
+    """The old-file line number of the CONTEXT line at `new_line` of `path`.
+
+    None for an added line (it has no old side) and for a line the diff does
+    not carry. Bitbucket wants both coordinates (`from` and `to`) to anchor a
+    comment on an unchanged line; with `to` alone it can answer 400 or place
+    the comment on the wrong side. Read from the hunk text, so no extra request.
+    """
+    for hunk in pr.anchor_hunks:
+        if hunk.file_path != path or hunk.new_count <= 0:
+            continue
+        if not hunk.new_start <= new_line < hunk.new_start + hunk.new_count:
+            continue
+        old, new = hunk.old_start, hunk.new_start
+        for raw in hunk.content.split("\n")[1:]:
+            if new > new_line or (old - hunk.old_start >= hunk.old_count
+                                  and new - hunk.new_start >= hunk.new_count):
+                break
+            if raw.startswith("\\"):  # "\ No newline at end of file"
+                continue
+            if raw.startswith("+"):
+                if new == new_line:
+                    return None
+                new += 1
+            elif raw.startswith("-"):
+                old += 1
+            else:  # context; an editor may have stripped its single space
+                if new == new_line:
+                    return old
+                old += 1
+                new += 1
+    return None
 
 
 def _snap_to_span(line: int, spans: list[tuple[int, int]]) -> int:

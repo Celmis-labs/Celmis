@@ -1,0 +1,50 @@
+{
+  "actor": {
+    "type": "user",
+    "uuid": "{11111111-aaaa-bbbb-cccc-000000000001}",
+    "account_id": "acc-alice",
+    "nickname": "alice",
+    "display_name": "Alice"
+  },
+  "pullrequest": {
+    "id": 42,
+    "title": "Add basket totals",
+    "state": "OPEN",
+    "draft": false,
+    "author": {
+      "type": "user",
+      "uuid": "{11111111-aaaa-bbbb-cccc-000000000001}",
+      "account_id": "acc-alice",
+      "nickname": "alice",
+      "display_name": "Alice"
+    },
+    "source": {
+      "commit": {
+        "hash": "abc123def456"
+      }
+    },
+    "destination": {
+      "branch": {
+        "name": "develop"
+      }
+    }
+  },
+  "repository": {
+    "full_name": "acme/shop",
+    "is_private": true
+  },
+  "comment": {
+    "id": 1001,
+    "content": {
+      "raw": "@celmis review --force"
+    },
+    "user": {
+      "type": "user",
+      "uuid": "{11111111-aaaa-bbbb-cccc-000000000001}",
+      "account_id": "acc-alice",
+      "nickname": "alice",
+      "display_name": "Alice"
+    },
+    "parent": null
+  }
+}

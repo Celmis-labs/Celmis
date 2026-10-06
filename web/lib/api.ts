@@ -126,7 +126,7 @@ export interface TokenResponse {
 }
 
 export interface ConnectionStatus {
-  provider: "github" | "gitlab" | "bitbucket";
+  provider: "github" | "gitlab" | "bitbucket" | "jira";
   connected: boolean;
   account_label: string;
   metadata: Record<string, unknown>;
@@ -134,15 +134,43 @@ export interface ConnectionStatus {
   last_used_at: string | null;
 }
 
+/** A connected git provider. Jira is a connection too, but a workspace with
+ *  only Jira has nothing to review yet, so it does not tick "connect a provider". */
+export const isGitConnection = (c: ConnectionStatus) =>
+  c.connected && c.provider !== "jira";
+
 export interface ConnectionVerifyResult {
   ok: boolean;
   provider: string;
   username?: string | null;
   error?: string | null;
   scopes?: string[];
-  /** GitLab: the normalised instance root the token was verified against. */
+  /** GitLab / Jira: the normalised site the token was verified against. */
   base_url?: string | null;
 }
+
+/** GET /api/task-context/issue/{key}: one Jira task as a review reads it. */
+export interface TaskPreview {
+  key: string;
+  url: string;
+  summary: string;
+  status: string;
+  issue_type: string;
+  priority: string;
+  description: string;
+  criteria: { id: string; text: string }[];
+  criteria_source: "field" | "description" | "none";
+  parent: { key: string; summary: string; status: string } | null;
+  subtasks: { key: string; summary: string; status: string }[];
+  labels: string[];
+  comments: string[];
+  truncated: boolean;
+  /** The exact text handed to the model for this task. */
+  llm_text: string;
+}
+
+export interface JiraFieldOption { id: string; name: string; schema_type: string }
+export interface JiraProjectOption { key: string; name: string }
 
 /** What a call did about a repository's code graph.
  *
@@ -171,6 +199,10 @@ export interface RepoOut {
   symbol_count: number | null;
   auto_review_enabled: boolean;
   auto_review_mode: "polling" | "webhook" | "manual";
+  /** Effective target-branch patterns (`!` excludes; [] = every branch) and the
+   *  layer they came from. Only the list fills them; null = not resolved. */
+  target_branches?: string[] | null;
+  target_branches_source?: SettingSource | null;
   /** Branch to clone/index. null → whatever the provider calls default. */
   branch: string | null;
   /** True only when THIS response's call queued a new index job. */
@@ -231,6 +263,20 @@ export interface RepoWebhook {
   last_delivery: Record<string, unknown> | null;
   full_name: string | null;
   updated_at: string | null;
+  /** Events the receiver acts on that the installed hook does not subscribe
+   *  to — a hook from before comment commands existed. */
+  missing_events?: string[];
+  outdated?: boolean;
+}
+
+/** POST /api/repos/webhooks/repair-outdated: one row per repository tried. */
+export interface RepairOutdatedResult {
+  repos: Array<{
+    repo_slug: string;
+    status: RepoWebhook["status"];
+    reason: string | null;
+    message: string | null;
+  }>;
 }
 
 /** POST /api/repos body. `index` defaults to true server-side — send false
@@ -336,6 +382,11 @@ export type HiddenReport = {
   no_evidence?: number;
   coverage_claim?: number;
   veto?: number;
+  /** Left out because the team had dismissed the same finding before. */
+  learned?: number;
+  /** Report-only mode: how many would have been, and a few of them. */
+  learned_would_hide?: number;
+  learned_items?: Array<{ title: string; file: string; tier: number }>;
 };
 
 /** One parameter the runtime changed on its own while running an agent.
@@ -681,6 +732,16 @@ export type ReviewPolicy = {
   request_changes_on_critical_effective?: boolean;
   status_feedback?: boolean | null;
   status_feedback_effective?: boolean;
+  /** Issues backlog — what becomes of an issue after its PR merged. */
+  issues_auto_resolve?: boolean | null;
+  issues_auto_resolve_effective?: boolean;
+  issues_resolve_llm_verify?: boolean | null;
+  issues_resolve_llm_verify_effective?: boolean;
+  /** 0..50 model calls per recheck of one branch; null inherits. */
+  issues_resolve_max_llm?: number | null;
+  issues_resolve_max_llm_effective?: number;
+  issues_announce_resolved?: boolean | null;
+  issues_announce_resolved_effective?: boolean;
   committable_suggestions?: boolean | null;
   committable_suggestions_effective?: boolean;
   apply_filters_to_rules?: boolean | null;
@@ -697,6 +758,58 @@ export type ReviewPolicy = {
   message_started_effective?: string | null;
   message_finished_header?: string | null;
   message_finished_header_effective?: string | null;
+  completed_comment?: "completed" | "classic" | null;
+  completed_comment_effective?: string;
+  commands_guide_enabled?: boolean | null;
+  commands_guide_enabled_effective?: boolean;
+  review_cadence?: "automatic" | "auto_pause" | "manual" | null;
+  review_cadence_effective?: string;
+  review_scope?: "incremental" | "full" | null;
+  review_scope_effective?: string;
+  auto_pause_pushes?: number | null;
+  auto_pause_pushes_effective?: number;
+  auto_pause_window_minutes?: number | null;
+  auto_pause_window_minutes_effective?: number;
+  ignored_title_keywords?: string[] | null;
+  ignored_title_keywords_effective?: string[];
+  commands_enabled?: boolean | null;
+  commands_enabled_effective?: boolean;
+  chat_enabled?: boolean | null;
+  chat_enabled_effective?: boolean;
+  command_permission?: "repo_access" | "participants" | "anyone" | null;
+  command_permission_effective?: string;
+  /** Team memories: tell the reviewers the saved facts about the code. */
+  memories_enabled?: boolean | null;
+  memories_enabled_effective?: boolean;
+  /** A memory a machine proposed waits for a person to approve it. */
+  knowledge_approval?: boolean | null;
+  knowledge_approval_effective?: boolean;
+  /** People whose "remember" is active at once (the token owner always is). */
+  memory_trusted_commenters?: string[] | null;
+  memory_trusted_commenters_effective?: string[];
+  /** Feedback learning: leave out findings the team already dismissed
+   *  (`shadow` only reports what it would leave out). */
+  learning_suppression?: "shadow" | "off" | "on" | null;
+  learning_suppression_effective?: string;
+  /** People whose replies and reactions teach nothing (a login or an e-mail). */
+  learning_excluded_reviewers?: string[] | null;
+  learning_excluded_reviewers_effective?: string[];
+  /** Jira task context (what the business-logic agent reads): null =
+   *  inherit; `_effective` is what a review starting now would apply. */
+  task_context_enabled?: boolean | null;
+  task_context_enabled_effective?: boolean;
+  task_project_keys?: string[] | null;
+  task_project_keys_effective?: string[];
+  task_acceptance_field?: string | null;
+  task_acceptance_field_effective?: string | null;
+  task_include_comments?: number | null;
+  task_include_comments_effective?: number;
+  business_logic_auto?: "off" | "when_task_found" | null;
+  business_logic_auto_effective?: string;
+  requirements_check_mode?: "off" | "findings" | "checklist" | null;
+  requirements_check_mode_effective?: string;
+  task_urls_enabled?: boolean | null;
+  task_urls_enabled_effective?: boolean;
   agent_participation_effective?: Record<string, boolean>;
   agent_participation_defaults?: Record<string, boolean>;
   setting_choices?: Record<string, string[]>;
@@ -728,10 +841,24 @@ type ReviewPolicyReadOnly =
   | "enabled_agents_effective" | "run_on_drafts_effective"
   | "approve_when_clean_effective" | "request_changes_on_critical_effective"
   | "status_feedback_effective" | "committable_suggestions_effective"
+  | "issues_auto_resolve_effective" | "issues_resolve_llm_verify_effective"
+  | "issues_resolve_max_llm_effective" | "issues_announce_resolved_effective"
   | "apply_filters_to_rules_effective" | "summary_target_effective"
   | "summary_on_new_commits_effective" | "summary_existing_description_effective"
   | "base_instruction_effective" | "message_started_effective"
-  | "message_finished_header_effective" | "agent_participation_effective"
+  | "message_finished_header_effective" | "completed_comment_effective"
+  | "commands_guide_enabled_effective" | "review_cadence_effective"
+  | "review_scope_effective"
+  | "auto_pause_pushes_effective" | "auto_pause_window_minutes_effective"
+  | "ignored_title_keywords_effective" | "agent_participation_effective"
+  | "commands_enabled_effective" | "chat_enabled_effective"
+  | "command_permission_effective" | "memories_enabled_effective"
+  | "knowledge_approval_effective" | "memory_trusted_commenters_effective"
+  | "learning_suppression_effective" | "learning_excluded_reviewers_effective"
+  | "task_context_enabled_effective" | "task_project_keys_effective"
+  | "task_acceptance_field_effective" | "task_include_comments_effective"
+  | "business_logic_auto_effective" | "requirements_check_mode_effective"
+  | "task_urls_enabled_effective"
   | "agent_participation_defaults" | "setting_choices" | "message_placeholders";
 
 /** GET /api/review-policies/overrides-summary. */
@@ -888,6 +1015,10 @@ export type WorkspaceReviewDefaults = {
   approve_when_clean: boolean | null;
   request_changes_on_critical: boolean | null;
   status_feedback: boolean | null;
+  issues_auto_resolve: boolean | null;
+  issues_resolve_llm_verify: boolean | null;
+  issues_resolve_max_llm: number | null;
+  issues_announce_resolved: boolean | null;
   committable_suggestions: boolean | null;
   apply_filters_to_rules: boolean | null;
   summary_target: "comment" | "description" | null;
@@ -896,6 +1027,28 @@ export type WorkspaceReviewDefaults = {
   base_instruction: string | null;
   message_started: string | null;
   message_finished_header: string | null;
+  completed_comment: "completed" | "classic" | null;
+  commands_guide_enabled: boolean | null;
+  review_cadence: "automatic" | "auto_pause" | "manual" | null;
+  review_scope: "incremental" | "full" | null;
+  auto_pause_pushes: number | null;
+  auto_pause_window_minutes: number | null;
+  ignored_title_keywords: string[] | null;
+  commands_enabled: boolean | null;
+  chat_enabled: boolean | null;
+  command_permission: "repo_access" | "participants" | "anyone" | null;
+  memories_enabled: boolean | null;
+  knowledge_approval: boolean | null;
+  memory_trusted_commenters: string[] | null;
+  learning_suppression: "shadow" | "off" | "on" | null;
+  learning_excluded_reviewers: string[] | null;
+  task_context_enabled: boolean | null;
+  task_project_keys: string[] | null;
+  task_acceptance_field: string | null;
+  task_include_comments: number | null;
+  business_logic_auto: "off" | "when_task_found" | null;
+  requirements_check_mode: "off" | "findings" | "checklist" | null;
+  task_urls_enabled: boolean | null;
   /** agent → runs for a repo that overrides nothing; and the built-in map
    *  (false = opt-in, switched on through enabled_agents). */
   agent_participation_effective: Record<string, boolean>;
@@ -931,9 +1084,19 @@ export type WorkspaceReviewDefaultsUpdate = Partial<Pick<WorkspaceReviewDefaults
   | "suppressed_rules" | "review_language"
   | "enabled_agents" | "run_on_drafts" | "approve_when_clean"
   | "request_changes_on_critical" | "status_feedback" | "committable_suggestions"
+  | "issues_auto_resolve" | "issues_resolve_llm_verify" | "issues_resolve_max_llm"
+  | "issues_announce_resolved"
   | "apply_filters_to_rules" | "summary_target" | "summary_on_new_commits"
   | "summary_existing_description" | "base_instruction" | "message_started"
-  | "message_finished_header"
+  | "message_finished_header" | "completed_comment" | "commands_guide_enabled"
+  | "review_cadence" | "auto_pause_pushes" | "auto_pause_window_minutes"
+  | "ignored_title_keywords" | "review_scope" | "commands_enabled"
+  | "chat_enabled" | "command_permission" | "memories_enabled"
+  | "knowledge_approval" | "memory_trusted_commenters"
+  | "learning_suppression" | "learning_excluded_reviewers"
+  | "task_context_enabled" | "task_project_keys"
+  | "task_acceptance_field" | "task_include_comments" | "business_logic_auto"
+  | "requirements_check_mode" | "task_urls_enabled"
 >> & {
   agents?: Record<string, AgentLLMOverride | null> | null;
 };
@@ -983,7 +1146,8 @@ export const reviewSettingsApi = {
 
 export type ReviewRuleStatus = "active" | "pending" | "rejected";
 export type ReviewRuleSeverity = "info" | "warning" | "error" | "critical";
-export type ReviewRuleOrigin = "manual" | "library" | "generated" | "imported" | "agent";
+export type ReviewRuleOrigin =
+  | "manual" | "library" | "generated" | "imported" | "agent" | "learned";
 
 /** One rule. `repo_slug` null = every repository of the workspace. */
 export type ReviewRule = {
@@ -1057,7 +1221,7 @@ export type LibraryRule = {
 export type ReviewRuleJob = {
   id: string;
   repo_slug: string;
-  kind: "generate" | "import";
+  kind: "generate" | "import" | "history";
   status: "queued" | "running" | "completed" | "failed";
   progress: string;
   result: { created?: number[]; proposed?: number; skipped?: number; files?: string[] };
@@ -1108,10 +1272,165 @@ export const reviewRulesApi = {
     api<ReviewRuleJob>("/api/review-rules/import", {
       token, method: "POST", json: { repo_slug: repoSlug },
     }),
+  generateFromHistory: (token: string, repoSlug: string) =>
+    api<ReviewRuleJob>("/api/review-rules/generate-from-history", {
+      token, method: "POST", json: { repo_slug: repoSlug },
+    }),
   job: (token: string, id: string) =>
     api<ReviewRuleJob>(`/api/review-rules/jobs/${encodeURIComponent(id)}`, { token }),
   jobs: (token: string, repo?: string | null) =>
     api<ReviewRuleJob[]>(`/api/review-rules/jobs${queryString({ repo })}`, { token }),
+};
+
+
+// ─── Team memories (/memories) ───────────────────────────────────────
+
+export type MemoryStatus = "active" | "pending" | "rejected";
+export type MemoryOrigin = "manual" | "command" | "reply" | "agent" | "ui";
+export type MemoryScope = "workspace" | "repo" | "directory";
+
+/** One fact the reviewers are told. `repo_slug` null = the whole workspace;
+ *  a `path_glob` narrows it to the files under it. */
+export type Memory = {
+  id: number;
+  repo_slug: string | null;
+  path_glob: string;
+  scope: MemoryScope;
+  text: string;
+  status: MemoryStatus;
+  origin: MemoryOrigin;
+  source_provider: string | null;
+  source_repo: string | null;
+  source_pr: number | null;
+  source_comment_id: string | null;
+  source_url: string | null;
+  created_by: string | null;
+  updated_by: string | null;
+  last_used_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type MemoryList = {
+  memories: Memory[];
+  counts: { all: number; active: number; pending: number; rejected: number };
+  repo_slug: string | null;
+  can_edit: boolean;
+  statuses: MemoryStatus[];
+  origins: MemoryOrigin[];
+  scopes: MemoryScope[];
+  max_text: number;
+  max_per_scope: number;
+};
+
+export type MemoryIn = {
+  repo_slug?: string | null;
+  path_glob?: string | null;
+  text: string;
+  status?: "active" | "pending";
+};
+
+export type MemoryPatch = {
+  text?: string;
+  path_glob?: string | null;
+  status?: MemoryStatus;
+};
+
+/** GET /api/memories/preview — what a review of some files would be told. */
+export type MemoryPreview = {
+  enabled: boolean;
+  budget: number;
+  chars: number;
+  omitted: number;
+  used: Memory[];
+  text: string;
+};
+
+export const memoriesApi = {
+  list: (token: string, f: {
+    scope?: "all" | MemoryScope; repo?: string | null;
+    status?: MemoryStatus | null; origin?: string | null; q?: string | null;
+  } = {}) =>
+    api<MemoryList>(`/api/memories${queryString({
+      scope: f.scope, repo: f.repo, status: f.status, origin: f.origin, q: f.q,
+    })}`, { token }),
+  create: (token: string, payload: MemoryIn) =>
+    api<Memory>("/api/memories", { token, method: "POST", json: payload }),
+  update: (token: string, id: number, payload: MemoryPatch) =>
+    api<Memory>(`/api/memories/${id}`, { token, method: "PATCH", json: payload }),
+  remove: (token: string, id: number) =>
+    api<{ deleted: number[] }>(`/api/memories/${id}`, { token, method: "DELETE" }),
+  bulkStatus: (token: string, ids: number[], status: MemoryStatus) =>
+    api<{ updated: number[] }>("/api/memories/bulk-status", {
+      token, method: "POST", json: { ids, status },
+    }),
+  bulkDelete: (token: string, ids: number[]) =>
+    api<{ deleted: number[] }>("/api/memories/bulk-delete", {
+      token, method: "POST", json: { ids },
+    }),
+  preview: (token: string, repo?: string | null, paths: string[] = []) => {
+    const qs = new URLSearchParams();
+    if (repo) qs.set("repo", repo);
+    for (const p of paths) qs.append("paths", p);
+    const q = qs.toString();
+    return api<MemoryPreview>(`/api/memories/preview${q ? `?${q}` : ""}`, { token });
+  },
+};
+
+// ─── What the review learned from feedback (/memories, Learning tab) ─
+
+export type LearningSignalKind = "dismissed" | "accepted" | "implemented" | "ignored" | "resolved";
+
+export type LearningSummary = {
+  repo_slug: string | null;
+  window_days: number;
+  /** The effective `learning_suppression` of the scope. */
+  mode: "shadow" | "off" | "on" | string;
+  signals: Partial<Record<LearningSignalKind, number>>;
+  sources: Record<string, number>;
+  total: number;
+  implementation: { implemented: number; ignored: number; total: number; rate: number | null };
+  top_dismissed: Array<{
+    fingerprint: string; title: string; file_path: string; rule_id: string | null;
+    agent: string | null; repo_slug: string; dismissals: number;
+  }>;
+};
+
+export type LearningSignal = {
+  id: string;
+  repo_slug: string;
+  fingerprint: string;
+  file_path: string;
+  title: string;
+  rule_id: string | null;
+  agent: string | null;
+  severity: string | null;
+  category: string | null;
+  signal: LearningSignalKind;
+  source: string;
+  weight: number;
+  reason: string;
+  /** Only workspace admins are told who. */
+  actor: string | null;
+  pr_provider: string;
+  pr_repo: string;
+  pr_number: number;
+  created_at: string | null;
+};
+
+export const learningApi = {
+  summary: (token: string, repo?: string | null) =>
+    api<LearningSummary>(`/api/learning/summary${queryString({ repo })}`, { token }),
+  signals: (token: string, f: {
+    repo?: string | null; signal?: LearningSignalKind | null; limit?: number; offset?: number;
+  } = {}) =>
+    api<{ repo_slug: string | null; total: number; limit: number; offset: number;
+      signals: LearningSignal[] }>(
+      `/api/learning/signals${queryString({
+        repo: f.repo, signal: f.signal, limit: f.limit, offset: f.offset,
+      })}`, { token }),
+  forget: (token: string, id: string) =>
+    api<void>(`/api/learning/signals/${encodeURIComponent(id)}`, { token, method: "DELETE" }),
 };
 
 
@@ -2433,6 +2752,37 @@ export type ReviewIssue = {
   first_seen_at: string;
   last_seen_at: string;
   closed_at: string | null;
+  /** The backlog layer: what became of the issue once its PR merged. */
+  base_ref: string | null;
+  merged_at: string | null;
+  close_outcome: IssueOutcome | null;
+  dup_of: string | null;
+  /** How many other PRs' runs repeated this issue. */
+  duplicates_count: number;
+  /** auto | manual | feedback | pr_closed — null while open. */
+  resolution_kind: IssueResolutionKind | null;
+  resolution_note: string | null;
+  fixed_by_pr_number: number | null;
+  fixed_by_pr_url: string | null;
+  fixed_by_pr_title: string | null;
+  last_checked_at: string | null;
+};
+
+export type IssueOutcome = "implemented" | "unimplemented" | "dismissed" | "abandoned";
+export type IssueResolutionKind = "auto" | "manual" | "feedback" | "pr_closed";
+
+/** GET /api/issues/summary — the header strip of the issues page. */
+export type IssueSummary = {
+  days: number;
+  implemented: number;
+  unimplemented: number;
+  dismissed: number;
+  abandoned: number;
+  /** implemented / (implemented + unimplemented); null until one is decided. */
+  implementation_rate: number | null;
+  backlog_open: number;
+  auto_resolved: number;
+  reopened: number;
 };
 
 export type ReviewIssueList = {
@@ -2447,11 +2797,16 @@ export type ReviewIssueList = {
 export type IssueFilters = {
   status?: string; severity?: string; category?: string; repo?: string;
   pr?: number; q?: string;
+  /** backlog = issues of merged PRs; pr = issues of PRs not merged yet. */
+  scope?: "backlog" | "pr";
+  resolution?: string; outcome?: string; include_duplicates?: boolean;
   sort?: "newest" | "oldest" | "severity" | "last_seen";
   limit?: number; offset?: number;
 };
 
-function queryString(params: Record<string, string | number | undefined | null>): string {
+function queryString(
+  params: Record<string, string | number | boolean | undefined | null>,
+): string {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
@@ -2466,6 +2821,12 @@ export const issuesApi = {
   setStatus: (token: string, id: string, status: IssueStatus) =>
     api<ReviewIssue>(`/api/issues/${encodeURIComponent(id)}`, {
       token, method: "PATCH", json: { status },
+    }),  summary: (token: string, f: { repo?: string; days?: number } = {}) =>
+    api<IssueSummary>(`/api/issues/summary${queryString(f)}`, { token }),
+  /** Queues a recheck of every branch with a backlog; `queued` is how many. */
+  recheck: (token: string, repo?: string) =>
+    api<{ queued: number }>("/api/issues/recheck", {
+      token, method: "POST", json: repo ? { repo } : {},
     }),
 };
 
@@ -2494,6 +2855,12 @@ export type ReviewedPullRequest = {
   opened_at: string;
   updated_at: string;
   closed_at: string | null;
+  /** Automatic reviews of this PR wait; `paused_reason` is
+   *  auto_pause | manual | command. */
+  review_paused?: boolean;
+  paused_reason?: string | null;
+  /** The commit the last complete, posted review read. */
+  last_reviewed_sha?: string | null;
 };
 
 export type ReviewedPullRequestList = {
@@ -2518,6 +2885,35 @@ export type PullRequestStats = {
   day_start: string;
 };
 
+/** One `@celmis ...` comment on a PR and what became of it. */
+export type PullRequestCommand = {
+  id: string;
+  command: string;
+  args: string | null;
+  force: boolean;
+  actor_name: string | null;
+  /** claimed | done | denied | rate_limited | failed | ignored */
+  status: string;
+  error: string | null;
+  run_id: string | null;
+  created_at: string;
+  finished_at: string | null;
+};
+
+export type RequirementVerdict =
+  "met" | "no_gap" | "partial" | "missing" | "contradicts" | "unclear";
+
+/** The Jira task(s) behind a pull request and the latest requirements check. */
+export type PullRequestRequirements = {
+  pr_id: string;
+  tasks: {
+    key: string; url: string; summary: string; status: string; issue_type: string;
+  }[];
+  requirements: {
+    key: string; id: string; text: string; verdict: RequirementVerdict; evidence: string;
+  }[];
+};
+
 export const pullRequestsApi = {
   list: (token: string, f: {
     q?: string; repo?: string; state?: string; review_status?: string;
@@ -2532,6 +2928,22 @@ export const pullRequestsApi = {
   runs: (token: string, prId: string) =>
     api<{ pr_id: string; items: ReviewRunOut[] }>(
       `/api/pull-requests/${encodeURIComponent(prId)}/runs`, { token }),
+  /** The comment commands given on one PR, newest first. */
+  commands: (token: string, prId: string) =>
+    api<{ pr_id: string; items: PullRequestCommand[] }>(
+      `/api/pull-requests/${encodeURIComponent(prId)}/commands`, { token }),
+  /** The Jira task(s) the last review read and its requirements checklist. */
+  requirements: (token: string, prId: string) =>
+    api<PullRequestRequirements>(
+      `/api/pull-requests/${encodeURIComponent(prId)}/requirements`, { token }),
+  /** Hold the PR's automatic reviews until somebody resumes it. */
+  pause: (token: string, prId: string) =>
+    api<{ pr_id: string; review_paused: boolean }>(
+      `/api/pull-requests/${encodeURIComponent(prId)}/pause`, { token, method: "POST" }),
+  /** Release a paused PR and queue the review of everything pushed meanwhile. */
+  resume: (token: string, prId: string) =>
+    api<{ pr_id: string; review_paused: boolean; run_id: string | null; status: string | null }>(
+      `/api/pull-requests/${encodeURIComponent(prId)}/resume`, { token, method: "POST" }),
 };
 
 /** An open PR/MR of a registered repository — any target branch. */

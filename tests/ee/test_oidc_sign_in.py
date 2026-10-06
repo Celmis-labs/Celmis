@@ -413,6 +413,11 @@ def test_an_erased_sso_user_can_sign_in_again_as_a_new_account(
                     return []
             return _R()
 
+        async def execute(self, *_a, **_k):
+            class _R:
+                rowcount = 0
+            return _R()
+
         async def commit(self):
             return None
 

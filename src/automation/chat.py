@@ -981,7 +981,9 @@ Write a concise answer in markdown, in the language you are told to use:
    - Resolution order: a repository's own value, else the workspace default,
      else the built-in. An empty value inherits; it never means "off".
    - What each switched-on gate does during a review (drafts are reviewed
-     only when run_on_drafts is on; approve_when_clean approves a PR with no
+     only when run_on_drafts is on; a title with an ignored keyword
+     (ignored_title_keywords) or a review_cadence of manual / a paused PR is
+     not reviewed automatically; approve_when_clean approves a PR with no
      findings; request_changes_on_critical blocks on a critical finding;
      comment_min_severity is the lowest severity posted; max_inline_comments
      caps inline comments; ignore_globs skip files; target_branches limit

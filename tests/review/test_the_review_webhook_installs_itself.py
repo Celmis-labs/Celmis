@@ -161,19 +161,21 @@ def test_creates_the_hook_when_absent(env, monkeypatch, provider, full):
         assert path == "/repos/acme/billing/hooks"
         assert body["config"] == {"url": URL[provider], "content_type": "json",
                                   "secret": secret, "insecure_ssl": "0"}
-        assert body["events"] == ["pull_request", "push"]
+        assert body["events"] == ["pull_request", "push", "issue_comment",
+                                  "pull_request_review_comment",
+                                  "pull_request_review_thread"]
         assert body["active"] is True
     elif provider == "gitlab":
         assert path == "/api/v4/projects/acme%2Fgroup%2Fbilling/hooks"
         assert body["url"] == URL[provider]
         assert body["token"] == secret
         assert body["merge_requests_events"] is True
+        assert body["note_events"] is True
         assert body["push_events"] is False
     else:
         assert path == "/2.0/repositories/acme/billing/hooks"
         assert body["secret"] == secret
-        assert body["events"] == ["pullrequest:created", "pullrequest:updated",
-                                  "pullrequest:fulfilled", "pullrequest:rejected"]
+        assert body["events"] == wi.EVENTS["bitbucket"]
         assert body["active"] is True
     # Never in the answer.
     assert secret not in json.dumps(st.as_dict())
@@ -327,29 +329,29 @@ def test_webhook_url_matches_the_manual_setup_shape():
 
 def test_bitbucket_payload_full_name_finds_a_differently_cased_binding(tmp_path):
     store = AutoReviewStore(tmp_path / "ar.db")
-    store.upsert(cfg("bitbucket", "Acme/Billing-API"))
-    found = store.config_for_repo("bitbucket", "acme/billing-api")
+    store.upsert(cfg("bitbucket", "Northwind/Billing-API"))
+    found = store.config_for_repo("bitbucket", "northwind/billing-api")
     assert found is not None and found.workspace_id == WS
-    assert store.workspace_for_repo("bitbucket", "ACME/billing-api") == WS
+    assert store.workspace_for_repo("bitbucket", "NORTHWIND/billing-api") == WS
     # Provider still matters.
-    assert store.config_for_repo("github", "acme/billing-api") is None
+    assert store.config_for_repo("github", "northwind/billing-api") is None
 
 
 def test_case_variants_in_two_workspaces_fail_closed(tmp_path):
     store = AutoReviewStore(tmp_path / "ar.db")
-    a = cfg("bitbucket", "acme/billing")
-    b = cfg("bitbucket", "Acme/Billing", ws=OTHER_WS)
+    a = cfg("bitbucket", "northwind/billing")
+    b = cfg("bitbucket", "Northwind/Billing", ws=OTHER_WS)
     b.user_id = "u-other"
     store.upsert(a)
     store.upsert(b)
-    assert store.config_for_repo("bitbucket", "acme/billing") is None
-    assert store.workspace_for_repo("bitbucket", "acme/billing") is None
+    assert store.config_for_repo("bitbucket", "northwind/billing") is None
+    assert store.workspace_for_repo("bitbucket", "northwind/billing") is None
 
 
 def test_registration_refuses_a_case_variant_owned_elsewhere(tmp_path):
     store = AutoReviewStore(tmp_path / "ar.db")
-    store.upsert(cfg("bitbucket", "acme/billing", ws=OTHER_WS))
-    assert store.existing_workspace_binding("bitbucket", "Acme/Billing") == OTHER_WS
+    store.upsert(cfg("bitbucket", "northwind/billing", ws=OTHER_WS))
+    assert store.existing_workspace_binding("bitbucket", "Northwind/Billing") == OTHER_WS
 
 
 # ─── the API ─────────────────────────────────────────────────────────
@@ -372,9 +374,9 @@ def api(env, monkeypatch):
 
 
 def test_install_endpoint_binds_canonical_name_and_enables(api, monkeypatch):
-    c = cfg("bitbucket", "Acme/Billing", enabled=False)
+    c = cfg("bitbucket", "Northwind/Billing", enabled=False)
     api.store.upsert(c)
-    fake = FakeProvider("bitbucket", canonical="acme/billing")
+    fake = FakeProvider("bitbucket", canonical="northwind/billing")
     use(monkeypatch, fake)
 
     r = api.client.post(f"/api/repos/{c.repo_slug}/webhook")
@@ -384,10 +386,10 @@ def test_install_endpoint_binds_canonical_name_and_enables(api, monkeypatch):
     assert body["status"] == "installed"
     assert body["url"] == URL["bitbucket"]
     row = api.store.get_in_workspace(WS, c.repo_slug)
-    assert row.full_name == "acme/billing"
+    assert row.full_name == "northwind/billing"
     assert row.enabled is True and row.mode == "webhook"
     # The exact name Bitbucket will send now resolves to this tenant.
-    assert api.store.config_for_repo("bitbucket", "acme/billing").workspace_id == WS
+    assert api.store.config_for_repo("bitbucket", "northwind/billing").workspace_id == WS
     assert api.secrets[("bitbucket", WS)] not in r.text
     # The list shows the last known state without calling the provider.
     n = len(fake.calls)
@@ -397,9 +399,9 @@ def test_install_endpoint_binds_canonical_name_and_enables(api, monkeypatch):
 
 
 def test_permission_failure_is_200_with_hint(api, monkeypatch):
-    c = cfg("bitbucket", "acme/billing")
+    c = cfg("bitbucket", "northwind/billing")
     api.store.upsert(c)
-    use(monkeypatch, FakeProvider("bitbucket", canonical="acme/billing", fail={
+    use(monkeypatch, FakeProvider("bitbucket", canonical="northwind/billing", fail={
         ("POST", "/hooks"): (403, {"error": {"message": "Your credentials lack scope"}}),
     }))
     body = api.client.post(f"/api/repos/{c.repo_slug}/webhook").json()
@@ -463,14 +465,14 @@ def test_delete_endpoint_removes_and_falls_back_to_polling(api, monkeypatch):
 
 
 def test_registration_installs_the_webhook(api, monkeypatch):
-    fake = FakeProvider("bitbucket", canonical="acme/billing")
+    fake = FakeProvider("bitbucket", canonical="northwind/billing")
     use(monkeypatch, fake)
     r = api.client.post("/api/repos", json={
-        "url": "https://bitbucket.org/Acme/Billing", "auto_review": True, "index": False})
+        "url": "https://bitbucket.org/Northwind/Billing", "auto_review": True, "index": False})
     assert r.status_code == 201, r.text
     hook = r.json()["webhook"]
     assert hook["status"] == "installed" and hook["action"] == "created"
-    row = api.store.config_for_repo("bitbucket", "acme/billing")
+    row = api.store.config_for_repo("bitbucket", "northwind/billing")
     assert row is not None and row.enabled and row.workspace_id == WS
 
 

@@ -51,6 +51,9 @@ def start_worker() -> None:
     register(jq.KIND_GENERATE_VAULT, h.handle_generate_vault)
     register(jq.KIND_DEPS_AUDIT, h.handle_deps_audit)
     register(jq.KIND_AUTOMATION_PLAN, h.handle_automation_plan)
+    register(jq.KIND_PR_COMMAND, h.handle_pr_command)
+    register(jq.KIND_PRODUCTIVITY_SYNC, h.handle_productivity_sync)
+    register(jq.KIND_PRODUCTIVITY_PR, h.handle_productivity_pr)
 
     try:
         loop = asyncio.get_event_loop()

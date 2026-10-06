@@ -21,11 +21,14 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckIcon, CopyIcon, Loader2Icon, WebhookIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { api, ApiError, type RepoOut, type RepoWebhook } from "@/lib/api";
+import {
+  api, ApiError, type RepairOutdatedResult, type RepoOut, type RepoWebhook,
+} from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Callout } from "@/components/ui/callout";
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
@@ -39,11 +42,15 @@ const WHERE: Record<string, string> = {
 
 /** What each receiver acts on — mirrors src/review/webhook_install.py EVENTS. */
 const EVENTS: Record<string, string[]> = {
-  github: ["pull_request", "push"],
-  gitlab: ["Merge request events"],
+  github: [
+    "pull_request", "push", "issue_comment", "pull_request_review_comment",
+    "pull_request_review_thread",
+  ],
+  gitlab: ["Merge request events", "Comments"],
   bitbucket: [
     "pullrequest:created", "pullrequest:updated",
     "pullrequest:fulfilled", "pullrequest:rejected",
+    "pullrequest:comment_created", "pullrequest:comment_updated",
   ],
 };
 
@@ -71,6 +78,14 @@ function CopyLine({ value, label }: { value: string; label: string }) {
 
 function StatusBadge({ hook }: { hook: RepoWebhook | null | undefined }) {
   const t = useT();
+  if (hook?.status === "installed" && hook.outdated) {
+    // Installed, and deaf to comments: the hook predates `@celmis` commands.
+    return (
+      <Badge variant="warning" className="px-1.5 py-0" title={t("repoWebhook.outdatedTitle")}>
+        {t("repoWebhook.outdated")}
+      </Badge>
+    );
+  }
   if (hook?.status === "installed") {
     return <Badge variant="success" className="px-1.5 py-0">{t("repoWebhook.installed")}</Badge>;
   }
@@ -78,6 +93,47 @@ function StatusBadge({ hook }: { hook: RepoWebhook | null | undefined }) {
     return <Badge variant="destructive" className="px-1.5 py-0">{t("repoWebhook.failed")}</Badge>;
   }
   return <Badge variant="outline" className="px-1.5 py-0">{t("repoWebhook.none")}</Badge>;
+}
+
+/** One press that re-subscribes every hook installed before comment commands
+ *  existed. Shown only while some repository has such a hook. */
+export function RepairOutdatedHooks({ repos }: { repos: RepoOut[] }) {
+  const t = useT();
+  const token = useToken();
+  const qc = useQueryClient();
+  const outdated = repos.filter((r) => r.webhook?.outdated).length;
+  const repair = useMutation({
+    mutationFn: () =>
+      api<RepairOutdatedResult>("/api/repos/webhooks/repair-outdated", { method: "POST", token }),
+    onSuccess: (res) => {
+      const failed = res.repos.filter((r) => r.status !== "installed").length;
+      if (failed > 0) {
+        toast.error(t("repoWebhook.repairAllFailed", { count: failed }));
+      } else {
+        toast.success(t("repoWebhook.repairAllDone", { count: res.repos.length }));
+      }
+      void qc.invalidateQueries({ queryKey: ["repos"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  if (outdated === 0) return null;
+  return (
+    <Callout tone="info" className="mb-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <span>{t("repoWebhook.outdatedBanner", { count: outdated })}</span>
+        <Button
+          type="button" size="sm" variant="outline"
+          disabled={repair.isPending}
+          onClick={() => repair.mutate()}
+        >
+          {repair.isPending
+            ? <Loader2Icon className="h-3.5 w-3.5 animate-spin" />
+            : <WebhookIcon className="h-3.5 w-3.5" />}
+          {t("repoWebhook.repairAll")}
+        </Button>
+      </div>
+    </Callout>
+  );
 }
 
 export function RepoWebhookControl({ repo }: { repo: RepoOut }) {

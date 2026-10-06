@@ -2,7 +2,8 @@
 
 Composition:
     /api/auth/*         — login / signup / google / me
-    /api/connections/*  — provider tokens (GitHub / GitLab / Bitbucket)
+    /api/connections/*  — provider tokens (GitHub / GitLab / Bitbucket / Jira)
+    /api/task-context/* — read-only preview of the Jira task a review reads
     /api/repos/*        — list / add / remove + auto-review toggle + browse + PR list
     /api/reviews/*      — manual trigger + history
     /webhook/*          — provider webhooks (mounted from src.review.webhook)
@@ -48,7 +49,9 @@ from src.api.routers import intel as intel_router_mod
 from src.api.routers import invites as invites_router
 from src.api.routers import issues as issues_router
 from src.api.routers import jobs as jobs_router
+from src.api.routers import learning as learning_router
 from src.api.routers import llm as llm_router
+from src.api.routers import memories as memories_router
 from src.api.routers import models as models_router
 from src.api.routers import oauth as oauth_router
 from src.api.routers import oauth_metadata as oauth_metadata_router
@@ -66,6 +69,7 @@ from src.api.routers import review_settings as review_settings_router
 from src.api.routers import reviews as reviews_router
 from src.api.routers import search as search_router_mod
 from src.api.routers import spend as spend_router
+from src.api.routers import task_context as task_context_router
 from src.api.routers import teams as teams_router
 from src.api.routers import usage as usage_router
 from src.api.routers import users as users_router
@@ -488,6 +492,7 @@ def build_app() -> FastAPI:
     app.include_router(auth_router.router)
     app.include_router(capabilities_router.router)
     app.include_router(connections_router.router)
+    app.include_router(task_context_router.router)
     app.include_router(repos_router.router)
     app.include_router(reviews_router.router)
     app.include_router(webhooks_router.router)
@@ -495,6 +500,8 @@ def build_app() -> FastAPI:
     app.include_router(review_defaults_router.router)
     app.include_router(review_settings_router.router)
     app.include_router(review_rules_router.router)
+    app.include_router(memories_router.router)
+    app.include_router(learning_router.router)
     # Review issues and reviewed pull requests. Review analytics, which reads
     # them, is an enterprise feature and is mounted below with the rest.
     app.include_router(issues_router.router)
@@ -724,6 +731,33 @@ def build_app() -> FastAPI:
                 start_refresh_scheduler()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("refresh_scheduler_start_failed err=%s", exc)
+
+        # Daily backlog sweep: is an issue of a merged PR fixed on the target
+        # branch by now? CELMIS_ISSUES_SWEEP_INTERVAL_HOURS=0 turns it off.
+        if os.environ.get("CELMIS_DISABLE_ISSUES_SWEEP", "").strip() != "1":
+            try:
+                from src.review.issues_sweep import start_issues_sweep
+                start_issues_sweep()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("issues_sweep_start_failed err=%s", exc)
+        # Productivity sync tick (PR history, deployments). Queues one job per
+        # repository that opted in; an install with none queued spends nothing.
+        # CELMIS_PRODUCTIVITY_INTERVAL_MINUTES=0 turns it off.
+        if os.environ.get("CELMIS_DISABLE_PRODUCTIVITY_SCHED", "").strip() != "1":
+            try:
+                from src.productivity.scheduler import start_productivity_scheduler
+                start_productivity_scheduler()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("productivity_scheduler_start_failed err=%s", exc)
+
+        # Weekly rules-from-history proposals; a no-op unless
+        # REVIEW_LEARNING_RULES_SCHEDULE=weekly. CELMIS_DISABLE_LEARNING_SCHED=1
+        # turns the loop off.
+        try:
+            from src.review.learning.schedule import start_learning_scheduler
+            start_learning_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("learning_scheduler_start_failed err=%s", exc)
 
         # Debug log ring buffer — makes /api/ops/logs work when the box is
         # not SSH-reachable. Cheap (in-memory, bounded).

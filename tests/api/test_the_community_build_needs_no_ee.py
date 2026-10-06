@@ -107,6 +107,7 @@ def test_the_app_builds_as_the_community_edition_without_the_package(monkeypatch
     assert doc.complete is True
     assert doc.features["sso"].available is False
     assert doc.features["review_analytics"].available is False
+    assert doc.features["productivity"].available is False
     assert doc.features["review_issues"].available is True
     assert doc.features["core"].available is True
     paths = caps.mounted_paths(app)
@@ -127,6 +128,7 @@ WEB_IMPORTERS = {
     # same capability check (web/lib/sso-offer.ts → `ssoName`).
     "app/invite/[token]/invite-view.tsx",
     "app/(app)/analytics/page.tsx",
+    "app/(app)/productivity/page.tsx",
 }
 
 _IMPORT_EE = re.compile(r"""^\s*(?:import|export)\b[^;]*?from\s+["']@/ee/""", re.M | re.S)

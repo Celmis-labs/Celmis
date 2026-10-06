@@ -168,7 +168,7 @@ async def test_purges_every_store_and_reports_counts(env):
     assert not env.settings.repo_vault_path(SLUG).exists()
 
     assert report.project_repo_links_removed == 2
-    assert report.orphan_rows_removed == 14   # 7 repo_slug-keyed tables x 2 rows
+    assert report.orphan_rows_removed == 20   # 10 repo_slug-keyed tables x 2 rows
     assert session.committed
 
     assert report.auto_review_rows_removed == 2   # both users, not just the caller

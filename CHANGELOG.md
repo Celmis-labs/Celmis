@@ -20,6 +20,492 @@ derives it from there.
 
 ## [Unreleased]
 
+### Added
+
+- **Ask the reviewer a question in a pull request comment, and get the answer in the thread.**
+  Any text after `@celmis` that is not a command word (`@celmis why is this a race?`) is
+  answered by the model, with the review comment it replies to, the replies under it, the
+  diff of the file it is anchored on (the whole change's digest for a comment elsewhere) and
+  the team's memories in front of it. The answer is posted as a reply in the same thread (a
+  child comment on Bitbucket, a review-thread reply on GitHub and GitLab, a quoting comment
+  for a plain GitHub comment) and carries the chat marker, so the next push keeps it. The
+  pull request's text, the thread and the code are fenced as data, and the answer is
+  cleaned before posting: no markers of ours, no images, no raw HTML, no live @-mentions.
+  A bare "thanks" is a reaction, not a model call. Spend is booked under its own `pr_chat`
+  surface on the Usage page; a workspace over its hard-stop budget gets one sentence. New
+  knobs `REVIEW_CHAT_TIMEOUT_SECONDS` (90), `REVIEW_CHAT_MAX_CONTEXT_CHARS` (60000) and
+  `REVIEW_CHAT_MAX_REPLY_CHARS` (6000); the per-repository "Answer questions" switch was
+  already in Commands. Providers gained `get_thread`.
+
+- **`@celmis remember` teaches the reviewers from a pull request comment.**
+  `@celmis remember: <rule>` stores a team memory for the repository,
+  `--org` for the whole workspace, `--dir=src/api` (or `--dir` on a comment
+  written on a line of a file) for one directory. The rule goes through
+  `memories.remember`: a name on the trusted list is active at once, anybody
+  else's waits for approval on the Memories page, and the thread is told which
+  happened. The command is listed in the comment guide and in `help` now that
+  it exists. A GitHub or GitLab commenter is trusted by login as well as by
+  numeric id.
+- **An incremental review still checks the earlier issues of the whole pull
+  request.** The backlog check reads the files of the whole PR, not only of the
+  new commits.
+
+- **Incremental review: a push is reviewed by what is new in it.** A new setting
+  `review_scope` (repo over workspace over built-in, in General): `incremental`
+  (the default) reads only the commits added since the last complete, posted
+  review; `full` reads the whole pull request every time. Whatever is doubtful
+  falls back to the whole PR: a first review, a force-push that dropped the
+  reviewed commit, a provider that cannot list the commits, an empty or
+  unreadable increment, a person asking again with a command or the Review
+  button. A push of only merge commits, or the same head again, is a quiet skip
+  that leaves the PR's status and counters as they were. Changes pulled in from
+  the target branch by a merge are not the author's and are not reviewed.
+  Comments are anchored and hashed against the whole PR, so a finding in a file
+  the push never touched stays open. Our inline comments on lines the push
+  removed are resolved as outdated (a thread a person replied in stays open),
+  a finding already posted within three lines is not posted twice, and the
+  summary says how many commits it read. Review runs record `scope` and
+  `scope_base_sha`; the run page shows a new "scope" stage. Works on GitHub,
+  GitLab and Bitbucket.
+  An earlier comment is resolved as outdated only when it was posted at the
+  commit the push starts from, so its line number is in the same numbering as
+  the lines the push removed; older comments stay open, and a comment is
+  compared with a new finding where its code stands now, not where it was
+  first written. A push of only files nobody reads (lockfiles, generated
+  files, the repository's ignore globs) ends quietly instead of reading the
+  whole pull request again. The same finding twice within three lines counts
+  as one comment on purpose: the fingerprint is rule, file and title, not the
+  line.
+- **PR commands: `@celmis start-review`, `review --force` and `help` work from a comment.**
+  Comment webhooks (GitHub `issue_comment` and `pull_request_review_comment`,
+  GitLab `Note Hook`, Bitbucket `pullrequest:comment_created` and
+  `comment_updated`) are verified exactly like the pull-request webhooks and
+  bound to the workspace of the registered repository. A comment becomes a
+  command only when it starts a token with the bot handle (`@celmis` or the
+  `/celmis` alias, from `REVIEW_BOT_HANDLE`); fenced code, inline code and
+  quoted lines are never read, and a command word followed by prose is a
+  question, not a command. `start-review` resumes a paused pull request and
+  reviews the latest commit; `review --force` reviews everything again and
+  skips the draft, title and cadence gates (never the size and enabled gates).
+  Every command is recorded in a ledger (`pr_command_events`), which makes a
+  redelivery or an edited comment run once, drives two rate limits (replies
+  per pull request and commands per person, per hour; a refusal is announced
+  once per window; refused commands from strangers do not use the pull
+  request's budget, and forced reviews have their own small one) and feeds a "Comment commands" timeline on the
+  pull-requests page. Who may command is a setting, `command_permission`
+  (anyone with repository access, participants only, or anyone), next to
+  `commands_enabled` and `chat_enabled`; all three inherit repository over
+  workspace over built-in and have a new "Commands" section in the review
+  settings. The bot never answers its own comments. Replies carry a chat
+  marker, so the next push's cleanup does not delete them. The commands guide
+  in the review summary is now on by default and lists only commands that are
+  installed. Webhooks installed before this change do not deliver comments:
+  the repositories page marks them "needs repair" and offers one button
+  (`POST /api/repos/webhooks/repair-outdated`, admin only) that re-subscribes
+  them all. `scripts/pr_commands_smoke.py` sends a signed synthetic comment to
+  a running instance. Migration `a9d4f6b8c034`.
+- **Learning from feedback: what the team dismissed is not posted again.**
+  Every verdict a person gives a finding becomes a signal in an append-only
+  table keyed by the finding's fingerprint, which does not depend on the pull
+  request or the line: a reply (a thumb, `@celmis` plus a keyword, or free text
+  read by one cheap model call), a reaction polled at the next review of the
+  same pull request, a resolved thread (a weak signal, upgraded when the fix
+  follows), the verdict on the reviews page, and what the issues ledger sees
+  (fixed, or merged unfixed). A new `learned_filter` stage between the
+  prefilter and the model's veto compares each finding with the repository's
+  signals (same fingerprint; near-identical title in the same directory; or an
+  embedding of 0.90 or more) and leaves out one that two people on two pull
+  requests dismissed, or an exact repeat after one. Signals fade by a 90-day
+  half-life, somebody who said "this was right" blocks the hiding, and a
+  critical or `proven` finding is never hidden. Two review settings, repo over
+  workspace over built-in, in a new Learning section: `learning_suppression`
+  (`shadow`, the built-in, keeps every finding and reports what it would have
+  left out; `on` leaves them out; `off`) and `learning_excluded_reviewers`
+  (people whose feedback teaches nothing). A correction in a reply also offers
+  a pending memory. `/memories` gains a Learning view (editor and above, only
+  repositories one can read) with the counts, the most dismissed findings, the
+  implementation rate and a way to forget a signal; the reviews page says how
+  many findings feedback hid or would have hid. **Rules from history:** a
+  "from history" job on the rules page, and an optional weekly tick
+  (`REVIEW_LEARNING_RULES_SCHEDULE=weekly`), propose rules where several pull
+  requests agree; they arrive pending with origin "learned". Signals and the
+  comment map leave with their repository and the person on erasure.
+  Provider adapters gained `list_comment_reactions`. Migration `c1f6b8d0e256`.
+- **Replies and resolved threads reach the learning loop.** A reply in the thread
+  of one of our findings is read as feedback before the comment-command path
+  sees it, so `@celmis dismiss` or a thumbs-down teaches the reviewer instead of
+  being answered as a chat question; a question in that thread (with or without
+  the handle) goes on to the chat. A named command (`review`, `remember`) never
+  does. Who may teach follows `command_permission`, checked only after the
+  thread is known to be one of ours, so a stranger's reply costs no model call
+  and ordinary conversation costs one lookup. GitHub hooks now also subscribe
+  to `pull_request_review_thread` (a resolved thread is a weak signal, a
+  reopened one withdraws it); existing hooks show "needs repair" until the
+  repositories page's repair button is pressed. GitLab replies are matched by
+  discussion id. The implementation rate on the Learning view is now the
+  issues ledger's own (`implementation_stats` over pull requests merged in the
+  window) and respects the repositories the reader may see.
+- **Requirements check: the completed comment lists every acceptance criterion of the Jira task, and `@celmis -v business-logic <task>` checks one on demand.**
+  A review that read a task now adds a "Requirements check" section to the
+  summary comment, one row per acceptance criterion, marked met, partial,
+  missing, contradicted or unclear, with the place in the diff that shows it.
+  A finding of the business-logic agent that cites a criterion always wins;
+  in `checklist` mode one short model call judges the rest, in `findings` mode
+  nothing more is spent and the section says the criteria were not checked one
+  by one, and `off` adds nothing. The mode is the inheritable setting
+  `requirements_check_mode` (default `checklist`), set like every review
+  setting at workspace, install and repository level, with the labels in all
+  sixteen languages. The description gets a one-line link to the task, and the
+  pull-requests page shows the task and its checklist above the review
+  timeline (`GET /api/pull-requests/{id}/requirements`, readable by whoever
+  may read the repository). The on-demand command runs only the business-logic
+  agent, forced on, against a key, a link to the connected Jira site, or, when
+  the repository sets `task_urls_enabled` (default off), a Confluence page of
+  that same site; it answers in the thread, posts nothing to the code and
+  records nothing on the pull request. Task text stays fenced as untrusted,
+  links are https-only, and every failure is a plain sentence, never the
+  provider's own words. The model sees the diff only through the redacting
+  `code_context` channel, judges the whole pull request also after an
+  incremental review, and the on-demand command honours `task_project_keys`
+  (a page is refused while a project list is set). No migration.
+
+- **Gates and cadence: a PR can be left alone, or paused when pushes pile up.**
+  Four review settings, repo over workspace over built-in, in General:
+  `ignored_title_keywords` (a title containing one, in any case, is not reviewed
+  automatically: WIP, Revert, `[skip review]`), `review_cadence` (`automatic`
+  reviews every push, `auto_pause` pauses a PR after `auto_pause_pushes` pushes
+  (3) inside `auto_pause_window_minutes` (15), `manual` reviews only on
+  request). A paused PR gets one note saying how to continue, in the repository's
+  review language, and is resumed from the Resume button on the pull-requests
+  page (which reviews everything pushed meanwhile); there is a Pause button too.
+  The push that reaches the limit is itself the first one skipped. A person's
+  request (comment command, Review button, CLI, MCP) skips the draft, title and
+  cadence gates; `force` (`--force`, `force` on the trigger route) also skips the
+  target-branch rule. One `ReviewRequest` (trigger, force, scope, resume) now
+  carries that through the webhook, the poller, the queue and the orchestrator.
+  New run stages `gate_title` and `gate_cadence`; the draft gate now runs before
+  the repository context is built, so a draft costs no context. Migration
+  `e7b2d4f6a812` adds the four columns to both policy tables and the pause state
+  to `review_pull_requests`, and gives every PR whose last review was complete a
+  baseline commit. A state that cannot be read never blocks a review. A pause
+  note that could not be posted is tried again on the next delivery; a pause the
+  cadence no longer asks for is forgotten; removing "WIP" from a title brings the
+  pull request back for review (GitHub title edits, GitLab polling).
+- **Auto-review shows which target branches it reviews.** The "Auto-review PRs"
+  card on Reviews says under each repository "→ develop" (or "→ all
+  branches"), where that comes from (repo, workspace or built-in default) and
+  links to the repository's settings; "Connect auto-review" says per provider
+  which branches deliveries are reviewed for and how many repositories override
+  it. `GET /api/repos` carries `target_branches` and `target_branches_source`,
+  resolved by the same repo > workspace > install resolver the orchestrator uses.
+
+- **A review closes with "Code Review Completed", and the PR hears a greeting first.**
+  The started comment says hello on a PR's first review ("Hi! I'm Celmis.
+  Starting the review of commit `abcdef1` (3 files)...") and "New changes -
+  updating the review" on a later push. The closing comment leads with the
+  verdict and the counts (found, by severity, by category), lists the top five
+  findings with their place and a pointer to the inline comments, and ends with
+  the scope and a link to the repository's review settings. A commands guide
+  can be added under it. The previous layout stays available as `classic`.
+  All of it speaks the repository's `review_language` through the message
+  catalog (`en`, `uk`).
+- **Two new review settings, wired through every layer.** `completed_comment`
+  (`completed` by default, or `classic`) and `commands_guide_enabled` (off by
+  default) inherit like the other settings: workspace default, repository
+  override, effective value in the API, a row each in the Summary section of the
+  settings UI in all 16 locales (Ukrainian translated, the rest carry English
+  text until translated), migration `d6a1c3e5f701`.
+- **The PR description carries the findings.** Between the overview and the
+  changes walkthrough there is a findings block (total, top findings, how many
+  were left as inline comments, or that nothing was found). A re-run of the same
+  commit rewrites the stamp without a clock time, so the description settles
+  instead of changing on every run.
+- **`ReviewBatch.summary_sections`.** One list of named, ordered blocks that the
+  summary comment and the description render from, each marked for the comment,
+  the description, or both. Later stages add a section instead of editing the
+  composers.
+- **Team memories.** Short facts the team teaches the reviewers, kept per
+  workspace, per repository, or per directory of a repository, and told to
+  every review of the files they concern. One store (`review_memories`, table
+  and three settings in migration `f8c3e5a7b923`), one module
+  (`src/review/memories.py`) for the writing: `remember(...)` decides who is
+  trusted (the token owner, a workspace editor or admin, or a name on the
+  `memory_trusted_commenters` list), asks the model once whether the fact is
+  already known (skip, merge or create; a model that is down stores the fact
+  rather than losing it), and files a stranger's request as pending. Only
+  active memories reach a prompt: fenced as `<team_memories>` data under a
+  preamble that puts the output contract above them, cut to
+  `REVIEW_MEMORY_PROMPT_CHARS` (default 3000) broadest first, and a directory
+  memory is told only for pull requests that touch it. New `/memories` page
+  (approve, reject, edit, bulk, search, a budget meter) and `/api/memories`;
+  the repository policy's prompt preview shows what a review is told. New
+  **Learning** section in the review settings with `memories_enabled`,
+  `knowledge_approval` and `memory_trusted_commenters`, inherited repository
+  over workspace like every other setting. A removed repository takes its
+  memories with it; a GDPR export lists what a person wrote and an erasure
+  unlinks their name from it. Memories are for workspace leads: viewers and
+  members get a 403 on every `/api/memories` endpoint (and no tab); an editor
+  sees and edits a repository's memories only where a team of theirs grants
+  access, owners and admins see all of their workspace, and a repository one
+  may not read is never named, counted, previewed (also not in the prompt
+  preview) or told to a chat answer.
+- **Issues backlog and auto-resolve.** An issue from a merged PR now stays on
+  the backlog (open, with its target branch) instead of vanishing with the PR,
+  and Celmis closes it once the target branch no longer has the problem:
+  after each review of a later PR, on a merge, on a push, from a manual
+  "recheck" and in a daily sweep. A blob-hash skip and an "anchor still there"
+  check come first; only a gone anchor goes to the model, which can say
+  fixed, not fixed or unsure, and only "fixed" closes (a file counts as gone
+  only when its deletion is confirmed, renames are followed). An issue closed
+  by the machine reopens when its anchor comes back; a person's decision never
+  is overruled. The implementation rate (implemented, unimplemented,
+  dismissed, abandoned) is frozen at merge and later fixes are reported as
+  `resolved_later`; `/api/issues` takes `scope`, `resolution`, `outcome` and
+  `include_duplicates`, and `/summary` carries the backlog figures. Four new
+  inheritable settings (workspace and repository, all 16 languages):
+  `issues_auto_resolve`, `issues_resolve_llm_verify`, `issues_resolve_max_llm`
+  (0-50, default 8, one call per file chunk, own budget surface
+  `issue_resolve`) and `issues_announce_resolved`. New env:
+  `CELMIS_ISSUES_RECHECK_DEBOUNCE_SECONDS`, `CELMIS_ISSUES_SWEEP_INTERVAL_HOURS`
+  (0 turns the sweep off), `CELMIS_DISABLE_ISSUES_SWEEP=1`. Migration
+  `b0e5a7c9d145`. Review fixes: a repeat whose canonical issue a person
+  closed (or that was fixed before the repeat merged) joins the backlog
+  instead of going unchecked; the revert watch covers only the last 60 days of
+  auto-fixes and never crowds open issues out of a pass; a merge recheck that
+  found the branch busy asks again; a head read from a possibly stale local
+  clone no longer decides a merge-time check; finding titles are fenced in the
+  verification prompt; the manual recheck runs one branch at a time with the
+  repository owner's provider. Second review: a merge stamps the branch the PR
+  really landed on (a retargeted stacked PR no longer keeps a deleted branch);
+  repeats are linked, closed and reopened only within one target branch; a
+  revert reopens an auto-fixed issue only where the issue was raised, not for
+  the same line elsewhere in the file; the recheck reads the repository's own
+  policy (an unbound repository's opt-out holds, an unreadable policy skips
+  the pass); a pass over more than 500 open issues moves on (least recently
+  checked first); the model's code region is capped in characters; asking for
+  one PR's issues no longer hides its repeats.
+- **The business-logic check reads the Jira task.** A pull request that names
+  a task (`PROJ-6066` in the title, branch, description or commits, Cyrillic
+  branch names and keyboard-layout lookalikes included) is now held to the
+  task's summary, description and numbered acceptance criteria (`AC1`, `AC2`, …)
+  as well as to its own text, and a pull request with an empty description is no
+  longer skipped when its task can be read. Connect Jira on the Connections page
+  (site address, Atlassian email, API token; or reuse the Bitbucket token on the
+  server): the site must be an https Atlassian Cloud address or a host in
+  `JIRA_ALLOWED_HOSTS`, resolve to public addresses, and the token is verified
+  with `GET /rest/api/3/myself` before anything is saved. Five new inheritable
+  settings (repository > workspace > install) in Review categories:
+  `task_context_enabled`, `task_project_keys`, `task_acceptance_field`,
+  `task_include_comments`, `business_logic_auto` (`when_task_found` switches the
+  agent on for pull requests whose task was read; naming it in
+  `disabled_agents` still wins). The task text reaches the model fenced as
+  untrusted evidence, secrets masked, capped, and cached per workspace
+  (`task_context_cache`, `JIRA_CACHE_TTL_SECONDS`); a Jira failure is a sentence
+  in the skip reason, never a failed review. New findings rule ids
+  `logic.requirement-missing`, `logic.requirement-partial`,
+  `logic.requirement-contradicts`. Admins can preview a task as the model reads
+  it (`GET /api/task-context/issue/{key}`, `/fields`, `/projects`). Migration
+  `d2a7c9e1f367`; providers gained `fetch_commit_messages`.
+  Who can make the bot read a task: the connection is one workspace token, so
+  with `task_project_keys` empty a key written in a pull request is read from
+  any project that token can browse, whoever wrote the pull request. Set
+  `task_project_keys` to the projects reviews are meant to read. Disconnecting
+  or replacing the Jira token also drops the stored task reads of the
+  workspace; a review waits at most 30 seconds in all on Jira; project keys are
+  letters and digits (no underscore) in settings, the key check and the finder.
+
+- **Productivity metrics and the `/productivity` page (Enterprise, under the
+  `analytics` licence feature).** Reads the pull request history the sync
+  backend collects and answers how fast work moves and how stable releases are.
+  Owners and admins only, like spend and review cost (the routes answer 403 to
+  everyone else and the tab is not drawn for them):
+  cycle time split into coding, pickup and review; lead time for changes;
+  deployment frequency; change failure rate; time to recover; merged pull
+  requests; pull request size and cycle time by size; and, when the review
+  issues ledger records outcomes, the share of review suggestions taken. Every
+  figure is a median with p75/p90 and a comparison against the previous equal
+  period, with DORA bands for the four delivery figures. Filters by repository,
+  repository group, author and target branch; a slowest-pull-requests table and a
+  developer activity table that withholds a median below three merged pull
+  requests. The page also hosts the data-source panel: switch a repository on,
+  watch the backfill, start or re-read a sync, estimate the backfill and edit the
+  workspace and per-repository settings. The routes live under
+  `/api/analytics/productivity` and are absent without the licence; capabilities
+  reports the `productivity` feature accordingly. Labels ship in all sixteen
+  locales. Cycle time counts only pull requests whose detail has been read (an
+  unread one can carry an approximate merge time); a target branch that no
+  deployment lands on no longer zeroes the delivery figures; ignored accounts are
+  not offered as authors; and the page says when the previous period is older
+  than the synced history.
+- **Productivity sync backend (AGPL core).** Six tables (`productivity_repo_settings`,
+  `productivity_pull_requests`, `productivity_pr_events`, `productivity_deployments`,
+  `productivity_deployment_prs`, `productivity_sync_state`; migration `e3b8d0f2a478`) and the
+  writers that fill them, in `src/productivity/`. Opt-in per repository: nothing is read
+  from a provider until `enabled` is set. Settings layer repo row, then workspace row,
+  then built-in (`settings.py`). `sync.py` runs list, detail, release shas, revert
+  resolution and deployment rebuild under a soft lease, a 480 s time budget, a
+  per-credential token bucket (`ratelimit.py`) and a stored watermark, so a run
+  that hits a budget or a 429 resumes where it stopped (continuation job
+  `prodsync-next:`). Adapters for Bitbucket, GitHub (GraphQL) and GitLab are in
+  `providers/`. Bot comments, the author's own comments and quoted lines do not
+  count as the first review; PRs are classified revert, hotfix, bugfix or
+  feature (Latin and Cyrillic titles); deployments come from merges into
+  integration branches, provider deployments or tags, with failures and recovery
+  time. The review webhook marks a PR stale and a merge refreshes it; approved
+  and unapproved events are now subscribed. Scheduler env vars:
+  `CELMIS_PRODUCTIVITY_INTERVAL_MINUTES` (60, 0 turns it off) and
+  `CELMIS_PRODUCTIVITY_FIRST_DELAY_SECONDS` (180). The metrics reader, API and
+  UI are Enterprise and not part of this change.
+
+  Review fixes: a backfill's continuation job is keyed by the job that queues it
+  (`prodsync-next:<repo>:<job id>`, likewise `prodpr-next:`), because the queue
+  dedups against running rows and a shared key stopped the chain after two slices;
+  one unreadable release PR no longer blocks the deployment rebuild; Bitbucket
+  commit lists are walked when the API leaves out `size`; Bitbucket's 12-character
+  PR hashes match the 40-character commit lists; deployments are upserted (stable
+  ids) instead of deleted and re-inserted; a merge webhook reuses the stored provider
+  deployments instead of re-reading them; a GitHub list cut short by the page cap is
+  an error instead of a silently advanced watermark.
+
+- **Markers are invisible on Bitbucket.** The `<!-- … -->` lines Celmis finds
+  its own comments and the description block by were shown as text in every
+  Bitbucket comment. One module, `src/review/markers.py`, now owns every
+  marker (`review`, `status`, `summary`, `chat:v1`, `finding`): the code keeps
+  writing the HTML form, the Bitbucket provider hides it on the way out
+  (`[//]: # (x)`, or zero-width characters as the fallback) and reveals it on
+  the way in. A marker counts only as a line of its own, so a quote reply that
+  copied it is not ours. Old comments and descriptions with HTML markers are
+  still recognised and are converted by the next write. If Bitbucket renders a
+  hidden marker anyway (checked on the `content.html` of every write) the
+  process switches to the zero-width form by itself; `REVIEW_MARKER_STYLE`
+  (`auto|html|refdef|zwsp`) pins it. `scripts/probe_bitbucket_markdown.py`
+  shows on a test PR which form Bitbucket hides.
+- **No raw HTML on Bitbucket.** `<sub>`, `<details>`/`<summary>` and `&amp;`
+  become `_italic_` and `**bold**` at the Bitbucket boundary; fenced and inline
+  code is never touched. Comments and descriptions are capped (30 000
+  characters) without cutting a marker, and the overview in the description
+  gives way before the author's own text does.
+- **A description whose markers were lost is repaired by its heading.** When
+  someone edits the description in Bitbucket's editor and the hidden lines
+  disappear, the next write finds our block by `## 🤖 Celmis summary` instead
+  of stacking a second one.
+- **Markers are whole lines outside code, whatever the line ends.** A marker
+  quoted mid-sentence, in an inline code span or in a fenced block (a finding
+  about Celmis' own code) is no longer rewritten into a real hidden marker; a
+  description saved with Windows line ends is read like any other; a
+  description over the limit is cut from its longest stretch of text, so the
+  summary block keeps its start and end markers around its content.
+- **The bot's own text comes from one catalog, in the review language**
+  (`src/review/messages.py`, English and Ukrainian, English fallback): the
+  "reviewing…" placeholder, the skipped/failed notes, the "not reviewed" note
+  and the lost-diff note. `ReviewBatch.review_language` carries it.
+- `REVIEW_BOT_HANDLE` (default `@celmis`), the mention PR commands will answer to.
+- A guard test walks every inheritable review setting through the resolver,
+  both policy tables, the four API schemas, `api.ts`, `model.ts`, the settings
+  section and the English texts, so a new setting cannot be wired halfway.
+
+### Security
+
+- **Role limits on the new surfaces are one rule, checked everywhere.**
+  Memories are for editors and above (an editor sees only the memories of
+  repositories their teams may read, plus the workspace-level ones),
+  Productivity is for owners and admins, and the Jira connection and
+  `/api/task-context/*` are for owners and admins; viewers and members get a
+  403 and no navigation entry. The connection list stays open to every member
+  (the dashboard needs to know whether a provider is connected) but now tells
+  only owners and admins which account, host or e-mail is behind it, and no
+  endpoint returns a token. The Connections page and its tab follow the same
+  role and say so instead of offering forms that would answer 403.
+- **A new route cannot skip its gate.** A test walks every mounted router and
+  requires the matching role dependency on each route of the memories,
+  learning, productivity, task-context and credential surfaces, and fails on a
+  route that names one of those surfaces without being in its table. Role
+  matrices (owner, admin, editor, member, viewer, a member of another
+  workspace, somebody with no workspace, global admin) now run against the
+  real membership rows for the Jira and credential endpoints and for every
+  productivity endpoint.
+
+### Fixed
+
+- **Learning from feedback: review fixes.** A finding posted twice on one pull
+  request keeps a thumb given on either comment (reactions are read per finding,
+  not per comment, and a thumb is withdrawn only when no comment carries it); a
+  question or a quoted keyword is no longer read as a dismissal or an accept, and
+  a bare `-1` / `+1` counts only as the whole comment; a verdict from the reviews
+  page is matched to the stored finding by file, title and rule; one unreadable
+  comment no longer stops the reaction poll; erasing a person who signalled under
+  both e-mail and user id no longer collides on the signals table.
+- **The answer to `business-logic` is cleaned like a chat answer.** It quotes a task and a
+  diff written by other people, so before it is posted as the bot its markers, images, raw
+  HTML and live @-mentions are neutralised.
+- **A push no longer deletes a finding somebody asked about through the bot's own account.**
+  On an install where the token is a person's account, the question under a finding is
+  written by the same account as the finding. A comment of the token's account with none of
+  Celmis's markers now counts as a person's words and protects its thread from the cleanup,
+  on all three providers.
+- **A refused finding folded into the summary no longer breaks it.** A body cut inside a
+  code fence is closed again, so the rest of the summary (and Bitbucket's tag
+  rewriting) is not swallowed as code; a malformed `Retry-After` on Bitbucket no
+  longer aborts the review; the GitHub review body and the classic layout follow
+  the review language.
+
+- **Bitbucket: an inline comment the API would not place is no longer lost.**
+  A refused finding is folded into the summary comment ("Findings without a
+  place in the diff") with its position and explanation; GitLab does the same
+  for a refused discussion.
+- **Bitbucket: comments on unchanged lines are anchored by both sides** (`from`
+  and `to`), a 429 is waited out once (honouring `Retry-After`, capped at 30 s)
+  before the comment counts as refused, and the description update sends back
+  every field it read (`draft`, `close_source_branch`) so a rewrite does not
+  reset them.
+- **A Bitbucket pull request is no longer "skipped, no diff" when it has one.**
+  Bitbucket answers `/pullrequests/{id}/diff` with a 302 and an empty body;
+  the guarded client never follows a redirect on its own, so the diff read as
+  empty and the pull request got only a quiet "no diff content" note. The provider
+  now follows the redirect itself — at most three hops, same host only — asks
+  for `text/plain` and reads the bytes as UTF-8. When the diff is still empty
+  and the diffstat lists files it retries (by commits, then 2 s and 5 s later)
+  and then fails the run and says so on the pull request; a PR with no files
+  stays a quiet skip. When the diffstat cannot be read either, the run fails
+  with a sentence of its own (the diff could not be verified) instead of
+  skipping quietly, and a transport error on a Bitbucket read is reported as
+  "Bitbucket request failed (<error type>)" without the exception's text. GitHub and GitLab treat a 3xx as an error instead of an
+  empty answer, and both now report how many files the PR has
+  (`PullRequest.reported_files`), which the "check reviewable changes" gate
+  uses to tell a lost diff from an empty change-set.
+- **Cyrillic (and other non-ASCII) file names are anchored.** git writes such
+  paths quoted with octal escapes in diff headers; they are decoded, so hunks,
+  findings and inline comments name the real file.
+- **Applying a fix on Bitbucket follows the redirect on the file read** and
+  quotes the path.
+- **Editing a pull request's title or description no longer starts another
+  review** of a commit that is already reviewed (Bitbucket `pullrequest:updated`,
+  GitLab `update`). A failed or skipped last run, a new commit and a PR never
+  seen are still reviewed. This also keeps `summary_target=description` from
+  re-triggering itself.
+- **Integration pass over the new surfaces.**
+  - Comments written through the token owner's account are that person's: the
+    reviewer ignores only comments that carry its markers or come from a bot
+    account, so a person on a personal token can use the commands and teach it.
+  - The business-logic agent reads the whole pull request, also in an
+    incremental review, so a requirement met by an earlier commit is not
+    reported missing.
+  - A thread the reviewer resolved itself after a push is not read as feedback
+    from a person, and a reply, thumb or resolved thread from somebody who may
+    not command the reviewer in that repository teaches nothing.
+  - The guide at the end of the completed comment lists only the commands the
+    repository has not switched off (chat, memories, task context), and the
+    wording of `start-review` and `review --force` says what each really does.
+  - "Same commit already reviewed" is decided only by the commit of the last
+    complete, posted review, so a failed or partial run is retried.
+  - `GET /api/pull-requests/{id}/commands` answers 403 to somebody who may not
+    read the repository.
+  - Memories hide the repository, pull request and author they were taught from
+    when the reader may not read that repository.
+  - A redundant index on the productivity events table was removed from its
+    migration (the model never had it), so the migration chain and the models
+    agree; every new revision downgrades.
+
 ## [2.3.5] — 2026-10-06
 
 ### Security

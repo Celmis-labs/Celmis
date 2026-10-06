@@ -187,6 +187,9 @@ def test_the_enterprise_features_follow_the_licence(app):
     assert doc.features["sso"].available is on
     assert doc.features["review_analytics"].available is on
     assert doc.pages["/analytics"] is on
+    # Productivity metrics are the same licence line, found by their own routes.
+    assert doc.features["productivity"].available is on
+    assert doc.pages["/productivity"] is on
     assert sorted(doc.license.features) == sorted(_granted(app))
     # The AGPL half of the same product area never moves with the licence.
     assert doc.features["review_issues"].available is True

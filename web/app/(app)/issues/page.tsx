@@ -33,8 +33,11 @@ import { SectionTabs } from "@/components/section-tabs";
 import { WorkspaceBadge } from "@/components/workspace-badge";
 import { NoReviewsYetHint } from "@/components/repo-webhook";
 import { Badge } from "@/components/ui/badge";
+import { IssueResolutionBadge } from "@/components/issue-resolution-badge";
+import { IssuesBacklogSummary } from "@/components/issues-backlog-summary";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { QueryState } from "@/components/ui/query-state";
@@ -79,10 +82,18 @@ export default function IssuesPage() {
   const [category, setCategory] = useState("");
   const [repo, setRepo] = useState("");
   const [q, setQ] = useState("");
+  const [scope, setScope] = useState<"" | "pr" | "backlog">("");
+  const [resolution, setResolution] = useState("");
+  const [outcome, setOutcome] = useState("");
+  const [repeats, setRepeats] = useState(false);
   const [sort, setSort] = useState<"newest" | "oldest" | "severity" | "last_seen">("newest");
   const [offset, setOffset] = useState(0);
 
-  const filters = { status, severity, category, repo, q, sort, limit: PAGE, offset };
+  const filters = {
+    status, severity, category, repo, q, sort, limit: PAGE, offset,
+    scope: scope || undefined, resolution, outcome,
+    include_duplicates: repeats || undefined,
+  };
   const list = useQuery({
     queryKey: ["issues", filters],
     queryFn: () => issuesApi.list(token!, filters),
@@ -129,6 +140,21 @@ export default function IssuesPage() {
         tabs={<SectionTabs set="review" />}
       />
 
+      <IssuesBacklogSummary repo={repo} canEdit={canEdit !== false} />
+
+      {/* Where the issue lives: still in a PR under review, or on the branch. */}
+      <SegmentedControl
+        semantics="tabs"
+        label={t("issues.scope.label")}
+        value={scope}
+        onValueChange={(v) => resetPage(setScope)(v as typeof scope)}
+        segments={(["", "pr", "backlog"] as const).map((s) => ({
+          value: s,
+          label: t(s ? `issues.scope.${s}` : "issues.scope.all"),
+        }))}
+        className="self-start"
+      />
+
       {/* Status tabs with counts over the other filters, like a mailbox. */}
       <SegmentedControl
         semantics="tabs"
@@ -145,7 +171,7 @@ export default function IssuesPage() {
         className="self-start"
       />
 
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         <div className="relative">
           <SearchIcon aria-hidden className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-subtle-foreground)]" />
           <Input
@@ -174,6 +200,29 @@ export default function IssuesPage() {
           options={[any(t("issues.anyRepo")),
             ...(list.data?.repos ?? []).map((r) => ({ value: r, label: r }))]}
         />
+        <Select
+          value={resolution}
+          onChange={resetPage(setResolution)}
+          options={[any(t("issues.resolvedBy.any")),
+            ...(["auto", "manual", "feedback", "pr_closed"] as const).map((r) => ({
+              value: r, label: t(`issues.resolvedBy.${r}`),
+            }))]}
+        />
+        <Select
+          value={outcome}
+          onChange={resetPage(setOutcome)}
+          options={[any(t("issues.outcome.any")),
+            ...(["implemented", "unimplemented", "dismissed", "abandoned"] as const).map((o) => ({
+              value: o, label: t(`issues.outcome.${o}`),
+            }))]}
+        />
+        <label className="flex min-h-9 items-center gap-2 text-sm">
+          <Checkbox
+            checked={repeats}
+            onChange={(e) => resetPage(setRepeats)(e.target.checked)}
+          />
+          {t("issues.showRepeats")}
+        </label>
         <Select
           value={sort}
           onChange={(v) => resetPage(setSort)(v as typeof sort)}
@@ -288,6 +337,7 @@ function IssueRow({
             {fixedNote && (
               <Badge variant={STATUS_VARIANT.fixed} className="w-fit">{fixedNote}</Badge>
             )}
+            <IssueResolutionBadge issue={i} />
           </div>
         </TD>
         <TD className="whitespace-nowrap">
@@ -307,6 +357,11 @@ function IssueRow({
             )} />
             <span className="group-hover/title:underline">{i.title}</span>
           </button>
+          {i.duplicates_count > 0 && (
+            <Badge variant="outline" className="ml-1.5 whitespace-nowrap">
+              {t("issues.dupBadge", { n: i.duplicates_count })}
+            </Badge>
+          )}
           {i.occurrences > 1 && (
             <span className="ml-1.5 whitespace-nowrap text-xs text-[var(--color-muted-foreground)]">
               {t("issues.seenTimes", { n: i.occurrences })}
@@ -333,6 +388,11 @@ function IssueRow({
           ) : (
             <>#{i.pr_number}</>
           )}
+          {i.merged_at && i.status === "open" && (
+            <div className="text-xs text-[var(--color-muted-foreground)]" title={i.base_ref ?? undefined}>
+              {t("issues.col.since")} {formatDateTime(i.merged_at)}
+            </div>
+          )}
           {i.pr_state && i.pr_state !== "open" && (
             <span className="ml-1.5 text-xs text-[var(--color-muted-foreground)]">
               {t(`prs.state.${i.pr_state}`)}
@@ -357,6 +417,11 @@ function IssueRow({
                     <pre className="max-w-[100ch] overflow-x-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] p-3 font-mono text-xs leading-5">
                       {i.suggestion}
                     </pre>
+                  )}
+                  {i.last_checked_at && (
+                    <p className="text-xs text-[var(--color-muted-foreground)]">
+                      {t("issues.checkedAt", { when: formatDateTime(i.last_checked_at) })}
+                    </p>
                   )}
                   <p className="text-xs text-[var(--color-muted-foreground)]">
                     {t("issues.meta", {

@@ -11,6 +11,7 @@ Endpoints:
     POST   /api/review-rules/library/add        — copy library entries in
     POST   /api/review-rules/generate           — propose rules for a repo (job)
     POST   /api/review-rules/import             — import repo convention files (job)
+    POST   /api/review-rules/generate-from-history — rules from past feedback (job)
     GET    /api/review-rules/jobs               — recent jobs
     GET    /api/review-rules/jobs/{id}          — one job's progress
 
@@ -419,6 +420,19 @@ async def import_from_repo(
 ) -> dict[str, Any]:
     """Read the repository's convention files into pending rules."""
     return await _start("import", payload.repo_slug, user, ws_id, background, request)
+
+
+@router.post("/generate-from-history", status_code=status.HTTP_202_ACCEPTED)
+async def generate_from_history(
+    payload: ImportIn,
+    request: Request,
+    background: BackgroundTasks,
+    user: User = Depends(require_prompt_editor),
+    ws_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """Propose rules from what the team dismissed and fixed in past reviews of
+    this repository. Proposals arrive pending, origin "learned"."""
+    return await _start("history", payload.repo_slug, user, ws_id, background, request)
 
 
 @router.get("/jobs")

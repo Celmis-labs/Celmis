@@ -351,6 +351,33 @@ class TestBitbucketProvider:
         assert pr.state == "open"
         provider.close()
 
+    def test_fetch_pull_request_follows_the_diff_redirect(self) -> None:
+        """Bitbucket answers `/diff` with a 302 and an empty body; the real
+        client never follows by itself, so the provider has to."""
+        api = "https://api.bitbucket.org/2.0/repositories/ws/r"
+        meta = {
+            "title": "T", "author": {"nickname": "carol"},
+            "source": {"branch": {"name": "f"}, "commit": {"hash": "head789"}},
+            "destination": {"branch": {"name": "main"}, "commit": {"hash": "base000"}},
+            "state": "OPEN",
+        }
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            url = str(req.url)
+            if url.endswith("/pullrequests/3/diff"):
+                return httpx.Response(302, headers={
+                    "Location": f"{api}/diff/head789..base000?topic=true"})
+            if "/diff/head789..base000" in url:
+                return httpx.Response(200, text=SAMPLE_DIFF)
+            return httpx.Response(200, json=meta)
+
+        provider = BitbucketPRProvider(token="fake")
+        _patch_client(provider, httpx.MockTransport(handler))
+
+        pr = provider.fetch_pull_request("ws/r", 3)
+        assert [h.file_path for h in pr.hunks] == ["src/foo.py"]
+        provider.close()
+
 
 # ─── Guarded egress ─────────────────────────────────────────────────
 

@@ -35,6 +35,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
     text,
 )
@@ -430,6 +431,62 @@ class RepoReviewPolicy(Base, TimestampMixin):
     message_started: Mapped[str | None] = mapped_column(Text, nullable=True)
     #: The final summary's header line (same placeholders).
     message_finished_header: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: completed | classic — the layout of the closing comment.
+    completed_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Whether the closing comment lists the bot's commands.
+    commands_guide_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: automatic | auto_pause | manual — when a PR is reviewed without being asked.
+    review_cadence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Pushes inside the window that pause automatic reviews (auto_pause only).
+    auto_pause_pushes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    auto_pause_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: A PR whose title contains one of these (case-insensitive) is not reviewed
+    #: by an automatic trigger.
+    ignored_title_keywords: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    #: incremental | full — what a review reads (the new commits, or the whole PR).
+    review_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Whether `@celmis ...` in a PR comment is answered, whether a free-text
+    #: question gets an LLM answer, and who may command the bot
+    #: (repo_access | participants | anyone).
+    commands_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    chat_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    command_permission: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ── Learning (migration f8c3e5a7b923). NULL = inherit, as above. ──
+    #: Tell the reviewers this repository's memories (`review_memories`).
+    memories_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: A memory a machine proposed (a reply, an agent) waits for a person.
+    knowledge_approval: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: Identities (provider login / account id / email) whose "remember"
+    #: becomes an active memory at once. The token owner is always trusted.
+    memory_trusted_commenters: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # ── Feedback learning (migration c1f6b8d0e256). NULL = inherit. ──
+    #: off | shadow | on — hide findings like ones the team dismissed earlier.
+    learning_suppression: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Identities (e-mail, account id, login) whose replies, reactions and
+    #: verdicts teach nothing.
+    learning_excluded_reviewers: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Issues backlog (migration b0e5a7c9d145): resolve a backlog issue when a
+    # later change leaves the target branch without it. NULL = inherit.
+    issues_auto_resolve: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    issues_resolve_llm_verify: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    issues_resolve_max_llm: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    issues_announce_resolved: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # ── Task context (migration d2a7c9e1f367): the Jira task a PR links to.
+    #: Read the linked task when the workspace has a Jira connection.
+    task_context_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: Project keys a task key may belong to; NULL / [] = any Jira confirms.
+    task_project_keys: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    #: Jira custom field (customfield_NNNNN) holding acceptance criteria.
+    task_acceptance_field: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: How many of the latest Jira comments join the evidence (0..10).
+    task_include_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: off | when_task_found — run business_logic when a task was read.
+    business_logic_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: off | findings | checklist — the requirements check in the completed
+    #: comment; and whether an on-demand check may read a same-site Confluence
+    #: page. NULL = built-in.
+    requirements_check_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_urls_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # Per-repo models for the 2.3.0 finders, beside the five `<agent>_model`
     # columns above and for their reason: the model of THIS layer is a column
     # and never a key of `agent_llm_overrides`. `_model_field_for` in the
@@ -499,6 +556,48 @@ class WorkspaceReviewDefaults(Base, TimestampMixin):
     base_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
     message_started: Mapped[str | None] = mapped_column(Text, nullable=True)
     message_finished_header: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    commands_guide_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    review_cadence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auto_pause_pushes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    auto_pause_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ignored_title_keywords: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    #: incremental | full — what a review reads (the new commits, or the whole PR).
+    review_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    commands_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    chat_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    command_permission: Mapped[str | None] = mapped_column(Text, nullable=True)
+    memories_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    knowledge_approval: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    memory_trusted_commenters: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # ── Feedback learning (migration c1f6b8d0e256). NULL = inherit. ──
+    #: off | shadow | on — hide findings like ones the team dismissed earlier.
+    learning_suppression: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Identities (e-mail, account id, login) whose replies, reactions and
+    #: verdicts teach nothing.
+    learning_excluded_reviewers: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Issues backlog (migration b0e5a7c9d145): resolve a backlog issue when a
+    # later change leaves the target branch without it. NULL = inherit.
+    issues_auto_resolve: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    issues_resolve_llm_verify: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    issues_resolve_max_llm: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    issues_announce_resolved: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # ── Task context (migration d2a7c9e1f367): the Jira task a PR links to.
+    #: Read the linked task when the workspace has a Jira connection.
+    task_context_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: Project keys a task key may belong to; NULL / [] = any Jira confirms.
+    task_project_keys: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    #: Jira custom field (customfield_NNNNN) holding acceptance criteria.
+    task_acceptance_field: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: How many of the latest Jira comments join the evidence (0..10).
+    task_include_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: off | when_task_found — run business_logic when a task was read.
+    business_logic_auto: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: off | findings | checklist — the requirements check in the completed
+    #: comment; and whether an on-demand check may read a same-site Confluence
+    #: page. NULL = built-in.
+    requirements_check_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_urls_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     updated_by: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -549,6 +648,159 @@ class ReviewRule(Base, TimestampMixin):
 
     __table_args__ = (
         Index("ix_review_rules_scope", "workspace_id", "repo_slug", "status"),
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
+# ReviewMemory — team knowledge the reviewers are told (src/review/memories.py)
+# ════════════════════════════════════════════════════════════════════
+class ReviewMemory(Base, TimestampMixin):
+    """One fact about the team's code that every review is told.
+
+    Scope is derived, never stored: no `repo_slug` = the whole workspace; a
+    slug without `path_glob` = that repository; a slug with a glob = the files
+    under it (the glob is relative to the repository root, and a glob needs a
+    repository). Only `active` memories reach a prompt. A memory a person wrote
+    or a trusted commenter asked for is active at once; one a machine proposed
+    (a reply to a finding, an agent), or a stranger asked for, is `pending`
+    until a person approves it. `rejected` is kept so the same text is not
+    proposed again.
+    """
+
+    __tablename__ = "review_memories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    repo_slug: Mapped[str | None] = mapped_column(Text, nullable=True)
+    path_glob: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: ≤ 800 characters.
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    #: active | pending | rejected
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    #: manual | command | reply | agent | ui
+    origin: Mapped[str] = mapped_column(Text, nullable=False, server_default="manual")
+    #: Where it was said: the provider, repository, PR number, comment id and
+    #: link of the comment that asked for it (all NULL for a page-made one).
+    source_provider: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_repo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_pr: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_comment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The last review that told it.
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_review_memories_scope", "workspace_id", "repo_slug", "status"),
+    )
+
+
+class FindingSignal(Base):
+    """One thing a person (or the code) said about a finding, kept so the next
+    review can learn from it. Append-only: a verdict flipped or withdrawn
+    deletes its row, nothing is edited in place.
+
+    `fingerprint` is the PR-independent finding identity (`issues.fingerprint`),
+    so a dismissal on one pull request is found again on the next. The title,
+    file and a short body are copied here because the feedback table keeps none
+    of them and a run can be pruned. `signal` is dismissed | accepted |
+    implemented | ignored | resolved; `weight` says how much it counts (a
+    resolved thread is 0.4, an ignored suggestion 0.3, the rest 1.0). `actor`
+    is a normalised identity string, '' for the code itself.
+    """
+
+    __tablename__ = "finding_signals"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    repo_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    title: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    #: At most 1000 characters of the finding's text.
+    body: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    rule_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    severity: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: dismissed | accepted | implemented | ignored | resolved
+    signal: Mapped[str] = mapped_column(Text, nullable=False)
+    #: ui | reply | command | reaction | resolve | auto_next_commit | auto_merge
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    weight: Mapped[float] = mapped_column(Float, nullable=False, server_default="1")
+    reason: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    actor: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    actor_is_member: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"))
+    pr_provider: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    pr_repo: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    comment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: True once the signal's vector is in the similarity collection.
+    embedded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "pr_provider", "pr_repo", "pr_number", "fingerprint",
+            "signal", "source", "actor", name="uq_finding_signal",
+        ),
+        Index("ix_finding_signals_fp", "workspace_id", "repo_slug", "fingerprint"),
+        Index("ix_finding_signals_kind", "workspace_id", "repo_slug", "signal", "created_at"),
+    )
+
+
+class PostedFindingComment(Base):
+    """The provider comment a finding was posted as, so a reply to it (or a
+    reaction, or a resolved thread) can be traced back to the finding.
+
+    Never deleted when the provider comment is: a push can replace the
+    comments, and a reply to a surviving thread must still resolve.
+    """
+
+    __tablename__ = "posted_finding_comments"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    pr_provider: Mapped[str] = mapped_column(Text, nullable=False)
+    pr_repo: Mapped[str] = mapped_column(Text, nullable=False)
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    comment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    finding_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fingerprint: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    repo_slug: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    file_path: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    line: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    body_excerpt: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rule_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    severity: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The thread a reply names when it is not the comment id (GitLab
+    #: discussions).
+    thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    posted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "pr_provider", "pr_repo", "pr_number", "comment_id",
+            name="uq_posted_finding_comment",
+        ),
+        Index("ix_posted_finding_comments_pr", "workspace_id", "pr_provider",
+              "pr_repo", "pr_number"),
     )
 
 
@@ -1144,6 +1396,35 @@ class ReviewIssue(Base):
     closed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
+    # ── The backlog layer (src.review.issue_resolver): what became of the
+    # issue once its PR merged. All NULLABLE; a PR that never merged leaves
+    # every one of them empty.
+    #: The branch the PR merged into: what a head check reads files from.
+    base_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: When the PR merged. NOT NULL is what makes an open issue "backlog".
+    merged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    #: Frozen at merge or close: implemented | unimplemented | dismissed |
+    #: abandoned. The implementation rate counts only these.
+    close_outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Id of the backlog issue (another PR's row) this one repeats.
+    dup_of: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The flagged line and +-3 around it on the reviewed head, for the
+    #: model that judges whether the code at the branch head still has it.
+    snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    last_checked_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Hash of the file at the last head check, and at the last model verdict:
+    #: an unchanged file is not read into a prompt twice.
+    last_checked_blob: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_verified_blob: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The later pull request that fixed it (parsed from the merge commit).
+    fixed_by_pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fixed_by_pr_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         UniqueConstraint(
@@ -1153,6 +1434,36 @@ class ReviewIssue(Base):
         Index("ix_review_issues_ws_status", "workspace_id", "status"),
         Index("ix_review_issues_ws_seen", "workspace_id", "first_seen_at"),
         Index("ix_review_issues_pr", "workspace_id", "pr_provider", "pr_repo", "pr_number"),
+        Index("ix_review_issues_backlog", "workspace_id", "repo_slug", "base_ref", "status"),
+        Index("ix_review_issues_dup_of", "dup_of"),
+    )
+
+
+class ReviewIssueRecheckState(Base):
+    """Where the last backlog recheck of one branch stopped.
+
+    One row per (workspace, repository, target branch). `last_head_sha` is
+    what makes an unchanged branch cost nothing: the recheck reads the head
+    first and stops when it is the sha it already judged. The row is also the
+    lock a merge recheck and the daily sweep share, so the two never judge the
+    same issue twice (insert ON CONFLICT DO NOTHING, then SELECT FOR UPDATE).
+    """
+
+    __tablename__ = "review_issue_recheck_state"
+
+    workspace_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    pr_provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    pr_repo: Mapped[str] = mapped_column(Text, primary_key=True)
+    base_ref: Mapped[str] = mapped_column(Text, primary_key=True)
+    last_head_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    #: Counts of the last pass: checked, resolved, reopened, llm_calls,
+    #: unreadable, skipped_budget.
+    last_result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    llm_calls_total: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0",
     )
 
 
@@ -1194,6 +1505,12 @@ class ReviewPullRequest(Base):
     last_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviews_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     file_hashes: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    #: The Jira tasks the last review read: [{key, url, summary, status,
+    #: issue_type}] (src/review/task_context). NULL = no review looked yet.
+    task_refs: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    #: The last requirements check: [{key, id, text, verdict, evidence}]
+    #: (`src.review.task_context.checklist.Requirement.to_dict`).
+    requirements_check: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     opened_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(),
     )
@@ -1203,6 +1520,30 @@ class ReviewPullRequest(Base):
     closed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
+    # The commit the last COMPLETE, POSTED review read — the baseline an
+    # incremental review starts from (written by `pr_state.mark_reviewed`).
+    last_reviewed_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    # The last head a webhook delivery named, and when heads arrived lately
+    # (ISO times, pruned to the cadence window): what the push counter reads.
+    last_seen_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recent_pushes: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Automatic reviews of this PR wait (auto-pause, `@celmis pause`, the
+    # pull-requests page), why, who said so, and when the one notice that
+    # says so was posted.
+    review_paused: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false(), default=False,
+    )
+    paused_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    paused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    paused_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pause_notice_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -1210,6 +1551,94 @@ class ReviewPullRequest(Base):
             name="uq_review_pull_request",
         ),
         Index("ix_review_pull_requests_ws_updated", "workspace_id", "updated_at"),
+    )
+
+
+class PRCommandEvent(Base):
+    """One `@celmis ...` comment the receiver accepted as a command.
+
+    The unique key (workspace, provider, repo, PR, comment id) is the
+    idempotency claim: a redelivery, a retry, or an edit of a comment that was
+    already handled inserts nothing and is dropped. The same rows are the rate
+    limit (commands per PR and per commenter in the last hour) and the
+    timeline the pull-requests page shows. Only the first 500 characters of
+    the arguments are kept and never the answer: the ledger records that a
+    command happened, not the discussion around it.
+    """
+
+    __tablename__ = "pr_command_events"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    repo: Mapped[str] = mapped_column(Text, nullable=False)
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    comment_id: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    event_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: start-review | review | help | remember | chat | business-logic
+    command: Mapped[str] = mapped_column(Text, nullable=False)
+    args: Mapped[str | None] = mapped_column(Text, nullable=True)
+    force: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false(), default=False)
+    actor_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actor_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: claimed | done | denied | rate_limited | failed | ignored
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="claimed")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reply_comment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "provider", "repo", "pr_number", "comment_id",
+            name="uq_pr_command_event",
+        ),
+        Index("ix_pr_command_events_pr",
+              "workspace_id", "provider", "repo", "pr_number", "created_at"),
+        Index("ix_pr_command_events_actor",
+              "workspace_id", "provider", "actor_id", "created_at"),
+    )
+
+
+class TaskContextCache(Base):
+    """A Jira issue as the review last read it, shared by every worker.
+
+    One row per (workspace, Jira site, issue key). `payload` is the
+    already-curated issue (src/review/task_context/models.py `TaskIssue`
+    as a dict), never the raw Jira answer, and never a token. Inside the hot
+    window (JIRA_CACHE_TTL_SECONDS) it is served as it is; after that one
+    cheap `fields=updated` request decides whether it is still true. A
+    negative answer (the task is unreadable) is cached briefly, `status`
+    saying which, so a PR with a wrong key does not hit Jira on every push.
+    Rows older than 30 days are pruned.
+    """
+
+    __tablename__ = "task_context_cache"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    site_host: Mapped[str] = mapped_column(Text, nullable=False)
+    issue_key: Mapped[str] = mapped_column(Text, nullable=False)
+    issue_updated: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # ok | not_found | forbidden
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="ok")
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "site_host", "issue_key", name="uq_task_context_cache",
+        ),
+        Index("ix_task_context_cache_ws_fetched", "workspace_id", "fetched_at"),
     )
 
 
@@ -1670,3 +2099,225 @@ class AutomationRun(Base, TimestampMixin):
     )
 
     __table_args__ = (Index("ix_automation_runs_ws", "workspace_id", "created_at"),)
+
+
+# ════════════════════════════════════════════════════════════════════
+# Productivity — pull request history, deployments, sync progress
+# ════════════════════════════════════════════════════════════════════
+# The tables and their writers are AGPL; only the metrics reader is
+# Enterprise (src/ee/analytics). No comment text is stored: a comment is a
+# row of "who, when, is it ours" and nothing else.
+class ProductivityRepoSettings(Base):
+    """What to sync and how to read it, per repository.
+
+    `provider=''` and `repo=''` is the WORKSPACE default row; a repository's
+    own row overrides it field by field. Every setting column is NULL = "not
+    said here, inherit" — the same layering as the review settings, in a table
+    of its own so the review-settings wiring is untouched.
+    """
+
+    __tablename__ = "productivity_repo_settings"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    provider: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    repo: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    backfill_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    production_branches: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    integration_branches: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    deploy_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tag_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revert_patterns: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    hotfix_branch_patterns: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    bugfix_patterns: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    ignored_authors: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    bot_markers: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    failure_window_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    deploy_group_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_per_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "provider", "repo", name="uq_productivity_repo_settings"),
+    )
+
+
+class ProductivityPullRequest(Base):
+    """One pull request, normalised across providers.
+
+    Unlike `review_pull_requests` (only what Celmis reviewed), this holds every
+    PR the sync read. `created_at` is the PROVIDER's creation time, not "first
+    seen". `detail_state` says how much of the row is known: `none` = list
+    fields only, `partial` = was detailed and has changed since, `full`.
+    """
+
+    __tablename__ = "productivity_pull_requests"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    repo: Mapped[str] = mapped_column(Text, nullable=False)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    repo_slug: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    author_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    author_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # open | merged | declined
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="open")
+    is_draft: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    source_branch: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_branch: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_on: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_commit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_approval_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: True when `merged_at` is the list's `updated_on` because the exact merge
+    #: time (Bitbucket's activity feed) has not been read yet.
+    merged_at_approx: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    merge_commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    head_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    additions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    deletions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    files_changed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    commits_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    human_comments: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    approvals: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # feature | bugfix | hotfix | revert
+    kind: Mapped[str] = mapped_column(Text, nullable=False, server_default="feature")
+    reverts_pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: The quoted title or ticket of the PR a revert undoes, kept until the
+    #: original has been synced and the number can be resolved.
+    revert_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ticket_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Commit shas of a PR merged into a production branch (the release PR),
+    #: used to find which integration-branch PRs it shipped.
+    commit_shas: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    prod_deployed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    prod_deployment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # sha | time | direct
+    deploy_link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # none | partial | full
+    detail_state: Mapped[str] = mapped_column(Text, nullable=False, server_default="none")
+    detail_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "provider", "repo", "number", name="uq_productivity_pull_request",
+        ),
+        Index("ix_productivity_prs_ws_repo_state", "workspace_id", "repo", "state", "merged_at"),
+        Index("ix_productivity_prs_ws_created", "workspace_id", "created_at"),
+        Index("ix_productivity_prs_ws_repo_updated", "workspace_id", "repo", "updated_on"),
+        Index("ix_productivity_prs_ws_author", "workspace_id", "author_key"),
+    )
+
+
+class ProductivityPrEvent(Base):
+    """A human (or bot) act on a PR: a comment, an approval, a review.
+
+    No text is stored. `external_id` is the provider's id for the act (a
+    comment id), or `actor:time` for an approval, which has none.
+    """
+
+    __tablename__ = "productivity_pr_events"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    pr_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("productivity_pull_requests.id", ondelete="CASCADE"), nullable=False)
+    # comment | approval | review | changes_requested
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    external_id: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_key: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    actor_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_bot: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    is_author: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+
+    __table_args__ = (
+        UniqueConstraint("pr_id", "kind", "external_id", name="uq_productivity_pr_event"),
+        Index("ix_productivity_pr_events_actor", "workspace_id", "actor_key", "at"),
+    )
+
+
+class ProductivityDeployment(Base):
+    """A release to production: a merge (or burst of merges), a provider deployment or a tag."""
+
+    __tablename__ = "productivity_deployments"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    repo: Mapped[str] = mapped_column(Text, nullable=False)
+    environment: Mapped[str] = mapped_column(Text, nullable=False, server_default="production")
+    branch: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deployed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # merge | provider | tag
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="merge")
+    external_id: Mapped[str] = mapped_column(Text, nullable=False)
+    pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="success")
+    is_failure: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    failed_by_pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    recovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "provider", "repo", "source", "external_id",
+            name="uq_productivity_deployment",
+        ),
+        Index("ix_productivity_deployments_repo_at", "workspace_id", "repo", "deployed_at"),
+    )
+
+
+class ProductivityDeploymentPr(Base):
+    """Which PRs a deployment carried."""
+
+    __tablename__ = "productivity_deployment_prs"
+
+    deployment_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("productivity_deployments.id", ondelete="CASCADE"), primary_key=True)
+    pr_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+
+class ProductivitySyncState(Base):
+    """Where the sync of one repository stands: watermark, progress, limits."""
+
+    __tablename__ = "productivity_sync_state"
+
+    workspace_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    repo: Mapped[str] = mapped_column(Text, primary_key=True)
+    updated_watermark: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    backfill_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    backfill_done: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"))
+    deploy_watermark: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rate_limited_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    #: A soft lease: one run per repository at a time, across workers.
+    running_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    prs_total: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    prs_detailed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    prs_pending: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )

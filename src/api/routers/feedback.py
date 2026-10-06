@@ -12,7 +12,6 @@ noise — the input you need to tune prompts or drop a rule.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import uuid
 
@@ -23,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api import deps as deps_module
 from src.api.deps import current_workspace_id, get_current_user
-from src.db.models import FindingFeedback
+from src.db.models import FindingFeedback, FindingSignal
 from src.db.session import get_async_session
 from src.users import User
 
@@ -43,8 +42,9 @@ def finding_key(file_path: str, line: int, title: str, rule_id: str | None = Non
     index is useless as an identifier. Hash the things that actually pin a
     finding down instead.
     """
-    basis = f"{rule_id or ''}|{file_path}|{line}|{title.strip()[:120]}"
-    return hashlib.sha256(basis.encode()).hexdigest()[:20]
+    from src.review.learning.signals import feedback_key
+
+    return feedback_key(file_path, line, title, rule_id)
 
 
 def _issue_scope(
@@ -93,6 +93,51 @@ async def _sync_issue(
     )
 
 
+async def _teach(
+    user: User, ws: str, run_id: str, *, state: str | None, finding_key_value: str,
+    payload: FeedbackIn | None, file_path: str | None = None, title: str | None = None,
+    rule_id: str | None = None, reason: str = "",
+) -> None:
+    """Carry a page verdict onto the learning signals (`state=None` takes it
+    back). Only people who may change the run's issue teach; the finding is
+    recomputed from the run, the page's own fields are the fallback. Best
+    effort: it never fails the request."""
+    import asyncio
+
+    try:
+        allowed, _pr = await asyncio.to_thread(_issue_scope, user, ws, run_id)
+        if not allowed:
+            return
+        from src.review.learning import signals
+
+        def work() -> None:
+            snap = signals.snapshot_from_run(
+                run_id, finding_key_value,
+                file_path=payload.file_path if payload else file_path,
+                title=payload.title if payload else title,
+                rule_id=payload.rule_id if payload else rule_id)
+            if snap is None and (payload is not None or title is not None):
+                snap = signals.FindingSnapshot(
+                    title=(payload.title if payload else title) or "",
+                    file_path=(payload.file_path if payload else file_path) or "",
+                    rule_id=(payload.rule_id if payload else rule_id) or None,
+                    agent=payload.agent if payload else None,
+                    severity=payload.severity if payload else None)
+            if snap is None:
+                return
+            if state is None:
+                signals.clear_ui(ws, run_id, actor=user.email or user.id, snapshot=snap)
+                return
+            signals.record_ui(
+                ws, run_id, state, actor=user.email or user.id, also_known_as=[user.id],
+                actor_is_member=True, reason=reason, snapshot=snap)
+
+        await asyncio.to_thread(work)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("feedback_learning_failed run=%s err_type=%s", run_id,
+                       type(exc).__name__)
+
+
 class FeedbackIn(BaseModel):
     finding_key: str = Field(min_length=4, max_length=64)
     state: str
@@ -122,6 +167,9 @@ class AgentStat(BaseModel):
     accepted: int
     dismissed: int
     dismissal_rate_pct: float
+    #: Findings later fixed in the code (the issues ledger, via the learning
+    #: signals) — what the team DID, next to what it clicked.
+    implemented: int = 0
 
 
 @router.get("/run/{run_id}", response_model=list[FeedbackOut])
@@ -187,6 +235,9 @@ async def upsert_feedback(
             file_path=payload.file_path, title=payload.title,
             rule_id=payload.rule_id,
         )
+    await _teach(user, ws, run_id, state=payload.state,
+                 finding_key_value=payload.finding_key, payload=payload,
+                 reason=payload.reason)
     return FeedbackOut(
         finding_key=row.finding_key, state=row.state, reason=row.reason,
         agent=row.agent, severity=row.severity, user_id=row.user_id,
@@ -219,6 +270,8 @@ async def clear_feedback(
             user, ws, run_id, state=None,
             file_path=file_path, title=title, rule_id=rule_id,
         )
+    await _teach(user, ws, run_id, state=None, finding_key_value=fkey, payload=None,
+                 file_path=file_path, title=title, rule_id=rule_id)
 
 
 @router.get("/stats", response_model=list[AgentStat])
@@ -237,12 +290,24 @@ async def stats(
         .where(FindingFeedback.workspace_id == ws)
         .group_by(FindingFeedback.agent)
     )).all()
+    fixed = dict((await session.execute(
+        select(FindingSignal.agent, func.count())
+        .where(FindingSignal.workspace_id == ws, FindingSignal.signal == "implemented")
+        .group_by(FindingSignal.agent)
+    )).all())
     out: list[AgentStat] = []
+    seen: set[str | None] = set()
     for agent, accepted, dismissed in rows:
+        seen.add(agent)
         total = int(accepted) + int(dismissed)
         out.append(AgentStat(
             agent=agent or "—",
             accepted=int(accepted), dismissed=int(dismissed),
             dismissal_rate_pct=round(int(dismissed) / total * 100, 1) if total else 0.0,
+            implemented=int(fixed.get(agent, 0)),
         ))
+    for agent, n in fixed.items():
+        if agent not in seen:
+            out.append(AgentStat(agent=agent or "—", accepted=0, dismissed=0,
+                                 dismissal_rate_pct=0.0, implemented=int(n)))
     return sorted(out, key=lambda a: -a.dismissal_rate_pct)

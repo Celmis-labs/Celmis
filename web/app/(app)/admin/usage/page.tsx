@@ -126,6 +126,15 @@ const SURFACE_LABEL: Record<string, { label: string; hint: string }> = {
   rules_generate: {
     label: "admin.usage.surfaceRulesGenerate", hint: "admin.usage.surfaceRulesGenerateHint",
   },
+  issue_resolve: {
+    label: "admin.usage.surfaceIssueResolve", hint: "admin.usage.surfaceIssueResolveHint",
+  },
+  learning: {
+    label: "admin.usage.surfaceLearning", hint: "admin.usage.surfaceLearningHint",
+  },
+  pr_chat: {
+    label: "admin.usage.surfacePrChat", hint: "admin.usage.surfacePrChatHint",
+  },
   embeddings: {
     label: "admin.usage.surfaceEmbeddings", hint: "admin.usage.surfaceEmbeddingsHint",
   },

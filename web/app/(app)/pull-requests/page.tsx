@@ -10,7 +10,8 @@
  */
 
 import { Fragment, useState } from "react";
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { AnimatePresence } from "motion/react";
 import * as m from "motion/react-m";
 import {
@@ -35,7 +36,8 @@ import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import { WorkspaceBadge } from "@/components/workspace-badge";
 import { NoReviewsYetHint } from "@/components/repo-webhook";
-import { PullRequestReviews } from "@/components/review-timeline";
+import { PullRequestRequirements } from "@/components/pr-requirements";
+import { PullRequestCommands, PullRequestReviews } from "@/components/review-timeline";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -289,6 +291,50 @@ function SummaryCards({ stats, active, onPick }: {
 /** Columns of the PR table — the expanded row spans all of them. */
 const COLS = 10;
 
+/** The paused state of a PR and the one button that changes it. A PR that
+ *  waits for a person keeps its automatic reviews off until Resume, which
+ *  also queues the review of every push that was skipped meanwhile. */
+function PauseControl({ pr }: { pr: ReviewedPullRequest }) {
+  const t = useT();
+  const token = useToken();
+  const qc = useQueryClient();
+  const paused = !!pr.review_paused;
+  const change = useMutation({
+    mutationFn: () => (paused
+      ? pullRequestsApi.resume(token!, pr.id)
+      : pullRequestsApi.pause(token!, pr.id)),
+    onSuccess: () => {
+      toast.success(paused ? t("prs.pause.resumed") : t("prs.pause.paused"));
+      qc.invalidateQueries({ queryKey: ["pull-requests"] });
+    },
+    onError: (err) => toast.error(err instanceof Error ? err.message : String(err)),
+  });
+  if (pr.state !== "open") return null;
+  const reason = pr.paused_reason && ["auto_pause", "manual", "command"].includes(pr.paused_reason)
+    ? t(`prs.pause.reason.${pr.paused_reason}`) : null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {paused && (
+        <Badge variant="default" title={reason ?? undefined}>
+          {t("prs.pause.badge")}
+        </Badge>
+      )}
+      {paused && reason && (
+        <span className="text-xs text-[var(--color-muted-foreground)]">{reason}</span>
+      )}
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={!token || change.isPending}
+        onClick={() => change.mutate()}
+      >
+        {paused ? t("prs.pause.resume") : t("prs.pause.pause")}
+      </Button>
+    </div>
+  );
+}
+
 function PrRow({ pr }: { pr: ReviewedPullRequest }) {
   const t = useT();
   // Rows of the "Awaiting review" card come from the provider's listing: the
@@ -376,6 +422,12 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
             )}
           </div>
         ) : "—"}
+        {!awaiting && <div className="mt-1.5"><PauseControl pr={pr} /></div>}
+        {pr.last_reviewed_sha && !awaiting && (
+          <span className="mt-1 block font-mono text-xs text-[var(--color-muted-foreground)]">
+            {t("prs.pause.reviewedUpTo", { sha: pr.last_reviewed_sha.slice(0, 7) })}
+          </span>
+        )}
       </TD>
     </TR>
     <AnimatePresence initial={false}>
@@ -390,7 +442,9 @@ function PrRow({ pr }: { pr: ReviewedPullRequest }) {
               className="overflow-hidden"
             >
               <div className="bg-[var(--color-muted)]/40 px-3 py-3 sm:pl-12 sm:pr-4">
+                <PullRequestRequirements prId={pr.id} />
                 <PullRequestReviews prId={pr.id} />
+                <PullRequestCommands prId={pr.id} />
               </div>
             </m.div>
           </TD>

@@ -133,11 +133,13 @@ _AGENTS = {
         "focus": [
             "Contradictions between the diff and the PR title/description",
             "Acceptance criteria or promised behaviour nothing implements",
+            "The Jira task the PR names: each numbered criterion checked against the diff",
             "Edge cases the description names or plainly implies",
-            "Skips quietly when the PR has no meaningful description",
+            "Skips quietly when neither the PR nor its Jira task says what the change is for",
         ],
         "context_used": [
             "PR title, description, acceptance criteria and issue keys",
+            "The Jira task (summary, description, acceptance criteria) when Jira is connected",
             "Diff hunks",
             "Repo-specific rules from admin panel",
         ],

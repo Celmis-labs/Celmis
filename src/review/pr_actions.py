@@ -22,6 +22,7 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from src.review import messages
 from src.review.models import (
     PRActions,
     ReviewBatch,
@@ -111,16 +112,68 @@ def template_values(pr, agents: list[str]) -> dict[str, object]:
 SUMMARY_START = "<!-- celmis:summary:start -->"
 SUMMARY_END = "<!-- celmis:summary:end -->"
 _COMMIT_MARK = re.compile(r"<!-- celmis:summary:commit=([0-9a-fA-F]*) -->")
-_ORIGINAL_OPEN = "<details>\n<summary>Original description</summary>\n\n"
-_ORIGINAL_CLOSE = "\n\n</details>"
-_ORIGINAL = re.compile(
-    re.escape(_ORIGINAL_OPEN) + r"(.*?)" + re.escape(_ORIGINAL_CLOSE), re.DOTALL,
+#: The author's own text, folded under our block so a later run can merge again.
+#: Wrapped in two markers because Bitbucket shows `<details>` as text: there it
+#: becomes a bold line (see `markers.bitbucket_flavour`), and the markers are
+#: what still bound the fold. A fold written before the markers is read as well.
+_ORIGINAL_OPEN = (
+    "<!-- celmis:summary:original -->\n"
+    "<details>\n<summary>Original description</summary>\n\n"
 )
+_ORIGINAL_CLOSE = "\n\n</details>\n<!-- celmis:summary:original:end -->"
+_ORIGINAL = re.compile(
+    r"<!-- celmis:summary:original -->\s*"
+    r"(?:<details>\s*<summary>Original description</summary>|\*\*Original description\*\*)"
+    r"\s*(.*?)\s*(?:</details>\s*)?<!-- celmis:summary:original:end -->",
+    re.DOTALL,
+)
+_ORIGINAL_LEGACY = re.compile(
+    r"<details>\n<summary>Original description</summary>\n\n(.*?)\n\n</details>",
+    re.DOTALL,
+)
+#: A "later push" section of our block starts at this hidden line (the heading
+#: after it is in the repository's language, so it cannot be searched for);
+#: blocks written before the marker existed are found by the English heading.
+UPDATE_MARK = "<!-- celmis:summary:update -->"
 _UPDATE_HEADING = "### Update — "
+
+#: Our block's own first line. When a person edits the description in the
+#: provider's UI the hidden marker lines are the first thing to go (an editor
+#: that does not know them drops them); the heading is what is left to find the
+#: block by.
+SUMMARY_HEADING = "## 🤖 Celmis summary"
+_HEADING_LINE = re.compile(r"^" + re.escape(SUMMARY_HEADING) + r"[ \t]*\r?$", re.MULTILINE)
 
 #: The tightest description limit of the three providers is GitHub's 65,536
 #: characters for a body; stay well under it.
 DESCRIPTION_MAX_CHARS = 60_000
+
+#: What the markers, the stamp and the author's folded original take besides the
+#: overview itself, and the least room the overview is ever squeezed to.
+_BLOCK_OVERHEAD = 1_000
+_MIN_INSIGHTS = 2_000
+#: A provider that hides our markers writes them longer than the HTML form the
+#: limit is measured in (zero-width markers by far the longest); the block is
+#: kept this far under the limit so `markers.fit` has nothing left to cut.
+_HIDDEN_MARGIN = 1_500
+
+
+_END_LINE = re.compile(r"^" + re.escape(SUMMARY_END) + r"[ \t]*\r?$", re.MULTILINE)
+
+
+def _find_end(text: str, pos: int) -> tuple[int, int]:
+    """(start, end) of our end marker after `pos`, (-1, -1) when there is none.
+
+    The marker is written on a line of its own; text that merely contains the
+    same characters — a finding title quoted from the diff — does not end the
+    block. A description a provider's editor reflowed, so that no marker is
+    still alone on its line, falls back to the plain search.
+    """
+    found = _END_LINE.search(text, pos)
+    if found is not None:
+        return found.start(), found.end()
+    plain = text.find(SUMMARY_END, pos)
+    return (plain, plain + len(SUMMARY_END)) if plain >= 0 else (-1, -1)
 
 
 def split_description(text: str) -> tuple[str, str | None, str]:
@@ -128,25 +181,75 @@ def split_description(text: str) -> tuple[str, str | None, str]:
     text = text or ""
     start = text.find(SUMMARY_START)
     if start < 0:
-        return text, None, ""
-    end = text.find(SUMMARY_END, start + len(SUMMARY_START))
+        return _split_by_heading(text)
+    end, after_end = _find_end(text, start + len(SUMMARY_START))
     if end < 0:
         # A start marker with no end — somebody cut the block in half. The
         # rest of the text is treated as ours, so the next write repairs it
         # instead of stacking a second block below the broken one.
         return text[:start], text[start + len(SUMMARY_START):], ""
     return (text[:start], text[start + len(SUMMARY_START):end],
-            text[end + len(SUMMARY_END):])
+            text[after_end:])
+
+
+def _split_by_heading(text: str) -> tuple[str, str | None, str]:
+    """No start marker: the block is read from our heading instead.
+
+    The markers are gone but the block is not — somebody edited the description
+    and lost the hidden lines. Without this the next write would stack a second
+    block under the first. The block runs to its end marker when that is still
+    there, else to the end of the text.
+    """
+    found = _HEADING_LINE.search(text)
+    if found is None:
+        return text, None, ""
+    end, after_end = _find_end(text, found.end())
+    if end < 0:
+        return text[:found.start()], text[found.start():], ""
+    return text[:found.start()], text[found.start():end], text[after_end:]
+
+
+def _original_of(inner: str) -> str:
+    """The author's text folded into our block, "" when there is none."""
+    found = _ORIGINAL.search(inner) or _ORIGINAL_LEGACY.search(inner)
+    return found.group(1) if found else ""
 
 
 def _block(inner: str) -> str:
     return f"{SUMMARY_START}\n{inner.strip()}\n{SUMMARY_END}"
 
 
-def _stamp(commit: str, when: datetime) -> str:
-    return (f"<sub>Celmis summary · commit `{(commit or '')[:7] or 'unknown'}` · "
-            f"{when.strftime('%Y-%m-%d %H:%M UTC')}</sub>\n"
-            f"<!-- celmis:summary:commit={commit or ''} -->")
+def _around(before: str, block: str, after: str) -> str:
+    """`block` between the author's `before` and `after`, each on lines of its own.
+
+    A marker only counts (and is only hidden) as a whole line: an author who
+    typed straight up to our start marker must not glue it to their text.
+    """
+    if before and not before.endswith("\n"):
+        before += "\n\n"
+    if after and not after.startswith("\n"):
+        after = "\n\n" + after
+    return before + block + after
+
+
+def _stamp(commit: str, when: datetime, language: str | None = None, *,
+           same_commit: bool = False) -> str:
+    """The line under our block: which commit it describes, and when.
+
+    The clock time is left out when the block already described this commit:
+    the text of a re-run is then the same as before, so a provider that
+    reports a description change as an event is not woken by every re-run.
+    """
+    stamped = when.strftime("%Y-%m-%d" if same_commit else "%Y-%m-%d %H:%M UTC")
+    text = messages.t("description.stamp", language,
+                      sha=(commit or "")[:7] or "unknown", when=stamped)
+    return f"_{text}_\n<!-- celmis:summary:commit={commit or ''} -->"
+
+
+def _last_update_start(inner: str) -> int:
+    """Where the last "update" section of our block starts, -1 when none."""
+    at = inner.rfind(UPDATE_MARK)
+    return at if at >= 0 else inner.rfind(_UPDATE_HEADING)
 
 
 def _join(*parts: str) -> str:
@@ -162,10 +265,14 @@ def compose_description(
     new_commits_mode: str,
     complement: Callable[[str, str], str | None] | None = None,
     now: datetime | None = None,
+    limit: int | None = None,
+    language: str | None = None,
 ) -> str | None:
     """The new description, or None to leave it alone.
 
-    `insights` is our markdown (overview + walkthrough). `complement(author,
+    `insights` is our markdown (overview, findings, walkthrough). `language`
+    is the repository's review language, for the stamp and the update heading.
+    `complement(author,
     insights)` is the one LLM call for `existing_mode == "complement"`; when
     it is missing or answers None the block falls back to "append".
 
@@ -184,9 +291,20 @@ def compose_description(
     insights = (insights or "").strip()
     if not insights:
         return None
+    limit = limit or DESCRIPTION_MAX_CHARS
+    if limit > 4 * _HIDDEN_MARGIN:
+        limit -= _HIDDEN_MARGIN
     when = now or datetime.now(UTC)
     before, inner, after = split_description(current)
-    stamp = _stamp(commit, when)
+    # Our part gives way, never the author's text and never a marker: whatever
+    # the provider's description limit leaves after the author's words is the
+    # room the overview has.
+    room = max(limit - len(before) - len(after) - _BLOCK_OVERHEAD, _MIN_INSIGHTS)
+    if len(insights) > room:
+        insights = insights[:room].rstrip() + "\n\n…"
+    recorded = _COMMIT_MARK.findall(inner) if inner is not None else []
+    same_commit = bool(recorded) and bool(commit) and recorded[-1] == commit
+    stamp = _stamp(commit, when, language, same_commit=same_commit)
 
     if inner is None:
         if existing_mode == "replace":
@@ -200,24 +318,24 @@ def compose_description(
     if new_commits_mode == "nothing":
         return None
 
-    recorded = _COMMIT_MARK.findall(inner)
-    same_commit = bool(recorded) and bool(commit) and recorded[-1] == commit
-
     if new_commits_mode == "append":
-        if same_commit and _UPDATE_HEADING in inner:
+        start = _last_update_start(inner)
+        if same_commit and start >= 0:
             # A re-run of the commit the last section describes: rewrite that
             # section rather than add a copy of it.
-            inner = inner[: inner.rfind(_UPDATE_HEADING)]
+            inner = inner[:start]
         elif same_commit:
             return _rewrite(before, after, inner, insights, stamp, existing_mode,
                             complement)
         section = _join(
-            f"{_UPDATE_HEADING}{when.strftime('%Y-%m-%d')} "
-            f"(commit `{(commit or '')[:7] or 'unknown'}`)",
+            UPDATE_MARK,
+            messages.t("description.update", language,
+                       when=when.strftime("%Y-%m-%d"),
+                       sha=(commit or "")[:7] or "unknown"),
             insights, stamp,
         )
-        new = before + _block(_join(inner, section)) + after
-        if len(new) <= DESCRIPTION_MAX_CHARS:
+        new = _around(before, _block(_join(inner, section)), after)
+        if len(new) <= limit:
             return new
         # Too long to keep every update: the block starts over.
     return _rewrite(before, after, inner, insights, stamp, existing_mode, complement)
@@ -225,12 +343,11 @@ def compose_description(
 
 def _rewrite(before, after, inner, insights, stamp, existing_mode, complement) -> str:
     if existing_mode == "complement":
-        found = _ORIGINAL.search(inner)
-        original = found.group(1) if found else ""
+        original = _original_of(inner)
         merged = _complemented(_join(original, before + after), insights, complement)
         if merged is not None:
             return _block(_join(merged, stamp))
-    return before + _block(_join(insights, stamp)) + after
+    return _around(before, _block(_join(insights, stamp)), after)
 
 
 def _complemented(author: str, insights: str,
@@ -251,19 +368,67 @@ def _complemented(author: str, insights: str,
 
 
 def description_insights(batch: ReviewBatch) -> str:
-    """Our part of the description: the overview and the walkthrough table."""
-    from src.review.providers.base import _walkthrough_lines
+    """Our part of the description: the overview, what was found, the
+    walkthrough table and the blocks other stages added.
 
+    The findings sit between the overview and the walkthrough: when the block
+    has to be cut to fit the provider's limit the cut comes off the end, and
+    the walkthrough is the part that can best be spared.
+    """
+    from src.review.providers.base import _section_lines, _walkthrough_lines
+
+    language = getattr(batch, "review_language", None)
     overview = (getattr(batch, "pr_overview", "") or "").strip()
-    parts = ["## 🤖 Celmis summary"]
+    parts = [SUMMARY_HEADING]
     if overview:
         parts.append(overview)
-    walk = "\n".join(_walkthrough_lines(batch)).strip()
+    found = _findings_block(batch, language)
+    if found:
+        parts.append(found)
+    walk = "\n".join(_walkthrough_lines(batch, language)).strip()
     if walk:
         parts.append(walk)
+    extra = "\n".join(_section_lines(batch, "description")).strip()
+    if extra:
+        parts.append(extra)
     if len(parts) == 1:
         return ""
     return "\n\n".join(parts)
+
+
+def _findings_block(batch: ReviewBatch, language: str | None) -> str:
+    """"### Found": how many, of what kind, the first few, and how many are
+    comments in the code. "" for a review in which nothing ran — "no issues"
+    claims that something looked."""
+    from src.review.providers.base import (
+        _category_items,
+        _severity_breakdown,
+        _top_findings_lines,
+    )
+    from src.review.settings import get_review_settings
+
+    if not batch.findings and not batch.agents_run:
+        return ""
+    lines = [messages.t("description.found", language), ""]
+    if not batch.findings:
+        lines.append(messages.t("description.clean", language))
+        return "\n".join(lines)
+    lines.append(messages.t(
+        "description.counts", language, n=len(batch.findings),
+        breakdown=_severity_breakdown(batch, language)))
+    lines.append("")
+    lines.append(messages.t(
+        "completed.by_category", language, items=_category_items(batch, language)))
+    lines.append("")
+    top = _top_findings_lines(batch, language)
+    if top:
+        lines.extend(top)
+        lines.append("")
+    inline = len(batch.inline_findings(
+        batch.inline_cap(int(get_review_settings().max_inline_comments))))
+    if inline:
+        lines.append(messages.t("description.inline", language, n=inline))
+    return "\n".join(lines).rstrip()
 
 
 def strip_markers(text: str) -> str:

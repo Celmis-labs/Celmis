@@ -26,9 +26,9 @@ import { useSession } from "next-auth/react";
 import { AnimatePresence, useReducedMotion } from "motion/react";
 import * as m from "motion/react-m";
 import {
-  BotIcon, ChevronRightIcon, FilterIcon, GlobeIcon, MessageSquareTextIcon,
+  BotIcon, BrainIcon, ChevronRightIcon, FilterIcon, GlobeIcon, MessageSquareTextIcon,
   ScrollTextIcon, SearchIcon, SettingsIcon, SparklesIcon,
-  TextQuoteIcon, WrenchIcon,
+  TerminalIcon, TextQuoteIcon, WrenchIcon,
 } from "lucide-react";
 
 import type { ReviewSettingsOverview } from "@/lib/api";
@@ -52,6 +52,8 @@ export const SECTION_ICON: Record<SectionId, typeof SettingsIcon> = {
   summary: TextQuoteIcon,
   rules: ScrollTextIcon,
   messages: MessageSquareTextIcon,
+  commands: TerminalIcon,
+  learning: BrainIcon,
   advanced: WrenchIcon,
 };
 

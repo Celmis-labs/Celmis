@@ -14,11 +14,14 @@ Designed for local CLI use (Phase 17.6) + webhook handler (Phase 17b).
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
+from src.review import cadence, messages
 from src.review.agents import (
     AgentContext,
     BusinessLogicAgent,
@@ -42,7 +45,9 @@ from src.review.branch_patterns import branch_targeted
 from src.review.branch_patterns import pass_sentence as branch_pass_sentence
 from src.review.branch_patterns import skip_sentence as branch_skip_sentence
 from src.review.graph_context import build_graph_context
+from src.review.learning import signals as _learning_signals  # noqa: F401  (outcome listener)
 from src.review.models import (
+    COMPLETED_COMMENTS,
     SUMMARY_EXISTING_DESCRIPTION,
     SUMMARY_ON_NEW_COMMITS,
     SUMMARY_TARGETS,
@@ -54,9 +59,11 @@ from src.review.models import (
 )
 from src.review.providers import get_provider_for
 from src.review.providers.base import (
+    EmptyDiffError,
     PullRequestProvider,
     PullRequestProviderError,
 )
+from src.review.scope import AUTOMATIC, ReviewRequest, title_keyword_match
 from src.review.settings import (
     AgentLLMSettings,
     ReviewSettings,
@@ -93,6 +100,18 @@ def _fetched_sentence(pr) -> str:
     head = getattr(pr, "head_ref", "") or "?"
     return (f"#{getattr(pr, 'number', '?')} fetched: {base} ← {head}, "
             f"{files} changed file{'s' if files != 1 else ''}.")
+
+
+def _lost_diff_note(files: int | None, language: str | None = None) -> str:
+    """The sentence a pull request gets when its diff never arrived.
+
+    Not a skip: the provider itself lists `files` changed files, so there IS
+    something to review and nobody has. Said on the PR, because a run that
+    fails quietly is how an unreviewed change gets merged as "checked".
+    """
+    if files is None:
+        return messages.t("lost_diff.unknown", language)
+    return messages.tn("lost_diff", files, language, files=files)
 
 
 def _settings_sentence(policy) -> str:
@@ -299,7 +318,24 @@ def _pr_actions(policy) -> PRActions:
             "summary_existing_description", SUMMARY_EXISTING_DESCRIPTION, "append"),
         message_started=_text("message_started"),
         message_finished_header=_text("message_finished_header"),
+        completed_comment=_word("completed_comment", COMPLETED_COMMENTS, "completed"),
+        # The guide lists commands, so it needs both the guide and the commands.
+        commands_guide_enabled=bool(
+            _policy_value(policy, "commands_guide_enabled", True)
+            and _policy_value(policy, "commands_enabled", True)),
+        guide_commands_off=_commands_turned_off(policy),
     )
+
+
+def _commands_turned_off(policy) -> tuple[str, ...]:
+    """The commands whose feature this repository switched off, so the guide
+    in the completed comment does not offer what would be refused."""
+    from src.review.commands.parser import BUSINESS_LOGIC, CHAT, REMEMBER
+
+    gated = ((CHAT, "chat_enabled"), (REMEMBER, "memories_enabled"),
+             (BUSINESS_LOGIC, "task_context_enabled"))
+    return tuple(name for name, setting in gated
+                 if not _policy_value(policy, setting, True))
 
 
 def _display_time(iso: str) -> str:
@@ -359,10 +395,27 @@ class _ReviewLifecycle:
         self.pr: PullRequest | None = None
         #: The placeholder this run wrote, if any.
         self.started_id: int | None = None
+        self._language: str | None = None
+
+    @property
+    def language(self) -> str | None:
+        """The repository's review language, once the policy is known; None
+        (English) before that. Handed to the provider as well, whose own
+        notes (the "not reviewed" one) are written in it."""
+        return self._language
+
+    @language.setter
+    def language(self, value: str | None) -> None:
+        self._language = value
+        if self.provider is not None:
+            with contextlib.suppress(AttributeError):  # a provider double with __slots__
+                self.provider.review_language = value
 
     def bind(self, provider, pr: PullRequest) -> None:
         self.provider = provider
         self.pr = pr
+        if self._language is not None:
+            self.language = self._language
 
     def _write(self, body: str, *, create: bool, what: str,
                only_if_in_progress: bool = False) -> int | None:
@@ -388,14 +441,16 @@ class _ReviewLifecycle:
         return cid
 
     def started(self, agents: list[str], *, started_at: str,
-                template: str | None = None) -> None:
+                template: str | None = None,
+                first_review: bool | None = None) -> None:
         from src.review.providers.base import _format_started_comment
 
         if self.pr is None:
             return
         self.started_id = self._write(
             _format_started_comment(self.pr, agents=agents, started_at=started_at,
-                                    template=template),
+                                    template=template, language=self.language,
+                                    first_review=first_review),
             create=True, what="started",
         )
 
@@ -409,18 +464,22 @@ class _ReviewLifecycle:
         if self.pr is None:
             return
         cid = self._write(
-            _format_status_comment(self.pr, outcome="skipped", reason=reason),
+            _format_status_comment(self.pr, outcome="skipped", reason=reason,
+                                   language=self.language),
             create=False, what="skipped", only_if_in_progress=True,
         )
         if cid is None and feedback:
             self._feedback(reason)
 
-    def _feedback(self, reason: str) -> None:
+    def _feedback(self, reason: str) -> bool:
+        """Leave the marked status note. True only when the provider confirmed a
+        comment — a caller that must not lose the note (the pause notice)
+        reads this; every other caller may ignore it."""
         if not self.active or self.provider is None or self.pr is None:
-            return
+            return False
         upsert = getattr(self.provider, "upsert_feedback_comment", None)
         if not callable(upsert):
-            return
+            return False
         try:
             cid = upsert(self.pr, reason)
         except Exception as exc:  # noqa: BLE001 — a status note never fails a review
@@ -428,8 +487,9 @@ class _ReviewLifecycle:
                 "review_status_feedback_failed pr=%s err_type=%s err=%s",
                 self.pr.number, type(exc).__name__, str(exc)[:200],
             )
-            return
+            return False
         logger.info("review_status_feedback pr=%s id=%s", self.pr.number, cid)
+        return cid is not None
 
     def failed(self, reason: str) -> None:
         from src.review.providers.base import _format_status_comment
@@ -437,7 +497,8 @@ class _ReviewLifecycle:
         if self.pr is None or self.started_id is None:
             return
         self._write(
-            _format_status_comment(self.pr, outcome="failed", reason=reason),
+            _format_status_comment(self.pr, outcome="failed", reason=reason,
+                                   language=self.language),
             create=False, what="failed",
         )
         self.started_id = None
@@ -507,6 +568,16 @@ class _PRSummaryJob:
                            "without the parts that failed.")
         return True, (f"Overview and walkthrough of {len(batch.walkthrough)} "
                       f"file{'s' if len(batch.walkthrough) != 1 else ''} generated.")
+
+
+@dataclass
+class SingleAgentRun:
+    """What `ReviewOrchestrator.run_single_agent` returns: the agent's result
+    and the context it ran in (the on-demand check reads the model client and
+    the Jira task from it)."""
+
+    result: AgentRunResult
+    context: AgentContext
 
 
 class ReviewOrchestrator:
@@ -603,6 +674,7 @@ class ReviewOrchestrator:
         user_id: str = "default",
         workspace_id: str = "default",
         stages: StageRecorder | None = None,
+        request: ReviewRequest | None = None,
     ) -> ReviewRunResult:
         """Run full review pipeline.
 
@@ -616,6 +688,10 @@ class ReviewOrchestrator:
             stages: the run's stage recorder (src/review/stages.py); the
                 caller owns it and adds "record" and "finished" after this
                 returns. None records into a private one (`last_stages`).
+            request: what asked for this review (`src.review.scope`). It
+                decides which gates apply: a person's request skips the
+                draft, title and cadence gates, `force` the target-branch one
+                too. None is an automatic trigger — every gate applies.
         """
         t0 = time.time()
         if stages is None:
@@ -639,6 +715,7 @@ class ReviewOrchestrator:
                 post_comments=post_comments, provider=provider,
                 user_id=user_id, workspace_id=workspace_id, t0=t0,
                 lifecycle=lifecycle, stages=stages,
+                request=request or AUTOMATIC,
             )
         except Exception as exc:
             reason = _safe_failure_reason(exc)
@@ -657,6 +734,7 @@ class ReviewOrchestrator:
         user_id: str, workspace_id: str, t0: float,
         lifecycle: _ReviewLifecycle | None = None,
         stages: StageRecorder | None = None,
+        request: ReviewRequest = AUTOMATIC,
     ) -> ReviewRunResult:
         if lifecycle is None:
             lifecycle = _ReviewLifecycle(active=False)
@@ -670,6 +748,14 @@ class ReviewOrchestrator:
         stages.begin("fetch_pr", "Fetch pull request")
         try:
             pr = provider.fetch_pull_request(repo, pr_number)
+        except EmptyDiffError as exc:
+            # The provider lists files and sent no diff, even after retries.
+            # The run fails (the queue may retry it) — and says so on the PR.
+            if exc.pr is not None:
+                lifecycle.bind(provider, exc.pr)
+                lifecycle.language = self._language_for(exc.pr, workspace_id)
+                lifecycle._feedback(_lost_diff_note(exc.files, lifecycle.language))
+            raise
         except PullRequestProviderError:
             raise
         finally:
@@ -687,8 +773,15 @@ class ReviewOrchestrator:
         stages.begin("settings", "Resolve settings")
         policy = self._resolved_policy(pr.local_slug, workspace_id)
         stages.end("settings", "success", _settings_sentence(policy))
+        language = messages.resolve_language(
+            (policy or {}).get("review_language"), workspace_id)
+        lifecycle.language = language
 
         batch = ReviewBatch(pull_request=pr)
+        # The language the bot's own text on the PR is written in (see
+        # `src.review.messages`); the model's output follows the same setting
+        # through the prompt.
+        batch.review_language = language
         batch.comment_min_severity = (policy or {}).get("comment_min_severity")
         # The repo's own inline-comment cap; None leaves the providers on
         # REVIEW_MAX_INLINE_COMMENTS.
@@ -757,8 +850,9 @@ class ReviewOrchestrator:
         # asks as well, so the two gates cannot disagree about a branch.
         stages.begin("gate_target_branch", "Validate target branch")
         targets = list((policy or {}).get("target_branches") or [])
-        if (policy is not None and targets and pr.base_ref
-                and not branch_targeted(pr.base_ref, targets)):
+        off_target = bool(policy is not None and targets and pr.base_ref
+                          and not branch_targeted(pr.base_ref, targets))
+        if off_target and not request.bypasses("gate_target_branch"):
             logger.info(
                 "review_skipped reason=branch_not_targeted pr=%d base=%s patterns=%s",
                 pr.number, pr.base_ref, targets,
@@ -774,8 +868,39 @@ class ReviewOrchestrator:
                 f"reviews", feedback=actions.status_feedback,
             )
             return ReviewRunResult(batch=batch, posted=False, provider_response={})
-        stages.end("gate_target_branch", "success",
-                   branch_pass_sentence(pr.base_ref, targets))
+        if off_target:
+            stages.end("gate_target_branch", "success",
+                       f"Base branch '{pr.base_ref}' is outside the target "
+                       f"patterns; reviewed anyway — the review was forced.",
+                       meta={"target_branch": pr.base_ref})
+        else:
+            stages.end("gate_target_branch", "success",
+                       branch_pass_sentence(pr.base_ref, targets))
+
+        # ── Draft, title, cadence. Before the repository context is built:
+        # none of them needs it, and a skipped PR must not pay for a graph
+        # query. A person's request (`ReviewRequest.bypasses`) skips all three.
+        gated = self._gate_draft_title_cadence(
+            pr, batch, policy=policy, actions=actions, lifecycle=lifecycle,
+            stages=stages, request=request, workspace_id=workspace_id,
+            language=language, provider_name=provider_name,
+        )
+        if gated is not None:
+            return gated
+
+        # ── Review scope: the whole PR, or only what is new since the last
+        # reviewed commit. Before the context is built, so a run that has
+        # nothing new to read pays for no graph query.
+        stages.begin("scope", "Decide review scope")
+        scoped = self._decide_scope(
+            pr, batch, policy=policy, actions=actions, lifecycle=lifecycle,
+            stages=stages, request=request, workspace_id=workspace_id,
+            language=language, provider_name=provider_name, provider=provider,
+            ignore_globs=ignore_globs,
+        )
+        if isinstance(scoped, ReviewRunResult):
+            return scoped
+        review_diff = scoped if scoped is not None else review_diff
 
         # ── Build agent context (passes custom_rules from policy + matching folder_rules) ──
         # The agents get the PR with the FILTERED diff text. Compliance and
@@ -792,8 +917,10 @@ class ReviewOrchestrator:
         stages.begin("context", "Repository context")
         context = self._build_context(
             agent_pr, policy=policy, user_id=user_id, workspace_id=workspace_id,
+            provider=provider,
         )
         stages.end("context", "success", _context_sentence(context))
+        batch.task_context = getattr(context, "task_context", None)
 
         batch.cross_repo_callers = context.cross_repo_callers_count
         # What the graph could not say rides the same list as a dropped
@@ -804,30 +931,7 @@ class ReviewOrchestrator:
         if context.graph_note is not None:
             batch.parameter_adjustments.append(context.graph_note)
 
-        # ── Skip empty/draft/binary PRs ──
-        # Drafts: skipped unless `run_on_drafts` (repo > workspace > built-in
-        # False) says this repository reviews them. Read through the resolved
-        # policy like every other gate here, so the webhook's early skip
-        # (`review_defaults.run_on_drafts_for_repo`) and this one answer the
-        # same question from the same rows.
-        stages.begin("gate_draft", "Check draft status")
-        if pr.is_draft and not _policy_setting(policy, "run_on_drafts"):
-            logger.info("review_skipped reason=draft pr=%d", pr.number)
-            batch.summary = "PR is draft — review skipped."
-            batch.verdict = ReviewVerdict.SKIPPED
-            batch.mark_complete()
-            stages.end("gate_draft", "skipped",
-                       "Draft: the pull request is a draft; it is reviewed once "
-                       "it is marked ready.", ends_run=True)
-            lifecycle.skipped("the pull request is a draft",
-                              feedback=actions.status_feedback)
-            return ReviewRunResult(batch=batch, posted=False, provider_response={})
-        if pr.is_draft:
-            stages.end("gate_draft", "success",
-                       "Draft — reviewed: run_on_drafts is on.")
-        else:
-            stages.end("gate_draft", "success", "The pull request is not a draft.")
-
+        # ── Skip empty/binary PRs ──
         # A diff too large to review, refused as a refusal rather than
         # silently truncated. `max_diff_size_bytes` said "skip review if
         # larger" in its own comment and was read by NOTHING — so an
@@ -870,6 +974,32 @@ class ReviewOrchestrator:
                    meta={"bytes": raw_len})
 
         stages.begin("gate_hunks", "Check reviewable changes")
+        # Bitbucket tells an empty PR (a diffstat of 0) from a lost diff; a
+        # diffstat it could not read (None) is not an answer, so it is a loss.
+        diff_unverified = pr.provider == "bitbucket" and pr.reported_files is None
+        if (not pr.hunks and not (pr.raw_diff or "").strip()
+                and ((pr.reported_files or 0) > 0 or diff_unverified)):
+            # An empty diff for a PR the provider says has files is a diff
+            # that was lost on the way, not an empty change-set. Bitbucket
+            # answers with a redirect the old client did not follow; a skip
+            # here left a pull request "reviewed" with nothing read.
+            note = _lost_diff_note(pr.reported_files, language)
+            logger.error("review_failed reason=diff_lost pr=%d reported_files=%s",
+                         pr.number, pr.reported_files)
+            stages.end("gate_hunks", "failed",
+                       "The diff is empty and the provider could not say how many "
+                       "files changed." if pr.reported_files is None else
+                       f"The diff is empty but the provider lists "
+                       f"{pr.reported_files} changed file"
+                       f"{'' if pr.reported_files == 1 else 's'}.",
+                       ends_run=True, meta={"reported_files": pr.reported_files})
+            lifecycle._feedback(note)
+            raise EmptyDiffError(
+                "empty diff for a PR whose changed files are unknown"
+                if pr.reported_files is None else
+                f"empty diff for a PR with {pr.reported_files} changed files",
+                pr=pr, files=pr.reported_files,
+            )
         if not pr.hunks:
             if not pr.raw_diff or not pr.raw_diff.strip():
                 reason = "PR has no diff content (empty change-set)."
@@ -949,6 +1079,18 @@ class ReviewOrchestrator:
         # this one means "the built-in roster does not run it", which is the
         # normal state of every review and worth nothing louder than debug.
         dormant_agents = self._dormant_agents(policy, disabled_agents)
+        # `business_logic_auto = when_task_found`: the agent nobody opted in
+        # runs when the pull request names a Jira task that was read. Never
+        # against an explicit "off": naming it in `disabled_agents` always
+        # wins, here as everywhere else.
+        if (
+            "business_logic" in disabled_agents
+            and "business_logic" not in named_off
+            and self._task_auto_enabled(policy, context.task_context)
+        ):
+            disabled_agents.discard("business_logic")
+            logger.info("business_logic_switched_on_by_task pr=%s tasks=%s",
+                        pr.number, [t.key for t in context.task_context.tasks])
 
         # ── "🔄 Celmis is reviewing this PR…" — posted now, after every skip
         # gate (a skipped PR gets no placeholder to take back) and before the
@@ -964,7 +1106,9 @@ class ReviewOrchestrator:
                 if self._verifier_enabled(policy, disabled_agents)[0]:
                     roster.append("verifier")
             lifecycle.started(roster, started_at=_display_time(batch.started_at),
-                              template=actions.message_started)
+                              template=actions.message_started,
+                              first_review=self._is_first_review(
+                                  pr, provider_name, workspace_id))
 
         # ── The PR overview + walkthrough: one cheap LLM call, started now so
         # it runs alongside the engine instead of after it. Only when the
@@ -974,7 +1118,7 @@ class ReviewOrchestrator:
         if wants_summary and post_comments and not dry_run:
             stages.begin("summary", "Generate summary")
             summary_job = _PRSummaryJob.start(
-                agent_pr, context,
+                self._summary_pr(pr, agent_pr, ignore_globs), context,
                 language=_policy_value(policy, "review_language", None),
                 instructions=_policy_value(policy, "summary_instructions", None),
             )
@@ -1278,24 +1422,30 @@ class ReviewOrchestrator:
         batch.dropped_duplicates = pre.dropped_dedup
         batch.dropped_near_duplicates = pre.dropped_near_duplicate
         batch.dropped_low_confidence = pre.dropped_low_confidence
+        # What the team already judged: after the deterministic prefilter, before
+        # the model's veto, so the veto never spends tokens on a finding the
+        # team has dismissed. `shadow` (the built-in) only reports.
+        candidates = self._learned_filter(
+            batch, pre.kept, policy=policy, workspace_id=workspace_id,
+            pr=pr, stages=stages, provider=provider, provider_name=provider_name)
         veto_on, veto_reason = self._verifier_enabled(policy, disabled_agents)
         if not veto_on:
-            batch.findings = list(pre.kept)
+            batch.findings = list(candidates)
             batch.agents_skipped.append("verifier")
             logger.info(
                 "verifier_llm_skipped reason=%s findings=%d "
                 "by_rule=%d dedup=%d near_dup=%d low_conf=%d",
-                veto_reason, len(pre.kept), sum(pre.dropped_by_rule.values()),
+                veto_reason, len(candidates), sum(pre.dropped_by_rule.values()),
                 pre.dropped_dedup, pre.dropped_near_duplicate,
                 pre.dropped_low_confidence,
             )
             stages.end("verifier", "skipped",
                        f"LLM veto off ({veto_reason.replace('_', ' ')}); the "
-                       f"deterministic prefilter kept {len(pre.kept)} of "
+                       f"deterministic prefilter kept {len(candidates)} of "
                        f"{len(all_findings)} findings.",
-                       meta={"kept": len(pre.kept), "candidates": len(all_findings)})
+                       meta={"kept": len(candidates), "candidates": len(all_findings)})
         else:
-            v_result = self.verifier.llm_pass(pre.kept, context)
+            v_result = self.verifier.llm_pass(candidates, context)
             batch.findings = v_result.kept
             batch.dropped_by_veto = v_result.dropped_llm_filter
             batch.tokens_in += v_result.tokens_in
@@ -1470,6 +1620,116 @@ class ReviewOrchestrator:
             context=context, policy=policy, stages=stages,
         )
 
+    def _check_requirements(
+        self, batch: ReviewBatch, *, context, policy, stages: StageRecorder,
+    ) -> None:
+        """The "Requirements check" stage. Never raises, never changes the
+        verdict. No stage is recorded when it does not apply (no readable
+        task, the agent did not run, the setting is off)."""
+        task = getattr(batch, "task_context", None)
+        if task is None or not task.ok or "business_logic" not in batch.agents_run:
+            return
+        try:
+            from src.review.task_context import checklist
+            from src.review.task_context.service import task_settings
+
+            mode = task_settings(policy)["requirements_mode"]
+            if mode == "off":
+                return
+            stages.begin("requirements", "Requirements check")
+            if not checklist.criteria_of(task):
+                checklist.attach_requirements(batch, task, None, mode=mode)
+                stages.end("requirements", "skipped",
+                           "Skipped: the task lists no acceptance criteria, so the "
+                           "change was held to its description.")
+                return
+            findings = list(batch.findings)
+            error = None
+            pr = getattr(context, "pull_request", None) or batch.pull_request
+            if mode == "findings":
+                rows = checklist.rows_from_findings(
+                    task, findings, incremental=getattr(pr, "scope", None) is not None)
+            else:
+                agent_llm = None
+                try:
+                    from src.review.agents.base import agent_llm_settings
+
+                    agent_llm = agent_llm_settings(context, "business_logic")
+                except Exception:  # noqa: BLE001
+                    agent_llm = None
+                res = checklist.check_requirements(
+                    pr, task, findings, llm_client=getattr(context, "llm_client", None),
+                    agent_llm=agent_llm)
+                rows, error = res.rows, res.error
+                batch.tokens_in += res.tokens_in
+                batch.tokens_out += res.tokens_out
+                if res.cost_usd is not None and batch.cost_usd is not None:
+                    batch.cost_usd = round(batch.cost_usd + res.cost_usd, 6)
+                if error:
+                    mode = "findings"        # what the comment shows is the findings view
+            checklist.attach_requirements(batch, task, rows, mode=mode)
+            gaps = sum(1 for r in rows if r.verdict in ("partial", "missing", "contradicts"))
+            note = f"{len(rows)} criteria checked, {gaps} with a gap."
+            if error:
+                note = (f"The model's answer could not be used ({error}); the comment "
+                        f"shows the gaps the review reported. {note}")
+            stages.end("requirements", "success", note,
+                       meta={"criteria": len(rows), "gaps": gaps, "mode": mode})
+        except Exception as exc:  # noqa: BLE001 — a checklist never fails a review
+            logger.warning("requirements_stage_failed pr=%s err_type=%s",
+                           getattr(batch.pull_request, "number", "?"), type(exc).__name__)
+            stages.end("requirements", "failed",
+                       f"The requirements check raised {type(exc).__name__}.")
+
+    def _resolve_earlier_issues(
+        self, batch: ReviewBatch, pr: PullRequest, provider, provider_name: str,
+        *, policy, user_id: str, workspace_id: str, stages: StageRecorder,
+    ) -> None:
+        """The "Resolve earlier issues" stage. Never raises, never changes the
+        verdict: an unreadable branch leaves every issue open."""
+        stages.begin("resolve_issues", "Resolve earlier issues")
+        try:
+            from src.review.issue_resolver import (
+                IssueSettings,
+                attach_earlier_issues,
+                plan_review_resolutions,
+            )
+
+            cfg = IssueSettings(
+                auto_resolve=bool(_policy_setting(policy, "issues_auto_resolve")),
+                llm_verify=bool(_policy_setting(policy, "issues_resolve_llm_verify")),
+                max_llm=max(0, int(_policy_setting(policy, "issues_resolve_max_llm"))),
+                announce=bool(_policy_setting(policy, "issues_announce_resolved")),
+            )
+            if not cfg.auto_resolve:
+                stages.end("resolve_issues", "skipped",
+                           "Skipped: automatic resolution of earlier issues is off "
+                           "for this repository.")
+                return
+            found = plan_review_resolutions(
+                pr, provider=provider, workspace_id=workspace_id,
+                user_id=user_id, settings=cfg)
+            attach_earlier_issues(batch, found)
+            if found is None:
+                stages.end("resolve_issues", "skipped",
+                           "Skipped: no earlier issues on the files this pull "
+                           "request changes.")
+                return
+            n = len(found.resolved)
+            note = (f"{n} earlier issue{'s' if n != 1 else ''} fixed on the "
+                    f"target branch; {found.still_open} still open.")
+            if found.unreadable:
+                note += f" {found.unreadable} could not be checked."
+            stages.end("resolve_issues", "success", note,
+                       meta={"resolved": n, "still_open": found.still_open,
+                             "unreadable": found.unreadable,
+                             "llm_calls": found.llm_calls})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("resolve_issues_failed pr=%s err_type=%s",
+                           getattr(pr, "number", "?"), type(exc).__name__)
+            stages.end("resolve_issues", "failed",
+                       f"Checking earlier issues raised {type(exc).__name__}.")
+
     def _finish_review(
         self, batch: ReviewBatch, pr: PullRequest, provider, provider_name: str,
         *, dry_run: bool, post_comments: bool, user_id: str, workspace_id: str,
@@ -1491,6 +1751,16 @@ class ReviewOrchestrator:
             outcome = summary_job.apply_to(batch)
             ok, why = outcome if isinstance(outcome, tuple) else (True, "")
             stages.end("summary", "success" if ok else "failed", why)
+        # ── Requirements check: the Jira task's acceptance criteria as a
+        # checklist in the completed comment. Needs a readable task and the
+        # business-logic agent to have run; records nothing otherwise.
+        self._check_requirements(batch, context=context, policy=policy, stages=stages)
+        # ── Earlier issues: which backlog issues of merged PRs does the
+        # target branch's HEAD show as fixed? Reads only; the ledger write is
+        # `issues._record`'s, after the run, so a dry run changes nothing.
+        self._resolve_earlier_issues(
+            batch, pr, provider, provider_name, policy=policy,
+            user_id=user_id, workspace_id=workspace_id, stages=stages)
         # ── Auto-reviewer assignment (Stage 16) — via ownership snapshot.
         # Only fires for real posted reviews (not dry-run) so we don't
         # spam @-mentions during test runs.
@@ -1581,6 +1851,10 @@ class ReviewOrchestrator:
                     "review_summary_not_delivered provider=%s pr=%d err=%s",
                     provider_name, pr.number, summary_error,
                 )
+            if (posted and isinstance(provider_response, dict)
+                    and provider_response.get("inline_comments")):
+                self._remember_posted(batch, pr, provider_name, provider_response,
+                                      policy=policy, workspace_id=workspace_id)
 
         if description_result is not None and isinstance(provider_response, dict):
             provider_response["description"] = description_result
@@ -1617,6 +1891,8 @@ class ReviewOrchestrator:
                 existing_mode=actions.summary_existing_description,
                 new_commits_mode=actions.summary_on_new_commits,
                 complement=complement,
+                limit=getattr(provider, "description_max_chars", None),
+                language=batch.review_language,
             )
 
         try:
@@ -1673,8 +1949,12 @@ class ReviewOrchestrator:
         policy: dict | None = None,
         user_id: str = "default",
         workspace_id: str = "default",
+        provider=None,
+        task_override=None,
     ) -> AgentContext:
         """Build AgentContext with graph blast radius + cross-repo callers.
+        `task_override` is a Jira task somebody named (the on-demand check):
+        it is used as it is and the pull request's own text is not searched.
 
         Strategy:
             1. `build_graph_context` — the changed symbols of EVERY changed file,
@@ -1699,9 +1979,14 @@ class ReviewOrchestrator:
                 mcp_evidence + ("\n\n" + custom_rules if custom_rules else "")
             )
         llm_client, agent_llm = self._build_llm_client(user_id, workspace_id, policy)
+        task_context = task_override if task_override is not None else (
+            self._build_task_context(
+                pr, policy=policy, user_id=user_id, workspace_id=workspace_id,
+                provider=provider))
 
         return AgentContext(
             pull_request=pr,
+            task_context=task_context,
             graph_summary=graph.summary,
             graph_brief=graph.brief,
             graph_note=graph.note,
@@ -1725,6 +2010,101 @@ class ReviewOrchestrator:
             base_instruction=clamp_base_instruction(
                 _policy_value(policy, "base_instruction", None)),
         )
+
+    # ─── Jira task context (business-logic agent) ──
+
+    @classmethod
+    def _task_context_wanted(cls, policy: dict | None) -> bool:
+        """Will the business-logic agent run — or could it, were a task found?
+
+        The Jira read is a network call, so it is made only for a review that
+        can use it: the agent is not named off, and it is either opted in or
+        `business_logic_auto` lets a found task turn it on.
+        """
+        from src.review.review_defaults import effective_disabled_agents
+        from src.review.task_context.service import task_settings
+
+        named_off = {
+            str(a).strip().lower() for a in ((policy or {}).get("disabled_agents") or [])
+        }
+        if "business_logic" in named_off:
+            return False
+        cfg = task_settings(policy)
+        if not cfg["enabled"]:
+            return False
+        opted_out = "business_logic" in effective_disabled_agents(
+            None, (policy or {}).get("enabled_agents"))
+        return not opted_out or cfg["auto"] == "when_task_found"
+
+    @staticmethod
+    def _task_auto_enabled(policy: dict | None, task) -> bool:
+        from src.review.task_context.service import task_settings
+
+        return bool(
+            task is not None and task.ok
+            and task_settings(policy)["auto"] == "when_task_found"
+        )
+
+    def _build_task_context(
+        self, pr: PullRequest, *, policy: dict | None, user_id: str,
+        workspace_id: str, provider,
+    ):
+        """The Jira task(s) the pull request names, or None when this review
+        will not use them. Never raises (the resolver reports its own
+        failures as a status the agent turns into a skip reason)."""
+        if not self._task_context_wanted(policy):
+            return None
+        from src.review.task_context.service import resolve_task_context
+
+        def commit_messages() -> list[str]:
+            fetch = getattr(provider, "fetch_commit_messages", None)
+            if fetch is None:
+                return []
+            try:
+                return list(fetch(pr) or [])
+            except Exception as exc:  # noqa: BLE001
+                logger.info("task_context_commits_failed pr=%s err=%s",
+                            getattr(pr, "number", "?"), type(exc).__name__)
+                return []
+
+        return resolve_task_context(
+            pr, workspace_id=workspace_id, user_id=user_id, policy=policy,
+            commit_messages=commit_messages)
+
+    def run_single_agent(
+        self, pr: PullRequest, agent_name: str, *, task_override=None,
+        policy: dict | None = None, user_id: str = "default",
+        workspace_id: str = "default", provider=None,
+    ) -> SingleAgentRun:
+        """Run ONE agent on `pr`, forced on, and hand back what it found.
+
+        For the on-demand business-logic check (`@celmis -v business-logic`):
+        the repository context is built exactly as for a review
+        (`_build_context`: graph, rules, memories, the repository's ignore
+        globs), the agent runs through `_run_agents_parallel`, and nothing
+        else happens — no gates, no verifier, no summary, no comment, nothing
+        recorded on the pull request. The policy's switches (`disabled_agents`,
+        `enabled_agents`, `business_logic_auto`, `task_project_keys`) do not
+        apply: somebody asked for this agent by name. `task_override` is the
+        Jira task they named. Never raises for an agent's own failure (it is
+        on `result.error`); a context that cannot be built does raise.
+        """
+        agent_pr = pr
+        globs = list((policy or {}).get("ignore_globs") or [])
+        if globs:
+            import dataclasses
+
+            agent_pr = dataclasses.replace(pr, raw_diff=self._apply_ignore_globs(pr, globs))
+        context = self._build_context(
+            agent_pr, policy=policy, user_id=user_id, workspace_id=workspace_id,
+            provider=provider, task_override=task_override)
+        results = self._run_agents_parallel(context, only=agent_name)
+        result = results[0] if results else AgentRunResult(
+            agent=agent_name, error=f"no agent named {agent_name}")
+        changed = {str(p) for p in (pr.changed_files or [])}
+        if changed:
+            result.findings = [f for f in result.findings if f.file_path in changed]
+        return SingleAgentRun(result=result, context=context)
 
     # ─── Stage 11: BYOK LLM client + per-agent model resolution ──
 
@@ -1826,6 +2206,330 @@ class ReviewOrchestrator:
 
     # ─── Stage 10: per-repo policy loading + rules formatting ──
 
+    @staticmethod
+    def _summary_pr(pr: PullRequest, agent_pr: PullRequest, ignore_globs: list[str]) -> PullRequest:
+        """The PR the overview is written about: the whole change, also when an
+        incremental review's agents read only the new commits."""
+        if pr.scope is None:
+            return agent_pr
+        import dataclasses
+
+        from src.review.ignore_globs import filter_raw_diff
+
+        return dataclasses.replace(
+            pr, raw_diff=filter_raw_diff(pr.scope.full_raw_diff, ignore_globs),
+            hunks=list(pr.scope.full_hunks),
+            skipped_files=list(dict.fromkeys(
+                [*pr.scope.full_skipped_files, *pr.skipped_files])),
+            scope=None)
+
+    def _decide_scope(
+        self, pr: PullRequest, batch: ReviewBatch, *, policy, actions, lifecycle,
+        stages: StageRecorder, request: ReviewRequest, workspace_id: str,
+        language: str, provider_name: str, provider, ignore_globs: list[str],
+    ) -> ReviewRunResult | str | None:
+        """The "scope" stage. Returns a ReviewRunResult when the run ends here
+        (nothing new to read), the filtered diff text of the increment when
+        `pr` was narrowed to it, or None for a whole-PR review.
+
+        Every doubt ends in the whole PR: a review that reads too much is
+        merely slow, one that reads too little is wrong.
+        """
+        from src.review import scope as scope_mod
+
+        setting = str(_policy_setting(policy, "review_scope") or "incremental")
+        state = None
+        if setting == "incremental" and not request.force and request.scope != "full":
+            try:
+                from src.review import pr_state
+
+                state = pr_state.load(workspace_id, provider_name, pr.repo, pr.number)
+            except Exception as exc:  # noqa: BLE001 — fail open: a whole review
+                logger.warning("scope_state_unreadable pr=%s err=%s", pr.number, exc)
+        decision = scope_mod.decide_scope(
+            setting, request,
+            last_reviewed_sha=state.last_reviewed_sha if state else None,
+            head_sha=pr.head_sha,
+            list_commits=lambda: provider.list_pr_commits(pr.repo, pr.number),
+        )
+        meta = {"scope": decision.mode, "reason": decision.code}
+        batch.scope_mode = decision.mode if decision.mode != "skip" else None
+
+        def _end_quietly(code: str, reason: str, *, base_sha: str | None) -> ReviewRunResult:
+            logger.info("review_skipped reason=%s pr=%d", code, pr.number)
+            batch.summary = f"Review skipped — {reason}"
+            batch.verdict = ReviewVerdict.SKIPPED
+            batch.scope_skip = code
+            batch.scope_mode = None
+            batch.mark_complete()
+            stages.end("scope", "skipped", reason, ends_run=True, meta={
+                **meta, "reason": code, "base_sha": (base_sha or "")[:12] or None})
+            lifecycle.skipped(
+                messages.t(f"incremental.skip.{code}", language,
+                           sha=((state.last_reviewed_sha if state else None) or "")[:7]),
+                feedback=False)
+            return ReviewRunResult(batch=batch, posted=False, provider_response={})
+
+        if decision.mode == "skip":
+            return _end_quietly(decision.code, decision.reason, base_sha=decision.base_sha)
+
+        if decision.mode == "incremental":
+            narrowed = self._narrow_to_increment(
+                pr, decision, provider=provider, ignore_globs=ignore_globs)
+            if narrowed is None:
+                # Only files this review never reads (lockfiles, ignore globs):
+                # reading the whole PR again would cost a full review for nothing.
+                return _end_quietly(
+                    "no_reviewable_new_changes",
+                    f"the new commits since `{scope_mod._short(decision.base_sha)}` change "
+                    f"only files that are not reviewed.", base_sha=decision.base_sha)
+            if isinstance(narrowed, str):
+                batch.scope_mode = "full"
+                # `narrowed` is the reason the increment could not be read.
+                stages.end("scope", "success", f"Full review: {narrowed}",
+                           meta={**meta, "scope": "full", "reason": "increment_unreadable"})
+                return None
+            # The whole PR's skipped files, then the increment's own.
+            batch.skipped_files = list(dict.fromkeys(
+                [*pr.scope.full_skipped_files, *pr.skipped_files]))
+            batch.scope_mode = "incremental"
+            files = len({h.file_path for h in pr.hunks})
+            stages.end("scope", "success",
+                       f"{decision.reason} {files} file{'s' if files != 1 else ''} "
+                       f"changed in them; the rest of the pull request is not read again.",
+                       meta={**meta, "base_sha": (decision.base_sha or "")[:12],
+                             "new_commits": decision.new_commits, "files": files})
+            return narrowed[0]
+
+        stages.end("scope", "success", decision.reason, meta=meta)
+        return None
+
+    def _narrow_to_increment(
+        self, pr: PullRequest, decision, *, provider, ignore_globs: list[str],
+    ):
+        """Swap `pr`'s diff for the increment's, keeping the whole PR on
+        `pr.scope`. Returns (filtered_increment_diff,) on success, None when
+        the push touches only files nobody reads, else a sentence saying why
+        the whole PR is reviewed instead (and `pr` untouched)."""
+        from src.review import scope as scope_mod
+        from src.review.diff import parse_unified_diff
+        from src.review.models import ScopeInfo
+
+        try:
+            raw = provider.fetch_incremental_diff(
+                pr.repo, pr.number, decision.base_sha, pr.head_sha)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("incremental_diff_failed pr=%s err=%s", pr.number,
+                           type(exc).__name__)
+            raw = None
+        if not raw or not raw.strip():
+            return "the provider could not return the changes since the last reviewed commit."
+        inc_hunks, inc_skipped = parse_unified_diff(raw, settings=self.settings)
+        # The files the PR's own diff does not show are the target branch's,
+        # pulled in by a merge commit: not the author's, not reviewed.
+        kept = scope_mod.restrict_to_pr(inc_hunks, pr.hunks)
+        if not kept:
+            # Files the whole PR does not read either (skip patterns, ignore
+            # globs): a push of only those has nothing to review. Anything else
+            # that cannot be tied to the PR is doubt, and doubt means whole.
+            ignored = {re.sub(r" \(ignore glob\)$", "", p) for p in pr.skipped_files or []}
+            not_ignored = {h.file_path for h in inc_hunks} - ignored
+            if (inc_skipped or inc_hunks) and not not_ignored:
+                return None
+            return "none of the new changes could be tied to this pull request's own diff."
+        if scope_mod.same_added_lines(kept, pr.hunks):
+            # The increment is the whole PR: either nothing was reviewed before
+            # it, or the provider's "since" diff was really a merge-base diff
+            # (Bitbucket's `merge=false` is not confirmed live). The read is
+            # the same; the comments must not be matched against a wrong base.
+            logger.warning("increment_equals_whole_pr pr=%s", pr.number)
+            return "the changes since the last reviewed commit are the whole pull request."
+        gone = {h.file_path for h in inc_hunks} - {h.file_path for h in kept}
+        raw = scope_mod.drop_diff_sections(raw, gone)
+        removed, deleted = scope_mod.removed_old_lines(inc_hunks)
+        pr.scope = ScopeInfo(
+            base_sha=decision.base_sha or "", new_commits=decision.new_commits,
+            reason=decision.reason, full_raw_diff=pr.raw_diff,
+            full_hunks=list(pr.hunks), removed_lines=removed, deleted_files=deleted,
+            full_skipped_files=list(pr.skipped_files or []),
+        )
+        pr.hunks = kept
+        pr.raw_diff = raw
+        pr.skipped_files = list(inc_skipped)
+        review_diff = raw
+        if ignore_globs:
+            review_diff = self._apply_ignore_globs(pr, ignore_globs)
+        return (review_diff,)
+
+    def _gate_draft_title_cadence(
+        self, pr: PullRequest, batch: ReviewBatch, *, policy, actions, lifecycle,
+        stages: StageRecorder, request: ReviewRequest, workspace_id: str,
+        language: str, provider_name: str,
+    ) -> ReviewRunResult | None:
+        """The three gates a person's request skips: draft, title keywords,
+        cadence. A ReviewRunResult ends the run (the stage already says why);
+        None lets it go on.
+
+        Drafts: skipped unless `run_on_drafts` (repo > workspace > built-in
+        False) says this repository reviews them. Read through the resolved
+        policy like every other gate here, so the webhook's early skip
+        (`review_defaults.run_on_drafts_for_repo`) and this one answer the
+        same question from the same rows.
+        """
+        def _skip(key: str, stage_reason: str, summary: str,
+                  meta: dict | None = None) -> ReviewRunResult:
+            batch.summary = summary
+            batch.verdict = ReviewVerdict.SKIPPED
+            batch.mark_complete()
+            stages.end(key, "skipped", stage_reason, ends_run=True, meta=meta)
+            return ReviewRunResult(batch=batch, posted=False, provider_response={})
+
+        # ── gate_draft ──
+        stages.begin("gate_draft", "Check draft status")
+        if (pr.is_draft and not _policy_setting(policy, "run_on_drafts")
+                and not request.bypasses("gate_draft")):
+            logger.info("review_skipped reason=draft pr=%d", pr.number)
+            result = _skip(
+                "gate_draft",
+                "Draft: the pull request is a draft; it is reviewed once it is "
+                "marked ready.", "PR is draft — review skipped.")
+            lifecycle.skipped("the pull request is a draft",
+                              feedback=actions.status_feedback)
+            return result
+        if pr.is_draft and _policy_setting(policy, "run_on_drafts"):
+            stages.end("gate_draft", "success",
+                       "Draft — reviewed: run_on_drafts is on.")
+        elif pr.is_draft:
+            stages.end("gate_draft", "success",
+                       "Draft — reviewed: the review was asked for explicitly.")
+        else:
+            stages.end("gate_draft", "success", "The pull request is not a draft.")
+
+        # ── gate_title ──
+        stages.begin("gate_title", "Check title keywords")
+        keywords = list(_policy_setting(policy, "ignored_title_keywords") or [])
+        matched = title_keyword_match(pr.title, keywords)
+        if matched and not request.bypasses("gate_title"):
+            logger.info("review_skipped reason=title_keyword pr=%d keyword=%s",
+                        pr.number, matched)
+            sentence = messages.t("gate.title", "en", keyword=matched)
+            result = _skip(
+                "gate_title", sentence[:1].upper() + sentence[1:] + ".",
+                f"Review skipped — {sentence}.", meta={"keyword": matched})
+            # No note on the PR: an edit of a title must not answer with a
+            # comment, and the run row says why.
+            lifecycle.skipped(messages.t("gate.title", language, keyword=matched),
+                              feedback=False)
+            return result
+        if matched:
+            stages.end("gate_title", "success",
+                       f"The title contains the ignored keyword \"{matched}\"; "
+                       f"reviewed anyway — the review was asked for explicitly.")
+        elif keywords:
+            stages.end("gate_title", "success",
+                       f"The title contains none of the {len(keywords)} ignored "
+                       f"keyword{'s' if len(keywords) != 1 else ''}.")
+        else:
+            stages.end("gate_title", "success",
+                       "No ignored title keywords configured.")
+
+        # ── gate_cadence ──
+        stages.begin("gate_cadence", "Check review cadence")
+        cadence_name = str(_policy_setting(policy, "review_cadence") or "automatic")
+        pushes = int(_policy_setting(policy, "auto_pause_pushes"))
+        minutes = int(_policy_setting(policy, "auto_pause_window_minutes"))
+        if request.bypasses("gate_cadence"):
+            stages.end("gate_cadence", "success",
+                       f"Cadence '{cadence_name}' not applied: the review was "
+                       f"asked for explicitly.", meta={"cadence": cadence_name})
+            return None
+        state = None
+        try:
+            from src.review import pr_state
+
+            state = pr_state.load(workspace_id, provider_name, pr.repo, pr.number)
+        except Exception as exc:  # noqa: BLE001 — fail open: a review is never lost to this table
+            logger.warning("cadence_state_unreadable pr=%s err=%s", pr.number, exc)
+        decision = cadence.decide(
+            cadence_name, bool(state and state.review_paused),
+            state.paused_reason if state else None)
+        if decision.action == "review":
+            if state is not None and state.review_paused:
+                # Only a lapsed mechanical pause gets here (a person's holds):
+                # forget it, so the badge and a later `auto_pause` stay honest.
+                try:
+                    from src.review import pr_state
+
+                    pr_state.resume(workspace_id, provider_name, pr.repo, pr.number)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("stale_pause_clear_failed pr=%s err=%s", pr.number, exc)
+            stages.end("gate_cadence", "success",
+                       f"Cadence '{cadence_name}': this pull request is reviewed "
+                       f"automatically.", meta={"cadence": cadence_name})
+            return None
+        handle = cadence.bot_handle()
+        reason = state.paused_reason if state else None
+        sentence = cadence.gate_reason(decision, "en", handle=handle, pushes=pushes,
+                                       minutes=minutes, reason=reason)
+        logger.info("review_skipped reason=%s pr=%d cadence=%s", decision.code,
+                    pr.number, cadence_name)
+        result = _skip(
+            "gate_cadence", sentence[:1].upper() + sentence[1:] + ".",
+            f"Review skipped — {sentence}.",
+            meta={"cadence": cadence_name, "reason": decision.code})
+        lifecycle.skipped(
+            cadence.gate_reason(decision, language, handle=handle, pushes=pushes,
+                                minutes=minutes, reason=reason),
+            feedback=False)
+        # The one note that says how to resume: once per pause, never when the
+        # repository turned status notes off or the run posts nothing.
+        if actions.status_feedback and getattr(lifecycle, "active", False):
+            try:
+                from src.review import pr_state
+
+                if pr_state.claim_notice(workspace_id, provider_name, pr.repo, pr.number):
+                    posted = lifecycle._feedback(cadence.notice(
+                        decision, language, handle=handle, pushes=pushes,
+                        minutes=minutes, reason=reason,
+                        last_reviewed_sha=state.last_reviewed_sha if state else None))
+                    if not posted:
+                        # Give the claim back: the next delivery tries again
+                        # instead of leaving the PR paused with no way to resume.
+                        pr_state.release_notice(workspace_id, provider_name,
+                                                pr.repo, pr.number)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("pause_notice_failed pr=%s err=%s", pr.number, exc)
+        return result
+
+    @staticmethod
+    def _is_first_review(pr: PullRequest, provider_name: str, workspace_id: str) -> bool | None:
+        """Has this PR never been reviewed? None when the database cannot say —
+        the placeholder then keeps its plain heading instead of guessing."""
+        try:
+            from src.review import issues
+
+            count = issues.pr_review_count(
+                workspace_id=workspace_id, provider=provider_name,
+                repo=pr.repo, number=pr.number,
+            )
+        except Exception:  # noqa: BLE001 — a greeting never fails a review
+            return None
+        return count == 0
+
+    def _language_for(self, pr: PullRequest, workspace_id: str) -> str:
+        """The bot-text language for a PR whose review stopped before the policy
+        stage read it; English when the policy cannot be read."""
+        try:
+            policy = self._resolved_policy(pr.local_slug, workspace_id)
+        except Exception:  # noqa: BLE001 — a note about a lost diff must still go out
+            policy = None
+        return messages.resolve_language((policy or {}).get("review_language"), workspace_id)
+
+    def policy_for(self, pr: PullRequest, workspace_id: str) -> dict | None:
+        """The review policy in force for `pr` (repo over workspace over
+        install): what a one-off check outside a review reads its settings from."""
+        return self._resolved_policy(pr.local_slug, workspace_id)
+
     def _resolved_policy(self, repo_slug: str, workspace_id: str) -> dict | None:
         """The repo policy merged over the workspace review defaults.
 
@@ -1851,7 +2555,24 @@ class ReviewOrchestrator:
                 merged = blank_policy()
             if isinstance(merged, dict):
                 merged = {**merged, "review_rules": rules}
+        # The team's memories (/memories): active ones of the workspace, the
+        # repository and its directories, unless the repository switched them
+        # off. The renderer keeps a directory memory only when a changed file
+        # is under it and cuts the whole to the prompt budget.
+        if _policy_setting(merged, "memories_enabled"):
+            memories = self._load_memories(owner or workspace_id, repo_slug)
+            if memories:
+                if merged is None:
+                    merged = blank_policy()
+                if isinstance(merged, dict):
+                    merged = {**merged, "memories": memories}
         return merged
+
+    def _load_memories(self, workspace_id: str, repo_slug: str) -> list[dict]:
+        """The active team memories of this review. Blocking; never raises."""
+        from src.review.memories import load_active_sync
+
+        return load_active_sync(workspace_id, repo_slug)
 
     def _load_review_rules(self, workspace_id: str, repo_slug: str) -> list[dict]:
         """The active review rules of this review. Blocking; never raises."""
@@ -2016,6 +2737,79 @@ class ReviewOrchestrator:
             out[name] = value
         return out
 
+    def _remember_posted(
+        self, batch: ReviewBatch, pr: PullRequest, provider_name: str, response: dict,
+        *, policy, workspace_id: str,
+    ) -> None:
+        """Keep which provider comment each posted finding became, so a reply,
+        a thumb or a resolved thread on it can be read as feedback later.
+        Never raises."""
+        try:
+            from src.review.learning import signals
+
+            owner = policy.get("workspace_id") if isinstance(policy, dict) else None
+            signals.record_posted(
+                owner or workspace_id,
+                signals.PRRef(provider_name, pr.repo, int(pr.number)),
+                batch.findings, response.get("inline_comments"),
+                sha=pr.head_sha, repo_slug=pr.local_slug)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("learning_remember_posted_failed err_type=%s", type(exc).__name__)
+
+    def _learned_filter(
+        self, batch: ReviewBatch, findings: list, *, policy, workspace_id: str,
+        pr: PullRequest, stages: StageRecorder, provider=None, provider_name: str = "",
+    ) -> list:
+        """Drop (mode `on`) or only count (mode `shadow`, the built-in) the
+        findings the team already dismissed on this repository. Never raises;
+        a failure keeps every finding."""
+        mode = str(_policy_setting(policy, "learning_suppression") or "shadow")
+        if mode not in ("shadow", "on") or not findings:
+            return list(findings)
+        stages.begin("learned_filter", "Learned filter")
+        try:
+            from src.review.learning import reactions, signals, suppress
+
+            owner = policy.get("workspace_id") if isinstance(policy, dict) else None
+            if provider is not None and provider_name:
+                # Thumbs given since the last review of this pull request.
+                reactions.poll_pr_reactions(
+                    owner or workspace_id,
+                    signals.PRRef(provider_name, pr.repo, int(pr.number)), provider)
+            result = suppress.apply(
+                list(findings), workspace_id=owner or workspace_id,
+                repo_slug=pr.local_slug, mode=mode, settings=self.settings)
+        except Exception as exc:  # noqa: BLE001 — learning never fails a review
+            logger.warning("learned_filter_failed err_type=%s", type(exc).__name__)
+            stages.end("learned_filter", "failed",
+                       "The learned filter could not run; every finding was kept.")
+            return list(findings)
+        batch.dropped_by_feedback = len(result.hidden)
+        batch.would_drop_by_feedback = len(result.would_hide)
+        batch.learned_items = list(result.items)
+        meta = {"mode": mode, "checked": result.checked,
+                "hidden": len(result.hidden), "would_hide": len(result.would_hide)}
+        if result.degraded:
+            meta["embeddings"] = "unavailable"
+        if result.skipped:
+            stages.end("learned_filter", "skipped",
+                       f"Nothing to apply: {result.skipped}.", meta=meta)
+        elif mode == "on":
+            stages.end("learned_filter", "success",
+                       f"Left out {len(result.hidden)} of {result.checked} findings the "
+                       "team had already dismissed.", meta=meta)
+        else:
+            stages.end("learned_filter", "success",
+                       f"Shadow mode: {len(result.would_hide)} of {result.checked} "
+                       "findings would be left out; none were.", meta=meta)
+        if result.hidden:
+            lang = getattr(batch, "review_language", None)
+            batch.add_section(
+                "learned", messages.tn("learned", len(result.hidden), lang,
+                                       count=len(result.hidden)),
+                order=600, targets={"comment"})
+        return list(result.kept)
+
     def _verifier_enabled(
         self, policy: dict | None, disabled_agents: set[str],
     ) -> tuple[bool, str]:
@@ -2092,7 +2886,12 @@ class ReviewOrchestrator:
         """
         from src.review.policy_rules import render_policy_rules
 
-        return render_policy_rules(policy, pr.changed_files).shared
+        rendered = render_policy_rules(policy, pr.changed_files)
+        if rendered.memories_used:
+            from src.review.memories import touch_used_sync
+
+            touch_used_sync(rendered.memories_used)
+        return rendered.shared
 
     def _build_agent_custom_rules(
         self,
@@ -2194,6 +2993,7 @@ class ReviewOrchestrator:
         *,
         disabled_agents: set[str] | None = None,
         dormant_agents: set[str] | None = None,
+        only: str | None = None,
     ) -> list[AgentRunResult]:
         """Run all agents in parallel — LLM calls are I/O bound, and at most
         `settings.agent_concurrency` of them run at once (see the pool split
@@ -2207,13 +3007,18 @@ class ReviewOrchestrator:
         skip = disabled_agents or set()
         dormant = dormant_agents or set()
         self._agent_finished_at: dict[str, float] = {}
-        active = [a for a in self.agents
-                  if a.name not in skip and a.name not in dormant]
-        for a in self.agents:
-            if a.name in skip:
-                logger.warning("agent_skipped_by_policy agent=%s", a.name)
-            elif a.name in dormant:
-                logger.debug("agent_off_by_default agent=%s", a.name)
+        if only is not None:
+            # One forced-on agent (`run_single_agent`): the policy's switches
+            # do not apply, and the others are not announced as skipped.
+            active = [a for a in self.agents if a.name == only]
+        else:
+            active = [a for a in self.agents
+                      if a.name not in skip and a.name not in dormant]
+            for a in self.agents:
+                if a.name in skip:
+                    logger.warning("agent_skipped_by_policy agent=%s", a.name)
+                elif a.name in dormant:
+                    logger.debug("agent_off_by_default agent=%s", a.name)
         if not active:
             return []
         # Two pools, one bound. max_workers used to be len(active): six

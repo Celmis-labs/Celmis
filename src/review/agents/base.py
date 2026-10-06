@@ -45,6 +45,7 @@ from src.review.models import (
     parse_suggested_end_line,
 )
 from src.review.settings import AgentLLMSettings, resolve_agent_llm
+from src.review.task_context.models import TaskContext
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +319,11 @@ class AgentContext:
     #: prompt right after the agent's own prompt, and to the verifier's.
     #: Empty means the policy said nothing.
     base_instruction: str = ""
+    #: The Jira task(s) the pull request names, read by
+    #: `src.review.task_context.service.resolve_task_context` — only for the
+    #: business-logic agent, and only when the workspace connected Jira. None
+    #: when nobody looked (the setting is off, or the agent will not run).
+    task_context: TaskContext | None = None
 
 
 #: The longest base instruction any prompt carries. Kodus caps its own at the
@@ -1836,18 +1842,23 @@ class LLMReviewAgent(ReviewAgent):
         )
 
     @staticmethod
-    def _format_diff_for_prompt(pr: PullRequest, max_chars: int = 50_000) -> str:
-        """Diff for the LLM — capped so as to avoid overflow."""
+    def _format_diff_for_prompt(
+        pr: PullRequest, max_chars: int = 50_000, hunks: list | None = None,
+    ) -> str:
+        """Diff for the LLM — capped so as to avoid overflow. `hunks` replaces
+        the PR's own (the whole PR's, for an agent that must not read an
+        increment only)."""
+        hunks = pr.hunks if hunks is None else hunks
         parts: list[str] = []
         used = 0
-        for hunk in pr.hunks:
+        for hunk in hunks:
             chunk = (
                 f"### {hunk.file_path} (lines {hunk.new_start}-"
                 f"{hunk.new_start + hunk.new_count - 1})\n"
                 f"```diff\n{hunk.content}\n```\n"
             )
             if used + len(chunk) > max_chars:
-                parts.append(f"... (truncated, {len(pr.hunks) - len(parts)} hunks omitted)")
+                parts.append(f"... (truncated, {len(hunks) - len(parts)} hunks omitted)")
                 break
             parts.append(chunk)
             used += len(chunk)

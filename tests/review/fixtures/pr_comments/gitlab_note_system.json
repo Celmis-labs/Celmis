@@ -1,0 +1,22 @@
+{
+  "object_kind": "note",
+  "user": {
+    "id": 7,
+    "username": "carol"
+  },
+  "project": {
+    "path_with_namespace": "acme/shop",
+    "visibility_level": 0,
+    "web_url": "https://gitlab.example.com/acme/shop"
+  },
+  "object_attributes": {
+    "id": 9002,
+    "note": "added 1 commit",
+    "noteable_type": "MergeRequest",
+    "system": true
+  },
+  "merge_request": {
+    "iid": 42,
+    "state": "opened"
+  }
+}

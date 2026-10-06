@@ -18,6 +18,7 @@ import {
   BotIcon,
   CircleAlertIcon,
   FileDownIcon,
+  HistoryIcon,
   InfoIcon,
   OctagonAlertIcon,
   SparklesIcon,
@@ -210,6 +211,7 @@ const ORIGIN_ICON: Record<string, LucideIcon> = {
   library: BookOpenIcon,
   generated: SparklesIcon,
   imported: FileDownIcon,
+  learned: HistoryIcon,
   agent: BotIcon,
 };
 

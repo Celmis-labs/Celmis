@@ -49,6 +49,9 @@ def received_sentence(source: str, provider: str) -> str:
         "poller": f"Triggered by the {_label(provider)} poller (a new pull request was seen).",
         "manual": "Triggered manually from Celmis.",
         "bulk": "Triggered by “Review all open PRs” in Celmis.",
+        "command": "Triggered by a comment command on the pull request.",
+        "cli": "Triggered from the command line.",
+        "mcp": "Triggered through the MCP server.",
     }.get(str(source or ""), "Triggered from the review queue.")
 
 
@@ -158,6 +161,7 @@ class QueuedReview:
 def enqueue_review_run(
     provider: str, repo: str, number: int, *, user_id: str, workspace_id: str,
     post_comments: bool = True, source: str = "manual", store=None,
+    request=None, extra: dict | None = None,
 ) -> QueuedReview:
     """Create the run row, then put the review on the queue.
 
@@ -165,6 +169,13 @@ def enqueue_review_run(
     the worker picks the row up by `run_id` and records the time spent
     waiting. A dedup hit — this PR already has a review queued or running —
     closes the row as skipped with that reason instead of losing the request.
+
+    `request` (`ReviewRequest`) rides in the payload; without one the request
+    is what `source` says (see `ReviewRequest.from_payload`). A forced request
+    has its own dedup key, so it is not folded into a normal job that is
+    already waiting (which would not be forced). `extra` keys ride in the job
+    payload as well (a comment command's `command_ack`, which `execute_review`
+    answers when the review ends).
     """
     store = store or _store()
     run, stages = new_run(provider, repo, number, user_id=user_id,
@@ -176,12 +187,18 @@ def enqueue_review_run(
         "workspace_id": workspace_id, "run_id": run.id, "source": source,
         "enqueued_at": now_iso(),
     }
+    if request is not None:
+        payload.update(request.as_payload())
+    if extra:
+        payload.update(extra)
+    forced = bool(request and request.force)
     try:
         from src.sync.queue import KIND_REVIEW, enqueue
 
         job_id = enqueue(
             kind=KIND_REVIEW, payload=payload,
-            dedup_key=f"review:{provider}:{repo}#{int(number)}",
+            dedup_key=f"review:{provider}:{repo}#{int(number)}"
+                      + (":force" if forced else ""),
             enqueued_by=f"{source}:{user_id}",
         )
     except Exception as exc:  # noqa: BLE001
@@ -201,12 +218,25 @@ def enqueue_review_run(
     return QueuedReview(run.id, "queued", "", payload)
 
 
+def _answer_command(p: dict, provider, *, result=None, failed: bool = False) -> None:
+    """Close the loop with the person who commented `@celmis review`."""
+    if not isinstance(p.get("command_ack"), dict):
+        return
+    try:
+        from src.review.commands.handlers import finish_ack
+
+        finish_ack(p, provider, result=result, failed=failed)
+    except Exception:  # noqa: BLE001 — an answer never fails the review
+        logger.warning("command_ack_failed run=%s", p.get("run_id"))
+
+
 def execute_review(p: dict, *, attempt: int | None = None) -> None:
     """Run one queued review and record it — the worker's body, and the body
     of every inline fallback.
 
     Payload: {provider, repo, pr_number, post_comments?, user_id?,
-    workspace_id?, run_id?, source?, enqueued_at?}. `run_id` names a row
+    workspace_id?, run_id?, source?, enqueued_at?, trigger?, force?, scope?,
+    resume?} — the last four are the `ReviewRequest`. `run_id` names a row
     created at enqueue time; without it (jobs queued by an older version) a
     row is created here.
 
@@ -230,6 +260,9 @@ def execute_review(p: dict, *, attempt: int | None = None) -> None:
     number = int(p["pr_number"])
     post = bool(p.get("post_comments", True))
     source = str(p.get("source") or "")
+    from src.review.scope import ReviewRequest
+
+    request = ReviewRequest.from_payload(p)
     orch = orch_mod.ReviewOrchestrator()
 
     store = runs.get_review_run_store()
@@ -300,9 +333,14 @@ def execute_review(p: dict, *, attempt: int | None = None) -> None:
             provider_name, repo, number,
             dry_run=not post, post_comments=post, provider=provider,
             user_id=user_id, workspace_id=workspace_id, stages=stages,
+            request=request,
         )
+        # A review that a comment asked for answers the comment, while the
+        # provider is still open. Never raises.
+        _answer_command(p, provider, result=result)
     except Exception as exc:
         _failed(exc, orch_mod._safe_failure_reason(exc))
+        _answer_command(p, provider, failed=True)
         raise
     finally:
         with contextlib.suppress(Exception):

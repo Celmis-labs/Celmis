@@ -65,18 +65,37 @@ PROXY_PREFIX = "/backend"
 
 #: The events each receiver acts on — and nothing else, so the provider does
 #: not spend deliveries on events we would answer "ignored".
-#:   GitHub:    pull_request (review + lifecycle) and push (index refresh).
-#:   GitLab:    Merge Request Hook only.
-#:   Bitbucket: created/updated (review) + fulfilled/rejected (lifecycle).
+#:   GitHub:    pull_request (review + lifecycle), push (index refresh), the
+#:              two comment events (`@celmis` commands, feedback replies) and
+#:              review-thread resolved / reopened (feedback).
+#:   GitLab:    Merge Request Hook, and Comments (a "Note Hook" — commands).
+#:   Bitbucket: created/updated (review) + fulfilled/rejected (lifecycle) +
+#:              comment created/updated (commands) + approved/unapproved
+#:              (productivity: who reviewed, and when).
 EVENTS: dict[str, list[str]] = {
-    "github": ["pull_request", "push"],
-    "gitlab": ["merge_requests_events"],
+    "github": ["pull_request", "push", "issue_comment", "pull_request_review_comment",
+               "pull_request_review_thread"],
+    "gitlab": ["merge_requests_events", "note_events"],
     "bitbucket": [
         "pullrequest:created",
         "pullrequest:updated",
         "pullrequest:fulfilled",
         "pullrequest:rejected",
+        "pullrequest:comment_created",
+        "pullrequest:comment_updated",
+        "pullrequest:approved",
+        "pullrequest:unapproved",
     ],
+}
+
+#: The events that exist for the comment commands only. A hook without them
+#: still reviews; it is "outdated" (see `missing_events`) until it is repaired.
+#: The same goes for a Bitbucket hook without the approval events the
+#: productivity history reads.
+COMMAND_EVENTS: dict[str, list[str]] = {
+    "github": ["issue_comment", "pull_request_review_comment", "pull_request_review_thread"],
+    "gitlab": ["note_events"],
+    "bitbucket": ["pullrequest:comment_created", "pullrequest:comment_updated"],
 }
 
 #: What a token needs, per provider — shown to the user when a call is refused.
@@ -140,6 +159,11 @@ class WebhookStatus:
     #: The repo's name as the provider spells it (what the payload will carry).
     full_name: str | None = None
     updated_at: str | None = None
+    #: Events the receiver acts on that the installed hook does not subscribe
+    #: to — a hook from before comment commands existed. `outdated` is "there
+    #: are some"; installing again updates the hook in place.
+    missing_events: list[str] = field(default_factory=list)
+    outdated: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -430,6 +454,7 @@ def _body(provider: str, url: str, secret: str) -> dict[str, Any]:
             "url": url,
             "token": secret,
             "merge_requests_events": True,
+            "note_events": True,
             "push_events": False,
             "enable_ssl_verification": True,
             "name": _HOOK_DESCRIPTION,
@@ -505,6 +530,14 @@ def _last_delivery(provider: str, hook: dict[str, Any]) -> dict[str, Any] | None
                     "disabled_until": hook.get("disabled_until")}
         return None
     return None  # Bitbucket's hook resource carries no delivery history
+
+
+def missing_events(provider: str, installed: list[str]) -> list[str]:
+    """What the receiver acts on that a hook subscribed to `installed` would
+    never deliver. GitHub's `*` subscribes to everything."""
+    if "*" in installed:
+        return []
+    return [e for e in EVENTS.get(provider, []) if e not in installed]
 
 
 def _hook_events(provider: str, hook: dict[str, Any]) -> list[str]:
@@ -636,14 +669,19 @@ def status(cfg: Any, *, user_id: str, base: str) -> WebhookStatus:
                              full_name=found.canonical_full_name)
     hook = found.hook
     active = hook.get("active", True)
+    subscribed = _hook_events(provider, hook)
+    # An empty list is a hook whose events the provider did not report, not a
+    # hook that hears nothing: claim nothing is missing rather than a repair.
+    missing = missing_events(provider, subscribed) if subscribed else []
     return WebhookStatus(
         provider=provider, status="installed" if active else "failed",
-        url=url, events=_hook_events(provider, hook) or EVENTS[provider],
+        url=url, events=subscribed or EVENTS[provider],
         hook_id=_hook_id(provider, hook) or None,
         reason=None if active else "inactive",
         message=None if active else "The webhook exists but is disabled on the provider.",
         last_delivery=_last_delivery(provider, hook),
         full_name=found.canonical_full_name,
+        missing_events=missing, outdated=bool(missing),
     )
 
 
@@ -742,6 +780,7 @@ def get_webhook_state_store() -> WebhookStateStore:
 
 
 __all__ = [
+    "COMMAND_EVENTS",
     "EVENTS",
     "PERMISSION_HINTS",
     "WebhookInstallError",
@@ -750,6 +789,7 @@ __all__ = [
     "ensure_secret",
     "get_webhook_state_store",
     "install",
+    "missing_events",
     "public_base_url",
     "status",
     "uninstall",

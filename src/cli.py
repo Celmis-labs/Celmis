@@ -408,6 +408,12 @@ def review_cmd(
         "default", "--workspace", "-w",
         help="Workspace/tenant whose LLM + git keys to use (default: shared 'default' tenant)",
     ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Review even if the base branch is outside the repository's "
+             "target-branch patterns (draft, title and cadence gates are "
+             "skipped for a CLI review anyway)",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Review pull/merge request multi-agent reviewer (Phase 17).
@@ -436,6 +442,7 @@ def review_cmd(
     _setup_logging(verbose)
     from src.review.orchestrator import ReviewOrchestrator
     from src.review.providers.base import PullRequestProviderError
+    from src.review.scope import ReviewRequest
 
     try:
         provider_name, repo, pr_number = _parse_pr_ref(pr_ref)
@@ -465,6 +472,7 @@ def review_cmd(
             post_comments=True,
             provider=provider,
             workspace_id=workspace,
+            request=ReviewRequest(trigger="cli", force=force),
         )
     except PullRequestProviderError as exc:
         console.print(f"[red]✗ Provider error:[/red] {exc}")

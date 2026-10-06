@@ -379,6 +379,22 @@ class Settings(BaseSettings):
     # GitLab API calls and git clones only. There is no switch to turn TLS
     # verification off.
     gitlab_ca_bundle: str = ""
+    # ─── Jira task context (src/review/task_context, src/sync/jira_instance.py)
+    # A workspace's Jira site is set on the Connections page and must be
+    # https://<site>.atlassian.net (or .jira.com). A Data Center / self-hosted
+    # Jira is accepted only when its host is listed here (exact host or
+    # subdomain); such a host may resolve to a private address (a LAN / VPN
+    # Jira) — never link-local, multicast or unspecified. Not implied by
+    # egress_allow_private_network. Empty = Atlassian Cloud only.
+    jira_allowed_hosts: list[str] = Field(default_factory=list)
+    # How long a read issue is served without asking Jira again. After that
+    # one cheap `fields=updated` request decides whether it is still current.
+    jira_cache_ttl_seconds: int = Field(default=600, ge=0, le=86_400)
+    # Wall-clock limit of one Jira request. A review never waits longer than
+    # this on the tracker: a slow Jira costs the task context, not the review.
+    jira_timeout_seconds: float = Field(default=8.0, ge=1.0, le=60.0)
+    # Longest task description handed to the model, in characters.
+    jira_max_description_chars: int = Field(default=12_000, ge=500, le=100_000)
     audit_log_file: Path | None = None  # will be computed in a property
     audit_retention_days: int = 90
     redaction_fail_closed: bool = True

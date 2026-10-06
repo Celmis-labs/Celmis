@@ -179,6 +179,10 @@ def env(monkeypatch):
 
 def _orch(monkeypatch, *, agents, client=None, policy=None) -> ReviewOrchestrator:
     orch = ReviewOrchestrator(agents=agents, verifier=_PassThroughVerifier())
+    # The layout these tests read is the classic summary; the "Code Review
+    # Completed" one (the built-in since the Kodus-style comment) has its own
+    # tests in test_the_completed_comment_says_what_was_found.py.
+    policy = {"enabled": True, "completed_comment": "classic", **(policy or {})}
     monkeypatch.setattr(orch, "_load_policy", lambda slug: policy)
     monkeypatch.setattr(
         orch, "_build_context",

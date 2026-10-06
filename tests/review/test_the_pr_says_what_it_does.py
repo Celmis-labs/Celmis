@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
+from src.review.markers import reveal
 from src.review.models import (
     Finding,
     FindingSeverity,
@@ -209,7 +210,19 @@ class TestTheDecision:
         assert actions.summary_existing_description == "complement"
         assert actions.approve_when_clean is True
         assert actions.message_started is None
-        assert _pr_actions(None) == PRActions()
+        # Nothing configured: the built-ins. The closing comment is the one
+        # setting whose built-in differs from the dataclass default (a
+        # hand-built batch stays classic); the commands guide is on by default
+        # now that the commands it lists exist.
+        assert _pr_actions(None) == PRActions(
+            completed_comment="completed", commands_guide_enabled=True)
+        assert _pr_actions({"completed_comment": "fancy"}).completed_comment == "completed"
+
+    def test_the_guide_leaves_out_the_commands_of_a_feature_switched_off(self) -> None:
+        off = _pr_actions({"chat_enabled": False, "memories_enabled": False,
+                           "task_context_enabled": False}).guide_commands_off
+        assert set(off) == {"chat", "remember", "business-logic"}
+        assert _pr_actions({"chat_enabled": True}).guide_commands_off == ()
 
 
 # ─── GitHub ─────────────────────────────────────────────────────────
@@ -887,7 +900,8 @@ class TestStatusFeedback:
             fake.add_comment(f"{MARKER}\nfinished")
         for reason in ("first reason", "second reason"):
             assert make(fake).upsert_feedback_comment(pr, reason) is not None
-        notes = [b for b in fake.bodies() if STATUS_FEEDBACK_MARK in b]
+        # Bitbucket stores the marker hidden; read back, it is the HTML form.
+        notes = [b for b in map(reveal, fake.bodies()) if STATUS_FEEDBACK_MARK in b]
         assert len(notes) == 1 and "second reason" in notes[0]
         assert f"{MARKER}\nfinished" in fake.bodies()
 

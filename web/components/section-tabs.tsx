@@ -19,8 +19,9 @@ import { usePathname } from "next/navigation";
 import { ChevronDownIcon } from "lucide-react";
 import { useSession } from "next-auth/react";
 import { useT } from "@/lib/i18n";
-import { useCanViewAnalytics } from "@/lib/use-analytics-access";
-import { useFeatureOff } from "@/lib/use-capabilities";
+import { useCanEditPrompts, useCanViewAnalytics } from "@/lib/use-analytics-access";
+import { useCanManageWorkspace } from "@/lib/use-workspace-role";
+import { featureOff, useCapabilities, useFeatureOff } from "@/lib/use-capabilities";
 import { cn } from "@/lib/utils";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
@@ -44,6 +45,16 @@ export type TabDef = {
    * and also when /api/capabilities explicitly reports `review_analytics`
    * off: an enterprise feature this installation is not licensed for. */
   analyticsOnly?: boolean;
+  /** Hidden unless the person is owner / admin / editor of the active
+   * workspace (or a global admin) — `require_memories_access`: viewers and
+   * members get a 403 from /api/memories, so no tab leads there. */
+  editorOnly?: boolean;
+  /** Hidden when /api/capabilities explicitly reports this feature off — an
+   *  enterprise page whose routes this installation does not mount. */
+  requiresFeature?: string;
+  /** Owner or admin of the active workspace (or a global admin): the same
+   *  audience as spend and review cost. */
+  workspaceAdminOnly?: boolean;
   /** Listed under a "More" menu at the end of the row instead of as a tab
    *  of its own: still part of the section (sidebar highlight, breadcrumb),
    *  just not worth a permanent slot. */
@@ -81,8 +92,15 @@ export const SECTION_TABS = {
     // The rules library: workspace and per-repository rules, the built-in
     // library, generated and imported proposals waiting for approval.
     { href: "/admin/review-rules", labelKey: "nav.reviewRules" },
+    // What the team has taught the reviewers: facts, per repository or
+    // directory, told to every review; the pending ones wait for approval.
+    { href: "/memories", labelKey: "nav.memories", editorOnly: true },
     { href: "/review-settings", labelKey: "nav.reviewSettings" },
     { href: "/analytics", labelKey: "analytics.navLabel", analyticsOnly: true },
+    // Same licence as Analytics but a narrower audience (owner and admin); its
+    // own capability, so a build that mounts one and not the other shows only
+    // the tab that works.
+    { href: "/productivity", labelKey: "productivity.navLabel", workspaceAdminOnly: true, requiresFeature: "productivity" },
     { href: "/admin/compliance", labelKey: "nav.compliance", more: true },
     { href: "/admin/deprecations", labelKey: "nav.deprecations", more: true },
   ],
@@ -123,7 +141,7 @@ export const SECTION_TABS = {
     { href: "/settings", labelKey: "nav.account", exact: true },
     { href: "/settings/llm", labelKey: "nav.llm" },
     { href: "/settings/models", labelKey: "nav.models" },
-    { href: "/connections", labelKey: "nav.connections" },
+    { href: "/connections", labelKey: "nav.connections", workspaceAdminOnly: true },
     { href: "/settings/mcp", labelKey: "nav.mcp" },
   ],
   team: [
@@ -216,6 +234,9 @@ export function SectionTabs({
   // contract): no answer keeps today's behaviour.
   const analyticsOff = useFeatureOff("review_analytics");
   const canAnalytics = useCanViewAnalytics() === true && !analyticsOff;
+  const canEditor = useCanEditPrompts() === true;
+  const canManage = useCanManageWorkspace() === true;
+  const capabilities = useCapabilities().data;
   // The section this route belongs to wins over the one the page asked for;
   // see sectionOwning(). Explicit `items` are never second-guessed.
   const key = items ? undefined : sectionOwning(pathname) ?? set;
@@ -226,6 +247,9 @@ export function SectionTabs({
           .filter((d: TabDef) => !d.adminOnly || isAdmin)
           .filter((d: TabDef) => !d.superadminOnly || isSuperadmin)
           .filter((d: TabDef) => !d.analyticsOnly || canAnalytics)
+          .filter((d: TabDef) => !d.editorOnly || canEditor)
+          .filter((d: TabDef) => !d.workspaceAdminOnly || canManage)
+          .filter((d: TabDef) => !d.requiresFeature || !featureOff(capabilities, d.requiresFeature))
           .map((d: TabDef) => ({
             href: d.href,
             label: t(d.labelKey),

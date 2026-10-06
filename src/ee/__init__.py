@@ -98,8 +98,15 @@ def _router_for(feature: str) -> APIRouter:
         from src.ee.sso.router import router
         return router
     if feature == "analytics":
-        from src.ee.analytics.router import router
-        return router
+        # Review analytics and productivity metrics are one licence line, so
+        # one mount, one licence check and one unmount for both.
+        from src.ee.analytics.productivity_router import router as productivity
+        from src.ee.analytics.router import router as review
+
+        both = APIRouter()
+        both.include_router(review)
+        both.include_router(productivity)
+        return both
     raise KeyError(feature)
 
 

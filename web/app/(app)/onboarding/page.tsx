@@ -29,7 +29,7 @@ import {
 
 import {
   api, claudeApi, depsApi, llmApi, qaApi, workspacesApi,
-  type AvailableRepo, type ConnectionStatus, type ConnectionVerifyResult,
+  isGitConnection, type AvailableRepo, type ConnectionStatus, type ConnectionVerifyResult,
   type RepoOut,
 } from "@/lib/api";
 import { FirstProofStep } from "@/components/first-proof-step";
@@ -108,7 +108,7 @@ export default function OnboardingPage() {
   const active = workspaces.find((w) => w.id === ws.data?.active_id);
   const hasOwnWorkspace = workspaces.some((w) => w.slug !== "default");
   const keySet = (llm.data?.provider_keys ?? []).some((k) => k.connected);
-  const gitConnected = (conns.data ?? []).some((c) => c.connected);
+  const gitConnected = (conns.data ?? []).some(isGitConnection);
   const repoAdded = (repos.data ?? []).length > 0;
   const repoIndexed = (repos.data ?? []).some((r) => r.indexed);
   const vaultReady = (qaRepos.data ?? []).some((r) => r.is_ready);

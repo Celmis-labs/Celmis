@@ -41,6 +41,8 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { WorkspaceBadge } from "@/components/workspace-badge";
 import { useState } from "react";
+import Link from "next/link";
+import { settingsHref } from "@/lib/review-settings-routes";
 
 // Apply-fix currently supports GitHub only — the "(n/a)" providers were
 // noise in the select, so they are gone until the backend supports them.
@@ -169,6 +171,22 @@ function AutoReviewPanel() {
                   <div className="text-xs text-[var(--color-muted-foreground)]">
                     {t(repo.provider === "bitbucket" ? "reviews.manualMode" : "reviews.pollingMode")}
                   </div>
+                  {repo.target_branches != null && (
+                    <div className="text-xs text-[var(--color-muted-foreground)]">
+                      {repo.target_branches.length === 0
+                        ? t("reviews.targetsAll")
+                        : t("reviews.targetsOnly", { branches: repo.target_branches.join(", ") })}
+                      {" · "}
+                      {t(repo.target_branches_source === "repo" ? "reviews.targetsFromRepo" : repo.target_branches_source === "workspace" ? "reviews.targetsFromWorkspace" : "reviews.targetsFromDefault")}
+                      {" · "}
+                      <Link
+                        href={settingsHref({ repo: repo.slug })}
+                        className="underline underline-offset-2 hover:text-[var(--color-foreground)]"
+                      >
+                        {t("reviews.targetsEdit")}
+                      </Link>
+                    </div>
+                  )}
                 </div>
                 {/* The pill is 20px, so ::after carries the 44px tap target
                     without resizing it. The row is min-h-11 to match, so two
@@ -905,7 +923,7 @@ function hiddenTotal(run: Pick<ReviewRunOut, "hidden"> | null | undefined): numb
   const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
   const byRule = Object.values(h.by_rule ?? {}).reduce((a, v) => a + n(v), 0);
   return byRule + n(h.duplicates) + n(h.near_duplicates) + n(h.low_confidence)
-    + n(h.no_evidence) + n(h.coverage_claim) + n(h.veto);
+    + n(h.no_evidence) + n(h.coverage_claim) + n(h.veto) + n(h.learned);
 }
 
 /** The tooltip: what was hidden and why, rule by rule. The count alone is
@@ -920,7 +938,7 @@ function hiddenHint(
     .filter(([, v]) => typeof v === "number" && v > 0)
     .map(([rule, v]) => `${rule} ×${v}`)
     .join(", ") || "—";
-  return t("reviews.hiddenHint", {
+  const base = t("reviews.hiddenHint", {
     rules,
     duplicates: h.duplicates ?? 0,
     near: h.near_duplicates ?? 0,
@@ -929,6 +947,15 @@ function hiddenHint(
     coverage: h.coverage_claim ?? 0,
     veto: h.veto ?? 0,
   });
+  // The learned filter: what it left out, or in report-only mode what it would.
+  const learned = (h.learned ?? 0) > 0 ? t("reviews.hiddenLearned", { count: h.learned ?? 0 }) : "";
+  const would = (h.learned_would_hide ?? 0) > 0
+    ? t("reviews.hiddenLearnedWould", {
+      count: h.learned_would_hide ?? 0,
+      titles: (h.learned_items ?? []).map((i) => i.title).slice(0, 5).join("; ") || "—",
+    })
+    : "";
+  return `${base}${learned}${would}`;
 }
 
 function FindingsBreakdown({ run }: { run: ReviewRunOut }) {

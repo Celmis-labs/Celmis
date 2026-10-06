@@ -99,6 +99,8 @@ def _run_to_out(run: ReviewRun, *, with_adjustments: bool = True,
         pr_provider=getattr(run, "pr_provider", None),
         pr_repo=getattr(run, "pr_repo", None),
         pr_number=getattr(run, "pr_number", None),
+        scope=getattr(run, "scope", None),
+        scope_base_sha=getattr(run, "scope_base_sha", None),
         stages=(getattr(run, "stages", None) if with_stages else None),
     )
 
@@ -141,6 +143,7 @@ async def trigger_review(
         _run_review_task,
         pr_ref=req.pr_ref, post_comments=req.post_comments,
         run_id=run_id, user_id=user.id, workspace_id=workspace_id,
+        force=req.force,
     )
     # A run that was just queued has no cost yet: nothing to show or hide.
     return _run_to_out(run)
@@ -321,7 +324,7 @@ def get_findings(
 
 def _run_review_task(
     *, pr_ref: str, post_comments: bool, run_id: str, user_id: str,
-    workspace_id: str = "default",
+    workspace_id: str = "default", force: bool = False,
 ) -> None:
     """Background task — runs orchestrator + updates run row at every step."""
     from src.review.stages import StageRecorder
@@ -336,6 +339,7 @@ def _run_review_task(
         from src.cli import _parse_pr_ref
         from src.review.orchestrator import ReviewOrchestrator
         from src.review.providers import get_provider_for
+        from src.review.scope import ReviewRequest
 
         provider, repo, pr_number = _parse_ref(_parse_pr_ref, pr_ref, workspace_id)
         pr_provider = get_provider_for(provider, user_id=user_id, workspace_id=workspace_id)
@@ -349,6 +353,7 @@ def _run_review_task(
                 user_id=user_id,     # Stage 11 — routes BYOK keys + policy overrides
                 workspace_id=workspace_id,  # multi-tenant — ws:{id} keys/config
                 stages=stages,
+                request=ReviewRequest(trigger="manual", force=force),
             )
         finally:
             pr_provider.close()

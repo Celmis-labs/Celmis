@@ -29,6 +29,8 @@ Environment vars:
     REVIEW_GITLAB_TOKEN       — plaintext token for GitLab webhooks
     REVIEW_REDIS_URL          — optional Redis for dedup + queue (None → in-memory)
     REVIEW_COMMENT_MARKER     — idempotent marker (default '<!-- code-analyzer:review -->')
+    REVIEW_MARKER_STYLE       — how Bitbucket hides markers: auto|html|refdef|zwsp (default auto)
+    REVIEW_BOT_HANDLE         — the mention that talks to the bot in a PR comment (default '@celmis')
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -241,6 +243,42 @@ class ReviewSettings(BaseSettings):
     # ─── Comments idempotency ───────────────────────────────────────
     comment_marker: str = "<!-- code-analyzer:review -->"
     replace_on_synchronize: bool = True
+    #: How markers are kept out of sight on Bitbucket, whose markdown shows raw
+    #: HTML as text (see `src.review.markers`). `auto` is a markdown reference
+    #: definition; `zwsp` is the zero-width fallback; `html` leaves the comment
+    #: as written. GitHub and GitLab never need it.
+    marker_style: Literal["auto", "html", "refdef", "zwsp"] = "auto"
+    #: What a person types to address the bot in a PR comment. `/celmis` is an
+    #: alias of `@celmis`; set this when `@celmis` is a real account.
+    bot_handle: str = Field(default="@celmis", pattern=r"^[@/][A-Za-z0-9_.-]{2,32}$")
+    #: How many replies the bot may post on one pull request per hour, and how
+    #: many commands one person may give per hour. Counted from the command
+    #: ledger, so they hold across restarts and workers.
+    command_replies_per_pr_per_hour: int = Field(default=20, ge=1, le=1000)
+    commands_per_actor_per_hour: int = Field(default=30, ge=1, le=1000)
+    #: A chat answer (a question put to the bot in a comment): the longest wait
+    #: for the model, the most characters of diff, thread and memories it reads,
+    #: and the most it may write back.
+    chat_timeout_seconds: int = Field(default=90, ge=10, le=600)
+    chat_max_context_chars: int = Field(default=60000, ge=4000, le=400000)
+    chat_max_reply_chars: int = Field(default=6000, ge=500, le=30000)
+    #: The most characters of team memories (`review_memories`) one review's
+    #: prompt carries. The broadest and oldest whole memories give way first.
+    memory_prompt_chars: int = Field(default=3000, ge=200, le=20000)
+    #: Feedback learning (src/review/learning). The cosine a finding must reach
+    #: against a dismissed one to count as "the same finding", how many
+    #: weighted dismissals the embedding tier needs (an exact repeat needs 1),
+    #: how far back signals count, how fast they fade, how many signals of one
+    #: kind a rule proposal needs, and the vector collection.
+    learning_similarity: float = Field(default=0.90, ge=0.5, le=1.0)
+    learning_min_dismissals: float = Field(default=2.0, ge=0.5, le=20.0)
+    learning_window_days: int = Field(default=180, ge=7, le=730)
+    learning_half_life_days: int = Field(default=90, ge=7, le=730)
+    learning_rules_min_evidence: int = Field(default=3, ge=2, le=50)
+    #: off | weekly — propose rules from the review history on a schedule.
+    learning_rules_schedule: Literal["off", "weekly"] = "off"
+    learning_collection: str = Field(default="celmis_finding_signals", min_length=1,
+                                     max_length=100)
 
     # ─── Webhooks ────────────────────────────────────────────────────
     webhook_secret: SecretStr | None = None

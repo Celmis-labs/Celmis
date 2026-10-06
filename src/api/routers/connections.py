@@ -1,6 +1,6 @@
-"""Connection routes — manage GitHub / GitLab / Bitbucket tokens.
+"""Connection routes — manage GitHub / GitLab / Bitbucket / Jira tokens.
 
-Each user can save tokens for any of the three providers. Tokens are stored
+Each workspace can save tokens for any of the git providers. Tokens are stored
 encrypted via CredentialStore. The verify step calls the provider's /user
 endpoint to confirm the token works.
 
@@ -10,6 +10,15 @@ operator allowlisted the host) BEFORE the token is sent to it, verified with
 GET /api/v4/user, and stored in the credential row's metadata next to the
 token. The two only ever change together: the endpoint requires the token on
 every save, so nobody can re-point a stored token at a host they control.
+
+Jira (the task the business-logic agent reads) is the same shape: the body's
+``base_url`` is the site (https://<site>.atlassian.net, or an operator-listed
+host — src/sync/jira_instance.py), ``email`` + ``token`` are the Atlassian
+account and API token, verified with GET /rest/api/3/myself before anything is
+stored. ``reuse_bitbucket`` copies the saved Bitbucket email + token on the
+server (an unscoped Atlassian API token works for both) so the token never
+travels to the browser and back. The token is never written to a log or to an
+audit row.
 """
 
 from __future__ import annotations
@@ -22,6 +31,7 @@ from src.api.deps import (
     client_ip,
     current_workspace_id,
     get_current_user,
+    is_workspace_admin,
     require_workspace_admin,
 )
 from src.api.schemas import ConnectionStatus, ConnectionUpsert, ConnectionVerifyResult
@@ -45,7 +55,11 @@ _GIT_PROVIDERS = GIT_PROVIDERS
 # LLM providers (Stage 11). Same encrypted store; verify path differs.
 _LLM_PROVIDERS = ("openai", "anthropic", "google", "openrouter", "groq")
 
-_PROVIDERS = _GIT_PROVIDERS + _LLM_PROVIDERS
+#: Read-only task trackers. Not git providers: no repositories hang off them,
+#: and the resolver for git tokens must never return one.
+_TRACKER_PROVIDERS = ("jira",)
+
+_PROVIDERS = _GIT_PROVIDERS + _TRACKER_PROVIDERS + _LLM_PROVIDERS
 
 
 def _slot_for(provider: str, workspace_id: str) -> str:
@@ -67,6 +81,11 @@ def list_connections(
     Git rows are read through the same resolver the workers use, so the page
     shows what a review run would actually pick up — including a legacy
     personally-owned token that still works but is nobody's responsibility.
+
+    Anybody in the workspace may ask WHETHER a provider is connected (the
+    dashboard and the setup checklist need it); only an owner or admin is told
+    which account it is (an Atlassian e-mail, a Jira host, the credential slot).
+    No caller is ever sent a token.
     """
     store = get_credential_store()
     saved = {row["provider"]: row for row in store.list(user_id=_slot_for("", workspace_id))}
@@ -85,10 +104,14 @@ def list_connections(
             "last_used_at": stored.last_used_at,
         }
     out: list[ConnectionStatus] = []
+    may_see_account = is_workspace_admin(user, workspace_id)
     for p in _PROVIDERS:
         row = saved.get(p)
         if row is None:
             out.append(ConnectionStatus(provider=p, connected=False))
+        elif not may_see_account:
+            out.append(ConnectionStatus(
+                provider=p, connected=True, updated_at=row.get("updated_at")))
         else:
             out.append(ConnectionStatus(
                 provider=p,
@@ -118,10 +141,17 @@ def upsert_connection(
         raise HTTPException(status_code=400, detail=f"Unknown provider {provider!r}")
     if req.provider != provider:
         raise HTTPException(status_code=400, detail="Body/path provider mismatch")
-    if provider != "gitlab" and (req.base_url or "").strip():
+    if provider not in ("gitlab", "jira") and (req.base_url or "").strip():
         raise HTTPException(status_code=400,
-                            detail="A custom URL is only supported for GitLab")
+                            detail="A custom URL is only supported for GitLab and Jira")
+    if provider != "jira" and req.reuse_bitbucket:
+        raise HTTPException(status_code=400,
+                            detail="reuse_bitbucket is only supported for Jira")
 
+    if provider == "jira":
+        req, refusal = _jira_request(req, user_id=user.id, workspace_id=workspace_id)
+        if refusal is not None:
+            return refusal
     verify = _verify_token(provider, req)
     if not verify.ok:
         return verify  # don't save if verification failed
@@ -134,6 +164,11 @@ def upsert_connection(
         # gitlab.com row, exactly as every row saved before this existed.
         if verify.base_url and verify.base_url != DEFAULT_BASE_URL:
             metadata[METADATA_KEY] = verify.base_url
+    if provider == "jira":
+        from src.sync.jira_instance import METADATA_KEY as JIRA_URL_KEY
+
+        metadata[JIRA_URL_KEY] = verify.base_url or ""
+        metadata["atlassian_email"] = req.email or ""
     if provider == "bitbucket" and req.email:
         metadata["atlassian_email"] = req.email
     if provider == "bitbucket" and req.workspace:
@@ -152,6 +187,8 @@ def upsert_connection(
         user_id=slot,
         account_label=req.account_label or "default",
     )
+    if provider == "jira":
+        _forget_jira_reads(workspace_id)
     logger.info(
         "connection_saved user=%s workspace=%s provider=%s username=%s slot=%s",
         user.id, workspace_id, provider, verify.username, slot,
@@ -165,9 +202,23 @@ def upsert_connection(
         workspace_id=workspace_id, target=f"{provider}:{req.account_label or 'default'}",
         ip=client_ip(request),
         detail={"provider": provider, "username": verify.username, "slot": slot,
-                **({"gitlab_url": verify.base_url} if provider == "gitlab" else {})},
+                **({"gitlab_url": verify.base_url} if provider == "gitlab" else {}),
+                **({"jira_url": verify.base_url,
+                    "reused_bitbucket": bool(
+                        getattr(req, "reuse_bitbucket", False))}
+                   if provider == "jira" else {})},
     )
     return verify
+
+
+def _forget_jira_reads(workspace_id: str) -> None:
+    """A new or removed Jira credential: what the old one read is not served to
+    the new one (the cache key carries no credential identity)."""
+    from src.review.task_context import cache as task_cache
+    from src.review.task_context.service import forget_projects
+
+    task_cache.purge_workspace(workspace_id)
+    forget_projects()
 
 
 @router.delete("/{provider}", status_code=204)
@@ -186,6 +237,8 @@ def delete_connection(
     if provider in _GIT_PROVIDERS and workspace_id == "default":
         for slot in dict.fromkeys((user.id, "default")):
             store.delete(provider=provider, user_id=slot)
+    if provider == "jira":
+        _forget_jira_reads(workspace_id)
     logger.info("connection_deleted user=%s workspace=%s provider=%s", user.id, workspace_id, provider)
     record_action(
         action="connection.deleted", actor=user.email, actor_id=user.id,
@@ -220,6 +273,10 @@ def verify_existing(
         from src.sync.gitlab_instance import METADATA_KEY
 
         base_url = stored.metadata.get(METADATA_KEY) or None
+    if provider == "jira" and isinstance(stored.metadata, dict):
+        from src.sync.jira_instance import METADATA_KEY as JIRA_URL_KEY
+
+        base_url = stored.metadata.get(JIRA_URL_KEY) or None
     return _verify_token(
         provider,
         ConnectionUpsert(
@@ -261,6 +318,9 @@ def _verify_token(provider: str, req: ConnectionUpsert) -> ConnectionVerifyResul
 
         if provider == "gitlab":
             return _verify_gitlab(req)
+
+        if provider == "jira":
+            return _verify_jira(req)
 
         if provider == "bitbucket":
             if not req.email:
@@ -333,6 +393,65 @@ def _verify_token(provider: str, req: ConnectionUpsert) -> ConnectionVerifyResul
         return ConnectionVerifyResult(ok=False, provider=provider, error=str(exc))
 
     return ConnectionVerifyResult(ok=False, provider=provider, error="Unknown provider")
+
+
+def _jira_request(
+    req: ConnectionUpsert, *, user_id: str, workspace_id: str,
+) -> tuple[ConnectionUpsert, ConnectionVerifyResult | None]:
+    """Fill a Jira save from the saved Bitbucket credential when asked to.
+
+    Returns the request to verify, or a refusal sentence. The Bitbucket token
+    is read here, on the server, and goes only into the verify call to the
+    Jira site the URL rules accepted.
+    """
+    if not req.reuse_bitbucket:
+        return req, None
+    stored = resolve_git_credential(
+        "bitbucket", user_id=user_id, workspace_id=workspace_id,
+        store=get_credential_store())
+    meta = stored.metadata if stored is not None and isinstance(stored.metadata, dict) else {}
+    email = str(meta.get("atlassian_email") or "").strip()
+    if stored is None or not stored.secret or not email:
+        return req, ConnectionVerifyResult(
+            ok=False, provider="jira",
+            error="No Bitbucket token with an Atlassian email is saved for this "
+                  "workspace, so there is nothing to reuse — enter the email and "
+                  "API token for Jira")
+    return req.model_copy(update={"token": stored.secret, "email": email}), None
+
+
+def _verify_jira(req: ConnectionUpsert) -> ConnectionVerifyResult:
+    """URL rules → address rules → GET /rest/api/3/myself with the token.
+
+    Nothing reaches the network before the URL passed both rule sets, and no
+    message carries the token or the email: they are built from the host and
+    the status code only (src/review/task_context/jira_client.py).
+    """
+    from src.review.task_context.jira_client import JiraClient, JiraError
+    from src.sync.jira_instance import UnsafeJiraURL, validate_base_url
+
+    provider = "jira"
+    email = (req.email or "").strip()
+    if not email:
+        return ConnectionVerifyResult(
+            ok=False, provider=provider,
+            error="Jira needs the Atlassian account email next to the API token")
+    try:
+        instance = validate_base_url(req.base_url)
+    except UnsafeJiraURL as exc:
+        return ConnectionVerifyResult(ok=False, provider=provider, error=str(exc))
+    from src.config import get_settings
+
+    try:
+        with JiraClient(instance, email, req.token,
+                        timeout=float(get_settings().jira_timeout_seconds)) as client:
+            who = client.myself()
+    except JiraError as exc:
+        return ConnectionVerifyResult(ok=False, provider=provider, error=exc.sentence)
+    name = str(who.get("displayName") or who.get("emailAddress") or who.get("name")
+               or who.get("accountId") or "")
+    return ConnectionVerifyResult(
+        ok=True, provider=provider, username=name, base_url=instance.base_url)
 
 
 def _verify_gitlab(req: ConnectionUpsert) -> ConnectionVerifyResult:

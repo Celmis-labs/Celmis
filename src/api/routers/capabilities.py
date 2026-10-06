@@ -210,9 +210,11 @@ FEATURES: tuple[Feature, ...] = (
             ("/repositories", "/connections")),
     Feature("code_review",
             ("/api/reviews", "/api/review-policies", "/api/review-defaults",
-             "/api/review-settings", "/api/review-rules", "/api/agents", "/api/compliance"),
+             "/api/review-settings", "/api/review-rules", "/api/memories",
+             "/api/learning",
+             "/api/agents", "/api/compliance", "/api/task-context"),
             ("/reviews", "/admin/review-policies", "/admin/review-defaults",
-             "/admin/review-rules", "/admin/agents", "/admin/compliance",
+             "/admin/review-rules", "/memories", "/admin/agents", "/admin/compliance",
              "/admin/deprecations")),
     # Findings followed across a PR's runs, the PRs themselves, and the
     # lead's view over both. Their own features rather than more prefixes on
@@ -222,6 +224,12 @@ FEATURES: tuple[Feature, ...] = (
     # Enterprise (src/ee/analytics, LICENSE_EE): mounted only when the licence
     # grants "analytics". The tables it reads are the AGPL feature above.
     Feature("review_analytics", ("/api/analytics",), ("/analytics",),
+            license_feature="analytics"),
+    # Productivity metrics (cycle time, DORA, PR size, activity) ride on the
+    # same licence line and the same router. The prefix is the deeper one, so
+    # the page reports off exactly when its own routes are not mounted. The
+    # tables and the sync that fill it (src/productivity) are AGPL.
+    Feature("productivity", ("/api/analytics/productivity",), ("/productivity",),
             license_feature="analytics"),
     Feature("qa", ("/api/qa", "/api/projects", "/api/chats", "/api/search"),
             ("/projects", "/chats", "/search")),

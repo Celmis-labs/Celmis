@@ -1,0 +1,32 @@
+{
+  "action": "created",
+  "pull_request": {
+    "number": 42,
+    "state": "open",
+    "draft": false,
+    "title": "Add basket totals",
+    "head": {
+      "sha": "abc123def456"
+    },
+    "base": {
+      "ref": "develop"
+    }
+  },
+  "comment": {
+    "id": 5002,
+    "in_reply_to_id": 4900,
+    "body": "@celmis help",
+    "path": "src/cart.py",
+    "line": 17,
+    "user": {
+      "login": "bob",
+      "id": 102,
+      "type": "User"
+    },
+    "author_association": "NONE"
+  },
+  "repository": {
+    "full_name": "acme/shop",
+    "private": false
+  }
+}

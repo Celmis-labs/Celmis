@@ -187,9 +187,11 @@ def test_a_full_review_names_every_stage_in_order(env, monkeypatch, store):  # n
 
     assert _keys(rec) == [
         "fetch_pr", "settings", "ignore_globs", "gate_enabled",
-        "gate_target_branch", "context", "gate_draft", "gate_size", "gate_hunks",
-        "summary", "agent:defect", "verifier", "breaking_change", "compliance",
-        "publish", "record", "finished",
+        "gate_target_branch", "gate_draft", "gate_title", "gate_cadence", "scope", "context",
+        "gate_size", "gate_hunks",
+        "summary", "agent:defect", "verifier", "learned_filter", "breaking_change",
+        "compliance",
+        "resolve_issues", "publish", "record", "finished",
     ]
     agent = _stage(rec, "agent:defect")
     assert agent["status"] == "success"

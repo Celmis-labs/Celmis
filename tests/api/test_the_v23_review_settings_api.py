@@ -42,6 +42,8 @@ VALUES = {
     "base_instruction": "Write like a senior reviewer: terse, kind, specific.",
     "message_started": "Reviewing {commit} with {agents} ({files} files) on #{pr_number}",
     "message_finished_header": "Review of {commit}",
+    "completed_comment": "classic",
+    "commands_guide_enabled": True,
 }
 BUILTINS = {
     "enabled_agents": [], "run_on_drafts": False, "approve_when_clean": False,
@@ -50,6 +52,7 @@ BUILTINS = {
     "summary_target": "comment", "summary_on_new_commits": "replace",
     "summary_existing_description": "append", "base_instruction": None,
     "message_started": None, "message_finished_header": None,
+    "completed_comment": "completed", "commands_guide_enabled": True,
 }
 
 #: (body, what the 422 must name) — refused at BOTH layers.
@@ -57,6 +60,8 @@ BAD = [
     ({"summary_target": "slack"}, "summary_target"),
     ({"summary_on_new_commits": "overwrite"}, "summary_on_new_commits"),
     ({"summary_existing_description": "prepend"}, "summary_existing_description"),
+    ({"completed_comment": "short"}, "completed_comment"),
+    ({"commands_guide_enabled": "maybe"}, "commands_guide_enabled"),
     ({"base_instruction": "x" * 2001}, "base_instruction"),
     ({"message_started": "y" * 2001}, "message_started"),
     ({"message_started": "Hello {author}"}, "author"),

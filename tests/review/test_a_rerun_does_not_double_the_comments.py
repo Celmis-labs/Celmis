@@ -42,6 +42,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
+from src.review.markers import has_marker
 from src.review.models import (
     Finding,
     FindingSeverity,
@@ -1527,7 +1528,8 @@ class TestBitbucketRerun:
         assert top_level[0]["id"] == original_id
         assert result["summary_comment_id"] == original_id
         assert "old summary" not in top_level[0]["content"]["raw"]
-        assert MARKER in top_level[0]["content"]["raw"]
+        # Bitbucket stores the marker hidden; it is found again by `has_marker`.
+        assert has_marker(top_level[0]["content"]["raw"], MARKER)
 
     def test_a_replied_to_summary_is_the_upsert_target_not_a_casualty(
         self, settings,

@@ -25,7 +25,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckIcon, CopyIcon, KeyIcon, RefreshCwIcon, TriangleAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { api } from "@/lib/api";
+import Link from "next/link";
+import { api, reviewDefaultsApi, type RepoOut } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
@@ -99,6 +100,22 @@ export function WebhookSetup() {
     queryFn: () => api<Setup[]>("/api/webhooks", { token }),
     enabled: !!token,
   });
+
+  // Which base branches a delivery is reviewed for: the workspace layer of the
+  // same `target_branches` setting, plus the repositories that override it.
+  const defaults = useQuery({
+    queryKey: ["review-defaults"],
+    queryFn: () => reviewDefaultsApi.get(token!),
+    enabled: !!token,
+  });
+  const repos = useQuery({
+    queryKey: ["repos"],
+    queryFn: () => api<RepoOut[]>("/api/repos", { token }),
+    enabled: !!token,
+  });
+  const workspaceBranches = defaults.data
+    ? ((defaults.data.effective?.target_branches as string[] | undefined) ?? [])
+    : null;
 
   const rotate = useMutation({
     mutationFn: (provider: string) =>
@@ -191,6 +208,28 @@ export function WebhookSetup() {
                   </div>
                 </li>
               </ol>
+
+              {workspaceBranches && (
+                <p className="mt-3 text-sm text-[var(--color-muted-foreground)]">
+                  {workspaceBranches.length === 0
+                    ? t("webhooks.reviewsAllBranches")
+                    : t("webhooks.reviewsBranches", { branches: workspaceBranches.join(", ") })}
+                  {(() => {
+                    const n = (repos.data ?? []).filter(
+                      (r) => r.provider === s.provider && r.target_branches_source === "repo",
+                    ).length;
+                    return n > 0 ? (
+                      <>
+                        {" "}
+                        {t("webhooks.reposOverride", { count: n })}{" "}
+                        <Link href="/reviews" className="underline underline-offset-2">
+                          {t("webhooks.seeAutoReviewList")}
+                        </Link>
+                      </>
+                    ) : null;
+                  })()}
+                </p>
+              )}
 
               <InlineHelp className="mt-3" question={t("webhooks.howVerified")}>
                 {t("webhooks.howVerifiedBody", { header: s.header, scheme: s.scheme })}

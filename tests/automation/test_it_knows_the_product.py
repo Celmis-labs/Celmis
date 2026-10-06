@@ -137,7 +137,7 @@ def test_the_settings_sections_named_are_the_sections_on_screen():
                     .read_text(encoding="utf-8"))
     sections = [v for k, v in en.items() if k.startswith("reviewSettings.section.")]
     body = BY_ID["review-policies"].body
-    assert len(sections) == 8
+    assert len(sections) == 10
     for section in sections:
         assert f'"{section}"' in body, section
 

@@ -25,9 +25,10 @@ row of tabs at the top of the page.
   docs](/docs), "Repo intel" = [repository intelligence](/admin/intel).
 - "Code review": "Review history" = [reviews](/reviews), [Issues](/issues)
   (findings followed across pushes), [Pull requests](/pull-requests),
-  "Review rules" = [rules library](/admin/review-rules), "Settings" =
+  "Review rules" = [rules library](/admin/review-rules), "Memories" =
+  [what the team taught the reviewers](/memories) (owners, admins and editors only), "Settings" =
   [code review settings](/review-settings) (Global defaults and every
-  repository's overrides, agents, filters, prompts, summary, messages),
+  repository's overrides, agents, filters, prompts, summary, messages, learning),
   [Analytics](/analytics) (owner/admin/editor, enterprise licence); under
   "More": [Compliance](/admin/compliance), [Deprecations](/admin/deprecations).
 - "Ask the code": [Projects](/projects) (ask questions over a group of

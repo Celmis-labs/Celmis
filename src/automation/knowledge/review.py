@@ -137,14 +137,16 @@ for a repository with overrides, "Reset all overrides" (deletes all of the
 repository's settings, its prompts and legacy folder rules included).
 A link opens one place: `/review-settings?repo=<repo>&section=<section>`
 with section `general`, `categories`, `filters`, `prompts`, `summary`,
-`rules`, `messages` or `advanced`. The sections:
+`rules`, `messages`, `commands`, `learning` or `advanced`. The sections:
 
 1. "General" — "Review this repository" (off skips every PR) and
    "Department" (a grouping label); "Target branches" — names and globs,
-   a leading `!` excludes: `staging, !master, !main`; `release/*` matches
+   a leading `!` excludes: `develop, !master, !main`; `release/*` matches
    `release/1.2`; an exclusion wins; only exclusions = every other branch;
    empty = every branch. "Check a branch" says whether a PR into a given
-   branch would be reviewed. Then "Review draft pull requests",
+   branch would be reviewed. Then "Review draft pull requests", "Review
+   cadence" (every push, pause when pushes pile up, only on request), the two
+   auto-pause numbers, "Ignored title keywords",
    "Approve when nothing is found", "Request changes on critical findings",
    "Commit status", "Committable suggestions", "“Review started” comment"
    and "Review language".
@@ -168,7 +170,25 @@ with section `general`, `categories`, `filters`, `prompts`, `summary`,
    repository).
 7. "Custom messages" — the texts of the started comment and of the
    finished review header.
-8. "Advanced" — "MCP evidence sources" (name, URL, auth, credentials key,
+8. "Commands" — what `@celmis` does in a pull request comment:
+   "Answer comment commands" (start-review, review, help and the rest),
+   "Answer questions" (a comment that addresses the bot with a question) and
+   "Who may give commands" (people with repository access, participants only,
+   or anyone). A repository webhook installed before comment commands existed
+   shows "needs repair" on the repositories page, and "Repair all webhooks"
+   fixes them in one press.
+9. "Learning" — whether reviews are told the team's memories ("Tell
+   reviews the team's memories"), whether a new memory waits for approval
+   ("Require approval for new memories") and "Trusted commenters" (logins or
+   e-mails, one per line, whose memories are active at once). "Open the
+   memories" goes to the [Memories](/memories) page (owners, admins and
+   editors only; a person sees a repository's memories only when they may read
+   that repository): short facts about the
+   codebase, for the whole workspace, one repository or one directory of it,
+   that every review is told when it touches the files they concern; a memory
+   from somebody who is not trusted is "Pending" there until an editor
+   approves it, and only active ones reach a review.
+10. "Advanced" — "MCP evidence sources" (name, URL, auth, credentials key,
    trigger regexes, allowed tools; queried for evidence, output treated as
    untrusted) and "Legacy folder rules" (read-only; recreate them in the
    rules library).
@@ -252,11 +272,14 @@ other repositories, when the repository is indexed):
   loops, quadratic or repeated work, blocking I/O on hot paths, memory that
   grows with input, DOM thrash. On by default.
 - business_logic — the change against what the PR says it does (title,
-  description, acceptance criteria, issue keys named): contradictions,
-  missing parts, required edge cases. Off by default — switched on in
-  "Review categories";
-  a PR with no meaningful description is skipped quietly (no findings, the
-  reason noted in the summary's scope details).
+  description, acceptance criteria, issue keys named) and, when the
+  workspace connected Jira on the Connections page, against the Jira task
+  the PR names (its acceptance criteria are numbered AC1, AC2 … and cited in
+  findings): contradictions, missing parts, required edge cases. Off by
+  default — switched on in "Review categories", where "Switch it on when a
+  Jira task is found" turns it on for pull requests that name a readable
+  task; a PR whose own text and Jira task both say nothing is skipped
+  quietly (no findings, the reason noted in the summary's scope details).
 - structural — deterministic ast-grep rules, no model, no tokens.
 - cve — the PR's own dependency changes checked against OSV.
 - verifier — a post-processor: a deterministic filter (dedup, confidence
@@ -275,7 +298,26 @@ compliance check, ≥1 critical or ≥3 errors → REQUEST_CHANGES; any warning 
 error → COMMENT; otherwise APPROVE; nothing reviewed → SKIPPED. Skipped when
 review is off for the repository, the base branch is not a target branch,
 the PR is a draft (unless the repository or workspace reviews drafts —
-`run_on_drafts`), the diff is over 500 KB, or every file is ignored.
+`run_on_drafts`), its title contains an ignored keyword
+(`ignored_title_keywords`, any case, such as wip), the review cadence says it
+waits (`review_cadence`), the diff is over 500 KB, or every file is ignored.
+A person asking (a comment command, the Review button, the CLI, MCP) skips the
+draft, title and cadence checks; only a forced request also skips the target
+branch rule.
+
+Review cadence (`review_cadence`): `automatic` reviews every push (default);
+`auto_pause` reviews every push until a PR gets `auto_pause_pushes` (default 3)
+pushes inside `auto_pause_window_minutes` (default 15) — that push and the
+next ones wait, and the bot posts one note saying how to continue; `manual`
+reviews a PR only when somebody asks. A paused PR resumes with the Resume
+button on the pull-requests page, which reviews everything pushed meanwhile.
+
+Review scope (`review_scope`): `incremental` (default) reads only the commits
+since the last review that was complete and posted, and closes the earlier
+comments whose code those commits changed; an unclear case (first review,
+rewritten history, a provider that cannot list commits) reviews the whole PR.
+`full` reads the whole PR every time. A forced review is always whole. A push
+that brings no new code (same commit, merge commits only) is skipped quietly.
 
 On the PR: one status comment that says the review started and becomes the
 summary when it ends (see the PR comments section), plus inline comments for

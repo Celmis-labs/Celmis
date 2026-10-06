@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import subprocess
 from datetime import UTC, datetime
 from typing import Any
@@ -411,6 +412,7 @@ def _text_setting_from_payload(name: str, incoming: str | None) -> str | None:
     template must use only the documented placeholders."""
     from src.review.review_defaults import (
         MESSAGE_FIELDS,
+        TASK_FIELD_PATTERN,
         TEXT_SETTING_MAX,
         message_template_error,
     )
@@ -428,7 +430,31 @@ def _text_setting_from_payload(name: str, incoming: str | None) -> str | None:
         problem = message_template_error(value)
         if problem:
             raise HTTPException(status_code=422, detail=f"{name}: {problem}")
+    if name == "task_acceptance_field" and not re.match(TASK_FIELD_PATTERN, value):
+        raise HTTPException(status_code=422, detail=(
+            f"{name}: {value!r} is not a Jira custom field id — expected "
+            f"customfield_ and digits (e.g. customfield_10042), or blank to "
+            f"read the criteria from the description"
+        ))
     return value
+
+
+def _project_keys_from_payload(name: str, incoming: list[str] | None) -> list[str] | None:
+    """Jira project keys: trimmed, upper-cased, de-duplicated, each in Jira's
+    own shape. Refused, not dropped, when one is malformed — a typo would
+    otherwise silently stop every task from being found."""
+    from src.review.review_defaults import PROJECT_KEY_PATTERN
+
+    if incoming is None:
+        return None
+    keys = [str(k).strip().upper() for k in incoming if str(k).strip()]
+    bad = [k for k in keys if not re.match(PROJECT_KEY_PATTERN, k)]
+    if bad:
+        raise HTTPException(status_code=422, detail=(
+            f"{name}: {', '.join(bad[:5])} — a Jira project key is capital "
+            f"letters and digits, starting with a letter (e.g. PROJ)"
+        ))
+    return list(dict.fromkeys(keys))
 
 
 def _enabled_agents_from_payload(incoming: list[str] | None) -> list[str] | None:
@@ -454,6 +480,78 @@ def _enabled_agents_from_payload(incoming: list[str] | None) -> list[str] | None
     return list(dict.fromkeys(names))
 
 
+def _int_setting_from_payload(name: str, incoming: int | None) -> int | None:
+    """A whole-number setting (`review_defaults.INT_FIELDS`): null inherits,
+    anything outside its range is a 422 naming the range (the schema refuses
+    it first; checked again for a caller that bypasses the schema)."""
+    from src.review.review_defaults import INT_FIELDS
+
+    if incoming is None:
+        return None
+    low, high = INT_FIELDS[name]
+    if isinstance(incoming, bool) or not isinstance(incoming, int) or not low <= incoming <= high:
+        raise HTTPException(status_code=422, detail=(
+            f"{name}: {incoming!r} — expected a whole number from {low} to {high}, "
+            f"or null to inherit"
+        ))
+    return incoming
+
+
+def _title_keywords_from_payload(incoming: list[str] | None) -> list[str] | None:
+    """`ignored_title_keywords`: trimmed, blanks and case-insensitive
+    duplicates dropped; at most 50 entries of 100 characters. Null inherits;
+    an empty list is this layer's own "no keyword"."""
+    from src.review.review_defaults import (
+        TITLE_KEYWORD_MAX_CHARS,
+        TITLE_KEYWORDS_MAX,
+        normalise_title_keywords,
+    )
+
+    if incoming is None:
+        return None
+    words = normalise_title_keywords(incoming)
+    if len(words) > TITLE_KEYWORDS_MAX:
+        raise HTTPException(status_code=422, detail=(
+            f"ignored_title_keywords: {len(words)} keywords — at most {TITLE_KEYWORDS_MAX}"
+        ))
+    too_long = [w for w in words if len(w) > TITLE_KEYWORD_MAX_CHARS]
+    if too_long:
+        raise HTTPException(status_code=422, detail=(
+            f"ignored_title_keywords: a keyword is longer than "
+            f"{TITLE_KEYWORD_MAX_CHARS} characters"
+        ))
+    return words
+#: The longest identity one trusted-commenter entry may be (an e-mail, a
+#: login, an Atlassian account id or a `{uuid}`).
+TRUSTED_COMMENTER_MAX = 200
+
+
+def _trusted_commenters_from_payload(
+    incoming: list[str] | None, name_of_field: str = "memory_trusted_commenters",
+) -> list[str] | None:
+    """A list of identities (the people whose "remember" is active at once, or
+    the reviewers learning ignores): trimmed, blanks and repeats dropped
+    (compared case-insensitively, first spelling kept), each short and free of
+    control characters. [] is a decision (nobody but the token owner); null
+    inherits."""
+    if incoming is None:
+        return None
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in incoming:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        if len(name) > TRUSTED_COMMENTER_MAX or any(ord(ch) < 32 for ch in name):
+            raise HTTPException(status_code=422, detail=(
+                f"{name_of_field}: an identity is at most "
+                f"{TRUSTED_COMMENTER_MAX} characters, on one line"))
+        if name.casefold() not in seen:
+            seen.add(name.casefold())
+            out.append(name)
+    return out
+
+
 def v23_updates_from_payload(payload: Any) -> dict[str, Any]:
     """{field: value to store} for every 2.3.0 setting the request NAMED.
 
@@ -463,7 +561,12 @@ def v23_updates_from_payload(payload: Any) -> dict[str, Any]:
     layers, so a repository and its workspace can never be validated by two
     different rules.
     """
-    from src.review.review_defaults import SETTING_CHOICES, TEXT_FIELDS, V23_FIELDS
+    from src.review.review_defaults import (
+        INT_FIELDS,
+        SETTING_CHOICES,
+        TEXT_FIELDS,
+        V23_FIELDS,
+    )
 
     sent = payload.model_fields_set
     out: dict[str, Any] = {}
@@ -473,10 +576,18 @@ def v23_updates_from_payload(payload: Any) -> dict[str, Any]:
         value = getattr(payload, name)
         if name == "enabled_agents":
             out[name] = _enabled_agents_from_payload(value)
+        elif name == "ignored_title_keywords":
+            out[name] = _title_keywords_from_payload(value)
+        elif name in INT_FIELDS:
+            out[name] = _int_setting_from_payload(name, value)
+        elif name == "task_project_keys":
+            out[name] = _project_keys_from_payload(name, value)
         elif name in SETTING_CHOICES:
             out[name] = _choice_from_payload(name, value)
         elif name in TEXT_FIELDS:
             out[name] = _text_setting_from_payload(name, value)
+        elif name in ("memory_trusted_commenters", "learning_excluded_reviewers"):
+            out[name] = _trusted_commenters_from_payload(value, name)
         else:
             out[name] = None if value is None else bool(value)
     return out
@@ -745,6 +856,7 @@ def _layered_fields(
     """
     from src.review.review_defaults import (
         INHERITABLE_FIELDS,
+        LIST_FIELDS,
         TEXT_FIELDS,
         V23_FIELDS,
         agent_participation,
@@ -769,7 +881,8 @@ def _layered_fields(
     for name in V23_FIELDS:
         v23[name] = own(name)
         value = effective[name]
-        v23[f"{name}_effective"] = list(value or []) if name == "enabled_agents" else value
+        v23[f"{name}_effective"] = (
+            list(value or []) if name in LIST_FIELDS else value)
     v23["agent_participation_effective"] = agent_participation(
         effective["disabled_agents"], effective["enabled_agents"])
 
@@ -1031,7 +1144,7 @@ async def overrides_summary(
 async def workspace_prompt_preview(
     agent: str = Query(default="defect", pattern=_PREVIEWABLE_PATTERN),
     session: AsyncSession = Depends(get_async_session),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     ws_id: str = Depends(current_workspace_id),
 ) -> dict[str, Any]:
     """Dry-run of the prompt a repository with no settings of its own would
@@ -1048,8 +1161,10 @@ async def workspace_prompt_preview(
                        ws_id, exc)
         await session.rollback()
         review_rules = []
+    memories_ok = await _may_preview_memories(user, ws_id, None)
     return await asyncio.to_thread(
-        _compose_preview, agent, ws_id, None, None, ws_defaults, review_rules)
+        _compose_preview, agent, ws_id, None, None, ws_defaults, review_rules,
+        memories_ok)
 
 
 @router.get("/{repo_slug:path}/prompt-preview")
@@ -1063,7 +1178,7 @@ async def prompt_preview(
     # 500 for the dead ones — which is the whole endpoint dead either way.
     agent: str = Query(default="defect", pattern=_PREVIEWABLE_PATTERN),
     session: AsyncSession = Depends(get_async_session),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     ws_id: str = Depends(current_workspace_id),
 ) -> dict[str, Any]:
     """Dry-run: compose the effective system_prompt + user_prompt_template
@@ -1098,16 +1213,34 @@ async def prompt_preview(
     row = await session.get(RepoReviewPolicy, repo_slug)
     if row is not None and row.workspace_id != ws_id:
         row = None  # another tenant's policy — never disclose; preview defaults
+    memories_ok = await _may_preview_memories(user, ws_id, repo_slug)
     return await asyncio.to_thread(
-        _compose_preview, agent, ws_id, repo_slug, row, ws_defaults, review_rules)
+        _compose_preview, agent, ws_id, repo_slug, row, ws_defaults, review_rules,
+        memories_ok)
+
+
+async def _may_preview_memories(user: User, ws_id: str, repo_slug: str | None) -> bool:
+    """Do the previews show the team memories to this caller? Only to the
+    people who may open /memories (editor, admin, owner) and, for a repository,
+    only when they may read it: a memory is the team's own words, and a viewer
+    or member must not read them through the prompt."""
+    from src.api.deps import may_use_memories, readable_repo_slugs
+
+    if not await may_use_memories(user, ws_id):
+        return False
+    if repo_slug is None:
+        return True
+    return repo_slug in await readable_repo_slugs(user, ws_id, [repo_slug])
 
 
 def _compose_preview(
     agent: str, ws_id: str, repo_slug: str | None, row: Any,
     ws_defaults: dict[str, Any] | None, review_rules: list,
+    show_memories: bool = True,
 ) -> dict[str, Any]:
     """Both previews' body — blocking (the workspace prompt layers live in
-    the credential store). `row` None previews the workspace defaults."""
+    the credential store). `row` None previews the workspace defaults.
+    `show_memories` False leaves the team memories out of the prompt shown."""
     from src.review.agents.base import (
         AgentContext,
         LLMReviewAgent,
@@ -1182,6 +1315,8 @@ def _compose_preview(
             "prompt_template": (row.prompt_template if row else "") or "",
             "folder_rules": list(row.folder_rules or []) if row else [],
             "review_rules": review_rules,
+            "memories": (_preview_memories(ws_id, repo_slug, row, ws_defaults)
+                         if show_memories else []),
         },
         None, match_files=False,
     )
@@ -1201,8 +1336,29 @@ def _compose_preview(
         default_system=a.system_prompt,
         context=ctx,
     )
-    return _out(parts, a.user_prompt_template, ctx,
+    body = _out(parts, a.user_prompt_template, ctx,
                 "\n\n".join(p.text for p in parts))
+    # The memories the prompt above carries (ids), and how many matching ones
+    # the character budget left out — the page's "what will it be told".
+    body["memories_used"] = rendered.memories_used
+    body["memories_omitted"] = rendered.memories_omitted
+    return body
+
+
+def _preview_memories(
+    ws_id: str, repo_slug: str | None, row: Any, ws_defaults: dict[str, Any] | None,
+) -> list[dict]:
+    """The team memories a review of this repository would be told: the
+    active ones, unless the repository (else the workspace) switched them
+    off — the order `merge_policy` gives a review. Blocking."""
+    from src.review.memories import load_active_sync
+
+    own = getattr(row, "memories_enabled", None) if row is not None else None
+    if own is None:
+        own = (ws_defaults or {}).get("memories_enabled")
+    if own is False:
+        return []
+    return load_active_sync(ws_id, repo_slug)
 
 
 def _preview_base_instruction(row: Any, ws_defaults: dict[str, Any] | None) -> str:

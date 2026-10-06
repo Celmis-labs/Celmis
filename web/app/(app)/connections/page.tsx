@@ -3,10 +3,13 @@ import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
-import { CheckCircle2Icon, ExternalLinkIcon, XCircleIcon, TrashIcon, RefreshCwIcon } from "lucide-react";
+import {
+  CheckCircle2Icon, ExternalLinkIcon, RefreshCwIcon, ShieldOffIcon, TrashIcon, XCircleIcon,
+} from "lucide-react";
 import { api, type ConnectionStatus, type ConnectionVerifyResult } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
+import { useCanManageWorkspace } from "@/lib/use-workspace-role";
 import { formatDateTime } from "@/lib/format";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -14,8 +17,11 @@ import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
+import { JiraConnectionCard } from "@/components/jira-connection-card";
 
 type Provider = "github" | "gitlab" | "bitbucket";
 
@@ -73,16 +79,56 @@ export default function ConnectionsPage() {
   const token = useToken();
   const t = useT();
   const qc = useQueryClient();
+  // Owner / admin of the active workspace only (`require_workspace_admin` on
+  // every save, verify and delete): anybody else is told so instead of being
+  // handed forms whose every button is a 403. `undefined` = still loading.
+  const canManage = useCanManageWorkspace();
   const conns = useQuery({
     queryKey: ["connections"],
     queryFn: () => api<ConnectionStatus[]>("/api/connections", { token }),
-    enabled: !!token,
+    enabled: !!token && canManage === true,
   });
 
-  const byProvider = (p: Provider): ConnectionStatus | undefined =>
+  const byProvider = (p: Provider | "jira"): ConnectionStatus | undefined =>
     conns.data?.find((c) => c.provider === p);
 
   const gitProviders: Provider[] = ["github", "gitlab", "bitbucket"];
+
+  // Membership still loading (or failed to load): draw no provider as "not
+  // connected" — the connections query is off, so that would be a wrong answer.
+  if (canManage === undefined) {
+    return (
+      <PageShell width="wide">
+        <PageHeader
+          title={t("connections.title")}
+          description={t("connections.intro")}
+          tabs={<SectionTabs set="settings" />}
+        />
+        <Skeleton className="h-40 w-full" />
+      </PageShell>
+    );
+  }
+
+  if (canManage === false) {
+    return (
+      <PageShell width="wide">
+        <PageHeader
+          title={t("connections.title")}
+          description={t("connections.intro")}
+          tabs={<SectionTabs set="settings" />}
+        />
+        <Card>
+          <CardContent>
+            <EmptyState
+              icon={ShieldOffIcon}
+              title={t("connections.forbiddenTitle")}
+              description={t("connections.forbiddenDesc")}
+            />
+          </CardContent>
+        </Card>
+      </PageShell>
+    );
+  }
 
   return (
     <PageShell width="wide">
@@ -106,6 +152,17 @@ export default function ConnectionsPage() {
             />
           ))}
         </div>
+      </div>
+
+      <div>
+        <h2 className="text-sm font-semibold text-[var(--color-muted-foreground)] uppercase tracking-wide mb-3">
+          {t("connections.trackers")}
+        </h2>
+        <JiraConnectionCard
+          current={byProvider("jira")}
+          bitbucket={byProvider("bitbucket")}
+          onUpdated={() => qc.invalidateQueries({ queryKey: ["connections"] })}
+        />
       </div>
 
       {/* LLM provider keys live in /settings/llm — workspace-shared and

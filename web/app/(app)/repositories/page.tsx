@@ -39,7 +39,7 @@ import { Callout } from "@/components/ui/callout";
 
 import { WorkspaceBadge } from "@/components/workspace-badge";
 import { RepoFreshness } from "@/components/repo-freshness";
-import { RepoWebhookControl } from "@/components/repo-webhook";
+import { RepairOutdatedHooks, RepoWebhookControl } from "@/components/repo-webhook";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader,
   DialogTitle, DialogTrigger,
@@ -251,6 +251,7 @@ function ConnectedRepoList({
         </p>
       </CardHeader>
       <CardContent>
+        <RepairOutdatedHooks repos={repoList} />
         <QueryState
           query={query}
           empty={{ icon: FolderGit2Icon, title: t("repositories.emptyList") }}

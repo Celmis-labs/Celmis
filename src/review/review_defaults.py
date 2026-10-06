@@ -70,6 +70,53 @@ INHERITABLE_FIELDS: tuple[str, ...] = (
     "base_instruction",
     "message_started",
     "message_finished_header",
+    # The closing comment: its layout, and whether it lists the bot's commands.
+    "completed_comment",
+    "commands_guide_enabled",
+    # Gates and cadence: when a PR is reviewed without anybody asking.
+    "review_cadence",
+    "auto_pause_pushes",
+    "auto_pause_window_minutes",
+    "ignored_title_keywords",
+    # What a review reads: the whole PR, or only the commits since the last one.
+    "review_scope",
+    # Comment commands: whether `@celmis ...` is answered, whether a free-text
+    # question gets an answer, and who may ask.
+    "commands_enabled",
+    "chat_enabled",
+    "command_permission",
+    # ── Learning (migration f8c3e5a7b923): team memories ──
+    # Tell the reviewers the memories of the team (`review_memories`).
+    "memories_enabled",
+    # A memory a machine proposed (or a stranger asked for) waits for a person.
+    "knowledge_approval",
+    # External identities whose "remember" is active at once (the token owner
+    # always is).
+    "memory_trusted_commenters",
+    # ── Issues backlog (migration b0e5a7c9d145): whether a later change that
+    # removes a merged PR's open issue from the target branch resolves it, and
+    # how the resolution is checked and announced.
+    "issues_auto_resolve",
+    "issues_resolve_llm_verify",
+    "issues_resolve_max_llm",
+    "issues_announce_resolved",
+    # ── Jira task context (migration d2a7c9e1f367). The business-logic agent
+    # also reads the Jira task a PR links to; see src/review/task_context.
+    "task_context_enabled",
+    "task_project_keys",
+    "task_acceptance_field",
+    "task_include_comments",
+    "business_logic_auto",
+    # ── Feedback learning (migration c1f6b8d0e256): whether a finding like
+    # one the team dismissed earlier is hidden (off | shadow | on), and whose
+    # verdicts teach nothing.
+    "learning_suppression",
+    "learning_excluded_reviewers",
+    # ── Requirements check (no migration: the columns came with d2a7c9e1f367):
+    # the acceptance-criteria checklist in the completed comment, and whether
+    # an on-demand check may read a Confluence page of the Jira site.
+    "requirements_check_mode",
+    "task_urls_enabled",
 )
 
 #: The fields 2.3.0 added (migration f1a2b3c4d5e6) — one column of the same
@@ -79,15 +126,54 @@ V23_FIELDS: tuple[str, ...] = INHERITABLE_FIELDS[INHERITABLE_FIELDS.index("enabl
 #: Fields whose value is a list (copied, never shared, between layers).
 _LIST_FIELDS = frozenset({
     "disabled_agents", "ignore_globs", "target_branches", "suppressed_rules",
-    "enabled_agents",
+    "enabled_agents", "ignored_title_keywords", "memory_trusted_commenters",
+    "task_project_keys", "learning_excluded_reviewers",
 })
+
+#: The public name of `_LIST_FIELDS`: settings whose value is a list.
+LIST_FIELDS = _LIST_FIELDS
+
+#: Whole-number settings and the range each may take (inclusive). Refused
+#: outside it on save, never clamped: "0" and "8000" are both plausible typos
+#: for "8". The cadence reads the resolved value as stored.
+INT_FIELDS: dict[str, tuple[int, int]] = {
+    "auto_pause_pushes": (2, 20),
+    "auto_pause_window_minutes": (1, 240),
+    # Model verifications per review or merge recheck; 0 = deterministic checks only.
+    "issues_resolve_max_llm": (0, 50),
+    "task_include_comments": (0, 10),
+}
+
+#: Most entries / longest entry of `ignored_title_keywords`.
+TITLE_KEYWORDS_MAX = 50
+TITLE_KEYWORD_MAX_CHARS = 100
+
+
+def normalise_title_keywords(values: Any) -> list[str]:
+    """A keyword list as it is stored: trimmed, blanks dropped, duplicates
+    dropped case-insensitively (the first spelling wins), at most
+    `TITLE_KEYWORDS_MAX` entries of `TITLE_KEYWORD_MAX_CHARS` characters.
+    Refusing the excess is the router's job; this is the shape only."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values or []:
+        word = str(raw).strip()
+        if not word:
+            continue
+        key = word.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(word)
+    return out
+
 
 #: Free-text fields. Blank is "inherit" at every layer, never "say nothing":
 #: a cleared textarea must not silence a workspace's instruction for one repo
 #: while the page shows that repo as inheriting it.
 TEXT_FIELDS = frozenset({
     "summary_instructions", "base_instruction", "message_started",
-    "message_finished_header",
+    "message_finished_header", "task_acceptance_field",
 })
 
 #: The longest base instruction / message template a layer may store. The
@@ -95,6 +181,7 @@ TEXT_FIELDS = frozenset({
 #: is paid once per agent per PR; 2000 characters is a page of guidance, not a
 #: second system prompt.
 TEXT_SETTING_MAX = 2000
+
 
 #: The closed-vocabulary settings and what each may say, built-in FIRST:
 #:   summary_target               — post the summary as a PR comment, or
@@ -105,12 +192,46 @@ TEXT_SETTING_MAX = 2000
 #:   summary_existing_description — writing into a description the author
 #:                                  already wrote: append below it,
 #:                                  complement it (fill in what it lacks), or
-#:                                  replace it.
+#:                                  replace it;
+#:   completed_comment            — the closing comment: "completed" (Code
+#:                                  Review Completed: findings, scope, guide)
+#:                                  or "classic" (the earlier layout);
+#:   review_cadence               — "automatic": every push is reviewed;
+#:                                  "auto_pause": the same until a PR gets
+#:                                  `auto_pause_pushes` pushes inside
+#:                                  `auto_pause_window_minutes`, then it waits
+#:                                  for `@celmis start-review`; "manual": a PR
+#:                                  is reviewed only when somebody asks;
+#:   review_scope                 — "incremental": a push is reviewed from the
+#:                                  last reviewed commit on (the whole PR when
+#:                                  that cannot be told safely); "full": every
+#:                                  review reads the whole pull request.
+#:   command_permission           — who may command the bot in a PR comment:
+#:                                  "repo_access" (anyone who can comment on a
+#:                                  private repository; on a public one only
+#:                                  its members and the PR's participants),
+#:                                  "participants" (the PR's author and
+#:                                  reviewers) or "anyone".
 SETTING_CHOICES: dict[str, tuple[str, ...]] = {
     "summary_target": ("comment", "description"),
     "summary_on_new_commits": ("replace", "append", "nothing"),
     "summary_existing_description": ("append", "complement", "replace"),
+    "completed_comment": ("completed", "classic"),
+    "review_cadence": ("automatic", "auto_pause", "manual"),
+    "review_scope": ("incremental", "full"),
+    "command_permission": ("repo_access", "participants", "anyone"),
+    "business_logic_auto": ("off", "when_task_found"),
+    # shadow first: it records what it WOULD hide and hides nothing.
+    "learning_suppression": ("shadow", "off", "on"),
+    "requirements_check_mode": ("off", "findings", "checklist"),
 }
+
+#: The one shape a Jira custom-field id may have (`task_acceptance_field`).
+TASK_FIELD_PATTERN = r"^customfield_\d{1,9}$"
+
+#: A Jira project key as Jira writes it: an upper-case letter, then up to
+#: nine more upper-case letters or digits (the same alphabet the key finder reads).
+PROJECT_KEY_PATTERN = r"^[A-Z][A-Z0-9]{1,9}$"
 
 #: Placeholders a message template may use: `{commit}` the short head sha,
 #: `{agents}` the agents taking part (comma-separated), `{files}` how many
@@ -178,6 +299,32 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "base_instruction": None,
     "message_started": None,
     "message_finished_header": None,
+    "completed_comment": "completed",
+    "commands_guide_enabled": True,
+    "review_cadence": "automatic",
+    "auto_pause_pushes": 3,
+    "auto_pause_window_minutes": 15,
+    "ignored_title_keywords": [],
+    "review_scope": "incremental",
+    "commands_enabled": True,
+    "chat_enabled": True,
+    "command_permission": "repo_access",
+    "memories_enabled": True,
+    "knowledge_approval": True,
+    "memory_trusted_commenters": [],
+    "issues_auto_resolve": True,
+    "issues_resolve_llm_verify": True,
+    "issues_resolve_max_llm": 8,
+    "issues_announce_resolved": True,
+    "task_context_enabled": True,
+    "task_project_keys": [],
+    "task_acceptance_field": None,
+    "task_include_comments": 0,
+    "business_logic_auto": "off",
+    "learning_suppression": "shadow",
+    "learning_excluded_reviewers": [],
+    "requirements_check_mode": "checklist",
+    "task_urls_enabled": False,
 }
 
 
@@ -433,19 +580,22 @@ def target_branches_for_repo(provider: str, full_name: str) -> list[str]:
     return [str(v) for v in value] if isinstance(value, list) else []
 
 
-def _setting_for_repo(provider: str, full_name: str, name: str) -> Any:
-    """One inheritable setting for the repository a delivery names, resolved
-    repo policy > workspace default; None when neither says anything (or the
-    repository is unbound, or the database unreadable)."""
+def settings_for_repo(provider: str, full_name: str, names: tuple[str, ...] | list[str]) -> dict[str, Any]:
+    """Inheritable settings for the repository a delivery names, resolved
+    repo policy > workspace default, from ONE database session. A name neither
+    layer sets maps to None (so does everything when the repository is unbound
+    or the database unreadable) — the caller applies the built-in.
+    Blocking; never raises."""
+    out: dict[str, Any] = {name: None for name in names}
     try:
         from src.api.auto_review import get_auto_review_store
 
         cfg = get_auto_review_store().config_for_repo(provider, full_name)
         if cfg is None:
-            return None
+            return out
         url = _sync_url()
         if not url:
-            return None
+            return out
         from sqlalchemy import create_engine
         from sqlalchemy.orm import Session
 
@@ -462,17 +612,100 @@ def _setting_for_repo(provider: str, full_name: str, name: str) -> Any:
         try:
             with Session(engine) as s:
                 row = s.get(RepoReviewPolicy, slug)
-                value = getattr(row, name, None) if row is not None else None
-                if value is not None:
-                    return value
                 owner = row.workspace_id if row is not None else cfg.workspace_id
                 ws = s.get(WorkspaceReviewDefaults, owner)
-                value = getattr(ws, name, None) if ws is not None else None
-                if value is not None:
-                    return value
+                for name in names:
+                    value = getattr(row, name, None) if row is not None else None
+                    if value is None and ws is not None:
+                        value = getattr(ws, name, None)
+                    out[name] = list(value) if isinstance(value, list) else value
         finally:
             engine.dispose()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("%s_lookup_failed provider=%s repo=%s err=%s",
-                       name, provider, full_name, exc)
-    return None
+        logger.warning("settings_lookup_failed provider=%s repo=%s names=%s err=%s",
+                       provider, full_name, ",".join(names), exc)
+    return out
+
+
+def _setting_for_repo(provider: str, full_name: str, name: str) -> Any:
+    """One inheritable setting for the repository a delivery names, resolved
+    repo policy > workspace default; None when neither says anything (or the
+    repository is unbound, or the database unreadable)."""
+    return settings_for_repo(provider, full_name, (name,))[name]
+
+
+#: What the webhook and the poller need to decide, before any review exists,
+#: whether a delivery is reviewed: the title gate and the cadence.
+GATE_SETTINGS: tuple[str, ...] = (
+    "review_cadence", "auto_pause_pushes", "auto_pause_window_minutes",
+    "ignored_title_keywords", "status_feedback",
+)
+
+
+def gate_settings_for_repo(provider: str, full_name: str) -> dict[str, Any]:
+    """`GATE_SETTINGS` as in force for the repository (repo > workspace >
+    built-in), one database session. Never raises; unreadable is the built-in
+    (automatic, no keywords) — a review is never lost to a settings error."""
+    raw = settings_for_repo(provider, full_name, GATE_SETTINGS)
+    return {name: builtin_default(name) if raw[name] is None else raw[name]
+            for name in GATE_SETTINGS}
+
+
+#: What the comment receiver needs before it has a review to ask: is `@celmis`
+#: answered on this repository, and for whom.
+COMMAND_SETTINGS: tuple[str, ...] = (
+    "commands_enabled", "chat_enabled", "command_permission",
+)
+
+
+def command_settings_for_repo(provider: str, full_name: str) -> dict[str, Any]:
+    """`COMMAND_SETTINGS` as in force for the repository (repo > workspace >
+    built-in), one database session. Never raises; unreadable is the built-in
+    (commands on, anyone with repository access) — a command is never lost to
+    a settings error, and the permission check still runs."""
+    raw = settings_for_repo(provider, full_name, COMMAND_SETTINGS)
+    return {name: builtin_default(name) if raw[name] is None else raw[name]
+            for name in COMMAND_SETTINGS}
+
+
+def target_branches_for_workspace_repos(
+    workspace_id: str, repos: list[tuple[str, str]],
+) -> dict[str, tuple[list[str], Source]]:
+    """Effective `target_branches` and its layer for each (slug, full_name) of
+    one workspace — for lists that must say which branches a repository is
+    reviewed for. One query per layer, through the same `resolve` the
+    orchestrator calls (repo policy > workspace defaults > install), so the
+    list cannot drift from what a review does. Blocking; never raises — an
+    unreadable database yields {} (the caller shows nothing rather than a
+    guess)."""
+    url = _sync_url()
+    if not url or not repos:
+        return {}
+    try:
+        from sqlalchemy import create_engine, select
+        from sqlalchemy.orm import Session
+
+        from src.db.models import RepoReviewPolicy, WorkspaceReviewDefaults
+
+        engine = create_engine(url, pool_pre_ping=True)
+        try:
+            with Session(engine) as s:
+                ws = defaults_from_row(s.get(WorkspaceReviewDefaults, workspace_id))
+                policies = {
+                    row.repo_slug: row for row in s.scalars(
+                        select(RepoReviewPolicy).where(
+                            RepoReviewPolicy.workspace_id == workspace_id))
+                }
+        finally:
+            engine.dispose()
+        install = install_defaults()
+        out: dict[str, tuple[list[str], Source]] = {}
+        for slug, full_name in repos:
+            policy = policies.get(slug) or policies.get(full_name)
+            values, sources = resolve(policy, ws, install)
+            out[slug] = ([str(v) for v in values["target_branches"] or []],
+                         sources["target_branches"])
+        return out
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("target_branches_list_failed ws=%s err=%s", workspace_id, exc)
+        return {}

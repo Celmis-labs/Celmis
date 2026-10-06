@@ -588,6 +588,7 @@ async def list_issues(
         status=status_csv, severity=severity or None, category=None, repo=repo,
         exclude_repo=hidden or None,
         pr=_number(pr) if pr not in (None, "") else None,
+        scope=None, resolution=None, outcome=None, include_duplicates=False,
         q=q or None, sort="severity", limit=_limit(limit, 15, MAX_LIST),
         offset=0, session=session, _user=user, ws=actor.workspace_id))
     return {
@@ -633,11 +634,27 @@ async def apply_issue_status(
             row.resolution_source = None
             row.closed_at = None
             row.fixed_in_sha = None
+            # What an automatic resolution recorded goes with it.
+            row.fixed_by_pr_number = None
+            row.fixed_by_pr_url = None
+            row.resolution_note = None
+            row.last_verified_blob = None
         else:
             row.resolution_source = "manual"
             row.closed_at = datetime.now(UTC)
             if status != "fixed":
                 row.fixed_in_sha = None
+        if status != "open":
+            # Its repeats were judged through it; with it closed by a person
+            # they stand on their own (see `release_orphan_dups`).
+            from sqlalchemy import update
+
+            await session.execute(update(ReviewIssue).where(
+                ReviewIssue.workspace_id == ws,
+                ReviewIssue.dup_of == row.id,
+                ReviewIssue.status == "open",
+                ReviewIssue.merged_at.is_not(None),
+            ).values(dup_of=None).execution_options(synchronize_session=False))
         await session.commit()
         await session.refresh(row)
         logger.info("review_issue_status id=%s status=%s by=%s",

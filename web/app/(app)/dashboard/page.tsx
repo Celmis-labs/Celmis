@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { ArrowRightIcon, CheckIcon, GitPullRequestIcon, FolderGit2Icon, HelpCircleIcon, KeyIcon, RocketIcon, XIcon } from "lucide-react";
-import { api, type ConnectionStatus, type RepoOut, type ReviewRunOut } from "@/lib/api";
+import { api, isGitConnection, type ConnectionStatus, type RepoOut, type ReviewRunOut } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { formatDateTime } from "@/lib/format";
@@ -91,7 +91,7 @@ export default function DashboardPage() {
   useEffect(() => setDismissed(localStorage.getItem("celmis:tips") === "off"), []);
   const dismissTips = () => { setDismissed(true); localStorage.setItem("celmis:tips", "off"); };
 
-  const connectedCount = conns.data?.filter((c) => c.connected).length ?? 0;
+  const connectedCount = conns.data?.filter(isGitConnection).length ?? 0;
   const repoCount = repos.data?.length ?? 0;
   const autoRepoCount =
     repos.data?.filter((r) => r.auto_review_enabled).length ?? 0;
@@ -199,7 +199,7 @@ export default function DashboardPage() {
             <QueryState query={conns} skeleton={1}>
               {(data) => (
                 <CardTitle className="text-3xl">
-                  <CountUp value={data.filter((c) => c.connected).length} />
+                  <CountUp value={data.filter(isGitConnection).length} />
                 </CardTitle>
               )}
             </QueryState>

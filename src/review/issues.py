@@ -49,6 +49,22 @@ Closed unmerged — `record_pr_state()`:
     close (it was already running) files its new issues as resolved too, so a
     closed PR never carries an open issue nobody will ever resolve.
 
+Backlog — what a MERGE does (`record_pr_state()`, `issue_resolver`):
+    A merge freezes each issue's fate in `close_outcome` (implemented: it was
+    fixed on the PR; unimplemented: the PR merged with it open; dismissed;
+    abandoned: the PR closed unmerged) and stamps `merged_at` / `base_ref`.
+    An open issue with `merged_at` is BACKLOG: `issue_resolver` rechecks it
+    against the target branch's head, and only there — a fix that exists in
+    an unmerged PR never counts. A fix found on the branch sets status
+    `fixed` with resolution_source auto_at_merge (the PR itself, checked at
+    merge) or auto_head_check (a later change; `fixed_by_pr_*` names it); a
+    revert that brings the line back reopens it. A person's decision
+    (manual, feedback) is never overruled. The same defect on two PRs stays
+    two rows (the per-PR key above) but the later one points at the first
+    through `dup_of`, and the list shows it once.
+    `implementation_stats()` is the one place the implementation rate is
+    computed; `outcome_hooks` tells other features when an outcome changes.
+
 Category — `categorize()`: see the docstring; derived from the agent and
 keywords in rule_id/title, because rule ids are free text from the model.
 
@@ -70,6 +86,14 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 ISSUE_STATUSES = ("open", "fixed", "dismissed", "resolved")
+#: resolution_source values that mean "the code decided" (a person's say-so,
+#: `manual` and `feedback`, is never in this set and is never overruled).
+AUTO_RESOLUTION_SOURCES = ("auto_next_commit", "auto_at_merge", "auto_head_check")
+RESOLUTION_SOURCES = (
+    *AUTO_RESOLUTION_SOURCES, "manual", "feedback", "pr_closed",
+)
+#: What a merge or a close freezes in `review_issues.close_outcome`.
+CLOSE_OUTCOMES = ("implemented", "unimplemented", "dismissed", "abandoned")
 ISSUE_CATEGORIES = (
     "bug", "security", "performance", "maintainability", "style", "other",
 )
@@ -304,6 +328,141 @@ def near_lines(raw_diff: str | None, path: str, line: int | None,
         t for n in range(line - NEAR_WINDOW, line + NEAR_WINDOW + 1)
         if (t := _norm(side.get(n, ("", False))[0]))
     )
+
+
+# ─── The backlog (pure) ────────────────────────────────────────────
+
+SNIPPET_RADIUS = 3
+SNIPPET_MAX_CHARS = 1200
+
+
+def context_at(raw_diff: str | None, path: str, line: int | None,
+               *, radius: int = SNIPPET_RADIUS) -> str | None:
+    """The flagged line and `radius` lines each side, as the reviewed head has
+    them (read from the diff's new side, so only what the diff shows).
+
+    Kept on the issue for the model that later judges whether the code on the
+    branch still has the defect: by then the diff is long gone.
+    """
+    if not path or not isinstance(line, int):
+        return None
+    side = _new_side_lines(raw_diff).get(path, {})
+    if line not in side:
+        return None
+    lines = [side[n][0].rstrip() for n in range(line - radius, line + radius + 1)
+             if n in side]
+    text = "\n".join(lines).strip("\n")
+    return text[:SNIPPET_MAX_CHARS] or None
+
+
+def outcome_for(status: str, source: str | None) -> str | None:
+    """The `close_outcome` a PR's issue gets when its PR merges (or closes).
+
+    fixed on the PR → implemented; open → unimplemented; dismissed (by a
+    person or by feedback) → dismissed; resolved by the close → abandoned.
+    Anything else (a manual "resolved" of unknown meaning) has none, and is
+    left out of the implementation rate rather than guessed into it.
+    """
+    if status == "fixed":
+        return "implemented"
+    if status == "open":
+        return "unimplemented"
+    if status == "dismissed":
+        return "dismissed"
+    if status == "resolved" and source == "pr_closed":
+        return "abandoned"
+    return None
+
+
+def resolution_kind(status: str, source: str | None) -> str | None:
+    """auto | manual | feedback | pr_closed | None — how an issue was closed,
+    in the words the list filters by. The status vocabulary is unchanged: a
+    "resolved_auto" is status `fixed` with an `auto_*` source."""
+    if status == "open" or not source:
+        return None
+    if source in AUTO_RESOLUTION_SOURCES:
+        return "auto"
+    return source if source in ("manual", "feedback", "pr_closed") else None
+
+
+def _field(row: Any, name: str) -> Any:
+    return row.get(name) if isinstance(row, dict) else getattr(row, name, None)
+
+
+def implementation_stats(rows: Iterable[Any]) -> dict[str, Any]:
+    """How many suggestions were taken: {implemented, unimplemented,
+    dismissed, abandoned, implementation_rate}.
+
+    THE implementation rate (the learning store and the productivity metrics
+    call this instead of keeping a tally of their own). It counts only
+    `close_outcome`, frozen when the PR merged or closed: an issue of a PR
+    still open has none and is not in it, and a later resolution of a backlog
+    issue does not move it (that is `resolved_later`, counted elsewhere).
+    `rows` are ReviewIssue rows or dicts with a `close_outcome` key.
+    dismissed and abandoned are reported but are not in the rate: a finding
+    a person called noise, or one on a PR that never shipped, says nothing
+    about whether the team takes suggestions. The rate is None when nothing
+    has been decided yet.
+    """
+    counts = {k: 0 for k in CLOSE_OUTCOMES}
+    for r in rows:
+        o = _field(r, "close_outcome")
+        if o in counts:
+            counts[o] += 1
+    decided = counts["implemented"] + counts["unimplemented"]
+    return {**counts,
+            "implementation_rate": (counts["implemented"] / decided) if decided else None}
+
+
+@dataclass
+class Resolution:
+    """What a head check decided about one backlog issue (see issue_resolver).
+
+    kind: fixed | reopen | checked. `checked` writes only the bookkeeping
+    (`last_checked_*`), so an unchanged file is not read again.
+    """
+
+    issue_id: str
+    kind: str
+    source: str | None = None
+    sha: str | None = None
+    blob: str | None = None
+    verified_blob: str | None = None
+    fixed_in_sha: str | None = None
+    fixed_by_pr_number: int | None = None
+    fixed_by_pr_url: str | None = None
+    note: str | None = None
+    #: A merge-time resolution of the PR's OWN issue is "implemented".
+    implemented: bool = False
+
+
+def plan_dups(
+    create: list[FoundIssue], backlog: list[ExistingIssue],
+) -> dict[str, str]:
+    """{fingerprint of a new finding: id of the backlog issue it repeats}.
+
+    `backlog` is the repository's open merged-PR issues from OTHER pull
+    requests. The same fingerprint is the same defect (file, rule and
+    normalised title); a re-worded title is matched by the same anchor rule a
+    push on one PR uses (`_reworded`). A finding repeats at most one issue, and
+    one issue is claimed once per run by the re-worded rule — two different
+    findings of this PR never both point at it that way.
+    """
+    out: dict[str, str] = {}
+    by_fp: dict[str, ExistingIssue] = {}
+    for e in backlog:
+        by_fp.setdefault(e.fingerprint, e)
+    exact = {f.fingerprint for f in create if f.fingerprint in by_fp}
+    claimed: set[str] = set()
+    for f in create:
+        hit = by_fp.get(f.fingerprint)
+        if hit is None:
+            hit = _reworded(f, backlog, claimed, exact)
+            if hit is not None:
+                claimed.add(hit.id)
+        if hit is not None:
+            out[f.fingerprint] = hit.id
+    return out
 
 
 # ─── Planning (pure) ───────────────────────────────────────────────
@@ -623,6 +782,217 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
+#: How many backlog rows a new finding is compared with, at most. A defect
+#: is a defect on the same repository; a repository with more open backlog
+#: issues than this is one whose list needs a person, not a longer scan.
+BACKLOG_DEDUP_SCAN = 2000
+
+
+def _outcome_event(r, kind: str, workspace_id: str):
+    """The `outcome_hooks` event for issue row `r` changing fate to `kind`."""
+    from src.review.outcome_hooks import IssueOutcome
+
+    return IssueOutcome(
+        kind=kind, workspace_id=workspace_id, issue_id=r.id,
+        repo_slug=r.repo_slug, pr_provider=r.pr_provider, pr_repo=r.pr_repo,
+        pr_number=int(r.pr_number), fingerprint=r.fingerprint,
+        file_path=r.file_path or "", rule_id=r.rule_id, agent=r.agent,
+        category=r.category, severity=r.severity,
+        source=r.resolution_source,
+        fixed_by_pr_number=r.fixed_by_pr_number, fixed_in_sha=r.fixed_in_sha,
+    )
+
+
+def _emit(events) -> None:
+    """Tell the outcome listeners, after the commit. Never raises."""
+    if not events:
+        return
+    try:
+        from src.review.outcome_hooks import emit_outcome
+
+        for e in events:
+            emit_outcome(e)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("issue_outcome_emit_failed err_type=%s", type(exc).__name__)
+
+
+def apply_resolutions(s, resolutions, *, workspace_id: str, now: datetime | None = None) -> list:
+    """Write what head checks decided, inside the caller's transaction.
+
+    Returns the `IssueOutcome` events the caller emits AFTER it commits.
+    Every row is re-read here and re-judged against its CURRENT state, because
+    the check ran on a copy: a person who dismissed the issue meanwhile, or a
+    second pass that already resolved it, wins. In particular
+      * `fixed` only lands on an OPEN issue of a merged PR;
+      * `reopen` only on an issue an AUTO source fixed (never manual,
+        feedback or pr_closed);
+      * `checked` only records what was looked at.
+    Fixing or reopening a canonical issue does the same to its duplicates on
+    MERGED pull requests (a duplicate on an open PR is that PR's own live
+    defect, and keeps its status).
+    """
+    from sqlalchemy import select
+
+    from src.db.models import ReviewIssue
+
+    now = now or _now()
+    events: list = []
+    for res in resolutions:
+        r = s.get(ReviewIssue, res.issue_id)
+        if r is None or r.workspace_id != workspace_id:
+            continue
+        if res.sha:
+            r.last_checked_sha = res.sha
+        if res.blob:
+            r.last_checked_blob = res.blob
+        if res.verified_blob:
+            r.last_verified_blob = res.verified_blob
+        r.last_checked_at = now
+        if res.kind == "fixed":
+            if r.status != "open" or r.merged_at is None:
+                continue
+            _close_as_fixed(r, res, now)
+            events.append(_outcome_event(
+                r, "implemented" if res.implemented else "resolved_later", workspace_id))
+            for d in s.execute(select(ReviewIssue).where(
+                ReviewIssue.workspace_id == workspace_id,
+                ReviewIssue.dup_of == r.id,
+                ReviewIssue.status == "open",
+                ReviewIssue.merged_at.is_not(None),
+            )).scalars():
+                if _other_branch(d, r):
+                    continue
+                _close_as_fixed(d, res, now, implemented=False)
+                events.append(_outcome_event(d, "resolved_later", workspace_id))
+        elif res.kind == "reopen":
+            if r.status != "fixed" or r.resolution_source not in AUTO_RESOLUTION_SOURCES:
+                continue
+            _reopen(r)
+            events.append(_outcome_event(r, "reopened", workspace_id))
+            for d in s.execute(select(ReviewIssue).where(
+                ReviewIssue.workspace_id == workspace_id,
+                ReviewIssue.dup_of == r.id,
+                ReviewIssue.status == "fixed",
+                ReviewIssue.resolution_source == "auto_head_check",
+            )).scalars():
+                if _other_branch(d, r):
+                    continue
+                _reopen(d)
+                events.append(_outcome_event(d, "reopened", workspace_id))
+    return events
+
+
+def _other_branch(d, canonical) -> bool:
+    """Is this repeat known to sit on a different target branch than its
+    canonical issue? An unknown branch on either side is not a difference."""
+    return bool(d.base_ref and canonical.base_ref and d.base_ref != canonical.base_ref)
+
+
+def release_orphan_dups(s, workspace_id: str | None, canonical_ids: Iterable[str] | None = None) -> int:
+    """Let a repeat stand on its own once the issue it points at is not open.
+
+    A repeat (`dup_of` set) hides behind its canonical issue and is judged
+    through it. When the canonical is dismissed, resolved by a person, or was
+    fixed before the repeat's PR merged, nothing would ever judge the repeat:
+    the lists, the sweep and the recheck all skip repeats. Such a MERGED, open
+    repeat gets its link cleared and joins the backlog as an issue of its own.
+    A repeat the cascade already closed keeps its link ("also seen in").
+
+    `canonical_ids` narrows the scan to repeats of those issues; a None
+    `workspace_id` scans every workspace (the sweep). The caller commits. Returns how many were released.
+    """
+    from sqlalchemy import select, update
+
+    from src.db.models import ReviewIssue
+
+    where = [
+        ReviewIssue.dup_of.is_not(None),
+        ReviewIssue.status == "open",
+        ReviewIssue.merged_at.is_not(None),
+    ]
+    canon_where = [ReviewIssue.status != "open"]
+    if workspace_id is not None:
+        where.append(ReviewIssue.workspace_id == workspace_id)
+        canon_where.append(ReviewIssue.workspace_id == workspace_id)
+    if canonical_ids is not None:
+        ids = list(canonical_ids)
+        if not ids:
+            return 0
+        where.append(ReviewIssue.dup_of.in_(ids))
+    where.append(ReviewIssue.dup_of.in_(select(ReviewIssue.id).where(*canon_where)))
+    res = s.execute(update(ReviewIssue).where(*where).values(dup_of=None)
+                    .execution_options(synchronize_session=False))
+    return int(res.rowcount or 0)
+
+
+def release_other_branch_dups(s, workspace_id: str, of_pr) -> int:
+    """A repeat that merged into a different branch than the canonical issue it
+    points at stops pointing at it: that branch's head is what judges it. The
+    repeat was linked while its PR was open, against the branch the PR then
+    targeted; a retarget (or the merge naming another branch) can move it.
+    `of_pr` is the where-clause tuple selecting the merged PR's issues. The
+    caller commits."""
+    from sqlalchemy import select
+
+    from src.db.models import ReviewIssue
+
+    n = 0
+    for d in s.execute(select(ReviewIssue).where(
+        *of_pr, ReviewIssue.dup_of.is_not(None),
+    )).scalars():
+        canonical = s.get(ReviewIssue, d.dup_of)
+        if canonical is not None and canonical.workspace_id == workspace_id \
+                and _other_branch(d, canonical):
+            d.dup_of = None
+            n += 1
+    return n
+
+
+def _close_as_fixed(r, res, now: datetime, *, implemented: bool | None = None) -> None:
+    r.status = "fixed"
+    r.resolution_source = res.source or "auto_head_check"
+    r.fixed_in_sha = res.fixed_in_sha or r.fixed_in_sha
+    r.fixed_by_pr_number = res.fixed_by_pr_number
+    r.fixed_by_pr_url = res.fixed_by_pr_url
+    r.resolution_note = (res.note or "")[:500] or None
+    r.closed_at = now
+    if (res.implemented if implemented is None else implemented):
+        r.close_outcome = "implemented"
+
+
+def _reopen(r) -> None:
+    r.status = "open"
+    r.resolution_source = None
+    r.fixed_in_sha = None
+    r.fixed_by_pr_number = None
+    r.fixed_by_pr_url = None
+    r.resolution_note = None
+    r.last_verified_blob = None
+    r.closed_at = None
+
+
+def pr_base_ref(
+    *, workspace_id: str, provider: str, repo: str, number: int, engine=None,
+) -> str | None:
+    """The branch a PR targets, as the ledger knows it. Never raises."""
+    try:
+        from sqlalchemy import select
+        from sqlalchemy.orm import Session
+
+        from src.db.models import ReviewPullRequest
+
+        with Session(engine or _engine()) as s:
+            return s.execute(select(ReviewPullRequest.base_ref).where(
+                ReviewPullRequest.workspace_id == workspace_id,
+                ReviewPullRequest.provider == provider,
+                ReviewPullRequest.repo == repo,
+                ReviewPullRequest.number == int(number),
+            )).scalar_one_or_none() or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("review_pr_base_ref_failed repo=%s pr=%s err=%s", repo, number, exc)
+        return None
+
+
 def record_review_run(
     result: Any,
     *,
@@ -643,7 +1013,8 @@ def record_review_run(
         if batch is None or pr is None or not getattr(pr, "number", None):
             return None
         _record(batch, pr, run_id=run_id, workspace_id=workspace_id or "default",
-                status=status, engine=engine or _engine())
+                status=status, engine=engine or _engine(),
+                posted=bool(getattr(result, "posted", False)))
         return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("review_issues_sync_failed run=%s err=%s", run_id, exc)
@@ -672,7 +1043,8 @@ def _stage_status(batch, fallback: str) -> str:
         return fallback
 
 
-def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -> None:
+def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine,
+            posted: bool = False) -> None:
     from sqlalchemy import select
     from sqlalchemy.orm import Session
 
@@ -703,10 +1075,35 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
         if pr_state in ("merged", "closed") and row.state == "open":
             row.state = pr_state
             row.closed_at = row.closed_at or now
+        if getattr(batch, "scope_skip", None):
+            # Ended by the review scope before reading anything (no new
+            # commits, merge commits only): not a review of the PR. It stays
+            # reviewed as it was — no new count, status or run on the row.
+            s.commit()
+            return
         row.reviews_count = int(row.reviews_count or 0) + 1
         row.last_review_status = status
         row.last_run_id = run_id
         row.updated_at = now
+        # The Jira tasks this run read. Only a run that read them (ok) or
+        # that found the text naming none (no_key: the pull request's text
+        # changed) replaces the old ones; a Jira failure says nothing about
+        # which tasks the pull request is about, so it keeps what was stored.
+        task = getattr(batch, "task_context", None)
+        task_status = getattr(task, "status", "") if task is not None else ""
+        if task_status in ("ok", "no_key"):
+            row.task_refs = task.task_refs() or None
+        # The requirements check of this run replaces the stored one.
+        checked = getattr(batch, "requirements", None)
+        if checked is not None:
+            row.requirements_check = [r.to_dict() for r in checked] or None
+        elif task_status == "no_key" or (task_status == "ok" and reviewed):
+            # A review read the task but checked nothing (the mode went off,
+            # the agent failed, the task lost its criteria, the PR names
+            # another task): the stored rows belong to a run that read
+            # something else. A Jira failure or a run that reviewed nothing
+            # says nothing, so it keeps them.
+            row.requirements_check = None
 
         if not reviewed:
             # A skipped or failed run read nothing, so it moves neither the
@@ -714,7 +1111,12 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
             s.commit()
             return
 
-        raw_diff = getattr(pr, "raw_diff", "") or ""
+        # The WHOLE PR's diff also for an incremental review: the file hashes
+        # and anchors must describe the PR, or every file the increment did
+        # not touch would look unchanged-and-unseen on the next full check.
+        raw_diff = (getattr(pr, "whole_diff", None)
+                    if getattr(pr, "scope", None) is not None
+                    else getattr(pr, "raw_diff", "")) or ""
         new_hashes = file_section_hashes(raw_diff)
         head_sha = getattr(pr, "head_sha", None) or None
         # The ROW's state, not the run's snapshot: a close webhook that landed
@@ -757,7 +1159,36 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
             new_anchors=anchors_present(raw_diff) if raw_diff else None,
         )
 
+        # The same defect already on the backlog from another merged PR: the
+        # new row stays this PR's own, and points at the first one.
+        dup_of: dict[str, str] = {}
+        canonical_rows: dict[str, ReviewIssue] = {}
+        if plan.create:
+            same_branch = [ReviewIssue.base_ref == row.base_ref] if row.base_ref else []
+            backlog_rows = s.execute(select(ReviewIssue).where(
+                ReviewIssue.workspace_id == workspace_id,
+                ReviewIssue.repo_slug == repo_slug,
+                ReviewIssue.pr_number != number,
+                ReviewIssue.status == "open",
+                ReviewIssue.merged_at.is_not(None),
+                ReviewIssue.dup_of.is_(None),
+                # A defect on release-1.x is not the one on main: each branch
+                # is judged against its own head.
+                *same_branch,
+            ).limit(BACKLOG_DEDUP_SCAN)).scalars().all()
+            canonical_rows = {r.id: r for r in backlog_rows}
+            dup_of = plan_dups(plan.create, [ExistingIssue(
+                id=r.id, fingerprint=r.fingerprint, file_path=r.file_path,
+                agent=r.agent, status=r.status,
+                resolution_source=r.resolution_source, rule_id=r.rule_id,
+                anchor=r.anchor, category=r.category, title=r.title or "",
+            ) for r in backlog_rows])
+        merged_now = row.state == "merged"
+
         for f in plan.create:
+            canonical = dup_of.get(f.fingerprint)
+            if canonical and canonical in canonical_rows:
+                canonical_rows[canonical].last_seen_at = now
             s.add(ReviewIssue(
                 workspace_id=workspace_id, repo_slug=repo_slug,
                 fingerprint=f.fingerprint, file_path=f.file_path, line=f.line,
@@ -775,6 +1206,15 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
                 first_run_id=run_id, last_run_id=run_id,
                 first_seen_sha=head_sha, last_seen_sha=head_sha,
                 occurrences=1, first_seen_at=now, last_seen_at=now,
+                snippet=context_at(raw_diff, f.file_path, f.line),
+                dup_of=canonical,
+                # A review that finishes after the merge files its issues
+                # already frozen, like the ones the merge found.
+                base_ref=row.base_ref if merged_now else None,
+                merged_at=(row.closed_at or now) if merged_now else None,
+                close_outcome=(
+                    "unimplemented" if merged_now
+                    else "abandoned" if pr_closed_unmerged else None),
             ))
         for issue_id, f, reopen, reworded in plan.refound:
             r = by_id[issue_id]
@@ -796,26 +1236,73 @@ def _record(batch, pr, *, run_id: str, workspace_id: str, status: str, engine) -
             r.last_seen_sha = head_sha
             r.last_seen_at = now
             r.occurrences = int(r.occurrences or 0) + 1
+            r.snippet = context_at(raw_diff, f.file_path, f.line) or r.snippet
             if reopen:
                 r.status = "open"
                 r.resolution_source = None
                 r.fixed_in_sha = None
                 r.closed_at = None
+        fate_changes: list[tuple[ReviewIssue, str]] = []
         for issue_id in plan.fixed:
             r = by_id[issue_id]
             r.status = "fixed"
             r.resolution_source = "auto_next_commit"
             r.fixed_in_sha = head_sha
             r.closed_at = now
+            if merged_now and r.close_outcome in (None, "unimplemented"):
+                # Fixed on the PR, reviewed only after it merged.
+                r.close_outcome = "implemented"
+                fate_changes.append((r, "implemented"))
+
+        # What an earlier review stage found out about the BACKLOG: persisted
+        # here, with the rest of the run, so a dry run writes nothing.
+        earlier = getattr(batch, "earlier_issues", None)
+        outcomes: list = []
+        if earlier is not None and getattr(earlier, "resolutions", None):
+            outcomes = apply_resolutions(
+                s, earlier.resolutions, workspace_id=workspace_id, now=now)
 
         row.head_sha = head_sha
         row.file_hashes = new_hashes or None
+        # The baseline of the next incremental review and of the same-commit
+        # guard: moved only by a COMPLETE review whose comments were posted.
+        # A partial run, a dry run or a run whose posting failed leaves it
+        # where it was, so the next review covers their gap.
+        if status == "complete" and posted and head_sha:
+            row.last_reviewed_sha = head_sha
+            row.last_reviewed_at = now
+        pending = [_outcome_event(r, kind, workspace_id) for r, kind in fate_changes]
         s.commit()
+        _emit([*pending, *outcomes])
         logger.info(
             "review_issues_synced run=%s pr=%s#%d new=%d refound=%d fixed=%d",
             run_id, repo, number, len(plan.create), len(plan.refound),
             len(plan.fixed),
         )
+
+
+def pr_review_count(
+    *, workspace_id: str, provider: str, repo: str, number: int, engine=None,
+) -> int:
+    """How many reviews this PR has had; 0 for one never seen.
+
+    Decides between the greeting and the "new changes" line of the started
+    comment. Read-only, creates no row. Raises on a database error; the
+    caller decides what that means.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from src.db.models import ReviewPullRequest
+
+    with Session(engine or _engine()) as s:
+        count = s.execute(select(ReviewPullRequest.reviews_count).where(
+            ReviewPullRequest.workspace_id == workspace_id,
+            ReviewPullRequest.provider == provider,
+            ReviewPullRequest.repo == repo,
+            ReviewPullRequest.number == number,
+        )).scalar_one_or_none()
+    return int(count or 0)
 
 
 def record_failed_review(
@@ -866,14 +1353,19 @@ def record_unreviewed_run(
 def record_pr_state(
     *, workspace_id: str, provider: str, repo: str, number: int, state: str,
     title: str | None = None, author: str | None = None, url: str | None = None,
-    head_sha: str | None = None, engine=None,
+    head_sha: str | None = None, base_ref: str | None = None, engine=None,
 ) -> bool:
     """A provider said the PR was merged or closed (or reopened). Never raises.
 
     Closing UNMERGED resolves the PR's open issues (resolution_source
     pr_closed): the code they were raised on will never land. Reopening puts
     those back to open. A merge leaves them open on purpose — "found by
-    Celmis, merged anyway" is exactly the number the analytics page reports.
+    Celmis, merged anyway" is exactly the number the analytics page reports —
+    but it freezes each issue's fate (`close_outcome`) and stamps `merged_at`
+    and `base_ref`, which is what turns an open one into a backlog issue.
+    `base_ref` is the webhook's word for the target branch. At a merge it wins
+    over the one the reviews stored (the PR may have been retargeted since the
+    last review); otherwise the PR row's own wins when it has one.
 
     The PR row is created when missing, with reviews_count=0: a review that
     is still running when the close lands must find the closed state. The
@@ -899,20 +1391,42 @@ def record_pr_state(
                 row.author = author
             if url:
                 row.url = url
+            if base_ref and (state == "merged" or not row.base_ref):
+                # A merge names the branch the PR really landed on. The one the
+                # last review stored can be stale: a stacked PR is retargeted
+                # to main when its parent merges, and its issues belong there.
+                row.base_ref = base_ref
             row.updated_at = now
+            events: list = []
             of_pr = (
                 ReviewIssue.workspace_id == workspace_id,
                 ReviewIssue.pr_provider == provider,
                 ReviewIssue.pr_repo == repo,
                 ReviewIssue.pr_number == int(number),
             )
-            if state == "closed":
+            if state == "merged":
+                for issue in s.execute(select(ReviewIssue).where(*of_pr)).scalars():
+                    issue.base_ref = row.base_ref or issue.base_ref
+                    issue.merged_at = issue.merged_at or now
+                    if issue.close_outcome is None:
+                        outcome = outcome_for(issue.status, issue.resolution_source)
+                        issue.close_outcome = outcome
+                        if outcome:
+                            events.append(_outcome_event(issue, outcome, workspace_id))
+                # A repeat that merges after its canonical stopped being open
+                # has nobody left to be judged through.
+                s.flush()
+                release_orphan_dups(s, workspace_id)
+                release_other_branch_dups(s, workspace_id, of_pr)
+            elif state == "closed":
                 for issue in s.execute(select(ReviewIssue).where(
                     *of_pr, ReviewIssue.status == "open",
                 )).scalars():
                     issue.status = "resolved"
                     issue.resolution_source = "pr_closed"
                     issue.closed_at = now
+                    issue.close_outcome = "abandoned"
+                    events.append(_outcome_event(issue, "abandoned", workspace_id))
             elif state == "open":
                 # Reopened: what the close resolved is live again. Only what
                 # the CLOSE resolved — a person's resolution stands.
@@ -923,7 +1437,9 @@ def record_pr_state(
                     issue.status = "open"
                     issue.resolution_source = None
                     issue.closed_at = None
+                    issue.close_outcome = None
             s.commit()
+        _emit(events)
         return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("review_pr_state_record_failed repo=%s pr=%s err=%s",
@@ -982,6 +1498,8 @@ def apply_feedback(
                     r.resolution_source = "feedback"
                     r.closed_at = _now()
                     changed += 1
+                    s.flush()
+                    release_orphan_dups(s, workspace_id, [r.id])
                 elif state in (None, "accepted") and r.status == "dismissed" \
                         and r.resolution_source == "feedback":
                     r.status = "open"

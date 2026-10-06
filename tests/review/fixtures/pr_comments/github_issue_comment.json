@@ -1,0 +1,25 @@
+{
+  "action": "created",
+  "issue": {
+    "number": 42,
+    "state": "open",
+    "title": "Add basket totals",
+    "pull_request": {
+      "url": "https://api.github.com/repos/acme/shop/pulls/42"
+    }
+  },
+  "comment": {
+    "id": 5001,
+    "body": "@celmis start-review",
+    "user": {
+      "login": "alice",
+      "id": 101,
+      "type": "User"
+    },
+    "author_association": "MEMBER"
+  },
+  "repository": {
+    "full_name": "acme/shop",
+    "private": false
+  }
+}

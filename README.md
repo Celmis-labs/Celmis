@@ -370,6 +370,30 @@ who else calls the symbol being changed, including from another repository.
 Where it is not built, the review still runs — it just answers the narrower
 question, which is what the benchmark measured.
 
+### Talking to the reviewer, and what it learns
+
+Beyond the first review, the reviewer works inside the pull request:
+
+- **Comment commands.** `@celmis help`, `start-review`, `review --force`,
+  `remember: <rule>`, and a free-text question answered in the same thread
+  ([PR commands](docs/PR_COMMANDS.md)).
+- **Incremental review and cadence.** A new push is reviewed from the last
+  reviewed commit; a repository can pause automatic reviews after a burst of
+  pushes, skip titles by keyword, and write the overview into the description
+  ([Review settings](docs/REVIEW_SETTINGS.md)).
+- **Team memories and learning.** Rules the team states, and findings it
+  dismisses, shape later reviews, with a shadow mode to judge the effect first
+  ([Memories and learning](docs/MEMORIES_AND_LEARNING.md)).
+- **Issues backlog.** Findings are followed across pushes and after the merge,
+  and resolve themselves when the code shows the defect is gone
+  ([Issues backlog](docs/ISSUES_BACKLOG.md)).
+- **Jira task context.** The business-logic agent checks the change against the
+  task a pull request names, with an acceptance-criteria checklist
+  ([Jira](docs/JIRA.md)).
+- **Productivity metrics.** Cycle time and the four DORA measures from your pull
+  request history, for owners and admins ([Productivity](docs/PRODUCTIVITY.md)).
+- **Who can see what.** [Roles and access](docs/ROLES_AND_ACCESS.md).
+
 Every finding the benchmark scored false was opened in the source and published
 with a verdict. Thirty-three of seventy-nine turned out to be real defects the
 gold set does not contain. That work is in

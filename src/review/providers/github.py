@@ -53,14 +53,17 @@ up (`_minimize_reviews`). Superseded is exactly what they are.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx
 
 from src.credentials import resolve_git_credential
 from src.http import build_client
+from src.review import markers
 from src.review.diff import parse_unified_diff
+from src.review.markers import has_marker, parse_finding_marker
 from src.review.models import (
     HunkSide,
     PullRequest,
@@ -68,12 +71,20 @@ from src.review.models import (
 )
 from src.review.pr_actions import APPROVE, REQUEST_CHANGES, review_decision
 from src.review.providers.base import (
+    MAX_FILE_BYTES,
     SUGGESTION_GITHUB,
+    CommitInfo,
+    FileChange,
+    OurThread,
+    PathCommit,
+    PostedComment,
     PullRequestProvider,
     PullRequestProviderError,
+    ThreadMessage,
     _anchorable_ranges,
     _committable_enabled,
     _committable_span,
+    _count,
     _format_finding_body,
     _format_review_pointer,
     _format_summary,
@@ -81,7 +92,13 @@ from src.review.providers.base import (
     _original_lines,
     _snap_to_span,
     _with_marker,
+    begin_incremental_post,
+    finding_fingerprint,
+    finish_incremental_post,
+    incremental_skip,
+    trim_thread,
 )
+from src.review.scope import MAX_LISTED_COMMITS
 from src.review.settings import get_review_settings
 
 logger = logging.getLogger(__name__)
@@ -217,10 +234,9 @@ class GitHubPRProvider(PullRequestProvider):
             raise PullRequestProviderError(
                 f"PR #{pr_number} not found in {repo}"
             )
-        if meta_resp.status_code >= 400:
-            raise PullRequestProviderError(
-                f"GitHub API error {meta_resp.status_code}: {meta_resp.text[:200]}"
-            )
+        # A 301 (renamed or moved repository) used to pass this check and then
+        # fail on `.json()` of an empty body; now it says where it pointed.
+        self._expect_ok(meta_resp, "GitHub API")
         meta = meta_resp.json()
 
         # 2. Raw diff (accept v3.diff)
@@ -228,7 +244,7 @@ class GitHubPRProvider(PullRequestProvider):
             f"{GITHUB_API_BASE}/repos/{owner}/{name}/pulls/{pr_number}",
             headers={"Accept": "application/vnd.github.v3.diff"},
         )
-        diff_resp.raise_for_status()
+        self._expect_ok(diff_resp, "GitHub diff")
         raw_diff = diff_resp.text
 
         # 3. Parse hunks via unidiff
@@ -252,6 +268,7 @@ class GitHubPRProvider(PullRequestProvider):
             hunks=hunks,
             raw_diff=raw_diff,
             skipped_files=skipped_files,
+            reported_files=_count(meta.get("changed_files")),
         )
 
     # ─── Post review ─────────────────────────────────────────────
@@ -284,7 +301,12 @@ class GitHubPRProvider(PullRequestProvider):
         ranges = _anchorable_ranges(pr)
         comments_payload: list[dict[str, Any]] = []
         snapped = 0
-        for finding in batch.inline_findings(settings.max_inline_comments):
+        # An incremental review (only the new commits were read) lists our
+        # earlier threads first: what is already on the PR is not posted again.
+        incremental = begin_incremental_post(self, batch, settings.comment_marker)
+        selected = batch.inline_findings(
+            settings.max_inline_comments, skip=incremental_skip(incremental))
+        for finding in selected:
             side = "RIGHT" if finding.side == HunkSide.RIGHT else "LEFT"
             line = _snap_to_span(finding.line, ranges.get((finding.file_path, side), []))
             if line != finding.line:
@@ -303,6 +325,7 @@ class GitHubPRProvider(PullRequestProvider):
                     finding, settings.comment_marker,
                     committable=SUGGESTION_GITHUB if span else None,
                     original=_original_lines(new_side, finding),
+                    head_sha=pr.head_sha,
                 ),
             }
             if span and span[1] > span[0]:
@@ -358,6 +381,10 @@ class GitHubPRProvider(PullRequestProvider):
             stale, protected, listing_complete = self._marked_comments(
                 owner, name, pr.number, settings.comment_marker,
             )
+            if incremental is not None:
+                # Earlier inline comments stay: they are still about code the
+                # PR carries (outdated ones are resolved below).
+                stale = [x for x in stale if x[0] == _ISSUE_COMMENT]
             # The review BODIES of earlier runs, listed here for the same
             # reason and with the same ordering: a review that fails to post
             # must not leave the pull request with its previous review already
@@ -441,6 +468,14 @@ class GitHubPRProvider(PullRequestProvider):
                 keep_review_id=_json_id(review_resp),
             ))
 
+        # ── 4c. An incremental run: resolve what its commits made outdated, put
+        # the banner in the summary, and say which comments this run created.
+        review_comments = review_payload.get("comments") or []
+        incremental_response = finish_incremental_post(
+            self, batch, incremental, posted=len(review_comments))
+        inline_comments = self._created_comments(
+            owner, name, pr.number, _json_id(review_resp), selected)
+
         # ── 5. Top-level summary comment (separate, with an idempotency marker) ──
         summary_body = _format_summary(batch, marker=settings.comment_marker)
         if unanchored:
@@ -466,6 +501,9 @@ class GitHubPRProvider(PullRequestProvider):
             # half-done cleanup look like a finished one.
             "cleanup": cleanup,
             "review_state": review_state,
+            # What this run created, for the learning loop to follow.
+            "inline_comments": inline_comments,
+            **incremental_response,
         }
         if summary_id is None:
             # The review itself is up (it carries the verdict), but the full
@@ -483,6 +521,168 @@ class GitHubPRProvider(PullRequestProvider):
             response["summary_error"] = why
             response["error"] = why
         return response
+
+    def _created_comments(
+        self, owner: str, name: str, pr_number: int, review_id: object,
+        findings: list,
+    ) -> list[PostedComment]:
+        """The inline comments the review just created, matched back to their
+        findings by the finding marker in each body. Best effort: the review
+        is already up, so any failure here is an empty list."""
+        if not isinstance(review_id, int) or not findings:
+            return []
+        try:
+            comments, _ = self._list_all(
+                f"{GITHUB_API_BASE}/repos/{owner}/{name}/pulls/{pr_number}"
+                f"/reviews/{review_id}/comments?per_page=100")
+        except Exception:  # noqa: BLE001
+            return []
+        by_short = {}
+        for f in findings:
+            short, full = finding_fingerprint(f)
+            by_short.setdefault(short, full)
+        out: list[PostedComment] = []
+        for c in comments:
+            found = parse_finding_marker(str(c.get("body") or ""))
+            cid = c.get("id")
+            if not found or found[0] not in by_short or not isinstance(cid, int):
+                continue
+            line = c.get("line") or c.get("original_line") or 0
+            out.append(PostedComment(
+                comment_id=cid, path=str(c.get("path") or ""),
+                line=int(line) if isinstance(line, int) else 0,
+                fingerprint=found[0], finding_key=by_short[found[0]]))
+        return out
+
+    # ─── Incremental review: commits, compare diff, review threads ───
+
+    def list_pr_commits(self, repo: str, pr_number: int) -> list[CommitInfo] | None:
+        """The PR's commits with their parents. GitHub stops listing at 250:
+        a list that long may be cut short, so it is None (review the whole PR)."""
+        owner, name = self._split_repo(repo)
+        try:
+            items, complete = self._list_all(
+                f"{GITHUB_API_BASE}/repos/{owner}/{name}/pulls/{pr_number}"
+                "/commits?per_page=100")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("github_commits_failed pr=%s error=%s", pr_number, type(exc).__name__)
+            return None
+        if not complete or len(items) >= MAX_LISTED_COMMITS:
+            return None
+        out: list[CommitInfo] = []
+        for item in items:
+            sha = item.get("sha")
+            if not sha:
+                return None
+            commit = item.get("commit") if isinstance(item.get("commit"), dict) else {}
+            committer = commit.get("committer") if isinstance(commit.get("committer"), dict) else {}
+            out.append(CommitInfo(
+                sha=str(sha),
+                parents=tuple(str(p.get("sha")) for p in item.get("parents") or []
+                              if isinstance(p, dict) and p.get("sha")),
+                message=str(commit.get("message") or ""),
+                committed_at=committer.get("date")))
+        return out
+
+    def fetch_incremental_diff(
+        self, repo: str, pr_number: int, base_sha: str, head_sha: str,
+    ) -> str | None:
+        """`compare/{base}...{head}` as a unified diff. None on any failure."""
+        owner, name = self._split_repo(repo)
+        try:
+            resp = self._http.get(
+                f"{GITHUB_API_BASE}/repos/{owner}/{name}/compare/{base_sha}...{head_sha}",
+                headers={"Accept": "application/vnd.github.v3.diff"},
+            )
+            self._expect_ok(resp, "GitHub compare")
+        except (PullRequestProviderError, httpx.HTTPError) as exc:
+            logger.warning("github_incremental_diff_failed pr=%s error=%s", pr_number, exc)
+            return None
+        return resp.text
+
+    _THREADS_QUERY = (
+        "query($owner: String!, $name: String!, $number: Int!, $after: String) { "
+        "repository(owner: $owner, name: $name) { pullRequest(number: $number) { "
+        "reviewThreads(first: 100, after: $after) { "
+        "pageInfo { hasNextPage endCursor } "
+        "nodes { id isResolved path line originalLine diffSide "
+        "comments(first: 50) { nodes { databaseId body author { login } } } } } } } }"
+    )
+
+    def our_inline_threads(self, pr: PullRequest, marker: str) -> list[OurThread] | None:
+        """Our review threads (first comment: marker AND author), with their
+        GraphQL id (what resolving needs). None when a page cannot be read."""
+        owner, name = self._split_repo(pr.repo)
+        viewer = self._viewer_login()
+        if not viewer:
+            return None
+        threads: list[OurThread] = []
+        after: str | None = None
+        for _ in range(10):  # 1000 threads is more than a PR holds
+            data = self._graphql(self._THREADS_QUERY, {
+                "owner": owner, "name": name, "number": int(pr.number), "after": after})
+            try:
+                block = data["repository"]["pullRequest"]["reviewThreads"]  # type: ignore[index]
+                nodes = block["nodes"]
+            except (TypeError, KeyError):
+                return None
+            for node in nodes or []:
+                if not isinstance(node, dict):
+                    continue
+                comments = ((node.get("comments") or {}).get("nodes")) or []
+                if not comments or not isinstance(comments[0], dict):
+                    continue
+                first = comments[0]
+                body = str(first.get("body") or "")
+                author = str((first.get("author") or {}).get("login") or "")
+                if author != viewer or not has_marker(body, marker):
+                    continue
+                found = parse_finding_marker(body)
+                current = isinstance(node.get("line"), int)
+                line = node.get("line") if current else node.get("originalLine")
+                threads.append(OurThread(
+                    comment_id=first.get("databaseId") or 0,
+                    thread_id=str(node.get("id") or "") or None,
+                    path=str(node.get("path") or ""),
+                    line=line if isinstance(line, int) else None,
+                    side="LEFT" if node.get("diffSide") == "LEFT" else "RIGHT",
+                    resolved=bool(node.get("isResolved")),
+                    line_is_current=current,
+                    fingerprint=found[0] if found else None,
+                    sha=found[1] if found else None,
+                    replied=any(
+                        isinstance(c, dict)
+                        and str((c.get("author") or {}).get("login") or "") != viewer
+                        for c in comments[1:]),
+                ))
+            page = block.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                return threads
+            after = page.get("endCursor")
+            if not after:
+                return None
+        return None
+
+    def resolve_threads(self, pr: PullRequest, threads: list[OurThread]) -> dict[str, int]:
+        """`resolveReviewThread`, one aliased mutation for all of them."""
+        out = {"resolved": 0, "failed": 0, "unsupported": 0}
+        todo = [t for t in threads if t.thread_id]
+        out["unsupported"] += len(threads) - len(todo)
+        if not todo:
+            return out
+        fields = " ".join(
+            f"r{i}: resolveReviewThread(input: $i{i}) {{ thread {{ isResolved }} }}"
+            for i in range(len(todo)))
+        signature = ", ".join(f"$i{i}: ResolveReviewThreadInput!" for i in range(len(todo)))
+        data = self._graphql(
+            f"mutation({signature}) {{ {fields} }}",
+            {f"i{i}": {"threadId": t.thread_id} for i, t in enumerate(todo)})
+        for i in range(len(todo)):
+            result = (data or {}).get(f"r{i}")
+            ok = (isinstance(result, dict) and isinstance(result.get("thread"), dict)
+                  and result["thread"].get("isResolved") is True)
+            out["resolved" if ok else "failed"] += 1
+        return out
 
     # ─── Lifecycle comment ("🔄 reviewing…" → summary) ──────────
 
@@ -596,6 +796,30 @@ class GitHubPRProvider(PullRequestProvider):
             logger.warning("github_description_patch_failed status=%d", resp.status_code)
             return {"written": False, "error": f"GitHub refused the description (HTTP {resp.status_code})"}
         return {"written": True, "error": None}
+
+    def fetch_commit_messages(self, pr: PullRequest, limit: int = 50) -> list[str]:
+        """Newest first. GitHub answers oldest first and at most 250 commits
+        (three pages of 100), so the whole list is read and then reversed: the
+        newest commits, where a key added late sits, are on the last page."""
+        owner, name = self._split_repo(pr.repo)
+        url = f"{GITHUB_API_BASE}/repos/{owner}/{name}/pulls/{pr.number}/commits"
+        rows: list[Any] = []
+        try:
+            for page in range(1, 4):
+                resp = self._http.get(url, params={"per_page": 100, "page": page})
+                if resp.status_code != 200:
+                    return []
+                batch = resp.json()
+                if not isinstance(batch, list):
+                    return []
+                rows.extend(batch)
+                if len(batch) < 100:
+                    break
+        except (httpx.HTTPError, ValueError):
+            return []
+        messages = [str((r.get("commit") or {}).get("message") or "")
+                    for r in rows if isinstance(r, dict)]
+        return [m for m in reversed(messages) if m][:max(1, int(limit))]
 
     def _our_summary_comments(
         self, pr: PullRequest, marker: str,
@@ -767,7 +991,12 @@ class GitHubPRProvider(PullRequestProvider):
         protected: set[int] = set()
         for comment in inline_comments:
             root = comment.get("in_reply_to_id")
-            if isinstance(root, int) and not self._authored_by(comment, viewer):
+            # A comment from our own account with none of our markers is a
+            # person speaking through the token: it protects its root too.
+            if isinstance(root, int) and (
+                not self._authored_by(comment, viewer)
+                or not markers.is_bot_text(str(comment.get("body") or ""))
+            ):
                 protected.add(root)
         marked = [
             (_INLINE_COMMENT, c["id"]) for c in inline_comments
@@ -869,7 +1098,7 @@ class GitHubPRProvider(PullRequestProvider):
         identifies who wrote it. Only the pair identifies a comment this bot
         is entitled to delete.
         """
-        if marker not in (comment.get("body") or ""):
+        if not has_marker(comment.get("body") or "", marker):
             return False
         return cls._authored_by(comment, viewer)
 
@@ -1147,6 +1376,97 @@ class GitHubPRProvider(PullRequestProvider):
         m = re.search(r'<([^>]+)>;\s*rel="next"', link or "")
         return m.group(1) if m else None
 
+    # ─── Reading the target branch (the issues backlog) ──────────
+
+    def branch_head_sha(self, repo: str, branch: str) -> str:
+        owner, name = self._split_repo(repo)
+        resp = self._http.get(
+            f"{GITHUB_API_BASE}/repos/{owner}/{name}/branches/{quote(branch, safe='/')}")
+        self._expect_ok(resp, "GitHub branch")
+        sha = str(((resp.json() or {}).get("commit") or {}).get("sha") or "")
+        if not sha:
+            raise PullRequestProviderError(f"GitHub named no commit for branch {branch!r}")
+        return sha
+
+    def read_file_at(self, repo: str, ref: str, path: str) -> str | None:
+        owner, name = self._split_repo(repo)
+        resp = self._http.get(
+            f"{GITHUB_API_BASE}/repos/{owner}/{name}/contents/{quote(path, safe='/')}",
+            params={"ref": ref},
+            headers={"Accept": "application/vnd.github.raw+json"},
+        )
+        if resp.status_code == 404:
+            return None
+        self._expect_ok(resp, "GitHub file")
+        if len(resp.content) > MAX_FILE_BYTES:
+            raise PullRequestProviderError(
+                f"{path} is larger than {MAX_FILE_BYTES} bytes; not read")
+        return resp.content.decode("utf-8", "replace")
+
+    def commits_touching(
+        self, repo: str, ref: str, path: str, *,
+        since: datetime | None = None, limit: int = 10,
+    ) -> list[PathCommit]:
+        owner, name = self._split_repo(repo)
+        params: dict[str, Any] = {
+            "sha": ref, "path": path, "per_page": max(1, min(int(limit), 100)),
+        }
+        if since is not None:
+            params["since"] = since.isoformat()
+        resp = self._http.get(f"{GITHUB_API_BASE}/repos/{owner}/{name}/commits",
+                              params=params)
+        self._expect_ok(resp, "GitHub commits")
+        out: list[PathCommit] = []
+        for c in resp.json() or []:
+            commit = c.get("commit") or {}
+            message = str(commit.get("message") or "").strip()
+            out.append(PathCommit(
+                sha=str(c.get("sha") or ""),
+                subject=message.splitlines()[0][:300] if message else "",
+                date=((commit.get("committer") or {}).get("date")),
+                url=c.get("html_url"),
+            ))
+        return [c for c in out if c.sha][:limit]
+
+    def file_change_in_commit(
+        self, repo: str, sha: str, path: str,
+    ) -> FileChange | None:
+        owner, name = self._split_repo(repo)
+        resp = self._http.get(f"{GITHUB_API_BASE}/repos/{owner}/{name}/commits/{sha}")
+        self._expect_ok(resp, "GitHub commit")
+        for f in (resp.json() or {}).get("files") or []:
+            current, previous = f.get("filename"), f.get("previous_filename")
+            if path not in (current, previous):
+                continue
+            status = str(f.get("status") or "modified")
+            if status == "removed":
+                return FileChange("deleted", current or path)
+            if status == "renamed" and previous == path and current:
+                return FileChange("renamed", current, previous_path=previous)
+            return FileChange("added" if status == "added" else "modified",
+                              current or path)
+        return None
+
+    def commit_url(self, repo: str, sha: str) -> str | None:
+        owner, name = self._split_repo(repo)
+        return f"https://github.com/{owner}/{name}/commit/{sha}"
+
+    def list_comment_reactions(
+        self, repo: str, pr_number: int, comment_id: str,
+    ) -> list[tuple[str, str]]:
+        owner, name = self._split_repo(repo)
+        url = (f"{GITHUB_API_BASE}/repos/{owner}/{name}/pulls/comments/"
+               f"{quote(str(comment_id), safe='')}/reactions?per_page=100")
+        resp = self._http.get(url)
+        self._expect_ok(resp, "GitHub reactions")
+        out: list[tuple[str, str]] = []
+        for item in resp.json() or []:
+            content = str((item or {}).get("content") or "")
+            user = str(((item or {}).get("user") or {}).get("login") or "")
+            if user and content in ("+1", "-1"):
+                out.append((user, "up" if content == "+1" else "down"))
+        return out
+
     @staticmethod
     def _split_repo(repo: str) -> tuple[str, str]:
         """'owner/name' → (owner, name)."""
@@ -1156,3 +1476,121 @@ class GitHubPRProvider(PullRequestProvider):
                 f"Invalid GitHub repo format '{repo}'. Expected 'owner/name'."
             )
         return parts[0], parts[1]
+
+    # ─── Conversation (comment commands) ─────────────────────────
+
+    def viewer_ids(self) -> frozenset[str]:
+        login = self._viewer_login()
+        return frozenset({login}) if login else frozenset()
+
+    def post_reply(self, ev, body: str) -> str | None:
+        """Into the review thread when the comment is on the diff; otherwise a
+        new PR comment that opens with a quote of who asked (an issue comment
+        has no thread to reply into)."""
+        owner, name = self._split_repo(ev.repo)
+        text = markers.with_chat_marker(body)
+        if ev.kind == "inline" and ev.thread_id:
+            url = (
+                f"{GITHUB_API_BASE}/repos/{owner}/{name}/pulls/{ev.pr_number}"
+                f"/comments/{ev.thread_id}/replies"
+            )
+        else:
+            url = f"{GITHUB_API_BASE}/repos/{owner}/{name}/issues/{ev.pr_number}/comments"
+            if ev.actor_name:
+                text = f"> @{ev.actor_name}\n\n{text}"
+        resp = self._expect_ok(self._http.post(url, json={"body": text}), "github reply")
+        cid = _json_id(resp)
+        return str(cid) if cid is not None else None
+
+    def update_comment(
+        self, repo: str, pr_number: int, comment_id: str, body: str, *, kind: str = "issue",
+    ) -> bool:
+        owner, name = self._split_repo(repo)
+        where = "pulls" if kind == "inline" else "issues"
+        resp = self._http.patch(
+            f"{GITHUB_API_BASE}/repos/{owner}/{name}/{where}/comments/{comment_id}",
+            json={"body": markers.with_chat_marker(body)},
+        )
+        return 200 <= resp.status_code < 300
+
+    def get_thread(self, ev, limit: int = 30) -> list[ThreadMessage]:
+        """The review thread a diff comment belongs to: the root and its replies
+        (GitHub keeps replies flat, all pointing at the root). A plain PR
+        comment has no thread."""
+        if ev.kind != "inline" or not ev.thread_id:
+            return []
+        owner, name = self._split_repo(ev.repo)
+        items, _complete = self._list_all(self._inline_comments_url(owner, name, ev.pr_number))
+        root = str(ev.thread_id)
+        viewer = self._viewer_login()
+        found: list[tuple[int, ThreadMessage]] = []
+        for c in items:
+            cid = c.get("id")
+            if not isinstance(cid, int) or (str(cid) != root and str(c.get("in_reply_to_id")) != root):
+                continue
+            user = c.get("user")
+            line = c.get("line") if isinstance(c.get("line"), int) else c.get("original_line")
+            found.append((cid, ThreadMessage(
+                comment_id=str(cid),
+                author=str(user.get("login") or "") if isinstance(user, dict) else "",
+                text=str(c.get("body") or ""),
+                ours=bool(viewer) and self._authored_by(c, viewer),
+                path=c.get("path") if isinstance(c.get("path"), str) else None,
+                line=line if isinstance(line, int) else None,
+                created_at=c.get("created_at") if isinstance(c.get("created_at"), str) else None,
+            )))
+        found.sort(key=lambda pair: pair[0])
+        return trim_thread([m for _i, m in found], limit)
+
+    def acknowledge(self, ev) -> bool:
+        """An eyes reaction on the comment."""
+        owner, name = self._split_repo(ev.repo)
+        where = "pulls" if ev.kind == "inline" else "issues"
+        resp = self._http.post(
+            f"{GITHUB_API_BASE}/repos/{owner}/{name}/{where}/comments/{ev.comment_id}/reactions",
+            json={"content": "eyes"},
+        )
+        return 200 <= resp.status_code < 300
+
+    def actor_permission(
+        self, repo: str, *, actor_id: str = "", actor_name: str = "",
+    ) -> str:
+        owner, name = self._split_repo(repo)
+        login = actor_name or actor_id
+        if not login:
+            return "unknown"
+        try:
+            resp = self._http.get(
+                f"{GITHUB_API_BASE}/repos/{owner}/{name}/collaborators/{login}/permission",
+            )
+            if resp.status_code >= 400:
+                return "unknown"
+            data = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return "unknown"
+        level = str(data.get("permission") or "").lower() if isinstance(data, dict) else ""
+        if level in ("admin", "maintain", "write"):
+            return "write"
+        if level in ("read", "triage"):
+            return "read"
+        return "none" if level == "none" else "unknown"
+
+    def pr_participants(self, repo: str, pr_number: int) -> frozenset[str]:
+        owner, name = self._split_repo(repo)
+        try:
+            resp = self._http.get(f"{GITHUB_API_BASE}/repos/{owner}/{name}/pulls/{pr_number}")
+            if resp.status_code >= 400:
+                return frozenset()
+            data = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return frozenset()
+        if not isinstance(data, dict):
+            return frozenset()
+        people = [data.get("user")]
+        people.extend(data.get("requested_reviewers") or [])
+        people.extend(data.get("assignees") or [])
+        ids: set[str] = set()
+        for person in people:
+            if isinstance(person, dict):
+                ids.update(str(v) for v in (person.get("id"), person.get("login")) if v)
+        return frozenset(ids)

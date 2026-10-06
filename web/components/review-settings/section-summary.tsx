@@ -1,7 +1,8 @@
 "use client";
 
-/** PR summary: whether the overview is written, where it goes, and what
- *  happens to it on the next push and to a description already there. */
+/** PR summary: whether the overview is written, where it goes, what happens
+ *  to it on the next push and to a description already there, and how the
+ *  comment that closes a review looks. */
 
 import { useT } from "@/lib/i18n";
 import { useSettings } from "@/components/review-settings/context";
@@ -16,6 +17,7 @@ const ORDER: Record<string, string[]> = {
   summary_target: ["comment", "description"],
   summary_on_new_commits: ["nothing", "append", "replace"],
   summary_existing_description: ["append", "complement", "replace"],
+  completed_comment: ["completed", "classic"],
 };
 
 export function SummarySection() {
@@ -23,6 +25,8 @@ export function SummarySection() {
   const { scope, draft, inh, meta } = useSettings();
   const on = Boolean(effective(draft, "summary_enabled", scope.kind, inh));
   const target = String(effective(draft, "summary_target", scope.kind, inh) ?? "comment");
+  const completed = String(
+    effective(draft, "completed_comment", scope.kind, inh) ?? "completed") === "completed";
   const options = (field: keyof typeof ORDER) => {
     const served = meta.choices[field] ?? ORDER[field];
     return [...ORDER[field].filter((v) => served.includes(v)),
@@ -66,6 +70,21 @@ export function SummarySection() {
             : t("reviewSettings.summary.existingOnlyDescription")}
           options={options("summary_existing_description")}
           disabled={!on || target !== "description"}
+        />
+        <ChoiceRow
+          field="completed_comment"
+          label={t("reviewSettings.summary.completed")}
+          description={t("reviewSettings.summary.completedHint")}
+          options={options("completed_comment")}
+          columns={2}
+        />
+        <BooleanRow
+          field="commands_guide_enabled"
+          label={t("reviewSettings.summary.commandsGuide")}
+          description={completed
+            ? t("reviewSettings.summary.commandsGuideHint")
+            : t("reviewSettings.summary.commandsGuideOnlyCompleted")}
+          disabled={!completed}
         />
         <TextRow
           field="summary_instructions"

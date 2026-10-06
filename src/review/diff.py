@@ -130,9 +130,53 @@ def parse_unified_diff(
     return hunks, skipped
 
 
+_C_ESCAPES = {
+    "a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13,
+    '"': 34, "\\": 92,
+}
+
+
+def _unquote_git_path(path: str) -> str:
+    """Decode a git C-style quoted path (`"a/\\321\\202.py"`) to real text.
+
+    git quotes any path with non-ASCII bytes (core.quotePath, on by default),
+    a quote, a backslash or a control character, and writes the bytes as
+    octal escapes. Bitbucket's diffs arrive in that form, so a Cyrillic file
+    name used to reach the reviewer as `"a/\\321\\202..."` — a path that
+    matches no file and no inline anchor. A path that is not quoted passes
+    through untouched.
+    """
+    if len(path) < 2 or not (path.startswith('"') and path.endswith('"')):
+        return path
+    body = path[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\" or i + 1 >= len(body):
+            out += ch.encode("utf-8")
+            i += 1
+            continue
+        nxt = body[i + 1]
+        if nxt in "01234567":
+            digits = body[i + 1:i + 4]
+            j = 0
+            while j < len(digits) and digits[j] in "01234567":
+                j += 1
+            out.append(int(digits[:j], 8) & 0xFF)
+            i += 1 + j
+        elif nxt in _C_ESCAPES:
+            out.append(_C_ESCAPES[nxt])
+            i += 2
+        else:  # unknown escape: keep it as written
+            out += ("\\" + nxt).encode("utf-8")
+            i += 2
+    return out.decode("utf-8", errors="replace")
+
+
 def _strip_diff_prefix(path: str) -> str:
     """Strip 'a/' / 'b/' / '/dev/null' prefixes in git diff paths."""
-    p = path.strip()
+    p = _unquote_git_path(path.strip())
     if p in ("/dev/null", "dev/null"):
         return p
     if p.startswith("a/"):

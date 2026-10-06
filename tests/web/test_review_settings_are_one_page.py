@@ -69,6 +69,8 @@ SECTION_FILE = {
     "summary": "section-summary.tsx",
     "rules": "section-rules.tsx",
     "messages": "section-messages.tsx",
+    "commands": "section-commands.tsx",
+    "learning": "section-learning.tsx",
     "advanced": "section-advanced.tsx",
 }
 

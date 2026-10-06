@@ -35,6 +35,19 @@ async def handle_review(job: dict[str, Any]) -> None:
                             attempt=job.get("attempts"))
 
 
+async def handle_pr_command(job: dict[str, Any]) -> None:
+    """Answer one `@celmis ...` comment on a pull request.
+
+    The receiver already verified the delivery and claimed the comment in the
+    command ledger; this runs the command (`src.review.commands.handlers`).
+    It does not raise for a command that failed — the ledger row says so, and
+    a retry would answer the person twice.
+    """
+    from src.review.commands.handlers import execute
+
+    await asyncio.to_thread(execute, job["payload"])
+
+
 # ─── index_repo (incremental) ────────────────────────────────────────
 # payload: {repo_slug, force_full?: bool, since_sha?: str}
 
@@ -424,6 +437,90 @@ async def handle_deps_audit(job: dict[str, Any]) -> None:
                     eng.dispose()
             except Exception:  # noqa: BLE001
                 pass
+
+
+# ─── productivity sync (PR history, deployments) ─────────────────────
+# payload: {workspace_id, provider, repo, user_id?, repo_slug?, full?}
+
+
+def _seconds_until(when) -> float:  # noqa: ANN001
+    from datetime import UTC, datetime
+
+    if when is None:
+        return 60.0
+    return max(5.0, (when - datetime.now(UTC)).total_seconds())
+
+
+async def handle_productivity_sync(job: dict[str, Any]) -> None:
+    """One time-boxed slice of a repository's productivity sync.
+
+    The slice ends at its budget (`CELMIS_PRODUCTIVITY_JOB_BUDGET_SECONDS`, 480 s;
+    the queue lease is 600 s) or at a rate limit, saves its cursor and queues
+    the next slice itself, so a 180-day backfill never holds a worker for
+    hours at a time. An error raises, and the queue's backoff retries it.
+    """
+    import os
+
+    from src.productivity import sync as ps
+    from src.sync import queue as jq
+
+    p = job["payload"]
+    job_id = job["id"]
+    try:
+        budget = float(os.environ.get("CELMIS_PRODUCTIVITY_JOB_BUDGET_SECONDS") or ps.DEFAULT_TIME_BUDGET)
+    except ValueError:
+        budget = ps.DEFAULT_TIME_BUDGET
+    result = await asyncio.to_thread(
+        ps.run_repo_sync, p["workspace_id"], p["provider"], p["repo"],
+        repo_slug=p.get("repo_slug"), user_id=p.get("user_id") or "default",
+        time_budget=budget,
+        # A retry of a failed full run must not wipe the cursor a second time.
+        full=bool(p.get("full")) and int(job.get("attempts") or 1) <= 1,
+        cancel_check=lambda: jq.is_cancel_requested(job_id),
+    )
+    logger.info("productivity_sync repo=%s status=%s listed=%d detailed=%d deployments=%d",
+                p["repo"], result.status, result.prs_listed, result.prs_detailed, result.deployments)
+    if result.status == "cancelled":
+        raise jq.JobCancelled("cancelled by user")
+    if result.status == "error":
+        raise RuntimeError(result.error or "productivity sync failed")
+    if result.more_work:
+        await asyncio.to_thread(
+            ps.enqueue_sync, p["workspace_id"], p["provider"], p["repo"],
+            user_id=p.get("user_id") or "default", repo_slug=p.get("repo_slug"),
+            delay_seconds=_seconds_until(result.resume_at) if result.resume_at else 60.0,
+            continuation=job_id,
+        )
+
+
+# payload: {workspace_id, provider, repo, number, user_id?, repo_slug?}
+
+
+async def handle_productivity_pr(job: dict[str, Any]) -> None:
+    """Re-read one PR after its merge/close webhook and re-derive deployments."""
+    from src.productivity import sync as ps
+    from src.sync import queue as jq
+
+    p = job["payload"]
+    result = await asyncio.to_thread(
+        ps.refresh_pull_request, p["workspace_id"], p["provider"], p["repo"], int(p["number"]),
+        repo_slug=p.get("repo_slug"), user_id=p.get("user_id") or "default",
+    )
+    if result.status == "error":
+        raise RuntimeError(result.error or "productivity PR refresh failed")
+    if result.status == "rate_limited":
+        await asyncio.to_thread(
+            jq.enqueue, kind=jq.KIND_PRODUCTIVITY_PR, payload=p,
+            dedup_key=f"prodpr-next:{p['workspace_id']}:{p['repo']}:{int(p['number'])}:{job['id']}",
+            delay_seconds=_seconds_until(result.resume_at), workspace_id=p["workspace_id"],
+        )
+    elif result.status == "busy":
+        # a sync slice holds the repository: come back when it is likely done
+        await asyncio.to_thread(
+            jq.enqueue, kind=jq.KIND_PRODUCTIVITY_PR, payload=p,
+            dedup_key=f"prodpr-busy:{p['workspace_id']}:{p['repo']}:{int(p['number'])}:{job['id']}",
+            delay_seconds=60, workspace_id=p["workspace_id"],
+        )
 
 
 async def handle_automation_plan(job: dict[str, Any]) -> None:

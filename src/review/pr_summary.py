@@ -132,6 +132,10 @@ def _language_name(language: str | None) -> str:
     return cleaned or "English"
 
 
+#: The public name: chat answers are asked for in the policy's language too.
+language_name = _language_name
+
+
 SYSTEM_PROMPT = (
     "You write the description section of an automated code review comment. "
     "You describe WHAT a pull request changes, never whether it is correct: "

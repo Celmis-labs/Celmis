@@ -62,6 +62,15 @@ KIND_DEPS_AUDIT = "deps_audit"
 #: reading — and because a job is the only thing in this system that can be
 #: asked to stop.
 KIND_AUTOMATION_PLAN = "automation_plan"
+#: One `@celmis ...` pull-request comment, already accepted by the receiver
+#: (verified, bound to a workspace, claimed in the command ledger). The handler
+#: answers it on the pull request; see `src.review.commands.handlers`.
+KIND_PR_COMMAND = "pr_command"
+#: Productivity history of one repository (src/productivity/sync.py): a time-boxed
+#: slice that queues its own continuation while work remains.
+KIND_PRODUCTIVITY_SYNC = "productivity_sync"
+#: One PR re-read after its merge or close webhook.
+KIND_PRODUCTIVITY_PR = "productivity_pr"
 
 _LEASE_SECONDS = int(os.environ.get("CELMIS_JOB_LEASE_SECONDS", "600"))
 _BACKOFF_BASE = float(os.environ.get("CELMIS_JOB_BACKOFF_BASE", "5"))
@@ -438,7 +447,7 @@ def stats(*, workspace_id: str | None = None) -> dict[str, int]:
 __all__ = [
     "KIND_REVIEW", "KIND_INDEX_REPO", "KIND_OWNERSHIP_REBUILD",
     "KIND_CROSS_REPO_MATERIALIZE", "KIND_REINDEX_QDRANT",
-    "KIND_REGENERATE_NOTES",
+    "KIND_REGENERATE_NOTES", "KIND_PR_COMMAND",
     "JobCancelled",
     "enqueue", "dequeue_one", "mark_complete", "mark_failure",
     "mark_cancelled", "request_cancel", "is_cancel_requested",

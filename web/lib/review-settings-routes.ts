@@ -29,6 +29,8 @@ export const SECTION_IDS = [
   "summary",
   "rules",
   "messages",
+  "commands",
+  "learning",
   "advanced",
 ] as const;
 export type SectionId = (typeof SECTION_IDS)[number];

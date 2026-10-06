@@ -207,7 +207,7 @@ def test_a_batch_that_hid_nothing_says_so_in_zeros():
     payload = hidden_payload(ReviewBatch(pull_request=_pr()))
     assert payload == {
         "by_rule": {}, "duplicates": 0, "near_duplicates": 0,
-        "low_confidence": 0, "no_evidence": 0, "coverage_claim": 0, "veto": 0,
+        "low_confidence": 0, "no_evidence": 0, "coverage_claim": 0, "veto": 0, "learned": 0,
     }
 
 
@@ -220,6 +220,7 @@ def test_the_payload_carries_every_cause():
     assert hidden_payload(batch) == {
         "by_rule": {"quality.todo": 2}, "duplicates": 1, "near_duplicates": 2,
         "low_confidence": 3, "no_evidence": 4, "coverage_claim": 0, "veto": 5,
+        "learned": 0,
     }
 
 
@@ -266,7 +267,7 @@ def test_record_completed_review_writes_what_was_hidden(store: ReviewRunStore):
     record_completed_review(_Result(batch=batch), run_id="r", store=store)
     assert store.get("r").hidden == {
         "by_rule": {"quality.todo": 2}, "duplicates": 0, "near_duplicates": 0,
-        "low_confidence": 0, "no_evidence": 1, "coverage_claim": 0, "veto": 0,
+        "low_confidence": 0, "no_evidence": 1, "coverage_claim": 0, "veto": 0, "learned": 0,
     }
 
 

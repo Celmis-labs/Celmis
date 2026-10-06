@@ -7,9 +7,11 @@ these types.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any
 
 # The one shape every runtime adjustment travels in — see the block above it
 # in src/llm/capabilities.py. Imported here, in the domain model, because the
@@ -137,6 +139,32 @@ class Hunk:
 
 
 @dataclass
+class ScopeInfo:
+    """What an INCREMENTAL review read: only the commits since the last
+    reviewed one. Present on `PullRequest.scope` for such a run, None for a
+    full review.
+
+    While it is set, `PullRequest.raw_diff` / `hunks` hold the increment (what
+    the agents read); the whole PR's diff is kept here, because the comments
+    must anchor on lines the PR's diff shows and the issue ledger must hash
+    the whole PR (see `PullRequest.anchor_hunks` / `whole_diff`).
+    """
+
+    base_sha: str                 # the last reviewed commit the increment starts from
+    new_commits: int = 0          # commits of the PR that are new since then
+    reason: str = ""              # a sentence for the run's scope stage
+    full_raw_diff: str = ""       # the whole PR's diff
+    full_hunks: list[Hunk] = field(default_factory=list)
+    #: path -> lines of the OLD side the increment removed or replaced (1-based).
+    removed_lines: dict[str, set[int]] = field(default_factory=dict)
+    #: paths the increment deleted outright.
+    deleted_files: set[str] = field(default_factory=set)
+    #: the files the WHOLE PR skipped (lockfiles, binaries, ignore globs);
+    #: while the scope is set `PullRequest.skipped_files` holds the increment's.
+    full_skipped_files: list[str] = field(default_factory=list)
+
+
+@dataclass
 class PullRequest:
     """Provider-agnostic PR representation."""
 
@@ -157,6 +185,30 @@ class PullRequest:
     raw_diff: str = ""       # unified diff text (for debugging / fallback parsing)
     skipped_files: list[str] = field(default_factory=list)
     # Files filtered out during diff parsing (skip_patterns / binary / too-large)
+    # How many changed files the PROVIDER says this PR has, when it was asked
+    # (GitHub `changed_files`, GitLab `changes_count`, Bitbucket's diffstat —
+    # the last only when the diff came back empty). None = not known. The
+    # orchestrator uses it to tell "nothing to review" (0) from "the diff was
+    # lost on the way" (> 0 with an empty diff).
+    reported_files: int | None = None
+    #: Set for an incremental review (see `ScopeInfo`); None = the whole PR.
+    scope: ScopeInfo | None = None
+
+    @property
+    def anchor_hunks(self) -> list[Hunk]:
+        """The hunks a comment may be anchored on: the WHOLE PR's, also when
+        the agents only read an increment (the provider validates an anchor
+        against the PR's diff, not against the increment)."""
+        return self.scope.full_hunks if self.scope is not None else self.hunks
+
+    @property
+    def whole_diff(self) -> str:
+        """The whole PR's diff text, also when `raw_diff` holds an increment."""
+        return self.scope.full_raw_diff if self.scope is not None else self.raw_diff
+
+    @property
+    def is_incremental(self) -> bool:
+        return self.scope is not None
 
     @property
     def repo_slug(self) -> str:
@@ -278,6 +330,7 @@ class Finding:
 SUMMARY_TARGETS = ("comment", "description")
 SUMMARY_ON_NEW_COMMITS = ("nothing", "append", "replace")
 SUMMARY_EXISTING_DESCRIPTION = ("append", "complement", "replace")
+COMPLETED_COMMENTS = ("completed", "classic")
 
 
 @dataclass
@@ -300,6 +353,16 @@ class PRActions:
     summary_existing_description: str = "append"
     message_started: str | None = None
     message_finished_header: str | None = None
+    #: "completed" writes the "Code Review Completed" comment; "classic" keeps
+    #: the summary layout of earlier releases. A hand-built batch stays
+    #: classic, so a test's comment does not change underneath it; the
+    #: orchestrator reads the repository's setting (built-in: completed).
+    completed_comment: str = "classic"
+    #: List the bot's commands in the completed comment.
+    commands_guide_enabled: bool = False
+    #: Commands this repository's settings turn off (chat, remember,
+    #: business-logic): the guide does not list them.
+    guide_commands_off: tuple[str, ...] = ()
 
     @property
     def manages_review_state(self) -> bool:
@@ -308,11 +371,56 @@ class PRActions:
         return self.approve_when_clean or self.request_changes_on_critical
 
 
+#: Where a summary section may be shown.
+SECTION_TARGETS = frozenset({"comment", "description"})
+
+
+@dataclass(frozen=True)
+class SummarySection:
+    """One block of the review summary, owned by whichever stage produced it.
+
+    The comment and the pull request description both render their extra
+    blocks from `ReviewBatch.summary_sections`, ordered by `order` (lower
+    first), so a later stage (the earlier-issues line, the incremental banner,
+    the requirements check) adds a section instead of editing the composers.
+    `markdown` is provider-neutral (no raw HTML); `targets` says which of the
+    two surfaces shows it.
+    """
+
+    key: str
+    order: int
+    markdown: str
+    targets: frozenset[str] = SECTION_TARGETS
+
+
+@dataclass
+class EarlierIssues:
+    """What the "Resolve earlier issues" stage found out about the backlog.
+
+    `resolved` is what the completed comment names ([{id, title, file, pr,
+    sha}]); `resolutions` are the `issues.Resolution` rows the ledger writes
+    after the run (the stage itself writes nothing, so a dry run leaves the
+    ledger alone); the counts say how much of the backlog was looked at.
+    """
+
+    resolved: list[dict] = field(default_factory=list)
+    resolutions: list = field(default_factory=list)
+    still_open: int = 0
+    unreadable: int = 0
+    skipped_budget: int = 0
+    llm_calls: int = 0
+    #: The repository's `issues_announce_resolved`: show the list in the comment.
+    announce: bool = True
+
+
 @dataclass
 class ReviewBatch:
     """All findings + summary for a PR — atomic unit for posting."""
 
     pull_request: PullRequest
+    #: The language the bot's own text on the PR is written in (a catalog code
+    #: of `src.review.messages`); None reads as English.
+    review_language: str | None = None
     findings: list[Finding] = field(default_factory=list)
     summary: str = ""        # markdown summary for the top-level PR comment
     verdict: ReviewVerdict = ReviewVerdict.COMMENT
@@ -336,6 +444,15 @@ class ReviewBatch:
     #: that was meant to run and could not (`_degraded_notice` reads it as a
     #: thinner review), while this is a stage with nothing to do.
     skip_reasons: dict[str, str] = field(default_factory=dict)
+    #: The Jira task(s) the run read for the business-logic agent
+    #: (`src.review.task_context.models.TaskContext`), or None when nobody
+    #: looked — the setting is off, or the agent was not going to run.
+    #: `issues._record` stores its refs on the pull-request row.
+    task_context: Any = None
+    #: The requirements check (`task_context.checklist.Requirement` rows, one
+    #: per acceptance criterion), or None when nothing was checked.
+    #: `issues._record` stores it on the pull-request row.
+    requirements: list[Any] | None = None
     #: Why each failed agent failed — {agent: a sentence a user can act on}.
     #:
     #: The reason existed all along. `classify` produced a curated sentence
@@ -375,6 +492,12 @@ class ReviewBatch:
     #: that folded it into the neighbour could not say so.
     dropped_coverage_claim: int = 0
     dropped_by_veto: int = 0
+    #: Findings the team already judged (the learned filter, `learning_suppression`
+    #: = on), and — in shadow mode, the built-in — the ones it WOULD have hidden,
+    #: with up to ten of them described for the run record.
+    dropped_by_feedback: int = 0
+    would_drop_by_feedback: int = 0
+    learned_items: list[dict] = field(default_factory=list)
     skipped_files: list[str] = field(default_factory=list)
     cross_repo_callers: int = 0  # unique cross-repo blast radius
     # Stage 11 (BYOK) — sum across all agents; None if any agent had unknown model.
@@ -426,6 +549,40 @@ class ReviewBatch:
     #: description — the summary comment then keeps the verdict and the
     #: findings only, so the walkthrough is not shown twice.
     summary_in_description: bool = False
+    #: Extra blocks of the summary, see `SummarySection`. One per key: adding a
+    #: key again replaces the earlier block.
+    summary_sections: list[SummarySection] = field(default_factory=list)
+    #: Why the run ended before reading anything because of the REVIEW SCOPE
+    #: (`no_new_commits` | `only_merge_commits` | `no_reviewable_new_changes`),
+    #: else None. Such a run is not
+    #: a review of the PR: the ledger and the "reviewed" state ignore it.
+    scope_skip: str | None = None
+    #: What the run read once the scope stage decided: `full` or `incremental`;
+    #: None when the run ended before that stage (a draft, a gate).
+    scope_mode: str | None = None
+
+    def add_section(
+        self, key: str, markdown: str, *, order: int = 500,
+        targets: frozenset[str] | set[str] = SECTION_TARGETS,
+    ) -> None:
+        """Add (or replace) the section `key`; an empty text removes it."""
+        self.summary_sections = [x for x in self.summary_sections if x.key != key]
+        if markdown and markdown.strip():
+            self.summary_sections.append(SummarySection(
+                key=key, order=order, markdown=markdown.strip(),
+                targets=frozenset(targets) & SECTION_TARGETS,
+            ))
+
+    def sections_for(self, target: str) -> list[SummarySection]:
+        """The sections `target` ("comment" | "description") shows, in order."""
+        return sorted(
+            (x for x in self.summary_sections if target in x.targets),
+            key=lambda x: (x.order, x.key),
+        )
+    #: Backlog issues this review found fixed on the target branch (the
+    #: "Resolve earlier issues" stage); None when the stage did not run.
+    #: `issue_resolver.earlier_issues_section` renders it for the summary.
+    earlier_issues: EarlierIssues | None = None
 
     def __post_init__(self) -> None:
         if not self.started_at:
@@ -475,7 +632,9 @@ class ReviewBatch:
         """Findings kept out of the PR comments by the severity threshold."""
         return len(self.findings) - len(self.postable_findings)
 
-    def inline_findings(self, cap: int) -> list[Finding]:
+    def inline_findings(
+        self, cap: int, *, skip: Callable[[Finding], bool] | None = None,
+    ) -> list[Finding]:
         """What a provider posts inline: over the threshold, then capped.
 
         One method so the three providers cannot apply the two filters in a
@@ -484,13 +643,20 @@ class ReviewBatch:
 
         A finding exempt from the filters (`bypasses_filters`) is posted in
         its place in the order and takes no slot of the cap.
+
+        `skip` drops a finding BEFORE the cap (an incremental review does not
+        post again what is already on the PR; such a finding must not use up a
+        slot a new one needs). Called once per postable finding, in order.
         """
         limit = self.inline_cap(cap)
+        postable = self.postable_findings
+        if skip is not None:
+            postable = [f for f in postable if not skip(f)]
         if not self.rules_bypass_filters:
-            return self.postable_findings[:limit]
+            return postable[:limit]
         out: list[Finding] = []
         used = 0
-        for f in self.postable_findings:
+        for f in postable:
             if self.bypasses_filters(f):
                 out.append(f)
             elif used < limit:

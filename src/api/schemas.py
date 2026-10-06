@@ -102,8 +102,10 @@ class ConnectionStatus(BaseModel):
 
 
 class ConnectionUpsert(BaseModel):
-    provider: str = Field(pattern="^(github|gitlab|bitbucket)$")
-    token: str = Field(min_length=4, max_length=512)
+    provider: str = Field(pattern="^(github|gitlab|bitbucket|jira)$")
+    #: Four characters at least — except for a Jira save that reuses the
+    #: Bitbucket token, where the server supplies it (see `reuse_bitbucket`).
+    token: str = Field(default="", max_length=512)
     # Bitbucket needs email (Atlassian API token uses email:token Basic auth)
     email: str | None = None
     workspace: str | None = None  # Bitbucket only
@@ -113,6 +115,17 @@ class ConnectionUpsert(BaseModel):
     # Validated (https, public address or operator allowlist) before the token
     # is sent anywhere — see src/sync/gitlab_instance.py.
     base_url: str | None = Field(default=None, max_length=2048)
+    # Jira only: copy the stored Bitbucket email + token (an unscoped Atlassian
+    # API token works for both) instead of typing them again. The server reads
+    # the token itself — it never travels to the browser — and verifies it
+    # against the Jira site before saving anything.
+    reuse_bitbucket: bool = False
+
+    @model_validator(mode="after")
+    def _token_present(self) -> ConnectionUpsert:
+        if not (self.reuse_bitbucket and self.provider == "jira") and len(self.token) < 4:
+            raise ValueError("token: at least 4 characters")
+        return self
 
 
 class ConnectionVerifyResult(BaseModel):
@@ -161,6 +174,25 @@ class RepoWebhookOut(BaseModel):
     last_delivery: dict[str, Any] | None = None
     full_name: str | None = None
     updated_at: str | None = None
+    #: Events the receiver acts on that this hook does not subscribe to (a hook
+    #: installed before comment commands existed); `outdated` is "there are
+    #: some" — pressing Install webhook repairs it in place.
+    missing_events: list[str] = Field(default_factory=list)
+    outdated: bool = False
+
+
+class RepairedRepoOut(BaseModel):
+    """One repository `POST /api/repos/webhooks/repair-outdated` touched."""
+
+    repo_slug: str
+    #: installed (repaired) | failed | skipped … — the installer's own word.
+    status: str
+    reason: str | None = None
+    message: str | None = None
+
+
+class RepairOutdatedOut(BaseModel):
+    repos: list[RepairedRepoOut] = Field(default_factory=list)
 
 
 class RepoOut(BaseModel):
@@ -184,6 +216,12 @@ class RepoOut(BaseModel):
     auto_review_enabled: bool = False
     auto_review_mode: str = "polling"  # 'polling' | 'webhook' | 'manual'
     branch: str | None = None  # None → provider default branch
+    #: Target-branch patterns automatic review runs for (`!` excludes; [] =
+    #: every branch), resolved repo policy > workspace defaults > install by
+    #: the orchestrator's own resolver. LIST only; None = not resolved.
+    target_branches: list[str] | None = None
+    #: Which layer `target_branches` came from: repo | workspace | install.
+    target_branches_source: Literal["repo", "workspace", "install"] | None = None
     #: True only when THIS call put a new full-index job in the queue.
     index_queued: bool = False
     #: Why `index_queued` is what it is. None on responses that started
@@ -346,6 +384,10 @@ class PullRequestSummary(BaseModel):
 class ReviewTriggerRequest(BaseModel):
     pr_ref: str = Field(min_length=4, max_length=512)
     post_comments: bool = True
+    #: Review even if the base branch is outside the target patterns
+    #: (`ReviewRequest.force`). A manual request already skips the draft,
+    #: title and cadence gates.
+    force: bool = False
 
 
 class ParameterAdjustmentOut(BaseModel):
@@ -394,6 +436,11 @@ class HiddenReportOut(BaseModel):
     no_evidence: int = 0
     coverage_claim: int = 0
     veto: int = 0
+    #: Hidden because the team dismissed the same finding before.
+    learned: int = 0
+    #: Shadow mode: how many the learned filter would have hidden, and which.
+    learned_would_hide: int = 0
+    learned_items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ReviewRunOut(BaseModel):
@@ -474,6 +521,10 @@ class ReviewRunOut(BaseModel):
     pr_provider: str | None = None
     pr_repo: str | None = None
     pr_number: int | None = None
+    #: What the run read: "full" (the whole pull request) or "incremental"
+    #: (only the commits since `scope_base_sha`); null when not recorded.
+    scope: str | None = None
+    scope_base_sha: str | None = None
     #: The ordered stages (src/review/stages.py). Shipped on the detail view
     #: and on a pull request's run list; null on /history rows ("not
     #: shipped") and on runs recorded before stages existed ("not recorded").
@@ -484,7 +535,8 @@ class ReviewStageOut(BaseModel):
     """One stage of a review run — Kodus-style timeline row."""
 
     #: Stable id: received | queued | retry | fetch_pr | settings |
-    #: ignore_globs | gate_enabled | gate_target_branch | context | gate_draft
+    #: ignore_globs | gate_enabled | gate_target_branch | gate_draft | gate_title |
+    #: gate_cadence | scope | context
     #: | gate_size | gate_hunks | summary | agent:<name> | verifier |
     #: breaking_change | compliance | publish | record | finished. Open
     #: vocabulary — the page renders an unknown key by its `name`.
@@ -832,6 +884,39 @@ class ReviewPolicyIn(BaseModel):
     base_instruction: str | None = Field(default=None, max_length=2000)
     message_started: str | None = Field(default=None, max_length=2000)
     message_finished_header: str | None = Field(default=None, max_length=2000)
+    completed_comment: str | None = Field(default=None, max_length=32)
+    commands_guide_enabled: bool | None = None
+    review_cadence: str | None = Field(default=None, max_length=32)
+    review_scope: str | None = Field(default=None, max_length=32)
+    auto_pause_pushes: int | None = Field(default=None, ge=2, le=20)
+    auto_pause_window_minutes: int | None = Field(default=None, ge=1, le=240)
+    ignored_title_keywords: list[str] | None = Field(default=None, max_length=50)
+    commands_enabled: bool | None = None
+    chat_enabled: bool | None = None
+    command_permission: str | None = Field(default=None, max_length=32)
+    # Learning (src.review.memories): memories on/off, whether a machine's
+    # proposal waits for a person, and whose "remember" is active at once.
+    memories_enabled: bool | None = None
+    knowledge_approval: bool | None = None
+    memory_trusted_commenters: list[str] | None = Field(default=None, max_length=100)
+    # Issues backlog: resolve a merged PR's open issue once the target branch
+    # no longer has it. Booleans inherit on null; the cap is 0..50 model calls.
+    issues_auto_resolve: bool | None = None
+    issues_resolve_llm_verify: bool | None = None
+    issues_resolve_max_llm: int | None = Field(default=None, ge=0, le=50)
+    issues_announce_resolved: bool | None = None
+    # Jira task context (src.review.review_defaults says what each means).
+    # The router checks the vocabulary, the project keys and the field id.
+    task_context_enabled: bool | None = None
+    task_project_keys: list[str] | None = Field(default=None, max_length=50)
+    task_acceptance_field: str | None = Field(default=None, max_length=64)
+    task_include_comments: int | None = Field(default=None, ge=0, le=10)
+    business_logic_auto: str | None = Field(default=None, max_length=32)
+    # Feedback learning: off | shadow | on, and whose verdicts teach nothing.
+    learning_suppression: str | None = Field(default=None, max_length=32)
+    learning_excluded_reviewers: list[str] | None = Field(default=None, max_length=100)
+    requirements_check_mode: str | None = Field(default=None, max_length=32)
+    task_urls_enabled: bool | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -963,6 +1048,58 @@ class ReviewPolicyOut(BaseModel):
     message_started_effective: str | None = None
     message_finished_header: str | None = None
     message_finished_header_effective: str | None = None
+    completed_comment: str | None = None
+    completed_comment_effective: str = "completed"
+    commands_guide_enabled: bool | None = None
+    commands_guide_enabled_effective: bool = True
+    review_cadence: str | None = None
+    review_cadence_effective: str = "automatic"
+    review_scope: str | None = None
+    review_scope_effective: str = "incremental"
+    auto_pause_pushes: int | None = None
+    auto_pause_pushes_effective: int = 3
+    auto_pause_window_minutes: int | None = None
+    auto_pause_window_minutes_effective: int = 15
+    ignored_title_keywords: list[str] | None = None
+    ignored_title_keywords_effective: list[str] = Field(default_factory=list)
+    commands_enabled: bool | None = None
+    commands_enabled_effective: bool = True
+    chat_enabled: bool | None = None
+    chat_enabled_effective: bool = True
+    command_permission: str | None = None
+    command_permission_effective: str = "repo_access"
+    memories_enabled: bool | None = None
+    memories_enabled_effective: bool = True
+    knowledge_approval: bool | None = None
+    knowledge_approval_effective: bool = True
+    memory_trusted_commenters: list[str] | None = None
+    memory_trusted_commenters_effective: list[str] = Field(default_factory=list)
+    issues_auto_resolve: bool | None = None
+    issues_auto_resolve_effective: bool = True
+    issues_resolve_llm_verify: bool | None = None
+    issues_resolve_llm_verify_effective: bool = True
+    issues_resolve_max_llm: int | None = None
+    issues_resolve_max_llm_effective: int = 8
+    issues_announce_resolved: bool | None = None
+    issues_announce_resolved_effective: bool = True
+    task_context_enabled: bool | None = None
+    task_context_enabled_effective: bool = True
+    task_project_keys: list[str] | None = None
+    task_project_keys_effective: list[str] = Field(default_factory=list)
+    task_acceptance_field: str | None = None
+    task_acceptance_field_effective: str | None = None
+    task_include_comments: int | None = None
+    task_include_comments_effective: int = 0
+    business_logic_auto: str | None = None
+    business_logic_auto_effective: str = "off"
+    learning_suppression: str | None = None
+    learning_suppression_effective: str = "shadow"
+    learning_excluded_reviewers: list[str] | None = None
+    learning_excluded_reviewers_effective: list[str] = Field(default_factory=list)
+    requirements_check_mode: str | None = None
+    requirements_check_mode_effective: str = "checklist"
+    task_urls_enabled: bool | None = None
+    task_urls_enabled_effective: bool = False
     # agent → takes part in a review starting now (both lists and the
     # built-in participation map folded together), and that map itself.
     agent_participation_effective: dict[str, bool] = Field(default_factory=dict)
@@ -1034,6 +1171,39 @@ class WorkspaceReviewDefaultsIn(BaseModel):
     base_instruction: str | None = Field(default=None, max_length=2000)
     message_started: str | None = Field(default=None, max_length=2000)
     message_finished_header: str | None = Field(default=None, max_length=2000)
+    completed_comment: str | None = Field(default=None, max_length=32)
+    commands_guide_enabled: bool | None = None
+    review_cadence: str | None = Field(default=None, max_length=32)
+    review_scope: str | None = Field(default=None, max_length=32)
+    auto_pause_pushes: int | None = Field(default=None, ge=2, le=20)
+    auto_pause_window_minutes: int | None = Field(default=None, ge=1, le=240)
+    ignored_title_keywords: list[str] | None = Field(default=None, max_length=50)
+    commands_enabled: bool | None = None
+    chat_enabled: bool | None = None
+    command_permission: str | None = Field(default=None, max_length=32)
+    # Learning (src.review.memories): memories on/off, whether a machine's
+    # proposal waits for a person, and whose "remember" is active at once.
+    memories_enabled: bool | None = None
+    knowledge_approval: bool | None = None
+    memory_trusted_commenters: list[str] | None = Field(default=None, max_length=100)
+    # Issues backlog: resolve a merged PR's open issue once the target branch
+    # no longer has it. Booleans inherit on null; the cap is 0..50 model calls.
+    issues_auto_resolve: bool | None = None
+    issues_resolve_llm_verify: bool | None = None
+    issues_resolve_max_llm: int | None = Field(default=None, ge=0, le=50)
+    issues_announce_resolved: bool | None = None
+    # Jira task context (src.review.review_defaults says what each means).
+    # The router checks the vocabulary, the project keys and the field id.
+    task_context_enabled: bool | None = None
+    task_project_keys: list[str] | None = Field(default=None, max_length=50)
+    task_acceptance_field: str | None = Field(default=None, max_length=64)
+    task_include_comments: int | None = Field(default=None, ge=0, le=10)
+    business_logic_auto: str | None = Field(default=None, max_length=32)
+    # Feedback learning: off | shadow | on, and whose verdicts teach nothing.
+    learning_suppression: str | None = Field(default=None, max_length=32)
+    learning_excluded_reviewers: list[str] | None = Field(default=None, max_length=100)
+    requirements_check_mode: str | None = Field(default=None, max_length=32)
+    task_urls_enabled: bool | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1068,6 +1238,32 @@ class WorkspaceReviewDefaultsOut(BaseModel):
     base_instruction: str | None = None
     message_started: str | None = None
     message_finished_header: str | None = None
+    completed_comment: str | None = None
+    commands_guide_enabled: bool | None = None
+    review_cadence: str | None = None
+    review_scope: str | None = None
+    auto_pause_pushes: int | None = None
+    auto_pause_window_minutes: int | None = None
+    ignored_title_keywords: list[str] | None = None
+    commands_enabled: bool | None = None
+    chat_enabled: bool | None = None
+    command_permission: str | None = None
+    memories_enabled: bool | None = None
+    knowledge_approval: bool | None = None
+    memory_trusted_commenters: list[str] | None = None
+    issues_auto_resolve: bool | None = None
+    issues_resolve_llm_verify: bool | None = None
+    issues_resolve_max_llm: int | None = None
+    issues_announce_resolved: bool | None = None
+    task_context_enabled: bool | None = None
+    task_project_keys: list[str] | None = None
+    task_acceptance_field: str | None = None
+    task_include_comments: int | None = None
+    business_logic_auto: str | None = None
+    learning_suppression: str | None = None
+    learning_excluded_reviewers: list[str] | None = None
+    requirements_check_mode: str | None = None
+    task_urls_enabled: bool | None = None
     # agent → takes part for a repository that overrides nothing, and the
     # built-in participation map (False = opt-in, named in enabled_agents).
     agent_participation_effective: dict[str, bool] = Field(default_factory=dict)

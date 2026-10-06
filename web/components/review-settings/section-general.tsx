@@ -20,9 +20,13 @@ import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useSettings } from "@/components/review-settings/context";
 import {
-  BooleanRow, Group, SectionFrame, SettingRow,
+  BooleanRow, ChoiceRow, Group, SectionFrame, SettingRow,
 } from "@/components/review-settings/field";
-import { effective, isSet } from "@/components/review-settings/model";
+import {
+  AUTO_PAUSE_PUSHES_MAX, AUTO_PAUSE_PUSHES_MIN, AUTO_PAUSE_WINDOW_MAX,
+  AUTO_PAUSE_WINDOW_MIN, ISSUES_MAX_LLM_MAX, ISSUES_MAX_LLM_MIN,
+  TITLE_KEYWORDS_MAX, TITLE_KEYWORD_MAX_CHARS, effective, isSet, type InheritableKey,
+} from "@/components/review-settings/model";
 
 /** A language code's own name ("uk" → "українська (uk)"). */
 export function languageName(code: string): string {
@@ -91,6 +95,9 @@ export function GeneralSection() {
           label={t("reviewSettings.general.runOnDrafts")}
           description={t("reviewSettings.general.runOnDraftsHint")}
         />
+        <TitleKeywordsRow />
+        <CadenceRows />
+        <ScopeRow />
       </Group>
 
       <Group
@@ -142,7 +149,70 @@ export function GeneralSection() {
           )}
         />
       </Group>
+
+      <Group
+        title={t("reviewSettings.general.issuesGroup")}
+        description={t("reviewSettings.general.issuesGroupHint")}
+      >
+        <BooleanRow
+          field="issues_auto_resolve"
+          label={t("reviewSettings.general.issuesAutoResolve")}
+          description={t("reviewSettings.general.issuesAutoResolveHint")}
+        />
+        <BooleanRow
+          field="issues_resolve_llm_verify"
+          label={t("reviewSettings.general.issuesLlmVerify")}
+          description={t("reviewSettings.general.issuesLlmVerifyHint")}
+        />
+        <IssuesMaxLlmRow />
+        <BooleanRow
+          field="issues_announce_resolved"
+          label={t("reviewSettings.general.issuesAnnounce")}
+          description={t("reviewSettings.general.issuesAnnounceHint")}
+        />
+      </Group>
     </SectionFrame>
+  );
+}
+
+/** How many model calls one recheck of a branch may spend on the issues
+ *  backlog. 0 keeps only the checks that need no model. */
+function IssuesMaxLlmRow() {
+  const t = useT();
+  const { draft, inh, setOwn, canEdit } = useSettings();
+  const id = useId();
+  const own = draft.own.issues_resolve_max_llm as number | null;
+  return (
+    <SettingRow
+      field="issues_resolve_max_llm"
+      label={t("reviewSettings.general.issuesMaxLlm")}
+      htmlFor={id}
+      description={t("reviewSettings.general.issuesMaxLlmHint")}
+      describeInherited={(v) => String(v ?? "")}
+      control={(
+        <Input
+          id={id}
+          type="number"
+          inputMode="numeric"
+          min={ISSUES_MAX_LLM_MIN}
+          max={ISSUES_MAX_LLM_MAX}
+          className="w-32 tabular-nums"
+          placeholder={String(inh.values.issues_resolve_max_llm ?? "")}
+          value={own ?? ""}
+          disabled={!canEdit}
+          onChange={(e) => {
+            const raw = e.target.value.trim();
+            if (!raw) return setOwn("issues_resolve_max_llm", null);
+            const n = Math.round(Number(raw));
+            if (!Number.isFinite(n)) return;
+            setOwn(
+              "issues_resolve_max_llm",
+              Math.min(ISSUES_MAX_LLM_MAX, Math.max(ISSUES_MAX_LLM_MIN, n)),
+            );
+          }}
+        />
+      )}
+    />
   );
 }
 
@@ -335,6 +405,255 @@ function TargetBranchesRow() {
               ))}
             </p>
           </div>
+        </div>
+      )}
+    />
+  );
+}
+
+// The order a reader compares the cadences in; the server's list decides
+//  which exist (`setting_choices`), this only sorts.
+const CADENCE_ORDER = ["automatic", "auto_pause", "manual"];
+
+//
+// Review cadence: every push, every push until a PR gets noisy, or only when
+// asked. The two auto-pause numbers show only while the cadence in force is
+// auto_pause — they mean nothing otherwise.
+// /
+function CadenceRows() {
+  const t = useT();
+  const { scope, draft, inh, meta } = useSettings();
+  const cadence = String(effective(draft, "review_cadence", scope.kind, inh) ?? "automatic");
+  const served = meta.choices.review_cadence ?? CADENCE_ORDER;
+  const options = [
+    ...CADENCE_ORDER.filter((v) => served.includes(v)),
+    ...served.filter((v) => !CADENCE_ORDER.includes(v)),
+  ].map((v) => ({
+    value: v,
+    title: t(`reviewSettings.cadence.choice.${v}`),
+    body: t(`reviewSettings.cadence.choice.${v}Body`),
+  }));
+  return (
+    <>
+      <ChoiceRow
+        field="review_cadence"
+        label={t("reviewSettings.cadence.label")}
+        description={t("reviewSettings.cadence.hint")}
+        options={options}
+        columns={3}
+      />
+      {cadence === "auto_pause" && (
+        <>
+          <NumberRow
+            field="auto_pause_pushes"
+            label={t("reviewSettings.cadence.pushes")}
+            description={t("reviewSettings.cadence.pushesHint")}
+            min={AUTO_PAUSE_PUSHES_MIN}
+            max={AUTO_PAUSE_PUSHES_MAX}
+          />
+          <NumberRow
+            field="auto_pause_window_minutes"
+            label={t("reviewSettings.cadence.window")}
+            description={t("reviewSettings.cadence.windowHint")}
+            min={AUTO_PAUSE_WINDOW_MIN}
+            max={AUTO_PAUSE_WINDOW_MAX}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+// What a review reads: only the commits since the last reviewed one, or the
+// whole pull request each time. The server's list decides which exist.
+const SCOPE_ORDER = ["incremental", "full"];
+
+function ScopeRow() {
+  const t = useT();
+  const { meta } = useSettings();
+  const served = meta.choices.review_scope ?? SCOPE_ORDER;
+  const options = [
+    ...SCOPE_ORDER.filter((v) => served.includes(v)),
+    ...served.filter((v) => !SCOPE_ORDER.includes(v)),
+  ].map((v) => ({
+    value: v,
+    title: t(`reviewSettings.scope.choice.${v}`),
+    body: t(`reviewSettings.scope.choice.${v}Body`),
+  }));
+  return (
+    <ChoiceRow
+      field="review_scope"
+      label={t("reviewSettings.scope.label")}
+      description={t("reviewSettings.scope.hint")}
+      options={options}
+      columns={2}
+    />
+  );
+}
+
+// A whole-number setting in the server's range. What is typed is kept as text
+// (a minimum of 2 must not turn the first "1" of "10" into 2); the value
+// reaches the draft while it is in range and is clamped when the box is left.
+// An empty box is "inherit".
+function NumberRow({
+  field, label, description, min, max,
+}: {
+  field: Extract<InheritableKey, "auto_pause_pushes" | "auto_pause_window_minutes">;
+  label: string;
+  description: string;
+  min: number;
+  max: number;
+}) {
+  const { draft, inh, setOwn, canEdit } = useSettings();
+  const id = useId();
+  const own = draft.own[field] as number | null;
+  const [typing, setTyping] = useState<string | null>(null);
+  const commit = (raw: string, clamp: boolean) => {
+    const text = raw.trim();
+    if (!text) return setOwn(field, null);
+    const n = Math.round(Number(text));
+    if (!Number.isFinite(n)) return;
+    if (clamp) return setOwn(field, Math.min(max, Math.max(min, n)));
+    if (n >= min && n <= max) setOwn(field, n);
+  };
+  return (
+    <SettingRow
+      field={field}
+      label={label}
+      htmlFor={id}
+      description={description}
+      describeInherited={(v) => String(v ?? "")}
+      control={(
+        <Input
+          id={id}
+          type="number"
+          inputMode="numeric"
+          min={min}
+          max={max}
+          className="w-32 tabular-nums"
+          placeholder={String(inh.values[field] ?? "")}
+          value={typing ?? own ?? ""}
+          disabled={!canEdit}
+          onChange={(e) => {
+            setTyping(e.target.value);
+            commit(e.target.value, false);
+          }}
+          onBlur={() => {
+            if (typing !== null) commit(typing, true);
+            setTyping(null);
+          }}
+        />
+      )}
+    />
+  );
+}
+
+//
+// Ignored title keywords: a pull request whose title contains one of them
+// (any case) is not reviewed by an automatic trigger — "WIP", "[skip review]",
+// "Revert". A person's request still reviews it. Added with Enter or the
+// button; several at once with commas.
+// /
+function TitleKeywordsRow() {
+  const t = useT();
+  const { scope, draft, inh, setOwn, canEdit } = useSettings();
+  const inputId = useId();
+  const [text, setText] = useState("");
+  const set = isSet(draft, "ignored_title_keywords", scope.kind);
+  const shown = (effective(draft, "ignored_title_keywords", scope.kind, inh) as string[] | null) ?? [];
+  const typed = text.split(",").map((v) => v.trim()).filter(Boolean);
+  const tooLong = typed.some((v) => v.length > TITLE_KEYWORD_MAX_CHARS);
+  const full = shown.length >= TITLE_KEYWORDS_MAX;
+
+  const write = (next: string[]) => setOwn("ignored_title_keywords", next);
+  const add = () => {
+    if (!typed.length || tooLong) return;
+    const known = new Set(shown.map((v) => v.toLowerCase()));
+    const fresh = typed.filter((v) => {
+      const folded = v.toLowerCase();
+      if (known.has(folded)) return false;
+      known.add(folded);
+      return true;
+    });
+    write([...shown, ...fresh].slice(0, TITLE_KEYWORDS_MAX));
+    setText("");
+  };
+  const remove = (entry: string) => write(shown.filter((e) => e !== entry));
+
+  return (
+    <SettingRow
+      field="ignored_title_keywords"
+      label={t("reviewSettings.titleKeywords.label")}
+      htmlFor={inputId}
+      description={t("reviewSettings.titleKeywords.hint")}
+      describeInherited={(v) => {
+        const list = Array.isArray(v) ? (v as string[]) : [];
+        return list.length ? list.join(", ") : t("reviewSettings.titleKeywords.none");
+      }}
+      control={(
+        <div className="space-y-3">
+          <p className="text-xs" aria-live="polite">
+            {shown.length === 0
+              ? t("reviewSettings.titleKeywords.summaryNone")
+              : t("reviewSettings.titleKeywords.summary", { keywords: shown.join(", ") })}
+            {scope.kind === "repo" && set && shown.length === 0 && (
+              <> {t("reviewSettings.titleKeywords.overrideNone")}</>
+            )}
+          </p>
+          {shown.length > 0 && (
+            <ul className="flex flex-wrap gap-1.5">
+              {shown.map((entry) => (
+                <li key={entry}>
+                  <span className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-secondary)] py-0.5 pl-2 pr-0.5 font-mono text-xs">
+                    {entry}
+                    <button
+                      type="button"
+                      disabled={!canEdit}
+                      onClick={() => remove(entry)}
+                      aria-label={t("reviewSettings.titleKeywords.remove", { entry })}
+                      className="grid size-5 place-items-center rounded opacity-70 hover:bg-[var(--color-accent)] hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-ring)] disabled:pointer-events-none"
+                    >
+                      <XIcon className="h-3 w-3" aria-hidden />
+                    </button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="flex flex-col gap-2 @md:flex-row">
+            <Input
+              id={inputId}
+              className="flex-1 font-mono text-xs"
+              placeholder="WIP, [skip review], Revert"
+              value={text}
+              maxLength={TITLE_KEYWORD_MAX_CHARS * 5}
+              disabled={!canEdit || full}
+              aria-invalid={tooLong ? true : undefined}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  add();
+                }
+              }}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!canEdit || !typed.length || tooLong || full}
+              onClick={add}
+            >
+              {t("reviewSettings.titleKeywords.add")}
+            </Button>
+          </div>
+          {(tooLong || full) && (
+            <p className="text-xs text-[var(--color-destructive)]" role="alert">
+              {tooLong
+                ? t("reviewSettings.titleKeywords.tooLong", { max: TITLE_KEYWORD_MAX_CHARS })
+                : t("reviewSettings.titleKeywords.full", { max: TITLE_KEYWORDS_MAX })}
+            </p>
+          )}
         </div>
       )}
     />

@@ -33,33 +33,52 @@ the discussions endpoint decides which notes a human reply protects.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from urllib.parse import quote
 
 import httpx
 
 from src.credentials import resolve_git_credential
 from src.http import build_client
+from src.review import markers
 from src.review.diff import parse_unified_diff
+from src.review.markers import has_marker, parse_finding_marker
 from src.review.models import (
+    Finding,
     HunkSide,
     PullRequest,
     ReviewBatch,
 )
 from src.review.pr_actions import APPROVE, REQUEST_CHANGES, review_decision
 from src.review.providers.base import (
+    MAX_FILE_BYTES,
     SUGGESTION_GITLAB,
+    CommitInfo,
+    FileChange,
+    OurThread,
+    PathCommit,
+    PostedComment,
     PullRequestProvider,
     PullRequestProviderError,
+    ThreadMessage,
     _anchorable_ranges,
     _committable_enabled,
     _committable_span,
+    _count,
     _format_finding_body,
     _format_summary,
+    _format_unanchored,
     _new_side_text,
     _original_lines,
     _snap_to_span,
     _with_marker,
+    begin_incremental_post,
+    finding_fingerprint,
+    finish_incremental_post,
+    incremental_skip,
+    trim_thread,
 )
+from src.review.scope import MAX_LISTED_COMMITS
 from src.review.settings import get_review_settings
 from src.sync.gitlab_instance import (
     API_SUFFIX,
@@ -168,10 +187,9 @@ class GitLabPRProvider(PullRequestProvider):
             raise PullRequestProviderError(
                 f"MR !{pr_number} not found in {repo}"
             )
-        if meta_resp.status_code >= 400:
-            raise PullRequestProviderError(
-                f"GitLab API error {meta_resp.status_code}: {meta_resp.text[:200]}"
-            )
+        # A 301 (project renamed or moved) is an error that names the new
+        # location, not an empty answer to parse.
+        self._expect_ok(meta_resp, "GitLab API")
         meta = meta_resp.json()
 
         # 2. Raw diff (newer GitLab — single endpoint)
@@ -183,12 +201,10 @@ class GitLabPRProvider(PullRequestProvider):
         if diff_resp.status_code == 404:
             # Fallback: build the diff manually from the changes endpoint
             raw_diff = self._build_diff_from_changes(project_path, pr_number)
-        elif diff_resp.status_code >= 400:
-            raise PullRequestProviderError(
-                f"GitLab raw_diffs error {diff_resp.status_code}: "
-                f"{diff_resp.text[:200]}"
-            )
         else:
+            # Not `>= 400` alone: a 301 gave an empty body here, and an empty
+            # diff reads as "nothing to review".
+            self._expect_ok(diff_resp, "GitLab raw_diffs")
             raw_diff = diff_resp.text
 
         settings = get_review_settings()
@@ -212,6 +228,7 @@ class GitLabPRProvider(PullRequestProvider):
             hunks=hunks,
             raw_diff=raw_diff,
             skipped_files=skipped_files,
+            reported_files=_count(meta.get("changes_count")),
         )
 
     def _build_diff_from_changes(
@@ -282,10 +299,15 @@ class GitLabPRProvider(PullRequestProvider):
         stale: list[tuple[str, int]] = []
         protected: set[int] = set()
         listing_complete = True
+        # An incremental review (only the new commits were read) keeps every
+        # earlier inline discussion; the summary note is rewritten in place.
+        incremental = begin_incremental_post(self, batch, settings.comment_marker)
         if settings.replace_on_synchronize:
             stale, listing_complete = self._marked_notes(
                 project_path, pr.number, settings.comment_marker,
             )
+            if incremental is not None:
+                stale = [x for x in stale if x[0] == _SUMMARY_NOTE]
             if stale and listing_complete:
                 # The flat listing cannot see who replied to what (see
                 # `_protected_note_ids`) — one extra pass answers it. Skipped
@@ -310,7 +332,11 @@ class GitLabPRProvider(PullRequestProvider):
         posted = 0
         failed = 0
         snapped = 0
-        for finding in batch.inline_findings(settings.max_inline_comments):
+        refused: list[Finding] = []
+        inline_comments: list[PostedComment] = []
+        for finding in batch.inline_findings(
+            settings.max_inline_comments, skip=incremental_skip(incremental),
+        ):
             side = "RIGHT" if finding.side == HunkSide.RIGHT else "LEFT"
             line = _snap_to_span(
                 finding.line, ranges.get((finding.file_path, side), []))
@@ -329,6 +355,7 @@ class GitLabPRProvider(PullRequestProvider):
                     finding, settings.comment_marker,
                     committable=SUGGESTION_GITLAB if span else None,
                     original=_original_lines(new_side, finding),
+                    head_sha=pr.head_sha,
                 ),
                 "position[position_type]": "text",
                 "position[base_sha]": base_sha,
@@ -344,12 +371,31 @@ class GitLabPRProvider(PullRequestProvider):
             )
             if resp.status_code in (200, 201):
                 posted += 1
+                note_id = self._first_note_id(resp)
+                if note_id is not None:
+                    short, full = finding_fingerprint(finding)
+                    inline_comments.append(PostedComment(
+                        comment_id=note_id, path=finding.file_path, line=line,
+                        fingerprint=short, finding_key=full,
+                        thread_id=self._discussion_id(resp)))
             else:
                 failed += 1
+                refused.append(finding)
                 logger.warning(
                     "gitlab_discussion_failed status=%d body=%s",
                     resp.status_code, resp.text[:200],
                 )
+        # A discussion GitLab would not place is not a finding lost: it joins
+        # the summary, which is composed below. An incremental run also
+        # resolves the discussions its commits made outdated and puts its
+        # banner in the summary.
+        incremental_response = finish_incremental_post(
+            self, batch, incremental, posted=posted, refused=refused)
+        if refused and incremental is None:
+            batch.add_section(
+                "unanchored", _format_unanchored(refused, pr, batch.review_language),
+                order=900, targets={"comment"},
+            )
 
         # 4. Drop the previous run's notes, now that this run's are up
         #    The lifecycle comment this run posted ("🔄 reviewing…") is the
@@ -391,6 +437,9 @@ class GitLabPRProvider(PullRequestProvider):
             # half-done cleanup look like a finished one.
             "cleanup": cleanup,
             "review_state": review_state,
+            # What this run created, for the learning loop to follow.
+            "inline_comments": inline_comments,
+            **incremental_response,
         }
         if summary_id is None:
             # The summary note is the only place the verdict lives on GitLab,
@@ -410,6 +459,173 @@ class GitLabPRProvider(PullRequestProvider):
             response["summary_error"] = why
             response["error"] = why
         return response
+
+    @staticmethod
+    def _discussion_id(resp: httpx.Response) -> str | None:
+        """The id of the discussion a POST just created: what a reply names."""
+        try:
+            body = resp.json()
+        except ValueError:
+            return None
+        did = body.get("id") if isinstance(body, dict) else None
+        return did if isinstance(did, str) and did else None
+
+    @staticmethod
+    def _first_note_id(resp: httpx.Response) -> int | None:
+        """The id of the first note of the discussion a POST just created."""
+        try:
+            body = resp.json()
+        except ValueError:
+            return None
+        notes = body.get("notes") if isinstance(body, dict) else None
+        if isinstance(notes, list) and notes and isinstance(notes[0], dict):
+            nid = notes[0].get("id")
+            return nid if isinstance(nid, int) else None
+        return None
+
+    # ─── Incremental review: commits, compare diff, discussions ───
+
+    def _paged(self, url: str) -> list | None:
+        """Every item of a paginated list (X-Next-Page), None when a page fails."""
+        out: list = []
+        seen: set[str] = set()
+        nxt: str | None = url
+        while nxt:
+            if nxt in seen:
+                return None
+            seen.add(nxt)
+            try:
+                resp = self._http.get(nxt)
+                self._expect_ok(resp, "GitLab API")
+                page = resp.json()
+            except (PullRequestProviderError, httpx.HTTPError, ValueError) as exc:
+                logger.warning("gitlab_list_failed error=%s", exc)
+                return None
+            if not isinstance(page, list):
+                return None
+            out.extend(page)
+            if len(out) > MAX_LISTED_COMMITS * 8:
+                return None
+            next_page = (resp.headers.get("X-Next-Page") or "").strip()
+            nxt = self._replace_page_param(nxt, next_page) if next_page else None
+        return out
+
+    def list_pr_commits(self, repo: str, pr_number: int) -> list[CommitInfo] | None:
+        project_path = quote(repo, safe="")
+        items = self._paged(
+            f"{self.api_base}/projects/{project_path}/merge_requests/{pr_number}"
+            f"/commits?per_page=100")
+        if items is None or len(items) > MAX_LISTED_COMMITS:
+            return None
+        out: list[CommitInfo] = []
+        for item in items:
+            if not isinstance(item, dict) or not item.get("id"):
+                return None
+            out.append(CommitInfo(
+                sha=str(item["id"]),
+                parents=tuple(str(p) for p in item.get("parent_ids") or []),
+                message=str(item.get("message") or ""),
+                committed_at=item.get("committed_date")))
+        return out
+
+    def fetch_incremental_diff(
+        self, repo: str, pr_number: int, base_sha: str, head_sha: str,
+    ) -> str | None:
+        """`repository/compare?straight=true` rebuilt as a unified diff. A
+        diff GitLab collapsed or cut as too large cannot be read whole: None."""
+        project_path = quote(repo, safe="")
+        try:
+            resp = self._http.get(
+                f"{self.api_base}/projects/{project_path}/repository/compare",
+                params={"from": base_sha, "to": head_sha, "straight": "true"})
+            self._expect_ok(resp, "GitLab compare")
+            body = resp.json()
+        except (PullRequestProviderError, httpx.HTTPError, ValueError) as exc:
+            logger.warning("gitlab_incremental_diff_failed mr=%s error=%s", pr_number, exc)
+            return None
+        diffs = body.get("diffs") if isinstance(body, dict) else None
+        if not isinstance(diffs, list) or body.get("compare_timeout"):
+            return None
+        rows: list[str] = []
+        for change in diffs:
+            if not isinstance(change, dict):
+                return None
+            if change.get("too_large") or change.get("collapsed"):
+                return None
+            old = change.get("old_path") or change.get("new_path") or "unknown"
+            new = change.get("new_path") or change.get("old_path") or "unknown"
+            rows.append(f"diff --git a/{old} b/{new}")
+            rows.append("--- /dev/null" if change.get("new_file") else f"--- a/{old}")
+            rows.append("+++ /dev/null" if change.get("deleted_file") else f"+++ b/{new}")
+            rows.append(change.get("diff") or "")
+        return "\n".join(rows)
+
+    def our_inline_threads(self, pr: PullRequest, marker: str) -> list[OurThread] | None:
+        """Our diff discussions (first note: marker AND author) with their
+        discussion id. None when a page cannot be read."""
+        project_path = quote(pr.repo, safe="")
+        viewer = self._viewer_username()
+        if not viewer:
+            return None
+        items = self._paged(
+            f"{self.api_base}/projects/{project_path}/merge_requests/{pr.number}"
+            f"/discussions?per_page=100")
+        if items is None:
+            return None
+        threads: list[OurThread] = []
+        for disc in items:
+            notes = [n for n in (disc.get("notes") or []) if isinstance(n, dict)] \
+                if isinstance(disc, dict) else []
+            if not notes:
+                continue
+            first = notes[0]
+            position = first.get("position")
+            if (first.get("system") or not isinstance(position, dict)
+                    or not self._is_ours(first, marker, viewer)):
+                continue
+            found = parse_finding_marker(str(first.get("body") or ""))
+            new_line, old_line = position.get("new_line"), position.get("old_line")
+            line = new_line if isinstance(new_line, int) else old_line
+            threads.append(OurThread(
+                comment_id=first.get("id") if isinstance(first.get("id"), int) else 0,
+                thread_id=str(disc.get("id") or "") or None,
+                path=str(position.get("new_path") or position.get("old_path") or ""),
+                line=line if isinstance(line, int) else None,
+                side="RIGHT" if isinstance(new_line, int) else "LEFT",
+                resolved=bool(first.get("resolved")),
+                fingerprint=found[0] if found else None,
+                sha=found[1] if found else None,
+                replied=any(not n.get("system") and not self._authored_by(n, viewer)
+                            for n in notes[1:]),
+            ))
+        return threads
+
+    def resolve_threads(self, pr: PullRequest, threads: list[OurThread]) -> dict[str, int]:
+        """`PUT .../discussions/{id}?resolved=true`, one per thread."""
+        project_path = quote(pr.repo, safe="")
+        out = {"resolved": 0, "failed": 0, "unsupported": 0}
+        for th in threads:
+            if not th.thread_id:
+                out["unsupported"] += 1
+                continue
+            try:
+                resp = self._http.put(
+                    f"{self.api_base}/projects/{project_path}/merge_requests/"
+                    f"{pr.number}/discussions/{quote(th.thread_id, safe='')}",
+                    params={"resolved": "true"})
+            except httpx.HTTPError as exc:
+                out["failed"] += 1
+                logger.warning("gitlab_resolve_error id=%s err=%s", th.thread_id, exc)
+                continue
+            if resp.status_code in (200, 201):
+                out["resolved"] += 1
+            elif resp.status_code in (404, 405):
+                out["unsupported"] += 1
+            else:
+                out["failed"] += 1
+                logger.warning("gitlab_resolve_failed id=%s status=%d",
+                               th.thread_id, resp.status_code)
+        return out
 
     # ─── Lifecycle comment ("🔄 reviewing…" → summary) ──────────
 
@@ -527,6 +743,20 @@ class GitLabPRProvider(PullRequestProvider):
             logger.warning("gitlab_description_put_failed status=%d", resp.status_code)
             return {"written": False, "error": f"GitLab refused the description (HTTP {resp.status_code})"}
         return {"written": True, "error": None}
+
+    def fetch_commit_messages(self, pr: PullRequest, limit: int = 50) -> list[str]:
+        url = (f"{self.api_base}/projects/{self._project_path(pr.repo)}"
+               f"/merge_requests/{pr.number}/commits")
+        try:
+            resp = self._http.get(url, params={"per_page": max(1, min(int(limit), 100))})
+            if resp.status_code != 200:
+                return []
+            rows = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return []
+        # GitLab lists newest first already.
+        return [str(r.get("message") or "") for r in rows
+                if isinstance(r, dict) and r.get("message")][:limit]
 
     def _our_summary_comments(
         self, pr: PullRequest, marker: str,
@@ -661,8 +891,13 @@ class GitLabPRProvider(PullRequestProvider):
                 ]
                 if len(notes) < 2:
                     continue  # nobody replied; nothing here to protect
+                # Our own account without any marker of ours is a person
+                # speaking through the token, and counts as foreign.
                 foreign = any(
-                    not n.get("system") and not self._authored_by(n, viewer)
+                    not n.get("system") and (
+                        not self._authored_by(n, viewer)
+                        or not markers.is_bot_text(str(n.get("body") or ""))
+                    )
                     for n in notes
                 )
                 if foreign:
@@ -805,6 +1040,97 @@ class GitLabPRProvider(PullRequestProvider):
         found, _ = self._marked_notes(self._project_path(repo), pr_number, marker)
         return [nid for _, nid in found]
 
+    # ─── Reading the target branch (the issues backlog) ──────────
+
+    def _project_url(self, repo: str) -> str:
+        return f"{self.api_base}/projects/{self._project_path(repo)}"
+
+    def branch_head_sha(self, repo: str, branch: str) -> str:
+        resp = self._http.get(
+            f"{self._project_url(repo)}/repository/branches/{quote(branch, safe='')}")
+        self._expect_ok(resp, "GitLab branch")
+        sha = str(((resp.json() or {}).get("commit") or {}).get("id") or "")
+        if not sha:
+            raise PullRequestProviderError(f"GitLab named no commit for branch {branch!r}")
+        return sha
+
+    def read_file_at(self, repo: str, ref: str, path: str) -> str | None:
+        resp = self._http.get(
+            f"{self._project_url(repo)}/repository/files/{quote(path, safe='')}/raw",
+            params={"ref": ref},
+        )
+        if resp.status_code == 404:
+            return None
+        self._expect_ok(resp, "GitLab file")
+        if len(resp.content) > MAX_FILE_BYTES:
+            raise PullRequestProviderError(
+                f"{path} is larger than {MAX_FILE_BYTES} bytes; not read")
+        return resp.content.decode("utf-8", "replace")
+
+    def commits_touching(
+        self, repo: str, ref: str, path: str, *,
+        since: datetime | None = None, limit: int = 10,
+    ) -> list[PathCommit]:
+        params: dict[str, object] = {
+            "ref_name": ref, "path": path, "per_page": max(1, min(int(limit), 100)),
+        }
+        if since is not None:
+            params["since"] = since.isoformat()
+        resp = self._http.get(f"{self._project_url(repo)}/repository/commits",
+                              params=params)
+        self._expect_ok(resp, "GitLab commits")
+        return [
+            PathCommit(
+                sha=str(c.get("id") or ""),
+                subject=str(c.get("title") or c.get("message") or "").strip()[:300],
+                date=c.get("committed_date") or c.get("created_at"),
+                url=c.get("web_url"),
+            )
+            for c in (resp.json() or []) if c.get("id")
+        ][:limit]
+
+    def file_change_in_commit(
+        self, repo: str, sha: str, path: str,
+    ) -> FileChange | None:
+        resp = self._http.get(
+            f"{self._project_url(repo)}/repository/commits/{sha}/diff",
+            params={"per_page": 100})
+        self._expect_ok(resp, "GitLab commit")
+        for d in resp.json() or []:
+            new, old = d.get("new_path"), d.get("old_path")
+            if path not in (new, old):
+                continue
+            if d.get("deleted_file"):
+                return FileChange("deleted", old or path)
+            if d.get("renamed_file") and old == path and new:
+                return FileChange("renamed", new, previous_path=old)
+            return FileChange("added" if d.get("new_file") else "modified", new or path)
+        return None
+
+    def list_comment_reactions(
+        self, repo: str, pr_number: int, comment_id: str,
+    ) -> list[tuple[str, str]]:
+        url = (f"{self.api_base}/projects/{self._project_path(repo)}/merge_requests/"
+               f"{int(pr_number)}/notes/{quote(str(comment_id), safe='')}/award_emoji")
+        try:
+            resp = self._http.get(url, params={"per_page": 100})
+            rows = resp.json() if resp.status_code == 200 else None
+        except (httpx.HTTPError, ValueError) as exc:
+            raise PullRequestProviderError(f"GitLab reactions: {type(exc).__name__}") from exc
+        if rows is None:
+            raise PullRequestProviderError(f"GitLab reactions error {resp.status_code}")
+        out: list[tuple[str, str]] = []
+        for item in rows:
+            name = str((item or {}).get("name") or "")
+            user = str(((item or {}).get("user") or {}).get("username") or "")
+            if user and name in ("thumbsup", "thumbsdown"):
+                out.append((user, "up" if name == "thumbsup" else "down"))
+        return out
+
+    def commit_url(self, repo: str, sha: str) -> str | None:
+        base = self.api_base.removesuffix("/api/v4")
+        return f"{base}/{repo}/-/commit/{sha}"
+
     @staticmethod
     def _project_path(repo: str) -> str:
         """`group/proj` → `group%2Fproj`, and an already-encoded path unchanged.
@@ -850,7 +1176,7 @@ class GitLabPRProvider(PullRequestProvider):
     @classmethod
     def _is_ours(cls, note: dict, marker: str, viewer: str) -> bool:
         """Both conditions, never one: our marker AND our authorship."""
-        if marker not in (note.get("body") or ""):
+        if not has_marker(note.get("body") or "", marker):
             return False
         return cls._authored_by(note, viewer)
 
@@ -883,3 +1209,137 @@ class GitLabPRProvider(PullRequestProvider):
             return new_url
         sep = "&" if "?" in url else "?"
         return f"{url}{sep}page={page}"
+
+    # ─── Conversation (comment commands) ─────────────────────────
+
+    def viewer_ids(self) -> frozenset[str]:
+        username = self._viewer_username()
+        return frozenset({username}) if username else frozenset()
+
+    def post_reply(self, ev, body: str) -> str | None:
+        """Into the discussion the comment belongs to; a plain note when the
+        discussion cannot be written to (resolved threads refuse replies)."""
+        project = self._project_path(ev.repo)
+        base = f"{self.api_base}/projects/{project}/merge_requests/{ev.pr_number}"
+        text = markers.with_chat_marker(body)
+        resp = None
+        if ev.thread_id:
+            resp = self._http.post(
+                f"{base}/discussions/{ev.thread_id}/notes", json={"body": text},
+            )
+        if resp is None or resp.status_code >= 400:
+            resp = self._http.post(f"{base}/notes", json={"body": text})
+        resp = self._expect_ok(resp, "gitlab reply")
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+        nid = data.get("id") if isinstance(data, dict) else None
+        return str(nid) if nid is not None else None
+
+    def update_comment(
+        self, repo: str, pr_number: int, comment_id: str, body: str, *, kind: str = "issue",
+    ) -> bool:
+        project = self._project_path(repo)
+        resp = self._http.put(
+            f"{self.api_base}/projects/{project}/merge_requests/{pr_number}"
+            f"/notes/{comment_id}",
+            json={"body": markers.with_chat_marker(body)},
+        )
+        return 200 <= resp.status_code < 300
+
+    def get_thread(self, ev, limit: int = 30) -> list[ThreadMessage]:
+        """The discussion the note belongs to, system notes left out."""
+        if not ev.thread_id:
+            return []
+        project = self._project_path(ev.repo)
+        try:
+            resp = self._http.get(
+                f"{self.api_base}/projects/{project}/merge_requests/{ev.pr_number}"
+                f"/discussions/{quote(str(ev.thread_id), safe='')}")
+            if resp.status_code >= 400:
+                return []
+            data = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return []
+        notes = data.get("notes") if isinstance(data, dict) else None
+        viewer = self._viewer_username()
+        found: list[ThreadMessage] = []
+        for note in notes if isinstance(notes, list) else []:
+            if not isinstance(note, dict) or note.get("system"):
+                continue
+            author = note.get("author")
+            position = note.get("position")
+            position = position if isinstance(position, dict) else {}
+            line = position.get("new_line")
+            if not isinstance(line, int):
+                line = position.get("old_line")
+            path = position.get("new_path") or position.get("old_path")
+            found.append(ThreadMessage(
+                comment_id=str(note.get("id")),
+                author=str(author.get("username") or "") if isinstance(author, dict) else "",
+                text=str(note.get("body") or ""),
+                ours=bool(viewer) and self._authored_by(note, viewer),
+                path=path if isinstance(path, str) else None,
+                line=line if isinstance(line, int) else None,
+                created_at=note.get("created_at") if isinstance(note.get("created_at"), str) else None,
+            ))
+        return trim_thread(found, limit)
+
+    def acknowledge(self, ev) -> bool:
+        """An eyes award on the note."""
+        project = self._project_path(ev.repo)
+        resp = self._http.post(
+            f"{self.api_base}/projects/{project}/merge_requests/{ev.pr_number}"
+            f"/notes/{ev.comment_id}/award_emoji",
+            json={"name": "eyes"},
+        )
+        return 200 <= resp.status_code < 300
+
+    def actor_permission(
+        self, repo: str, *, actor_id: str = "", actor_name: str = "",
+    ) -> str:
+        """Access level in the project, inherited from its groups too: 30
+        (Developer) and up is `write`."""
+        if not str(actor_id).isdigit():
+            return "unknown"
+        project = self._project_path(repo)
+        try:
+            resp = self._http.get(
+                f"{self.api_base}/projects/{project}/members/all/{actor_id}",
+            )
+            if resp.status_code == 404:
+                return "none"
+            if resp.status_code >= 400:
+                return "unknown"
+            data = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return "unknown"
+        level = data.get("access_level") if isinstance(data, dict) else None
+        if not isinstance(level, int) or isinstance(level, bool):
+            return "unknown"
+        if level >= 30:
+            return "write"
+        return "read" if level > 0 else "none"
+
+    def pr_participants(self, repo: str, pr_number: int) -> frozenset[str]:
+        project = self._project_path(repo)
+        try:
+            resp = self._http.get(
+                f"{self.api_base}/projects/{project}/merge_requests/{pr_number}",
+            )
+            if resp.status_code >= 400:
+                return frozenset()
+            data = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return frozenset()
+        if not isinstance(data, dict):
+            return frozenset()
+        people = [data.get("author")]
+        people.extend(data.get("reviewers") or [])
+        people.extend(data.get("assignees") or [])
+        ids: set[str] = set()
+        for person in people:
+            if isinstance(person, dict):
+                ids.update(str(v) for v in (person.get("id"), person.get("username")) if v)
+        return frozenset(ids)

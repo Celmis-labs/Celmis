@@ -29,7 +29,7 @@ from src.review.agents.business_logic import (
     pr_intent,
 )
 from src.review.agents.verifier import PrefilterResult, VerifierResult
-from src.review.models import Hunk, PullRequest, ReviewRunStatus
+from src.review.models import Hunk, PullRequest, ReviewRunStatus, ScopeInfo
 from src.review.orchestrator import ReviewOrchestrator
 
 _DESCRIPTION = """<!-- Describe your change -->
@@ -74,6 +74,19 @@ _CONTRADICTION = {
     "title": "Any viewer can archive a project", "body": "Check the admin role.",
     "rule_id": "logic.contradiction", "confidence": 0.9,
 }
+
+
+def test_an_incremental_run_still_shows_the_agent_the_whole_pull_request():
+    whole = _pr()
+    earlier = whole.hunks[0]
+    newer = Hunk(file_path="app/audit.py", old_file_path="app/audit.py", old_start=1,
+                 old_count=1, new_start=1, new_count=2,
+                 content="@@ -1,1 +1,2 @@\n+    log_archive(project)\n")
+    whole.scope = ScopeInfo(base_sha="a" * 40, new_commits=1, full_hunks=[earlier, newer])
+    whole.hunks = [newer]
+    prompt = BusinessLogicAgent(model="m")._build_prompt(AgentContext(pull_request=whole))
+    # A criterion met by an earlier commit must not be reported as missing.
+    assert "app/projects.py" in prompt and "app/audit.py" in prompt
 
 
 # ─── reading the statement ───────────────────────────────────────────

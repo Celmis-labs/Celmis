@@ -14,12 +14,17 @@
 
 import Link from "next/link";
 import { useId, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { AnimatePresence } from "motion/react";
 import * as m from "motion/react-m";
 import { ChevronDownIcon, CpuIcon, RotateCcwIcon } from "lucide-react";
 
+import {
+  api, type ConnectionStatus, type JiraFieldOption, type JiraProjectOption,
+} from "@/lib/api";
 import { AGENT_CATEGORY, agentLabel } from "@/lib/review-categories";
 import { useT } from "@/lib/i18n";
+import { useToken } from "@/lib/use-token";
 import { cn } from "@/lib/utils";
 import {
   AgentLLMRow, DEFAULT_AGENT_MAX_OUTPUT, agentDraftFrom, agentMaxOutLimit,
@@ -28,10 +33,12 @@ import { Badge } from "@/components/ui/badge";
 import { OverriddenPill } from "@/components/ui/status";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useSettings } from "@/components/review-settings/context";
 import {
-  Group, OriginBadge, ResetButton, SectionFrame,
+  BooleanRow, ChoiceRow, Group, OriginBadge, ResetButton, SectionFrame, SettingRow,
 } from "@/components/review-settings/field";
 import {
   effective, effectiveParticipation, inheritedParticipation, isSet, switchAgent,
@@ -116,6 +123,8 @@ export function CategoriesSection() {
           );
         })}
       </Group>
+
+      <JiraTaskGroup />
 
       <Group
         title={t("reviewSettings.categories.alwaysGroup")}
@@ -331,5 +340,255 @@ function AgentModelRow({ agent }: { agent: string }) {
         {t("settings.llm.agents.budgetNote", { tokens: DEFAULT_AGENT_MAX_OUTPUT })}
       </Callout>
     </div>
+  );
+}
+
+// ─── the Jira task the business-logic agent reads ────────────────────
+
+/** Project keys as a person types them: split on commas, spaces, semicolons. */
+function parseProjectKeys(text: string): string[] {
+  return [...new Set(text.split(/[\s,;]+/).map((k) => k.trim().toUpperCase()).filter(Boolean))];
+}
+const PROJECT_KEY_RE = /^[A-Z][A-Z0-9_]{1,9}$/;
+const FIELD_ID_RE = /^customfield_\d{1,9}$/;
+const INCLUDE_COMMENTS_MAX = 10;
+
+function JiraTaskGroup() {
+  const t = useT();
+  const token = useToken();
+  const { scope, draft, inh, meta } = useSettings();
+  const conns = useQuery({
+    queryKey: ["connections"],
+    queryFn: () => api<ConnectionStatus[]>("/api/connections", { token }),
+    enabled: !!token,
+  });
+  const connected = Boolean(conns.data?.find((c) => c.provider === "jira")?.connected);
+  const on = Boolean(effective(draft, "task_context_enabled", scope.kind, inh));
+  const served = meta.choices.business_logic_auto ?? ["off", "when_task_found"];
+  const options = ["off", "when_task_found"].filter((v) => served.includes(v)).map((v) => ({
+    value: v,
+    title: t(`reviewSettings.jira.auto.${v}`),
+    body: t(`reviewSettings.jira.auto.${v}Body`),
+  }));
+  const modes = ["off", "findings", "checklist"];
+  const servedModes = meta.choices.requirements_check_mode ?? modes;
+  const modeOptions = modes.filter((v) => servedModes.includes(v)).map((v) => ({
+    value: v,
+    title: t(`reviewSettings.jira.requirements.${v}`),
+    body: t(`reviewSettings.jira.requirements.${v}Body`),
+  }));
+  return (
+    <Group
+      title={t("reviewSettings.jira.group")}
+      description={t("reviewSettings.jira.groupHint")}
+    >
+      {conns.isSuccess && !connected && (
+        <div className="px-4 pt-3.5">
+          <Callout tone="info">
+            {t("reviewSettings.jira.notConnected")}{" "}
+            <Link href="/connections" className="font-medium underline underline-offset-4">
+              {t("reviewSettings.jira.connect")}
+            </Link>
+          </Callout>
+        </div>
+      )}
+      <BooleanRow
+        field="task_context_enabled"
+        label={t("reviewSettings.jira.enabled")}
+        description={t("reviewSettings.jira.enabledHint")}
+      />
+      <ChoiceRow
+        field="business_logic_auto"
+        label={t("reviewSettings.jira.auto")}
+        description={t("reviewSettings.jira.autoHint")}
+        options={options}
+        columns={2}
+        disabled={!on}
+      />
+      <ChoiceRow
+        field="requirements_check_mode"
+        label={t("reviewSettings.jira.requirements")}
+        description={t("reviewSettings.jira.requirementsHint")}
+        options={modeOptions}
+        columns={3}
+        disabled={!on}
+      />
+      <BooleanRow
+        field="task_urls_enabled"
+        label={t("reviewSettings.jira.urls")}
+        description={t("reviewSettings.jira.urlsHint")}
+        disabled={!on}
+      />
+      <ProjectKeysRow disabled={!on} connected={connected} />
+      <AcceptanceFieldRow disabled={!on} connected={connected} />
+      <IncludeCommentsRow disabled={!on} />
+    </Group>
+  );
+}
+
+function ProjectKeysRow({ disabled, connected }: { disabled: boolean; connected: boolean }) {
+  const t = useT();
+  const token = useToken();
+  const { draft, inh, setOwn, canEdit } = useSettings();
+  const id = useId();
+  const own = draft.own.task_project_keys as string[] | null;
+  const inherited = Array.isArray(inh.values.task_project_keys)
+    ? (inh.values.task_project_keys as string[]) : [];
+  const [text, setText] = useState(own ? own.join(", ") : "");
+  // A reset (or a reload) changes the draft behind the box's back.
+  const shown = parseProjectKeys(text);
+  if (own === null && text !== "") setText("");
+  else if (own !== null && shown.join(",") !== own.join(",")) setText(own.join(", "));
+  const projects = useQuery({
+    queryKey: ["task-context", "projects"],
+    queryFn: () => api<JiraProjectOption[]>("/api/task-context/projects", { token }),
+    enabled: !!token && connected,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+  const bad = shown.filter((k) => !PROJECT_KEY_RE.test(k));
+  return (
+    <SettingRow
+      field="task_project_keys"
+      label={t("reviewSettings.jira.projects")}
+      htmlFor={id}
+      description={t("reviewSettings.jira.projectsHint")}
+      describeInherited={(v) => {
+        const list = Array.isArray(v) ? (v as string[]) : [];
+        return list.length ? list.join(", ") : t("reviewSettings.jira.anyProject");
+      }}
+      control={(
+        <div className="space-y-1">
+          <Input
+            id={id}
+            value={text}
+            list={`${id}-projects`}
+            spellCheck={false}
+            autoCapitalize="characters"
+            className="max-w-md font-mono text-xs uppercase"
+            disabled={!canEdit || disabled}
+            placeholder={own === null && inherited.length ? inherited.join(", ") : "PROJ, AIR"}
+            aria-invalid={bad.length ? true : undefined}
+            onChange={(e) => {
+              setText(e.target.value);
+              setOwn("task_project_keys", e.target.value.trim() ? parseProjectKeys(e.target.value) : []);
+            }}
+          />
+          {projects.data && (
+            <datalist id={`${id}-projects`}>
+              {projects.data.map((p) => (
+                <option key={p.key} value={p.key}>{p.name}</option>
+              ))}
+            </datalist>
+          )}
+          {bad.length > 0 && (
+            <p role="alert" className="text-xs text-[var(--color-destructive)]">
+              {t("reviewSettings.jira.projectsInvalid", { keys: bad.join(", ") })}
+            </p>
+          )}
+        </div>
+      )}
+    />
+  );
+}
+
+function AcceptanceFieldRow({ disabled, connected }: { disabled: boolean; connected: boolean }) {
+  const t = useT();
+  const token = useToken();
+  const { draft, inh, setOwn, canEdit } = useSettings();
+  const id = useId();
+  const own = draft.own.task_acceptance_field as string | null;
+  const inherited = String(inh.values.task_acceptance_field ?? "");
+  const [pick, setPick] = useState(false);
+  const fields = useQuery({
+    queryKey: ["task-context", "fields"],
+    queryFn: () => api<JiraFieldOption[]>("/api/task-context/fields", { token }),
+    enabled: !!token && connected && pick,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+  const invalid = Boolean(own && !FIELD_ID_RE.test(own));
+  return (
+    <SettingRow
+      field="task_acceptance_field"
+      label={t("reviewSettings.jira.field")}
+      htmlFor={id}
+      description={t("reviewSettings.jira.fieldHint")}
+      describeInherited={(v) => (v ? String(v) : t("reviewSettings.jira.fieldNone"))}
+      control={(
+        <div className="space-y-2">
+          <Input
+            id={id}
+            value={own ?? ""}
+            spellCheck={false}
+            className="max-w-xs font-mono text-xs"
+            disabled={!canEdit || disabled}
+            placeholder={inherited || "customfield_10042"}
+            aria-invalid={invalid ? true : undefined}
+            onChange={(e) => setOwn("task_acceptance_field", e.target.value.trim() || null)}
+          />
+          {invalid && (
+            <p role="alert" className="text-xs text-[var(--color-destructive)]">
+              {t("reviewSettings.jira.fieldInvalid")}
+            </p>
+          )}
+          {connected && canEdit && !disabled && (
+            pick ? (
+              <Select
+                value={own ?? ""}
+                onChange={(v) => setOwn("task_acceptance_field", v || null)}
+                className="max-w-md"
+                placeholder={fields.isError
+                  ? t("reviewSettings.jira.fieldsFailed")
+                  : t("reviewSettings.jira.fieldsLoading")}
+                options={(fields.data ?? []).map((f) => ({
+                  value: f.id, label: f.name, hint: f.id,
+                }))}
+              />
+            ) : (
+              <Button type="button" variant="ghost" size="sm" onClick={() => setPick(true)}>
+                {t("reviewSettings.jira.fieldPick")}
+              </Button>
+            )
+          )}
+        </div>
+      )}
+    />
+  );
+}
+
+function IncludeCommentsRow({ disabled }: { disabled: boolean }) {
+  const t = useT();
+  const { draft, inh, setOwn, canEdit } = useSettings();
+  const id = useId();
+  const own = draft.own.task_include_comments as number | null;
+  return (
+    <SettingRow
+      field="task_include_comments"
+      label={t("reviewSettings.jira.comments")}
+      htmlFor={id}
+      description={t("reviewSettings.jira.commentsHint")}
+      describeInherited={(v) => String(v ?? 0)}
+      control={(
+        <Input
+          id={id}
+          type="number"
+          inputMode="numeric"
+          min={0}
+          max={INCLUDE_COMMENTS_MAX}
+          className="w-32 tabular-nums"
+          placeholder={String(inh.values.task_include_comments ?? 0)}
+          value={own ?? ""}
+          disabled={!canEdit || disabled}
+          onChange={(e) => {
+            const raw = e.target.value.trim();
+            if (!raw) return setOwn("task_include_comments", null);
+            const n = Math.round(Number(raw));
+            if (!Number.isFinite(n)) return;
+            setOwn("task_include_comments", Math.min(INCLUDE_COMMENTS_MAX, Math.max(0, n)));
+          }}
+        />
+      )}
+    />
   );
 }

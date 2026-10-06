@@ -54,6 +54,16 @@ SURFACE_AUTOMATION = "automation"
 #: Proposing review rules for a repository (src/review/rules_generate.py) —
 #: a review-profile call that is not a review, so not booked as one.
 SURFACE_RULES_GENERATE = "rules_generate"
+#: Learning from the team (src/review/memories.py): the call that decides
+#: whether a new memory repeats one already stored.
+SURFACE_LEARNING = "learning"
+#: Judging whether a merged PR's open issue is still in the target branch
+#: (src/review/issue_resolver.py) — a review-profile call that is not a
+#: review, so it is not booked as one.
+SURFACE_ISSUE_RESOLVE = "issue_resolve"
+#: Answering a question put to the reviewer in a pull-request comment
+#: (src/review/commands/chat.py) — a review-profile call that is not a review.
+SURFACE_PR_CHAT = "pr_chat"
 SURFACE_OTHER = "other"          # unclassified — better than mislabelling
 
 
@@ -294,6 +304,7 @@ __all__ = [
     "BudgetExceeded", "BudgetStatus", "BudgetUnavailable",
     "SURFACE_QA", "SURFACE_REVIEW",
     "SURFACE_EMBEDDINGS", "SURFACE_EMBEDDING", "SURFACE_VAULT", "SURFACE_AGENT",
-    "SURFACE_DEPS", "SURFACE_OTHER",
+    "SURFACE_DEPS", "SURFACE_LEARNING", "SURFACE_ISSUE_RESOLVE", "SURFACE_PR_CHAT",
+    "SURFACE_OTHER",
     "enforce", "get_status", "month_spend", "record_spend",
 ]

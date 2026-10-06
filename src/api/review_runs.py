@@ -199,6 +199,11 @@ _MIGRATIONS = [
     # branch mismatch read exactly like a skip for a draft. NULL is "this row
     # predates the column"; the API serves it as null, never as [].
     "ALTER TABLE review_runs ADD COLUMN stages_json TEXT",
+    # What the run read: 'full' (the whole pull request) or 'incremental' (only
+    # the commits since the last reviewed one, `scope_base_sha`). NULL is "this
+    # row predates the column" — such a run read the whole PR.
+    "ALTER TABLE review_runs ADD COLUMN scope TEXT",
+    "ALTER TABLE review_runs ADD COLUMN scope_base_sha TEXT",
     # A PR's runs are listed by its coordinates (the pull-requests page and
     # the open-PR list's "last review" column).
     "CREATE INDEX IF NOT EXISTS idx_review_runs_pr"
@@ -399,7 +404,7 @@ def hidden_payload(batch) -> dict | None:
         except (TypeError, ValueError):
             return 0
 
-    return {
+    out = {
         "by_rule": {str(k): int(v) for k, v in dict(by_rule).items()},
         "duplicates": _n("dropped_duplicates"),
         "near_duplicates": _n("dropped_near_duplicates"),
@@ -407,7 +412,15 @@ def hidden_payload(batch) -> dict | None:
         "no_evidence": _n("dropped_no_evidence"),
         "coverage_claim": _n("dropped_coverage_claim"),
         "veto": _n("dropped_by_veto"),
+        "learned": _n("dropped_by_feedback"),
     }
+    # Shadow mode: what feedback WOULD have hidden, named, so a workspace can
+    # judge the filter before it lets it act. Only written when there is any.
+    if _n("would_drop_by_feedback"):
+        out["learned_would_hide"] = _n("would_drop_by_feedback")
+        items = getattr(batch, "learned_items", None) or []
+        out["learned_items"] = [dict(i) for i in list(items)[:10] if isinstance(i, dict)]
+    return out
 
 
 def post_failure(result) -> str | None:
@@ -571,6 +584,10 @@ class ReviewRun:
     #: The ordered stages (src/review/stages.py). None means "not recorded" —
     #: a row written before the column; [] would mean "recorded, none".
     stages: list[dict] | None = None
+    #: 'full' | 'incremental' (see the `scope` column); None = not recorded.
+    scope: str | None = None
+    #: The commit an incremental run started from.
+    scope_base_sha: str | None = None
 
     @property
     def status_reason(self) -> str | None:
@@ -723,6 +740,8 @@ class ReviewRunStore:
         hidden: dict | None = None,
         post_error: str | None = None,
         stages: list[dict] | None = None,
+        scope: str | None = None,
+        scope_base_sha: str | None = None,
     ) -> None:
         fields: list[str] = []
         values: list = []
@@ -741,6 +760,7 @@ class ReviewRunStore:
             ("pr_provider", pr_provider), ("pr_repo", pr_repo),
             ("pr_number", pr_number), ("raw_diff", raw_diff),
             ("cleanup_json", cleanup_json), ("post_error", post_error),
+            ("scope", scope), ("scope_base_sha", scope_base_sha),
         ]:
             if val is not None:
                 fields.append(f"{col} = ?")
@@ -801,6 +821,21 @@ class ReviewRunStore:
             return None
         return (row["workspace_id"] or "default", row["pr_provider"],
                 row["pr_repo"], int(row["pr_number"]))
+
+    def findings_of(self, run_id: str) -> list[dict] | None:
+        """The findings a run stored (the dicts `record_completed_review`
+        writes), or None when the row is missing or holds none."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT findings_json FROM review_runs WHERE id = ?", (run_id,),
+            ).fetchone()
+        if not row or not row["findings_json"]:
+            return None
+        try:
+            parsed = json.loads(row["findings_json"])
+        except (TypeError, ValueError):
+            return None
+        return [x for x in parsed if isinstance(x, dict)] if isinstance(parsed, list) else None
 
     def list_for_pr(
         self, workspace_id: str, provider: str, repo: str, number: int, *,
@@ -932,6 +967,8 @@ class ReviewRunStore:
             pr_repo=_col(row, "pr_repo"),
             pr_number=_col(row, "pr_number"),
             stages=_stages(row),
+            scope=_col(row, "scope"),
+            scope_base_sha=_col(row, "scope_base_sha"),
         )
 
 
@@ -959,7 +996,10 @@ def pr_snapshot(batch) -> dict:
     pr = getattr(batch, "pull_request", None)
     if pr is None:
         return {}
+    scope = getattr(pr, "scope", None)
     return {
+        "scope": getattr(batch, "scope_mode", None),
+        "scope_base_sha": (scope.base_sha or None) if scope is not None else None,
         "pr_head_sha": getattr(pr, "head_sha", None) or None,
         "pr_head_ref": getattr(pr, "head_ref", None) or None,
         "pr_provider": getattr(pr, "provider", None) or None,
@@ -967,7 +1007,10 @@ def pr_snapshot(batch) -> dict:
         "pr_number": getattr(pr, "number", None) or None,
         # Stage 21 — diff snapshot for the side-by-side UI. Capped so a
         # multi-MB monorepo diff can't bloat the sqlite row.
-        "raw_diff": (getattr(pr, "raw_diff", "") or "")[:800_000] or None,
+        # An incremental run stores the WHOLE PR's diff: the diff view anchors
+        # its findings on it, and they were anchored on the PR's lines.
+        "raw_diff": ((scope.full_raw_diff if scope is not None
+                      else getattr(pr, "raw_diff", "")) or "")[:800_000] or None,
     }
 
 

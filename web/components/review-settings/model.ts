@@ -62,6 +62,32 @@ export const INHERITABLE_KEYS = [
   "base_instruction",
   "message_started",
   "message_finished_header",
+  "completed_comment",
+  "commands_guide_enabled",
+  "review_cadence",
+  "auto_pause_pushes",
+  "auto_pause_window_minutes",
+  "ignored_title_keywords",
+  "review_scope",
+  "commands_enabled",
+  "chat_enabled",
+  "command_permission",
+  "memories_enabled",
+  "knowledge_approval",
+  "memory_trusted_commenters",
+  "learning_suppression",
+  "learning_excluded_reviewers",
+  "issues_auto_resolve",
+  "issues_resolve_llm_verify",
+  "issues_resolve_max_llm",
+  "issues_announce_resolved",
+  "task_context_enabled",
+  "task_project_keys",
+  "task_acceptance_field",
+  "task_include_comments",
+  "business_logic_auto",
+  "requirements_check_mode",
+  "task_urls_enabled",
   "review_language",
 ] as const;
 export type InheritableKey = (typeof INHERITABLE_KEYS)[number];
@@ -76,6 +102,10 @@ export const FIELD_SECTION: Record<InheritableKey | "agents", SectionId> = {
   status_feedback: "general",
   committable_suggestions: "general",
   started_comment_enabled: "general",
+  issues_auto_resolve: "general",
+  issues_resolve_llm_verify: "general",
+  issues_resolve_max_llm: "general",
+  issues_announce_resolved: "general",
   review_language: "general",
   disabled_agents: "categories",
   enabled_agents: "categories",
@@ -92,18 +122,45 @@ export const FIELD_SECTION: Record<InheritableKey | "agents", SectionId> = {
   summary_on_new_commits: "summary",
   summary_existing_description: "summary",
   summary_instructions: "summary",
+  completed_comment: "summary",
+  commands_guide_enabled: "summary",
+  review_cadence: "general",
+  auto_pause_pushes: "general",
+  auto_pause_window_minutes: "general",
+  ignored_title_keywords: "general",
+  review_scope: "general",
+  commands_enabled: "commands",
+  chat_enabled: "commands",
+  command_permission: "commands",
   message_started: "messages",
   message_finished_header: "messages",
+  memories_enabled: "learning",
+  knowledge_approval: "learning",
+  memory_trusted_commenters: "learning",
+  learning_suppression: "learning",
+  learning_excluded_reviewers: "learning",
+  task_context_enabled: "categories",
+  task_project_keys: "categories",
+  task_acceptance_field: "categories",
+  task_include_comments: "categories",
+  business_logic_auto: "categories",
+  requirements_check_mode: "categories",
+  task_urls_enabled: "categories",
 };
 
 const LIST_KEYS = new Set<InheritableKey>([
-  "disabled_agents", "enabled_agents", "target_branches",
+  "disabled_agents", "enabled_agents", "target_branches", "ignored_title_keywords",
+  "task_project_keys",
 ]);
 /** Edited as one entry per line; held as the text while typing. */
-const LINE_KEYS = new Set<InheritableKey>(["ignore_globs", "suppressed_rules"]);
+const LINE_KEYS = new Set<InheritableKey>([
+  "ignore_globs", "suppressed_rules", "memory_trusted_commenters",
+  "learning_excluded_reviewers",
+]);
 /** Blank is "inherit" at every layer, never "say nothing". */
 export const TEXT_KEYS = new Set<InheritableKey>([
   "summary_instructions", "base_instruction", "message_started", "message_finished_header",
+  "task_acceptance_field",
 ]);
 
 /** Server bounds, repeated so a value is refused at the keyboard. */
@@ -113,6 +170,17 @@ export const SUMMARY_INSTRUCTIONS_MAX = 4000;
 export const PROMPT_TEMPLATE_MAX = 20_000;
 export const MAX_INLINE_MIN = 1;
 export const MAX_INLINE_MAX = 100;
+/** Auto-pause bounds and keyword limits — src/review/review_defaults.py
+ *  `INT_FIELDS`, `TITLE_KEYWORDS_MAX`, `TITLE_KEYWORD_MAX_CHARS`. */
+export const AUTO_PAUSE_PUSHES_MIN = 2;
+export const AUTO_PAUSE_PUSHES_MAX = 20;
+export const AUTO_PAUSE_WINDOW_MIN = 1;
+export const AUTO_PAUSE_WINDOW_MAX = 240;
+export const TITLE_KEYWORDS_MAX = 50;
+export const TITLE_KEYWORD_MAX_CHARS = 100;
+/** `INT_FIELDS["issues_resolve_max_llm"]` on the server. */
+export const ISSUES_MAX_LLM_MIN = 0;
+export const ISSUES_MAX_LLM_MAX = 50;
 /** `AgentPromptIn.system_prompt` min_length on the server. */
 export const WORKSPACE_PROMPT_MIN = 10;
 /** Team guidelines per agent and layer — src/review/prompt_guidelines.py
@@ -282,9 +350,22 @@ export function canonical(key: InheritableKey, value: unknown, scope: Scope["kin
     if (scope === "workspace" && lines.length === 0) return null;
     return lines;
   }
+  if (key === "ignored_title_keywords") {
+    // Case-insensitive duplicates fold into the first spelling, as on the server.
+    const seen = new Set<string>();
+    const list = (value as string[]).map((v) => v.trim()).filter((v) => {
+      const folded = v.toLowerCase();
+      if (!v || seen.has(folded)) return false;
+      seen.add(folded);
+      return true;
+    });
+    if (scope === "workspace" && list.length === 0) return null;
+    return list;
+  }
   if (LIST_KEYS.has(key)) {
     const list = [...new Set((value as string[]).map((v) => v.trim()).filter(Boolean))];
-    if (scope === "workspace" && key === "target_branches" && list.length === 0) return null;
+    if (scope === "workspace" && (key === "target_branches" || key === "task_project_keys")
+      && list.length === 0) return null;
     return list;
   }
   if (TEXT_KEYS.has(key)) {
@@ -442,6 +523,10 @@ export function defaultsPayload(
     approve_when_clean: c.approve_when_clean as boolean | null,
     request_changes_on_critical: c.request_changes_on_critical as boolean | null,
     status_feedback: c.status_feedback as boolean | null,
+    issues_auto_resolve: c.issues_auto_resolve as boolean | null,
+    issues_resolve_llm_verify: c.issues_resolve_llm_verify as boolean | null,
+    issues_resolve_max_llm: c.issues_resolve_max_llm as number | null,
+    issues_announce_resolved: c.issues_announce_resolved as boolean | null,
     committable_suggestions: c.committable_suggestions as boolean | null,
     apply_filters_to_rules: c.apply_filters_to_rules as boolean | null,
     summary_target: c.summary_target as WorkspaceReviewDefaults["summary_target"],
@@ -451,6 +536,28 @@ export function defaultsPayload(
     base_instruction: c.base_instruction as string | null,
     message_started: c.message_started as string | null,
     message_finished_header: c.message_finished_header as string | null,
+    completed_comment: c.completed_comment as WorkspaceReviewDefaults["completed_comment"],
+    commands_guide_enabled: c.commands_guide_enabled as boolean | null,
+    review_cadence: c.review_cadence as WorkspaceReviewDefaults["review_cadence"],
+    review_scope: c.review_scope as WorkspaceReviewDefaults["review_scope"],
+    auto_pause_pushes: c.auto_pause_pushes as number | null,
+    auto_pause_window_minutes: c.auto_pause_window_minutes as number | null,
+    ignored_title_keywords: c.ignored_title_keywords as string[] | null,
+    commands_enabled: c.commands_enabled as boolean | null,
+    chat_enabled: c.chat_enabled as boolean | null,
+    command_permission: c.command_permission as WorkspaceReviewDefaults["command_permission"],
+    memories_enabled: c.memories_enabled as boolean | null,
+    knowledge_approval: c.knowledge_approval as boolean | null,
+    memory_trusted_commenters: c.memory_trusted_commenters as string[] | null,
+    learning_suppression: c.learning_suppression as WorkspaceReviewDefaults["learning_suppression"],
+    learning_excluded_reviewers: c.learning_excluded_reviewers as string[] | null,
+    task_context_enabled: c.task_context_enabled as boolean | null,
+    task_project_keys: c.task_project_keys as string[] | null,
+    task_acceptance_field: c.task_acceptance_field as string | null,
+    task_include_comments: c.task_include_comments as number | null,
+    business_logic_auto: c.business_logic_auto as WorkspaceReviewDefaults["business_logic_auto"],
+    requirements_check_mode: c.requirements_check_mode as WorkspaceReviewDefaults["requirements_check_mode"],
+    task_urls_enabled: c.task_urls_enabled as boolean | null,
   };
   if (agents) {
     const map: Record<string, AgentLLMOverride> = {};
@@ -534,6 +641,10 @@ export function policyPayload(
     approve_when_clean: c.approve_when_clean as boolean | null,
     request_changes_on_critical: c.request_changes_on_critical as boolean | null,
     status_feedback: c.status_feedback as boolean | null,
+    issues_auto_resolve: c.issues_auto_resolve as boolean | null,
+    issues_resolve_llm_verify: c.issues_resolve_llm_verify as boolean | null,
+    issues_resolve_max_llm: c.issues_resolve_max_llm as number | null,
+    issues_announce_resolved: c.issues_announce_resolved as boolean | null,
     committable_suggestions: c.committable_suggestions as boolean | null,
     apply_filters_to_rules: c.apply_filters_to_rules as boolean | null,
     summary_target: c.summary_target as ReviewPolicy["summary_target"],
@@ -543,6 +654,28 @@ export function policyPayload(
     base_instruction: c.base_instruction as string | null,
     message_started: c.message_started as string | null,
     message_finished_header: c.message_finished_header as string | null,
+    completed_comment: c.completed_comment as ReviewPolicy["completed_comment"],
+    commands_guide_enabled: c.commands_guide_enabled as boolean | null,
+    review_cadence: c.review_cadence as ReviewPolicy["review_cadence"],
+    review_scope: c.review_scope as ReviewPolicy["review_scope"],
+    auto_pause_pushes: c.auto_pause_pushes as number | null,
+    auto_pause_window_minutes: c.auto_pause_window_minutes as number | null,
+    ignored_title_keywords: c.ignored_title_keywords as string[] | null,
+    commands_enabled: c.commands_enabled as boolean | null,
+    chat_enabled: c.chat_enabled as boolean | null,
+    command_permission: c.command_permission as ReviewPolicy["command_permission"],
+    memories_enabled: c.memories_enabled as boolean | null,
+    knowledge_approval: c.knowledge_approval as boolean | null,
+    memory_trusted_commenters: c.memory_trusted_commenters as string[] | null,
+    learning_suppression: c.learning_suppression as ReviewPolicy["learning_suppression"],
+    learning_excluded_reviewers: c.learning_excluded_reviewers as string[] | null,
+    task_context_enabled: c.task_context_enabled as boolean | null,
+    task_project_keys: c.task_project_keys as string[] | null,
+    task_acceptance_field: c.task_acceptance_field as string | null,
+    task_include_comments: c.task_include_comments as number | null,
+    business_logic_auto: c.business_logic_auto as ReviewPolicy["business_logic_auto"],
+    requirements_check_mode: c.requirements_check_mode as ReviewPolicy["requirements_check_mode"],
+    task_urls_enabled: c.task_urls_enabled as boolean | null,
   };
 }
 

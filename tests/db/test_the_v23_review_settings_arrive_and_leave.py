@@ -23,8 +23,26 @@ from alembic.runtime.migration import MigrationContext
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 
-from src.review.review_defaults import BUILTIN_DEFAULTS, V23_FIELDS, install_defaults, resolve
+from src.review.review_defaults import (
+    BUILTIN_DEFAULTS,
+    INHERITABLE_FIELDS,
+    install_defaults,
+    resolve,
+)
 from src.review.settings import ReviewSettings
+
+# The fields THIS migration added: from `enabled_agents` to the last of the 2.3.0
+# settings. Later migrations append to INHERITABLE_FIELDS, so the end is fixed
+# here instead of following the list.
+V23_FIELDS: tuple[str, ...] = INHERITABLE_FIELDS[
+    INHERITABLE_FIELDS.index("enabled_agents"):
+    INHERITABLE_FIELDS.index("message_finished_header") + 1
+]
+# Columns that arrive in LATER migrations; the legacy table has none of them
+# either, and this migration must leave them alone.
+LATER_FIELDS: tuple[str, ...] = INHERITABLE_FIELDS[
+    INHERITABLE_FIELDS.index("message_finished_header") + 1:
+]
 
 REVISION = "f1a2b3c4d5e6"
 MIGRATION = (
@@ -32,6 +50,15 @@ MIGRATION = (
     / "alembic" / "versions" / f"{REVISION}_review_settings_v23.py"
 )
 MODEL_COLUMNS = ("performance_model", "business_logic_model")
+#: Settings appended to `V23_FIELDS` by later migrations (d6a1c3e5f701 …); this
+#: migration did not add them.
+_LATER = ("completed_comment", "commands_guide_enabled", "review_cadence",
+          "auto_pause_pushes", "auto_pause_window_minutes", "ignored_title_keywords",
+          "review_scope", "commands_enabled", "chat_enabled", "command_permission",
+          # d2a7c9e1f367, the Jira task context:
+          "task_context_enabled", "task_project_keys", "task_acceptance_field",
+          "task_include_comments", "business_logic_auto")
+_AT_V23 = tuple(n for n in V23_FIELDS if n not in _LATER)
 
 
 @compiles(JSONB, "sqlite")
@@ -64,7 +91,7 @@ def _legacy(table: str) -> list[sa.Column]:
         sa.Column(c.name, c.type, primary_key=c.primary_key, nullable=c.nullable,
                   server_default=_server_default(c))
         for c in model.__table__.columns
-        if c.name not in (*V23_FIELDS, *MODEL_COLUMNS)
+        if c.name not in (*V23_FIELDS, *MODEL_COLUMNS, *LATER_FIELDS)
     ]
 
 
@@ -119,7 +146,7 @@ def test_every_column_arrives_nullable_on_both_tables(engine):
     for table, extra in (("repo_review_policies", MODEL_COLUMNS),
                          ("workspace_review_defaults", ())):
         columns = _columns(engine, table)
-        for name in (*V23_FIELDS, *extra):
+        for name in (*_AT_V23, *extra):
             assert name in columns, f"{table}.{name}"
             assert columns[name]["nullable"], f"{table}.{name}"
             assert columns[name]["default"] is None, f"{table}.{name}"
@@ -130,15 +157,15 @@ def test_existing_rows_behave_exactly_as_before(engine):
     _run(engine, "upgrade")
     policy = _row(engine, "repo_review_policies")
     defaults = _row(engine, "workspace_review_defaults")
-    assert all(policy[n] is None for n in (*V23_FIELDS, *MODEL_COLUMNS))
-    assert all(defaults[n] is None for n in V23_FIELDS)
+    assert all(policy[n] is None for n in (*_AT_V23, *MODEL_COLUMNS))
+    assert all(defaults[n] is None for n in _AT_V23)
     # What was there stays there.
     assert policy["prompt_template"] == "rules"
     assert defaults["summary_instructions"] == "be brief"
     # And NULL resolves to the built-in of every new key.
-    values, sources = resolve(policy, {n: defaults[n] for n in V23_FIELDS},
+    values, sources = resolve(policy, {n: defaults[n] for n in _AT_V23},
                               install_defaults(ReviewSettings()))
-    for name in V23_FIELDS:
+    for name in _AT_V23:
         assert values[name] == BUILTIN_DEFAULTS[name], name
         assert sources[name] == "install", name
 
@@ -153,7 +180,7 @@ def test_it_is_idempotent_and_reverses(engine):
     _run(engine, "downgrade")
     for table in ("repo_review_policies", "workspace_review_defaults"):
         columns = _columns(engine, table)
-        for name in (*V23_FIELDS, *MODEL_COLUMNS):
+        for name in (*_AT_V23, *MODEL_COLUMNS):
             assert name not in columns, f"{table}.{name}"
     assert _row(engine, "repo_review_policies")["prompt_template"] == "rules"
     assert _row(engine, "workspace_review_defaults")["summary_instructions"] == "be brief"

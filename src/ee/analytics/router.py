@@ -4,6 +4,10 @@
 
     GET /api/analytics/summary?days=7|30|90
 
+The productivity metrics (src/ee/analytics/productivity_router.py) are the
+same licence feature but a narrower audience (owner and admin only: they name
+people); `src.ee._router_for("analytics")` mounts both routers together.
+
 Owner, admin or editor of the workspace (or a global admin) — see
 `require_analytics_access` (src/api/deps.py — RBAC, so it stays AGPL). The
 arithmetic lives in src/ee/analytics/aggregate.py; this module only reads the
