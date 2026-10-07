@@ -714,6 +714,12 @@ Each item has a regression test.
 
 ### Fixed
 
+- **Closing a repository graph no longer waits ~4 s.** Every MCP tool call opens
+  the embedded graph and closes it again; the close sent SHUTDOWN and then let
+  redis-py's default retry policy reconnect, with backoff, to the server it had
+  just stopped. A `list_repos` over four repositories took ~16 s. The close is
+  now one attempt; the snapshot is still written before the server exits.
+
 - **Learning from feedback: review fixes.** A finding posted twice on one pull
   request keeps a thumb given on either comment (reactions are read per finding,
   not per comment, and a thumb is withdrawn only when no comment carries it); a

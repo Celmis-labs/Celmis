@@ -655,6 +655,14 @@ class FalkorDBLiteStore(GraphStore):
         if self._closed:
             return
         try:
+            # SHUTDOWN ends with the server dropping the connection, which
+            # redis-py's default retry policy answers by reconnecting to a
+            # server that is gone, with backoff: ~4 s per close, paid on every
+            # MCP tool call. One attempt is the whole of a shutdown.
+            from redis.backoff import NoBackoff
+            from redis.retry import Retry
+
+            self._fdb.client.set_retry(Retry(NoBackoff(), 0))
             self._fdb.close()
         except Exception as e:  # noqa: BLE001
             logger.warning("close_failed err=%s", e)
