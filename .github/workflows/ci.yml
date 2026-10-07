@@ -79,7 +79,16 @@ jobs:
           # (src/api/jwt_auth.py). This value is 15, so every test that
           # builds an app failed at import — CI has been red on that alone.
           CELMIS_JWT_SECRET: dummy-for-tests-not-a-real-secret
-        run: pytest -q -p no:warnings --durations=10
+        run: |
+          set -o pipefail
+          pytest -q -p no:warnings --durations=10 -rfE 2>&1 | tee test-report.txt
+
+      # The step log needs a sign-in to read; a run's annotations do not. A red
+      # run names its failing tests where anyone can see them, instead of
+      # "Process completed with exit code 1" and nothing else.
+      - name: Name the failing tests
+        if: failure()
+        run: grep -E '^(FAILED|ERROR) ' test-report.txt | head -50 | sed 's/^/::error::/' || true
 
   web:
     name: typecheck + build
