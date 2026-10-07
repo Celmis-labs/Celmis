@@ -56,6 +56,17 @@ def _no_provider_is_called(monkeypatch):
     monkeypatch.setattr(connections, "_verify_jira", refuse)
     monkeypatch.setattr(connections, "_verify_token", refuse)
 
+    # The task-context reads open a real client on the saved connection; its
+    # transport answers as an unreachable site would, so the reads still go
+    # through the whole route and its error wording, and SITE is never dialled.
+    from src.review.task_context.jira_client import JiraClient, JiraError
+
+    def unreachable(self, *args, **kwargs):
+        raise JiraError("unreachable",
+                        f"Jira at {self.instance.host}: could not connect (offline in tests)")
+
+    monkeypatch.setattr(JiraClient, "_get", unreachable)
+
 
 def _store():
     from src.credentials import get_credential_store

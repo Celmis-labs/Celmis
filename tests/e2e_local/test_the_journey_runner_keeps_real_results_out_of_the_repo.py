@@ -34,6 +34,17 @@ def test_results_for_real_services_cannot_be_written_inside_this_repository() ->
         journey.main(["--real", "svc", "--out", str(ROOT / "docs" / "journey-out")])
 
 
+def test_running_the_journey_leaves_the_loggers_as_it_found_them() -> None:
+    """It used to leave `src` at WARNING, and every later test in the process
+    that reads an INFO record from `src.*` (tests/ops/test_logbuf.py) failed."""
+    import logging
+
+    before = {n: logging.getLogger(n).level for n in journey._NOISY}
+    with pytest.raises(SystemExit):
+        journey.main(["--real", "svc", "--out", str(ROOT / "docs" / "journey-out")])
+    assert {n: logging.getLogger(n).level for n in before} == before
+
+
 def test_a_password_literal_in_a_tracked_file_is_armed_but_a_placeholder_is_not(tmp_path: Path) -> None:
     secret = "Zk9" + "qW2mRt7Lx"  # assembled: no literal secret in this file
     repo = _git_repo(tmp_path / "svc", {

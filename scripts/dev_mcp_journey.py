@@ -774,7 +774,22 @@ def write_real(out: Path, sink: list[Call], rep, secrets_: list[e2e.Secret]) -> 
 # ───────────────────────────── entry ───────────────────────────────────────
 
 
+_NOISY = ("mcp", "httpx", "uvicorn", "src", "alembic", "httpcore")
+
+
 def main(argv: list[str] | None = None) -> int:
+    """Run; logger levels are lowered for the run and put back after (tests call this)."""
+    import logging
+
+    before = {n: logging.getLogger(n).level for n in _NOISY}
+    try:
+        return _main(argv)
+    finally:
+        for n, level in before.items():
+            logging.getLogger(n).setLevel(level)
+
+
+def _main(argv: list[str] | None) -> int:
     import logging
 
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -783,7 +798,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--src-root", type=Path, default=Path.home() / "code")
     p.add_argument("--no-baseline", action="store_true")
     args = p.parse_args(argv)
-    for noisy in ("mcp", "httpx", "uvicorn", "src", "alembic", "httpcore"):
+    for noisy in _NOISY:
         logging.getLogger(noisy).setLevel(logging.WARNING)
     out = (args.out or Path("~/.cache/celmis-journey") / time.strftime("%Y%m%d-%H%M%S")).expanduser()
     e2e.check_paths(out, None)

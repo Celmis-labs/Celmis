@@ -26,7 +26,10 @@ jobs:
   python:
     name: tests + lint
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # A hang guard, not a budget. The suite runs ~15 min here; one Install
+    # step took 11 min against PyPI where it usually takes one, and 25 cut a
+    # healthy run off in the middle of the tests.
+    timeout-minutes: 40
     steps:
       # FULL HISTORY AND TAGS, because two tests in tests/ci read them and the
       # default checkout is one commit with no tags. One of them said so —
