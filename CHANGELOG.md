@@ -18,7 +18,7 @@ derives it from there.
 
 ---
 
-## [Unreleased]
+## [2.3.7] — 2026-10-07
 
 ### BREAKING: repository access is closed by default, and MCP tokens are per person
 

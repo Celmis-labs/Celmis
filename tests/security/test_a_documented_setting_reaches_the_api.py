@@ -82,8 +82,10 @@ _NOT_API_SETTINGS = frozenset({
 
 
 def _unreleased_changelog() -> str:
+    """The newest section: `[Unreleased]` while work is open, the release
+    section once it is cut (a release renames the heading)."""
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    start = text.index("## [Unreleased]")
+    start = re.search(r"^## \[", text, re.M).start()
     nxt = re.search(r"^## \[\d", text[start + 1:], re.M)
     return text[start: start + 1 + nxt.start()] if nxt else text[start:]
 
