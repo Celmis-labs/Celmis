@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 import jwt
@@ -338,5 +339,7 @@ class TestCliIssueTokenCommand:
         del args[i:i + 2]
         result = CliRunner().invoke(app, args)
         assert result.exit_code == 2
-        assert missing in result.output
+        # Under GITHUB_ACTIONS typer forces rich's terminal output, which
+        # styles `--` and the option name apart: compare the plain text.
+        assert missing in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
 
