@@ -746,6 +746,12 @@ tokens and the audit work is in [MCP access](docs/mcp-access.md).
 }
 ```
 
+**One project, for an outside client.** On a project's page the superadmin can
+create a project token (`cmcp_...`, one hour to 90 days, shown once, revocable).
+It reaches only that project's repositories, narrowed by the project's file
+scope, through two tools, `search_project` and `ask_project`. Details and the
+`claude mcp add` command are in [Archives and project tokens](docs/archives-and-project-tokens.md).
+
 **Over stdio**, without the HTTP hop:
 
 ```jsonc
