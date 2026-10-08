@@ -1548,7 +1548,7 @@
   "repositories.confirmPurge": "Verwijdert ook de clone, graaf, vault-notities, Qdrant-vectoren, groepslidmaatschap, projectkoppelingen en reviewgeschiedenis. Maakt schijfruimte vrij en verwijdert de repository uit Q&A. Laat uit om deze alleen uit je lijst te verwijderen — er wordt niets op schijf aangeraakt.",
   "repositories.confirmRemove": "{name} uit je repositories verwijderen?",
   "repositories.connectHint": "Zorg dat {provider} gekoppeld is op de pagina Verbindingen.",
-  "repositories.connectedDescription": "GitHub en GitLab ondersteunen automatische review (polling). Bitbucket is handmatig — kies een PR en start de review op aanvraag.",
+  "repositories.connectedDescription": "GitHub en GitLab ondersteunen automatische review (polling). Bitbucket reviewt automatisch zodra de webhook is geïnstalleerd; zonder webhook kies je een PR en start je de review op aanvraag.",
   "repositories.connectedTitle": "Jouw repositories",
   "repositories.emptyList": "Nog geen repositories. Voeg er rechts een toe →",
   "repositories.filterByBranchTitle": "Filteren op doelbranch",

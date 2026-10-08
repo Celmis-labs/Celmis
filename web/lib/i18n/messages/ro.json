@@ -1548,7 +1548,7 @@
   "repositories.confirmPurge": "Șterge și clona, graful, notele din vault, vectorii Qdrant, apartenența la grupuri, legăturile cu proiectele și istoricul de review-uri. Eliberează spațiu pe disc și scoate repository-ul din Q&A. Lasă nebifat ca să îl elimini doar din listă — nimic de pe disc nu este atins.",
   "repositories.confirmRemove": "Elimini {name} din repository-urile tale?",
   "repositories.connectHint": "Asigură-te că {provider} este conectat în pagina Conexiuni.",
-  "repositories.connectedDescription": "GitHub și GitLab acceptă review automat (polling). Bitbucket este manual — alegi un PR și declanșezi reviewul la cerere.",
+  "repositories.connectedDescription": "GitHub și GitLab acceptă review automat (polling). Bitbucket face review automat după ce webhook-ul este instalat; fără el, alegi un PR și declanșezi reviewul la cerere.",
   "repositories.connectedTitle": "Repository-urile tale",
   "repositories.emptyList": "Niciun repository încă. Adaugă unul în dreapta →",
   "repositories.filterByBranchTitle": "Filtrează după branch-ul țintă",

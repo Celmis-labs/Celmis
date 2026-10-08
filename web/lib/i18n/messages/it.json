@@ -1548,7 +1548,7 @@
   "repositories.confirmPurge": "Elimina anche il clone, il grafo, le note del vault, i vettori Qdrant, l'appartenenza ai gruppi, i collegamenti ai progetti e la cronologia delle revisioni. Libera spazio su disco e rimuove il repository dal Q&A. Lascia disattivato per rimuoverlo solo dal tuo elenco — nulla su disco viene toccato.",
   "repositories.confirmRemove": "Rimuovere {name} dai tuoi repository?",
   "repositories.connectHint": "Assicurati che {provider} sia connesso nella pagina Connessioni.",
-  "repositories.connectedDescription": "GitHub + GitLab supportano la revisione automatica (polling). Bitbucket è manuale — scegli una PR e avvia la revisione su richiesta.",
+  "repositories.connectedDescription": "GitHub + GitLab supportano la revisione automatica (polling). Bitbucket la esegue in automatico una volta installato il webhook; senza, scegli una PR e avvia la revisione su richiesta.",
   "repositories.connectedTitle": "I tuoi repository",
   "repositories.emptyList": "Nessun repository ancora. Aggiungine uno a destra →",
   "repositories.filterByBranchTitle": "Filtra per branch target",

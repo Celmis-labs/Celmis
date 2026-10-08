@@ -1548,7 +1548,7 @@
   "repositories.confirmPurge": "Supprime aussi le clone, le graphe, les notes du vault, les vecteurs Qdrant, l'appartenance aux groupes, les liens de projet et l'historique de revue. Libère de l'espace disque et retire le dépôt du Q&A. Laissez désactivé pour seulement le retirer de votre liste — rien sur le disque n'est touché.",
   "repositories.confirmRemove": "Retirer {name} de vos dépôts ?",
   "repositories.connectHint": "Assurez-vous que {provider} est connecté sur la page Connexions.",
-  "repositories.connectedDescription": "GitHub + GitLab prennent en charge la revue automatique (polling). Bitbucket est manuel — choisissez une PR et déclenchez la revue à la demande.",
+  "repositories.connectedDescription": "GitHub + GitLab prennent en charge la revue automatique (polling). Bitbucket la fait automatiquement une fois le webhook installé ; sinon, choisissez une PR et déclenchez la revue à la demande.",
   "repositories.connectedTitle": "Vos dépôts",
   "repositories.emptyList": "Aucun dépôt pour le moment. Ajoutez-en un à droite →",
   "repositories.filterByBranchTitle": "Filtrer par branche cible",
