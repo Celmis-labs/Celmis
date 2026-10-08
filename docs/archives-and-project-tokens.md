@@ -76,6 +76,10 @@ on the project page.
 Connect Claude Code (note the trailing slash):
 
 ```bash
-claude mcp add --transport http project-search https://<your-host>/mcp/ \
+claude mcp add --transport http project-search <API base>/mcp/ \
   --header "Authorization: Bearer <token>"
 ```
+
+`<API base>` is where the API is served. Behind a path-prefix reverse proxy the
+prefix is part of it (for example `https://<your-host>/backend/mcp/`); the MCP
+access card shows the exact URL for your deployment.

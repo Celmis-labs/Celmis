@@ -34,6 +34,15 @@ export const API_BASE =
       "http://localhost:8000"
     : process.env.NEXT_PUBLIC_API_BASE || "/backend");
 
+/** The MCP mount's public URL: the API base INCLUDING a path prefix (for
+ * example https://host/backend/mcp/), absolute and with a trailing slash. */
+export function publicMcpUrl(path = "/mcp/"): string {
+  const base = API_BASE.startsWith("/") && typeof window !== "undefined"
+    ? `${window.location.origin}${API_BASE}`
+    : API_BASE;
+  return `${base.replace(/\/+$/, "")}${path}`;
+}
+
 export class ApiError extends Error {
   constructor(public status: number, public body: unknown, message: string) {
     super(message);

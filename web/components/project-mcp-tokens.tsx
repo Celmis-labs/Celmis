@@ -6,7 +6,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import { API_BASE, projectsApi, type ProjectMcpTokenIssued } from "@/lib/api";
+import { projectsApi, publicMcpUrl, type ProjectMcpTokenIssued } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { formatDateTime } from "@/lib/format";
@@ -25,12 +25,8 @@ const TTLS = [
   { value: "7776000", key: "projects.mcp.day90" },
 ] as const;
 
-/** The public base of this deployment, with the trailing slash the MCP mount needs. */
-function mcpUrl(): string {
-  const base = typeof window !== "undefined" && API_BASE.startsWith("/")
-    ? window.location.origin : API_BASE;
-  return `${base.replace(/\/$/, "")}/mcp/`;
-}
+/** The public MCP URL of this deployment, API prefix included. */
+const mcpUrl = () => publicMcpUrl();
 
 async function copy(text: string, done: string, failed: string) {
   try {

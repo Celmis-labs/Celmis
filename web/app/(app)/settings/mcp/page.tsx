@@ -19,7 +19,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { CheckIcon, CopyIcon, KeyIcon, PlugIcon, TerminalIcon } from "lucide-react";
 
-import { api, mcpTokensApi, type McpTokenRow } from "@/lib/api";
+import { api, mcpTokensApi, publicMcpUrl, type McpTokenRow } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { PageHeader, PageShell } from "@/components/page-shell";
@@ -124,7 +124,7 @@ export default function McpPage() {
   // tools over the repositories their token names.
   const url = issued?.url && issued.url !== "/mcp/" && issued.url !== "/mcp/dev/"
     ? issued.url
-    : (typeof window !== "undefined" ? `${window.location.origin}/backend/mcp/dev/` : "/mcp/dev/");
+    : (typeof window !== "undefined" ? publicMcpUrl("/mcp/dev/") : "/mcp/dev/");
   const secret = issued?.token ?? "${CELMIS_MCP_TOKEN}";
 
   const claudeCode = `claude mcp add --transport http celmis \\
