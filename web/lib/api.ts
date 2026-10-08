@@ -433,6 +433,26 @@ export interface ProjectRepoOut {
   repo_slug: string;
   role: string | null;
   added_at: string;
+  /** Only files matching one of these (empty = all). */
+  include_globs?: string[];
+  /** Files matching any of these are left out; wins over include. */
+  exclude_globs?: string[];
+}
+
+export interface ProjectMcpTokenRow {
+  id: string;
+  label: string;
+  created_by: string;
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  last_used_at: string | null;
+  scopes: string[];
+}
+
+/** The raw `token` is returned once, at creation, and never again. */
+export interface ProjectMcpTokenIssued extends ProjectMcpTokenRow {
+  token: string;
 }
 
 export interface ProjectRepoIn {
@@ -569,7 +589,37 @@ export const projectsApi = {
     api<void>(`/api/projects/${id}/repos/${repoSlug}`, {
       token, method: "DELETE",
     }),
+  setScope: (
+    token: string, id: string, repoSlug: string,
+    scope: { include_globs?: string[]; exclude_globs?: string[] },
+  ) =>
+    api<ProjectRepoOut>(`/api/projects/${id}/repos/${repoSlug}`, {
+      token, method: "PATCH", json: scope,
+    }),
+  mcpTokens: (token: string, id: string) =>
+    api<ProjectMcpTokenRow[]>(`/api/projects/${id}/mcp-tokens`, { token }),
+  createMcpToken: (
+    token: string, id: string, payload: { label: string; ttl_seconds?: number },
+  ) =>
+    api<ProjectMcpTokenIssued>(`/api/projects/${id}/mcp-tokens`, {
+      token, method: "POST", json: payload,
+    }),
+  revokeMcpToken: (token: string, id: string, tokenId: string) =>
+    api<void>(`/api/projects/${id}/mcp-tokens/${tokenId}`, {
+      token, method: "DELETE",
+    }),
 };
+
+/** Superadmin only: add code from a .zip / .tar.gz / .tgz archive. */
+export function uploadRepoArchive(
+  token: string, form: { slug: string; name: string; file: File },
+): Promise<RepoOut> {
+  const body = new FormData();
+  body.set("slug", form.slug);
+  body.set("name", form.name);
+  body.set("file", form.file);
+  return api<RepoOut>("/api/repos/upload", { token, method: "POST", body });
+}
 
 export const chatsApi = {
   list: (token: string, filters?: { project_id?: string; repo_slug?: string }) => {

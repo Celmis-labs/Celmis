@@ -2,6 +2,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
+import { useSession } from "next-auth/react";
 import { CpuIcon, ExternalLinkIcon, FolderGit2Icon, GitBranchIcon, Loader2Icon, PlusIcon, RefreshCwIcon, SearchIcon, SparklesIcon, TrashIcon, UsersIcon, ZapIcon } from "lucide-react";
 import {
   api,
@@ -17,6 +18,7 @@ import {
   type RepoOwnerItem,
   type RepoDeveloperScan,
   unruledApi,
+  uploadRepoArchive,
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useI18n, useT } from "@/lib/i18n";
@@ -952,6 +954,8 @@ function AddRepoCard({ onAdded, onIndexStart }: {
   onIndexStart: (slug: string) => void;
 }) {
   const t = useT();
+  const { data: session } = useSession();
+  const canUpload = Boolean(session?.isSuperadmin);
   return (
     <Card data-tour="add-repo">
       <CardHeader>
@@ -962,9 +966,12 @@ function AddRepoCard({ onAdded, onIndexStart }: {
       </CardHeader>
       <CardContent>
         <Tabs defaultValue="url">
-          <TabsList className="grid grid-cols-2 w-full">
+          <TabsList className={`grid w-full ${canUpload ? "grid-cols-3" : "grid-cols-2"}`}>
             <TabsTrigger value="url">{t("repositories.tabByUrl")}</TabsTrigger>
             <TabsTrigger value="browse">{t("repositories.tabBrowse")}</TabsTrigger>
+            {canUpload && (
+              <TabsTrigger value="archive">{t("repositories.tabArchive")}</TabsTrigger>
+            )}
           </TabsList>
           <TabsContent value="url">
             <AddByUrl onAdded={onAdded} onIndexStart={onIndexStart} />
@@ -972,9 +979,68 @@ function AddRepoCard({ onAdded, onIndexStart }: {
           <TabsContent value="browse">
             <BrowseRepos onAdded={onAdded} onIndexStart={onIndexStart} />
           </TabsContent>
+          {canUpload && (
+            <TabsContent value="archive">
+              <UploadArchive onAdded={onAdded} onIndexStart={onIndexStart} />
+            </TabsContent>
+          )}
         </Tabs>
       </CardContent>
     </Card>
+  );
+}
+
+function UploadArchive({ onAdded, onIndexStart }: {
+  onAdded: () => Promise<unknown>;
+  onIndexStart: (slug: string) => void;
+}) {
+  const token = useToken();
+  const t = useT();
+  const upload = useMutation({
+    mutationFn: (v: { slug: string; name: string; file: File }) =>
+      uploadRepoArchive(token!, v),
+    onSuccess: async (r) => {
+      toast.success(t("repositories.archiveDone"));
+      await onAdded();
+      if (indexInFlight(r)) onIndexStart(r.slug);
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return (
+    <form
+      className="flex flex-col gap-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const fd = new FormData(e.currentTarget);
+        const file = fd.get("file");
+        const slug = String(fd.get("slug") || "").trim();
+        if (file instanceof File && file.size > 0 && slug) {
+          upload.mutate({ slug, name: String(fd.get("name") || "").trim(), file });
+        }
+      }}
+    >
+      <p className="text-xs text-[var(--color-muted-foreground)]">
+        {t("repositories.archiveHint")}
+      </p>
+      <div>
+        <Label htmlFor="archive-slug">{t("repositories.archiveSlug")}</Label>
+        <Input id="archive-slug" name="slug" required pattern="[A-Za-z0-9._-]+" />
+      </div>
+      <div>
+        <Label htmlFor="archive-name">{t("repositories.archiveName")}</Label>
+        <Input id="archive-name" name="name" />
+      </div>
+      <div>
+        <Label htmlFor="archive-file">{t("repositories.archiveFile")}</Label>
+        <Input id="archive-file" name="file" type="file" required
+          accept=".zip,.tar.gz,.tgz" />
+      </div>
+      <Button type="submit" disabled={upload.isPending || !token}>
+        <PlusIcon className="h-4 w-4" />
+        {upload.isPending ? t("repositories.archiveUploading") : t("repositories.archiveUpload")}
+      </Button>
+    </form>
   );
 }
 

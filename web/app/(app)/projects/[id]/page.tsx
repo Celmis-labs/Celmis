@@ -28,6 +28,9 @@ import {
 } from "@/components/ui/dialog";
 import { useT } from "@/lib/i18n";
 import { PageShell } from "@/components/page-shell";
+import { ProjectFileScope } from "@/components/project-file-scope";
+import { ProjectMcpTokens } from "@/components/project-mcp-tokens";
+import { useSession } from "next-auth/react";
 import { SectionTabs } from "@/components/section-tabs";
 
 export default function ProjectDetailPage({
@@ -40,6 +43,8 @@ export default function ProjectDetailPage({
   const router = useRouter();
   const t = useT();
   const { confirm, dialog } = useConfirm();
+  const { data: session } = useSession();
+  const isSuperadmin = Boolean(session?.isSuperadmin);
 
   const project = useQuery({
     queryKey: ["projects", id],
@@ -149,10 +154,8 @@ export default function ProjectDetailPage({
                 </p>
               )}
               {p.repos.map((r) => (
-                <div
-                  key={r.repo_slug}
-                  className="flex items-center justify-between rounded border px-3 py-2"
-                >
+                <div key={r.repo_slug} className="rounded border px-3 py-2">
+                <div className="flex items-center justify-between">
                   <div className="min-w-0">
                     <div className="truncate text-sm font-medium">{r.repo_slug}</div>
                     <div className="mt-1 flex flex-wrap gap-1">
@@ -183,9 +186,16 @@ export default function ProjectDetailPage({
                     <TrashIcon className="h-3 w-3" />
                   </Button>
                 </div>
+                <ProjectFileScope projectId={id} repo={r} />
+                </div>
               ))}
             </CardContent>
           </Card>
+          {isSuperadmin && (
+            <div className="mt-6">
+              <ProjectMcpTokens projectId={id} />
+            </div>
+          )}
         </div>
 
         {/* ─── Right col — chats ───────────────────────────────────── */}
