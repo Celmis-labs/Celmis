@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "留空则继承当前生效值：{value}。",
   "settings.llm.agents.effectiveNone": "未设置",
   "settings.llm.agents.capsReasoningUnsendable": "推理：无法设置",
+  "settings.llm.agents.capsVia": "经由 {model}",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM 没有为该模型定义推理参数，因此没有可发送的内容——设置不会产生任何效果。",
   "settings.llm.agents.reasoningChecking": "正在读取该模型支持的能力…",
   "settings.llm.agents.reasoningLookupFailed": "无法连接能力检查，因此现在无法编辑——请刷新页面后重试。",

@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "空欄なら現在有効な値を継承します: {value}。",
   "settings.llm.agents.effectiveNone": "未設定",
   "settings.llm.agents.capsReasoningUnsendable": "推論: 設定不可",
+  "settings.llm.agents.capsVia": "{model} 経由",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM はこのモデルの推論パラメータを持たないため、送れるものがありません。設定しても何も変わりません。",
   "settings.llm.agents.reasoningChecking": "このモデルの対応内容を確認しています…",
   "settings.llm.agents.reasoningLookupFailed": "対応内容の確認に接続できなかったため、今は編集できません。ページを再読み込みして再試行してください。",

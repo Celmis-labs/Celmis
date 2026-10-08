@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "Prázdné dědí platnou hodnotu: {value}.",
   "settings.llm.agents.effectiveNone": "nenastaveno",
   "settings.llm.agents.capsReasoningUnsendable": "uvažování: nelze nastavit",
+  "settings.llm.agents.capsVia": "přes {model}",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM pro tento model nezná parametr uvažování, takže není co odeslat — nastavení by nic nezměnilo.",
   "settings.llm.agents.reasoningChecking": "Čteme, co tento model podporuje…",
   "settings.llm.agents.reasoningLookupFailed": "Kontrolu možností se nepodařilo oslovit, takže to teď nelze upravit — načtěte stránku znovu a zkuste to zase.",

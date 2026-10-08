@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "Puste dziedziczy obowiązującą wartość: {value}.",
   "settings.llm.agents.effectiveNone": "nie ustawiono",
   "settings.llm.agents.capsReasoningUnsendable": "rozumowanie: nie do ustawienia",
+  "settings.llm.agents.capsVia": "przez {model}",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM nie zna parametru rozumowania dla tego modelu, więc nie ma czego wysłać — ustawienie nic by nie zmieniło.",
   "settings.llm.agents.reasoningChecking": "Sprawdzamy, co obsługuje ten model…",
   "settings.llm.agents.reasoningLookupFailed": "Nie udało się połączyć ze sprawdzaniem możliwości, więc teraz nie da się tego edytować — odśwież stronę, aby spróbować ponownie.",

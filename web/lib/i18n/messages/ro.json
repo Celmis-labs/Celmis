@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "Gol moștenește valoarea în vigoare: {value}.",
   "settings.llm.agents.effectiveNone": "nesetat",
   "settings.llm.agents.capsReasoningUnsendable": "raționament: nu se poate seta",
+  "settings.llm.agents.capsVia": "prin {model}",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM nu are niciun parametru de raționament pentru acest model, deci nu se poate trimite nimic — setarea nu ar schimba nimic.",
   "settings.llm.agents.reasoningChecking": "Citim ce suportă acest model…",
   "settings.llm.agents.reasoningLookupFailed": "Verificarea capabilităților nu a putut fi contactată, deci acest câmp nu poate fi editat acum — reîncărcați pagina pentru a încerca din nou.",

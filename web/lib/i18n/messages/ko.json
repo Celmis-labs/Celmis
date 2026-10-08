@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "비워 두면 현재 적용 중인 값을 상속합니다: {value}.",
   "settings.llm.agents.effectiveNone": "설정 없음",
   "settings.llm.agents.capsReasoningUnsendable": "추론: 설정 불가",
+  "settings.llm.agents.capsVia": "{model} 경유",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM에 이 모델의 추론 파라미터가 없어 보낼 값이 없습니다. 설정해도 아무것도 바뀌지 않습니다.",
   "settings.llm.agents.reasoningChecking": "이 모델의 지원 범위를 확인하는 중…",
   "settings.llm.agents.reasoningLookupFailed": "기능 확인에 연결하지 못해 지금은 편집할 수 없습니다. 페이지를 새로 고쳐 다시 시도하세요.",

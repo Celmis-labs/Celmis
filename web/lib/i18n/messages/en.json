@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "Empty inherits what is in force: {value}.",
   "settings.llm.agents.effectiveNone": "nothing set",
   "settings.llm.agents.capsReasoningUnsendable": "reasoning: not settable",
+  "settings.llm.agents.capsVia": "via {model}",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM names no reasoning parameter for this model, so nothing can be sent — the setting would change nothing.",
   "settings.llm.agents.reasoningChecking": "Checking what this model supports…",
   "settings.llm.agents.reasoningLookupFailed": "The capabilities check could not be reached, so this cannot be edited right now — reload the page to try again.",

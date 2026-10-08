@@ -489,6 +489,10 @@ export function AgentLLMRow({
           : kind === "effort"
             ? t("settings.llm.agents.capsReasoningEffort")
             : t("settings.llm.agents.capsReasoningBudget"),
+      // A proxy alias: every fact above was read from the model behind it.
+      ...(caps.resolved_from
+        ? [t("settings.llm.agents.capsVia", { model: caps.resolved_from })]
+        : []),
     ].join(" · ");
   };
 

@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "Vuoto eredita il valore in vigore: {value}.",
   "settings.llm.agents.effectiveNone": "non impostato",
   "settings.llm.agents.capsReasoningUnsendable": "ragionamento: non impostabile",
+  "settings.llm.agents.capsVia": "tramite {model}",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM non ha un parametro di ragionamento per questo modello, quindi non si può inviare nulla: l'impostazione non cambierebbe niente.",
   "settings.llm.agents.reasoningChecking": "Lettura di ciò che supporta questo modello in corso…",
   "settings.llm.agents.reasoningLookupFailed": "Il controllo delle capacità non è raggiungibile, quindi ora questo campo non è modificabile: ricarica la pagina per riprovare.",

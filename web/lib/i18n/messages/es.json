@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "Vacío hereda lo que está en vigor: {value}.",
   "settings.llm.agents.effectiveNone": "sin definir",
   "settings.llm.agents.capsReasoningUnsendable": "razonamiento: no configurable",
+  "settings.llm.agents.capsVia": "vía {model}",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM no tiene ningún parámetro de razonamiento para este modelo, así que no se puede enviar nada: el ajuste no cambiaría nada.",
   "settings.llm.agents.reasoningChecking": "Comprobando lo que admite este modelo…",
   "settings.llm.agents.reasoningLookupFailed": "No se pudo llegar a la comprobación de capacidades, así que esto no se puede editar ahora mismo: recarga la página para volver a intentarlo.",

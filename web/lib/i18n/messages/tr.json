@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "Boş bırakılırsa yürürlükteki değer devralınır: {value}.",
   "settings.llm.agents.effectiveNone": "ayarlanmadı",
   "settings.llm.agents.capsReasoningUnsendable": "akıl yürütme: ayarlanamaz",
+  "settings.llm.agents.capsVia": "{model} üzerinden",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM bu model için bir akıl yürütme parametresi tanımıyor, dolayısıyla gönderilecek bir şey yok — ayar hiçbir şeyi değiştirmez.",
   "settings.llm.agents.reasoningChecking": "Bu modelin neleri desteklediği okunuyor…",
   "settings.llm.agents.reasoningLookupFailed": "Yetenek kontrolüne ulaşılamadı, bu yüzden şu anda düzenlenemiyor — yeniden denemek için sayfayı yenileyin.",

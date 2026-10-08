@@ -793,6 +793,9 @@ class ModelCapabilitiesOut(BaseModel):
     #: can say "refused by the provider on <date>" and not just hide the
     #: option. Always a list; empty means nothing learned.
     provider_refusals: list[ProviderRefusalOut] = Field(default_factory=list)
+    #: The model the facts were read from when `model` is a workspace-proxy
+    #: alias; null for a model asked about by its own name.
+    resolved_from: str | None = None
 
 
 def _agent_names() -> tuple[str, ...]:
@@ -920,7 +923,34 @@ def resolve_agent_settings(
     )
 
 
-def _validate_agent_entry(agent: str, entry: dict[str, Any], model_string: str) -> None:
+def _capabilities_for(model: str, workspace_id: str):
+    """`model_capabilities`, except a workspace-proxy alias is read through
+    the model the proxy runs it on.
+
+    The proxy's own /model/info names that model; it is cached with a short
+    TTL for a failed read (`litellm_proxy.cached_model_info`), so a proxy that
+    is down or refuses the route costs one probe a minute and the answer is
+    the plain unknown one. Never raises.
+    """
+    from src.llm.capabilities import alias_capabilities, model_capabilities
+    if not (model or "").startswith("litellm_proxy/"):
+        return model_capabilities(model)
+    underlying = None
+    try:
+        from src.llm import litellm_proxy
+        underlying = litellm_proxy.underlying_model(
+            litellm_proxy.resolve_endpoint(workspace_id),
+            model.split("/", 1)[1],
+        )
+    except Exception as exc:  # noqa: BLE001 — a settings read must not fail on the proxy
+        logger.debug("proxy_alias_resolve_failed err=%s", type(exc).__name__)
+    return alias_capabilities(model, underlying)
+
+
+def _validate_agent_entry(
+    agent: str, entry: dict[str, Any], model_string: str,
+    workspace_id: str = "default",
+) -> None:
     """Refuse a per-agent override that cannot do what it says.
 
     Everything here fails at SAVE time, in front of the person who chose it.
@@ -931,8 +961,7 @@ def _validate_agent_entry(agent: str, entry: dict[str, Any], model_string: str) 
     to end: `gemini_thinking_budget` sat in the UI for months, wired only into
     the native client, reaching no LiteLLM call.
     """
-    from src.llm.capabilities import model_capabilities
-    caps = model_capabilities(model_string)
+    caps = _capabilities_for(model_string, workspace_id)
 
     temperature = entry.get("temperature")
     if temperature is not None:
@@ -1095,6 +1124,7 @@ def _agent_overrides_from_payload(
         _validate_agent_entry(
             name, cur,
             _effective_agent(name, after, workspace_id, selection=selection)["model"],
+            workspace_id,
         )
     return merged
 
@@ -1103,11 +1133,14 @@ def _agent_overrides_from_payload(
 def get_model_capabilities(
     model: str,
     user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> ModelCapabilitiesOut:
     """What the installed LiteLLM knows about `model`.
 
-    Not admin-gated: it reports a public model catalogue — no workspace
-    state, no key. A model LiteLLM does not know answers `known: false` with
+    Not admin-gated: it reports a public model catalogue — no key, no secret.
+    A workspace-proxy alias (``litellm_proxy/<alias>``) is answered for the
+    model the workspace's proxy runs it on, `resolved_from` naming it; when
+    the proxy cannot say, the alias is unknown like any other. A model LiteLLM does not know answers `known: false` with
     nulls and a 200, not a 400: a self-hosted model string is the ordinary
     thing to ask about here, and the settings page still has to render.
 
@@ -1118,8 +1151,7 @@ def get_model_capabilities(
     which restarts the process. That restart is the whole invalidation story;
     a test or a live swap can call `reset_capability_caches()`.
     """
-    from src.llm.capabilities import model_capabilities
-    return ModelCapabilitiesOut(**model_capabilities(model).as_dict())
+    return ModelCapabilitiesOut(**_capabilities_for(model, workspace_id).as_dict())
 
 
 # ─── Endpoints ───────────────────────────────────────────────────────

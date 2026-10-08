@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any
@@ -229,6 +229,11 @@ class ModelCapabilities:
     #: UNKNOWN model too: a self-hosted server's refusal is measured, not read
     #: from a table, and it is the one thing about that model we do know.
     provider_refusals: tuple[ProviderRefusal, ...] = ()
+    #: Set when `model` is a workspace-proxy alias and every other field was
+    #: read from the model the proxy runs it on (``gemini/gemini-3.5-flash-lite``
+    #: behind ``litellm_proxy/my-alias``). None for a model asked about by its
+    #: own name.
+    resolved_from: str | None = None
 
     @property
     def reasoning_values(self) -> tuple[str, ...] | None:
@@ -271,6 +276,7 @@ class ModelCapabilities:
             # Always a list, never null: "nothing learned" and "nothing
             # refused" are the same answer here, and a screen iterates it.
             "provider_refusals": [r.as_dict() for r in self.provider_refusals],
+            "resolved_from": self.resolved_from,
         }
 
 
@@ -941,6 +947,27 @@ def model_capabilities(model: str) -> ModelCapabilities:
     )
 
 
+def alias_capabilities(model: str, underlying: str | None) -> ModelCapabilities:
+    """Capabilities of a proxy alias, read from the model behind it.
+
+    LiteLLM has no table entry for ``litellm_proxy/<alias>`` — the alias is the
+    operator's own name — so asked directly it answers ``known=False`` and the
+    settings page offers no reasoning control. `LLMClient` already asks about
+    the underlying model when it sends the call (`_capability_model`); this is
+    the same answer for the screens that run before any call exists.
+
+    Falls back to the alias's own (unknown) answer when `underlying` is missing
+    or LiteLLM does not know it either: never a guess about a different model.
+    """
+    own = model_capabilities(model)
+    if not underlying or underlying == model:
+        return own
+    behind = model_capabilities(underlying)
+    if not behind.known:
+        return own
+    return replace(behind, model=model, resolved_from=underlying)
+
+
 # ─── Clamping — a configuration mistake must not surface as inference ──
 
 #: (model, requested, ceiling) triples already reported. A clamp is a standing
@@ -1100,6 +1127,7 @@ __all__ = [
     "clamp_output_tokens",
     "forget_reasoning_refusal",
     "forget_temperature_refusal",
+    "alias_capabilities",
     "model_capabilities",
     "provider_of",
     "provider_refusal",

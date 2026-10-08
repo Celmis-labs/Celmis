@@ -18,6 +18,24 @@ derives it from there.
 
 ---
 
+## [Unreleased]
+
+### LLM
+
+- **A LiteLLM proxy alias is judged by the model behind it, so its Reasoning
+  control works.** `litellm_proxy/<alias>` is the operator's own name for a
+  deployment and has no entry in LiteLLM's table, so /settings/llm reported it
+  unknown and disabled the Reasoning select (and refused a saved value) while
+  the review told the operator to turn per-agent reasoning on. The workspace
+  proxy's `/model/info` now resolves the alias to the model it runs on, and the
+  capabilities of that model are reported, with `resolved_from` naming it and
+  the settings line showing "via <model>". A proxy that is unreachable, refuses
+  the route, or names a model LiteLLM does not know leaves the alias unknown,
+  as before; a failed read is retried after a minute. Requests already used the
+  underlying model's reasoning shape; they still go to the alias.
+
+---
+
 ## [2.3.9] — 2026-10-08
 
 ### Review

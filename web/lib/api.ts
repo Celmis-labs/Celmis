@@ -1733,6 +1733,9 @@ export type ModelCapabilities = {
   provider_refusals?: ProviderRefusal[] | null;
   supports_function_calling: boolean | null;
   source: "litellm" | "unknown";
+  /** For a workspace-proxy alias: the model the proxy runs it on, which the
+   *  facts above were read from. Absent/null for a model asked by its own name. */
+  resolved_from?: string | null;
 };
 
 /** One thing a provider has refused for one model, measured rather than

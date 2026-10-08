@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "Vide hérite de la valeur en vigueur : {value}.",
   "settings.llm.agents.effectiveNone": "non défini",
   "settings.llm.agents.capsReasoningUnsendable": "raisonnement : non réglable",
+  "settings.llm.agents.capsVia": "via {model}",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM ne connaît aucun paramètre de raisonnement pour ce modèle : rien ne peut être envoyé et le réglage ne changerait rien.",
   "settings.llm.agents.reasoningChecking": "Vérification de ce que prend en charge ce modèle…",
   "settings.llm.agents.reasoningLookupFailed": "La vérification des capacités est injoignable : ce champ n'est donc pas modifiable pour l'instant — rechargez la page pour réessayer.",

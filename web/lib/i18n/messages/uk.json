@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "Порожнє успадковує чинне значення: {value}.",
   "settings.llm.agents.effectiveNone": "не задано",
   "settings.llm.agents.capsReasoningUnsendable": "міркування: не задається",
+  "settings.llm.agents.capsVia": "через {model}",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM не має параметра міркування для цієї моделі, тож надіслати нічого не вийде — налаштування нічого не змінить.",
   "settings.llm.agents.reasoningChecking": "Перевіряємо, що підтримує ця модель…",
   "settings.llm.agents.reasoningLookupFailed": "Не вдалося звернутися до перевірки можливостей, тож зараз це не редагується — перезавантажте сторінку, щоб спробувати ще раз.",

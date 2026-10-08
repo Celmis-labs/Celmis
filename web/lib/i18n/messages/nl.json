@@ -2312,6 +2312,7 @@
   "settings.llm.agents.reasoningInherits": "Leeg erft de geldende waarde: {value}.",
   "settings.llm.agents.effectiveNone": "niet ingesteld",
   "settings.llm.agents.capsReasoningUnsendable": "redeneren: niet instelbaar",
+  "settings.llm.agents.capsVia": "via {model}",
   "settings.llm.agents.reasoningUnsendable": "LiteLLM kent voor dit model geen redeneerparameter, dus er valt niets mee te sturen — de instelling zou niets veranderen.",
   "settings.llm.agents.reasoningChecking": "Bezig te lezen wat dit model ondersteunt…",
   "settings.llm.agents.reasoningLookupFailed": "De capaciteitencontrole was niet bereikbaar, dus dit is nu niet te bewerken — herlaad de pagina om het opnieuw te proberen.",
