@@ -18,6 +18,28 @@ derives it from there.
 
 ---
 
+## [2.3.9] — 2026-10-08
+
+### Review
+
+- **A file that parsed but declares nothing is no longer a graph gap.** Entry
+  scripts, templates and modules without declarations of their own produced
+  `⚙ ADJUSTED — graph context partial … the index is stale there` on every run,
+  and re-indexing could not clear it. The check now counts the per-file marker
+  the indexer already writes, so only files the index really lacks are named.
+  Indexes built before the marker existed keep the old behaviour.
+- **A near-empty agent reply is said on the run.** When a model-backed agent
+  answers a diff of 50+ changed lines with 3 output tokens or fewer on 3000+
+  input tokens and no findings, the summary carries
+  `⚙ ADJUSTED — <agents> gave a near-empty reply`, pointing at a model with
+  reasoning or the per-agent `reasoning` setting. The verdict is unchanged.
+  [`docs/REVIEW_SETTINGS.md`](docs/REVIEW_SETTINGS.md) explains the knob.
+
+### Web
+
+- The Repositories page and onboarding say Bitbucket reviews and re-indexes
+  automatically once the webhook is installed, and manually otherwise.
+
 ## [2.3.8] — 2026-10-08
 
 ### Code from an archive, project file scope, project MCP tokens
