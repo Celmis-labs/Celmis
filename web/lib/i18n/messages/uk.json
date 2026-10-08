@@ -3858,7 +3858,7 @@
   "mcp.revoke": "Відкликати",
   "mcp.revoked": "Токен відкликано.",
   "repositories.tabArchive": "Архів",
-  "repositories.archiveHint": "Завантажте .zip, .tar.gz або .tgz з вихідним кодом (до 250 МБ). Його розпаковують на сервері й індексують; історії git немає, тож автоматично він не оновлюється. Щоб замінити, завантажте знову.",
+  "repositories.archiveHint": "Завантажте .zip, .tar.gz або .tgz з вихідним кодом (до 250 МБ). Файл вантажиться частинами, тож працює і за проксі з обмеженням тіла запиту; невдала частина повторюється до 3 разів. Його розпаковують на сервері й індексують; історії git немає, тож автоматично він не оновлюється. Щоб замінити, завантажте знову.",
   "repositories.archiveSlug": "Коротка назва",
   "repositories.archiveName": "Відображувана назва",
   "repositories.archiveFile": "Архів",
@@ -3895,5 +3895,6 @@
   "projects.mcp.status.expired": "прострочений",
   "projects.mcp.status.active": "активний",
   "projects.mcp.none": "Токенів ще немає.",
-  "projects.mcp.copyFailed": "Не вдалося скопіювати."
+  "projects.mcp.copyFailed": "Не вдалося скопіювати.",
+  "repositories.archiveCancel": "Скасувати"
 }

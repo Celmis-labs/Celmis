@@ -996,15 +996,30 @@ function UploadArchive({ onAdded, onIndexStart }: {
 }) {
   const token = useToken();
   const t = useT();
+  const [progress, setProgress] = useState<number | null>(null);
+  const [abort, setAbort] = useState<AbortController | null>(null);
   const upload = useMutation({
-    mutationFn: (v: { slug: string; name: string; file: File }) =>
-      uploadRepoArchive(token!, v),
+    mutationFn: async (v: { slug: string; name: string; file: File }) => {
+      const ctl = new AbortController();
+      setAbort(ctl);
+      setProgress(0);
+      try {
+        return await uploadRepoArchive(token!, v, {
+          onProgress: setProgress, signal: ctl.signal,
+        });
+      } finally {
+        setAbort(null);
+        setProgress(null);
+      }
+    },
     onSuccess: async (r) => {
       toast.success(t("repositories.archiveDone"));
       await onAdded();
       if (indexInFlight(r)) onIndexStart(r.slug);
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => {
+      if (e.name !== "AbortError") toast.error(e.message);
+    },
   });
 
   return (
@@ -1036,10 +1051,25 @@ function UploadArchive({ onAdded, onIndexStart }: {
         <Input id="archive-file" name="file" type="file" required
           accept=".zip,.tar.gz,.tgz" />
       </div>
-      <Button type="submit" disabled={upload.isPending || !token}>
-        <PlusIcon className="h-4 w-4" />
-        {upload.isPending ? t("repositories.archiveUploading") : t("repositories.archiveUpload")}
-      </Button>
+      {progress !== null && (
+        <div role="progressbar" aria-valuenow={Math.round(progress * 100)}
+          aria-valuemin={0} aria-valuemax={100}
+          className="h-2 w-full overflow-hidden rounded bg-[var(--color-muted)]">
+          <div className="h-full bg-[var(--color-primary)] transition-all"
+            style={{ width: `${Math.round(progress * 100)}%` }} />
+        </div>
+      )}
+      <div className="flex gap-2">
+        <Button type="submit" disabled={upload.isPending || !token}>
+          <PlusIcon className="h-4 w-4" />
+          {upload.isPending ? t("repositories.archiveUploading") : t("repositories.archiveUpload")}
+        </Button>
+        {abort && (
+          <Button type="button" variant="outline" onClick={() => abort.abort()}>
+            {t("repositories.archiveCancel")}
+          </Button>
+        )}
+      </div>
     </form>
   );
 }

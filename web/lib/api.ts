@@ -610,15 +610,54 @@ export const projectsApi = {
     }),
 };
 
-/** Superadmin only: add code from a .zip / .tar.gz / .tgz archive. */
-export function uploadRepoArchive(
-  token: string, form: { slug: string; name: string; file: File },
+interface UploadSession {
+  session_id: string;
+  chunk_size: number;
+  parts: number;
+  expires_at: number;
+  received?: number[];
+}
+
+/**
+ * Superadmin only: add code from a .zip / .tar.gz / .tgz archive, in numbered
+ * parts so it works behind proxies that cap request bodies. A failed part is
+ * retried (3 attempts); `signal` cancels and aborts the server-side session.
+ */
+export async function uploadRepoArchive(
+  token: string,
+  form: { slug: string; name: string; file: File },
+  opts: { onProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
 ): Promise<RepoOut> {
-  const body = new FormData();
-  body.set("slug", form.slug);
-  body.set("name", form.name);
-  body.set("file", form.file);
-  return api<RepoOut>("/api/repos/upload", { token, method: "POST", body });
+  const { file } = form;
+  const session = await api<UploadSession>("/api/repos/upload/sessions", {
+    token, method: "POST", signal: opts.signal,
+    json: { slug: form.slug, name: form.name, filename: file.name, size: file.size },
+  });
+  const base = `/api/repos/upload/sessions/${session.session_id}`;
+  try {
+    for (let n = 0; n < session.parts; n++) {
+      const body = file.slice(n * session.chunk_size, (n + 1) * session.chunk_size);
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await api<void>(`${base}/parts/${n}`, {
+            token, method: "PUT", body, signal: opts.signal,
+          });
+          break;
+        } catch (e) {
+          const final = attempt >= 3 || opts.signal?.aborted
+            || (e instanceof ApiError && e.status >= 400 && e.status < 500);
+          if (final) throw e;
+          await new Promise((r) => setTimeout(r, 500 * attempt));
+        }
+      }
+      opts.onProgress?.((n + 1) / session.parts);
+    }
+    return await api<RepoOut>(`${base}/complete`, { token, method: "POST" });
+  } catch (e) {
+    // Best effort: free the parts on the server.
+    void api<void>(base, { token, method: "DELETE" }).catch(() => undefined);
+    throw e;
+  }
 }
 
 export const chatsApi = {

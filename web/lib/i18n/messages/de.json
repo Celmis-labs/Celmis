@@ -3858,7 +3858,7 @@
   "mcp.revoke": "Widerrufen",
   "mcp.revoked": "Token widerrufen.",
   "repositories.tabArchive": "Archive",
-  "repositories.archiveHint": "Upload a .zip, .tar.gz or .tgz with the source code (up to 250 MB). It is unpacked on the server and indexed; it has no git history, so it is never refreshed automatically. Upload again to replace it.",
+  "repositories.archiveHint": "Upload a .zip, .tar.gz or .tgz with the source code (up to 250 MB). It is sent in parts, so it works behind proxies that limit request size; a failed part is retried up to 3 times. It is unpacked on the server and indexed; it has no git history, so it is never refreshed automatically. Upload again to replace it.",
   "repositories.archiveSlug": "Short name",
   "repositories.archiveName": "Display name",
   "repositories.archiveFile": "Archive",
@@ -3895,5 +3895,6 @@
   "projects.mcp.status.expired": "expired",
   "projects.mcp.status.active": "active",
   "projects.mcp.none": "No tokens yet.",
-  "projects.mcp.copyFailed": "Copy failed."
+  "projects.mcp.copyFailed": "Copy failed.",
+  "repositories.archiveCancel": "Cancel"
 }
