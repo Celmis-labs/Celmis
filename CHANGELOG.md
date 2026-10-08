@@ -18,6 +18,55 @@ derives it from there.
 
 ---
 
+## [2.3.8] — 2026-10-08
+
+### Code from an archive, project file scope, project MCP tokens
+
+- **A repository can be added from a `.zip`, `.tar.gz` or `.tgz` archive
+  instead of a Git provider.** Only the superadmin can do it (Repositories →
+  Archive, or `POST /api/repos/upload/sessions`). The browser sends the archive
+  in numbered parts (`CELMIS_UPLOAD_CHUNK_BYTES`, default 32 MiB, always under
+  100 MB) so uploads pass proxies and CDNs with a request-body limit; a session
+  lives `CELMIS_UPLOAD_SESSION_TTL` (24 h) and can be resumed or aborted. The
+  archive is capped by `CELMIS_MAX_UPLOAD_BYTES` (250 MB) and unpacks under
+  limits on total size, file count and file size. Links, devices, absolute
+  paths and `..` are refused. Uploading again under the same slug replaces the
+  code and re-indexes it. Such repositories have no webhook, freshness or
+  incremental sync. Single-request `POST /api/repos/upload` stays for small
+  archives and requires `Content-Length`.
+- **Files without a parser are searchable.** Q&A and project MCP search fall
+  back to a plain-text, Unicode-aware search over the allowed files (BSL, XML
+  configuration, plain text), skipping binaries, with result and time caps.
+- **Each repository in a project has a file scope.** `include_globs` and
+  `exclude_globs` (exclude wins) narrow what Q&A and project MCP tokens see.
+  Only the superadmin edits them (`PATCH /api/projects/{id}/repos/{slug}`).
+  While a project has a live MCP token, only the superadmin can add or remove
+  its repositories, so the token cannot be widened behind its issuer's back.
+- **Project MCP tokens.** The superadmin issues `cmcp_…` tokens bound to one
+  project (`/api/projects/{id}/mcp-tokens`, or the MCP access card on the
+  project page) with an expiry from 1 hour to 90 days. A token is shown once,
+  stored as a hash, can be revoked, and carries `read:project_search`: it sees
+  only `search_project` and `ask_project`, only that project's repositories,
+  only inside their file scope. The card prints a ready
+  `claude mcp add --transport http …` command with the right MCP URL, including
+  an API path prefix when the API sits behind one. Guide:
+  [`docs/archives-and-project-tokens.md`](docs/archives-and-project-tokens.md).
+- **Code review: the pull-request picker is searchable.** Filter open pull
+  requests by number, title, branch or author; the list keeps a bounded height
+  instead of filling the screen. Rate limits: `CELMIS_RL_UPLOAD`,
+  `CELMIS_RL_UPLOAD_PART`.
+
+### Security
+
+- The web app moves to next 16.4.0 and next-auth 5.0.0-beta.32
+  (@auth/core 0.41.3), and build-time dependencies reached through styled-jsx
+  are lifted to fixed releases: `pnpm audit --prod` is clean.
+
+### Upgrading
+
+- Database migration `d4a7f1c8e3b2` runs on start (adds `project_repos`
+  include/exclude globs and the `mcp_project_tokens` table).
+
 ## [2.3.7] — 2026-10-07
 
 ### BREAKING: repository access is closed by default, and MCP tokens are per person
