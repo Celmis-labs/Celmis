@@ -34,6 +34,7 @@ import { Callout } from "@/components/ui/callout";
 import { EmptyState } from "@/components/ui/empty-state";
 import { QueryState } from "@/components/ui/query-state";
 import { Switch } from "@/components/ui/switch";
+import { PrCombobox } from "@/components/pr-combobox";
 import { Select } from "@/components/ui/select";
 import {
   SEVERITY_TEXT, SeverityBadge, StatusPill, toRunStatus, toSeverity,
@@ -1021,11 +1022,26 @@ function ManualTrigger() {
   const prs = useQuery({
     queryKey: ["pulls", effSlug, { sort: "newest", limit: 200 }],
     queryFn: () =>
-      openPullsApi.list(token!, effSlug, { sort: "newest", limit: 200 })
-        .then((r) => r.items),
+      openPullsApi.list(token!, effSlug, { sort: "newest", limit: 200 }),
     enabled: !!token && !!effSlug && !manual,
   });
-  const selectedPr = (prs.data ?? []).find((p) => prRefOf(p) === prRef);
+  // The picker filters what it has. When the repo has more open PRs than the
+  // 200 loaded, a typed term is also sent to the server (same `q` the
+  // Repositories page uses) so older PRs can still be found.
+  const [prTerm, setPrTerm] = useState("");
+  const [pickedPr, setPickedPr] = useState<OpenPull | null>(null);
+  const loaded = prs.data?.items ?? [];
+  const hasMore = (prs.data?.open_total ?? 0) > loaded.length;
+  const prSearch = useQuery({
+    queryKey: ["pulls", effSlug, { sort: "newest", limit: 200, q: prTerm }],
+    queryFn: () =>
+      openPullsApi.list(token!, effSlug, { sort: "newest", limit: 200, q: prTerm }),
+    enabled: !!token && !!effSlug && !manual && hasMore && prTerm !== "",
+    placeholderData: (prev) => prev,
+  });
+  const prItems = hasMore && prTerm !== "" && prSearch.data ? prSearch.data.items : loaded;
+  const selectedPr = prItems.find((p) => prRefOf(p) === prRef)
+    ?? (pickedPr && prRefOf(pickedPr) === prRef ? pickedPr : undefined);
   const ref = manual ? manualRef.trim() : prRef;
 
   const trigger = useMutation({
@@ -1077,7 +1093,7 @@ function ManualTrigger() {
                 <Select
                   className="w-full"
                   value={effSlug}
-                  onChange={(v) => { setSlug(v); setPrRef(""); }}
+                  onChange={(v) => { setSlug(v); setPrRef(""); setPickedPr(null); setPrTerm(""); }}
                   placeholder={t("common.select")}
                   disabled={repoList.length === 0}
                   options={repoList.map((r) => ({ value: r.slug, label: r.full_name }))}
@@ -1107,7 +1123,7 @@ function ManualTrigger() {
                 <Callout tone="danger">
                   {t("reviews.mtPrsFailed", { message: (prs.error as Error).message })}
                 </Callout>
-              ) : (prs.data?.length ?? 0) === 0 ? (
+              ) : loaded.length === 0 ? (
                 <EmptyState
                   icon={GitPullRequestIcon}
                   title={t("reviews.mtNoPrs")}
@@ -1115,17 +1131,18 @@ function ManualTrigger() {
                 />
               ) : (
                 <div>
-                  <Label>{t("reviews.mtPrLabel")}</Label>
-                  <Select
-                    className="w-full"
+                  <Label htmlFor="pr-picker">{t("reviews.mtPrLabel")}</Label>
+                  <PrCombobox
+                    id="pr-picker"
                     value={prRef}
-                    onChange={setPrRef}
-                    placeholder={t("common.select")}
-                    options={(prs.data ?? []).map((p) => ({
-                      value: prRefOf(p),
-                      label: `#${p.number} — ${p.title.length > 70 ? `${p.title.slice(0, 70)}…` : p.title}`
-                        + ` (${p.target_branch ?? "?"} ← ${p.source_branch ?? "?"})`,
-                    }))}
+                    onChange={(v) => {
+                      setPrRef(v);
+                      setPickedPr(prItems.find((p) => prRefOf(p) === v) ?? null);
+                    }}
+                    options={prItems.map((p) => ({ ...p, value: prRefOf(p) }))}
+                    selected={selectedPr ? { ...selectedPr, value: prRefOf(selectedPr) } : null}
+                    onSearch={hasMore ? setPrTerm : undefined}
+                    searching={prSearch.isFetching}
                   />
                   {selectedPr && (
                     <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted-foreground)]">
