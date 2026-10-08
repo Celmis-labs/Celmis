@@ -257,8 +257,38 @@ class JwtTokenVerifier(TokenVerifier):
     Returns an AccessToken instance or raises (per the verify_token contract).
     """
 
-    def __init__(self, config: JwtConfig | None = None) -> None:
+    def __init__(self, config: JwtConfig | None = None, *,
+                 accept_project_tokens: bool = False) -> None:
         self.config = config or JwtConfig.from_env()
+        #: Only the full /mcp endpoint serves project tokens (it alone has the
+        #: project tools); every other server leaves them unrecognised.
+        self.accept_project_tokens = accept_project_tokens
+
+    async def _verify_project_token(self, token: str) -> AccessToken | None:
+        """An opaque ``cmcp_`` token: judged by its database row, every call."""
+        import asyncio
+
+        from src.mcp_server import project_tokens as pt
+
+        try:
+            view = await asyncio.to_thread(pt.lookup_hash, token)
+        except Exception as exc:  # noqa: BLE001 — fail closed
+            logger.warning("mcp_project_token_lookup_failed err=%s", type(exc).__name__)
+            note_refusal("Could not verify this project token. Try again shortly.")
+            return None
+        if view is None:
+            note_refusal(pt.UNKNOWN)
+            return None
+        problem = view.problem()
+        if problem:
+            logger.warning("mcp_project_token_refused id=%s", view.id)
+            note_refusal(problem)
+            return None
+        await asyncio.to_thread(pt.touch, view.id)
+        return AccessToken(
+            token=token, client_id=f"{pt.CLIENT_PREFIX}{view.id}", scopes=list(view.scopes),
+            expires_at=int(view.expires_at.timestamp()), resource=self.config.audience,
+        )
 
     async def verify_token(self, token: str) -> AccessToken | None:
         """Verify Bearer token. Returns AccessToken on success, None on failure.
@@ -269,6 +299,13 @@ class JwtTokenVerifier(TokenVerifier):
         if not token or not token.strip():
             logger.debug("verify_token_empty")
             return None
+
+        from src.mcp_server import project_tokens as pt
+
+        if pt.is_project_token(token):
+            # Never fall through to the JWT path: an opaque token is judged by
+            # its row or not at all, and only on the server that serves it.
+            return await self._verify_project_token(token) if self.accept_project_tokens else None
 
         try:
             try:

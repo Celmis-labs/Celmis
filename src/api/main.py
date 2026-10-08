@@ -57,6 +57,7 @@ from src.api.routers import oauth as oauth_router
 from src.api.routers import oauth_metadata as oauth_metadata_router
 from src.api.routers import ops_gateway as ops_gateway_router
 from src.api.routers import ops_metrics as ops_metrics_router
+from src.api.routers import project_mcp_tokens as project_mcp_tokens_router
 from src.api.routers import projects as projects_router
 from src.api.routers import pull_requests as pull_requests_router
 from src.api.routers import push as push_router
@@ -548,6 +549,7 @@ def build_app() -> FastAPI:
     app.include_router(search_router_mod.health_router)
     # Phase 2 — multi-repo Q&A
     app.include_router(projects_router.router)
+    app.include_router(project_mcp_tokens_router.router)
     app.include_router(chats_router.router)
     app.include_router(qa_router.router)
     # Stage 22 — fine-grained research access + user directory

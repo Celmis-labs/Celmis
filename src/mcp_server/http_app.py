@@ -250,7 +250,7 @@ def _build_mcp() -> FastMCP:  # noqa: F821 — quoted for typing without an impo
     # The unauthenticated mode still exists for stdio / offline local dev, but
     # it now requires an explicit opt-in so it can never happen by accident.
     try:
-        verifier = JwtTokenVerifier()
+        verifier = JwtTokenVerifier(accept_project_tokens=True)
         auth_settings = AuthSettings(
             issuer_url=f"https://{verifier.config.issuer}",
             resource_server_url=f"https://{verifier.config.audience}",
@@ -361,12 +361,17 @@ _TOOL_SCOPES: dict[str, str] = {
     "update_issue": "write:repos",
     "ask_code": "read:graph",
     "search_code": "read:graph",
+    # Project-scoped tokens (`cmcp_…`) see exactly these two and nothing else.
+    "search_project": "read:project_search",
+    "ask_project": "read:project_search",
     # lane:howto: cross-repo patterns without secret values
     "howto": "read:graph",
 }
 
 # Operations + review-configuration tools: scopes are defined next to the tools.
 from src.mcp_server.ops_tools import OPS_TOOL_SCOPES  # noqa: E402
+from src.mcp_server.project_tokens import SCOPE as PROJECT_SCOPE  # noqa: E402
+from src.mcp_server.project_tokens import TOOLS as PROJECT_TOOLS  # noqa: E402
 
 _TOOL_SCOPES.update(OPS_TOOL_SCOPES)
 
@@ -393,19 +398,25 @@ def _install_call_scope_gate(mcp) -> None:  # noqa: ANN001
     async def gated(req):  # noqa: ANN001, ANN202
         name = getattr(req.params, "name", "") or ""
         required = _TOOL_SCOPES.get(name)
-        if required:
-            try:
-                from mcp.server.auth.middleware.auth_context import get_access_token
+        try:
+            from mcp.server.auth.middleware.auth_context import get_access_token
 
-                token = get_access_token()
-                scopes = list(token.scopes or []) if token else []
-            except Exception:  # noqa: BLE001 — no auth context: nothing to gate
-                scopes = []
-            if scopes and ADMIN_SCOPE not in scopes and required not in scopes:
-                from src.mcp_server import callctx
+            token = get_access_token()
+            scopes = list(token.scopes or []) if token else []
+        except Exception:  # noqa: BLE001 — no auth context: nothing to gate
+            scopes = []
+        if PROJECT_SCOPE in scopes and name not in PROJECT_TOOLS:
+            # A project token reaches its two tools only — a tool missing from
+            # the scope table is refused too, not waved through.
+            from src.mcp_server import callctx
 
-                callctx.set_status("denied")
-                return _error_result(str(ScopeError((required,), scopes)))
+            callctx.set_status("denied")
+            return _error_result("This token can only search its own project.")
+        if required and scopes and ADMIN_SCOPE not in scopes and required not in scopes:
+            from src.mcp_server import callctx
+
+            callctx.set_status("denied")
+            return _error_result(str(ScopeError((required,), scopes)))
         return await original(req)
 
     inner.request_handlers[key] = gated
@@ -440,6 +451,9 @@ def _install_scope_filter(mcp) -> None:  # noqa: ANN001
             if not scopes:
                 return result  # legacy full-access token — show everything
             tools_result = result.root
+            if PROJECT_SCOPE in scopes:
+                tools_result.tools = [t for t in tools_result.tools if t.name in PROJECT_TOOLS]
+                return result
             tools_result.tools = [
                 t for t in tools_result.tools
                 if _TOOL_SCOPES.get(t.name, "") in scopes
@@ -1244,6 +1258,11 @@ def _register_tools(mcp, legacy_tools) -> None:  # noqa: ANN001
     # hide the tools in tools/list (`_TOOL_SCOPES`) AND refuse the call itself
     # (`enforcing`): a hidden tool can otherwise still be called by name.
     register_ops_tools(mcp, _actor, _in_session, enforcing)
+
+    # Search/ask inside ONE project, for project-scoped tokens (cmcp_…).
+    from src.mcp_server.project_tools import register_project_tools
+
+    register_project_tools(mcp)
 
     # "Do it like service X": code slices + the NAMES of env vars and where
     # their values come from, never a value (src/mcp_server/howto/).

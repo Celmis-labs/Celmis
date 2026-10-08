@@ -328,6 +328,26 @@ def resolve_grant(payload: dict, user_id: str) -> _Grant:
     )
 
 
+def _project_caller(client_id: str) -> McpCaller:
+    """The caller behind a project-scoped token (see
+    :mod:`src.mcp_server.project_tokens`): not a person, no admin flag, read
+    only. The row is re-read, so a revoked token is a refused caller."""
+    from src.mcp_server import project_tokens as pt
+
+    token_id = client_id[len(pt.CLIENT_PREFIX):]
+    try:
+        view = pt.lookup_id(token_id)
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        logger.warning("mcp_project_caller_failed err=%s", type(exc).__name__)
+        view = None
+    reason = pt.UNKNOWN if view is None else view.problem()
+    return McpCaller(
+        f"project-token:{token_id}", False, view.workspace_id if view else "",
+        tuple(view.scopes) if view else (), authenticated=True,
+        workspace_resolved=view is not None, refused=reason, kind="project",
+    )
+
+
 def resolve_caller() -> McpCaller:
     """Resolve the current MCP caller. Never raises — returns an
     ``authenticated=False`` caller when no bearer identity is present, open or
@@ -343,6 +363,9 @@ def resolve_caller() -> McpCaller:
         token = None
     if token is None or not getattr(token, "token", None):
         return _no_identity("no_bearer_token")
+
+    if str(getattr(token, "client_id", "") or "").startswith("mcp-project:"):
+        return _project_caller(str(token.client_id))
 
     sub, scopes, payload = _decode_token(token.token)
     claimed_ws = token_workspace(payload)
