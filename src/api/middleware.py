@@ -215,6 +215,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # Webhooks buffer the whole body before HMAC verification, so an
         # unbounded body is a pre-auth memory-exhaustion DoS.
         cl = request.headers.get("content-length")
+        if cls == "upload" and request.method == "POST" and not cl:
+            # The multipart body of the one-request upload is parsed (spooled
+            # to disk) BEFORE authentication runs; without a declared length
+            # the cap below could not apply, so an anonymous client could
+            # stream an unbounded body to disk. Browsers always send a length.
+            return JSONResponse(
+                {"detail": "Content-Length is required for archive uploads"},
+                status_code=411,
+            )
         if cl:
             try:
                 if int(cl) > _body_caps()[cls]:

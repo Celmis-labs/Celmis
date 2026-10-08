@@ -47,6 +47,7 @@ import os
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import jwt
 from mcp.server.auth.provider import AccessToken, TokenVerifier
@@ -284,7 +285,11 @@ class JwtTokenVerifier(TokenVerifier):
             logger.warning("mcp_project_token_refused id=%s", view.id)
             note_refusal(problem)
             return None
-        await asyncio.to_thread(pt.touch, view.id)
+        # At most one bookkeeping write a minute per token: a burst of calls
+        # must not become a burst of database writes.
+        last = view.last_used_at
+        if last is None or (datetime.now(UTC) - last).total_seconds() >= 60:
+            await asyncio.to_thread(pt.touch, view.id)
         return AccessToken(
             token=token, client_id=f"{pt.CLIENT_PREFIX}{view.id}", scopes=list(view.scopes),
             expires_at=int(view.expires_at.timestamp()), resource=self.config.audience,

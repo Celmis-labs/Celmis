@@ -192,6 +192,22 @@ def assemble(s: Session) -> StoredArchive:
         shown = ", ".join(map(str, missing[:20])) + (" …" if len(missing) > 20 else "")
         raise SessionError(f"Missing parts: {shown}.", 409)
     target = s.dir / "assembled"
+    # One complete at a time: a second one would truncate ``assembled`` under
+    # the first. The lock lives in the session directory, so it disappears with
+    # the session on discard; a failed assembly releases it for a retry.
+    lock = s.dir / "assembling.lock"
+    try:
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError:
+        raise SessionError("This upload is already being completed.", 409) from None
+    try:
+        return _join_parts(s, target)
+    except BaseException:
+        lock.unlink(missing_ok=True)
+        raise
+
+
+def _join_parts(s: Session, target: Path) -> StoredArchive:
     digest = hashlib.sha256()
     total = 0
     try:

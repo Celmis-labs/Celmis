@@ -274,3 +274,25 @@ def test_a_failed_reupload_keeps_the_working_copy(tmp_path, monkeypatch):
         assert os.path.isdir(get_settings().workspace_dir / "tmp")
     finally:
         get_settings.cache_clear()
+
+
+def test_an_archive_of_only_folders_hits_the_folder_cap(tmp_path, monkeypatch):
+    """Folder entries carry no bytes and no file count; each still costs an inode."""
+    monkeypatch.setattr(upload, "MAX_FILES", 5)
+    z = tmp_path / "dirs.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for i in range(8):
+            zf.writestr(f"d{i}/", "")
+    with pytest.raises(ArchiveError, match="folders"):
+        extract_archive(z, "dirs.zip", _staging(tmp_path))
+    t = tmp_path / "dirs.tar.gz"
+    members = []
+    for i in range(8):
+        info = tarfile.TarInfo(f"d{i}")
+        info.type = tarfile.DIRTYPE
+        members.append((info, None))
+    _tar(t, members)
+    second = tmp_path / "staging-tar"
+    second.mkdir()
+    with pytest.raises(ArchiveError, match="folders"):
+        extract_archive(t, "dirs.tar.gz", second)

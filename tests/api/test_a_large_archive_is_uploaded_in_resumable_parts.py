@@ -216,3 +216,17 @@ async def test_only_the_superadmin_touches_any_session_route(cu, who):
     assert (await _complete(cu, sid, who)).status_code == 403
     assert (await cu.client.delete(f"/api/repos/upload/sessions/{sid}", headers=h)).status_code == 403
     assert not list((cu.uploads / sid).glob("part-*"))
+
+
+async def test_a_second_complete_while_one_is_running_is_refused(cu):
+    """A second complete would truncate the assembled file under the first."""
+    from src.repos import upload_sessions as us
+
+    s = (await _open(cu)).json()
+    await _send_all(cu, s, cu.data)
+    (cu.uploads / s["session_id"] / "assembling.lock").write_text("")
+    r = await _complete(cu, s["session_id"])
+    assert r.status_code == 409 and "already being completed" in r.json()["detail"]
+    assert us.SessionError  # the session is intact, the lock only blocks
+    (cu.uploads / s["session_id"] / "assembling.lock").unlink()
+    assert (await _complete(cu, s["session_id"])).status_code == 201

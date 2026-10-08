@@ -56,3 +56,9 @@ def test_a_body_under_the_cap_reaches_the_upload_route(client):
     r = client.post("/api/repos/upload", content=b"x",
                     headers={"content-length": str(100 * 1024 * 1024)})
     assert r.status_code != 413
+
+
+def test_an_upload_without_a_declared_length_is_411(client):
+    """The multipart body is spooled before auth runs: no length, no cap, no entry."""
+    r = client.post("/api/repos/upload", content=iter([b"x", b"y"]))
+    assert r.status_code == 411

@@ -137,7 +137,15 @@ def _tar_name(raw: str) -> str:
 @dataclass
 class _Budget:
     files: int = 0
+    dirs: int = 0
     total: int = 0
+
+    def add_dir(self) -> None:
+        # Folder entries cost an inode each and carry no bytes, so neither the
+        # byte cap nor the file cap would stop an archive made only of them.
+        self.dirs += 1
+        if self.dirs > MAX_FILES:
+            raise ArchiveError(f"The archive has more than {MAX_FILES} folders.")
 
     def add_file(self) -> None:
         self.files += 1
@@ -204,6 +212,7 @@ def _unzip(archive: Path, staging: Path) -> None:
                 continue
             target = _target(staging, parts)
             if info.is_dir():
+                budget.add_dir()
                 _make_dir(target)
                 continue
             if info.file_size > MAX_FILE_BYTES:
@@ -242,6 +251,7 @@ def _untar(archive: Path, staging: Path) -> None:
                     continue
                 target = _target(staging, parts)
                 if member.isdir():
+                    budget.add_dir()
                     _make_dir(target)
                     continue
                 if member.size > MAX_FILE_BYTES:
