@@ -863,6 +863,9 @@ class ReviewBatch:
                     f"{who or 'a stage'} ran on the fallback model {sent} "
                     f"instead of {requested or 'the configured model'}"
                 )
+            elif parameter == "agent_reply":
+                # Literal for the same reason as "graph_context" below.
+                line = f"{who or 'an agent'} gave a near-empty reply"
             elif parameter == "graph_context":
                 # The graph stage, not a model parameter — it rides this list
                 # because this list is the road to the row and the banner.

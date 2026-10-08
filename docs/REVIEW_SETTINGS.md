@@ -113,3 +113,9 @@ review is worth keeping when most findings are useful and the wrong ones are
 rare. If one rule produces most of the noise, suppress that rule for the
 repository; if one agent does, disable that agent; if a project convention
 is missed, teach it with `@celmis remember:`.
+
+If the summary carries an `ADJUSTED` line saying agents gave a near-empty
+reply, they returned `[]` after a handful of output tokens on a large diff.
+That is a valid answer and the verdict is not changed, but a lite model without
+reasoning tends to do this. Switch those agents to a model with reasoning, or
+raise the per-agent `reasoning` setting, and run the dry run again.

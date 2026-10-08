@@ -21,6 +21,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
+from src.llm.capabilities import ParameterAdjustment
 from src.review import cadence, messages
 from src.review.agents import (
     AgentContext,
@@ -139,6 +140,56 @@ def _context_sentence(context) -> str:
         return f"Reviewed without full graph context: {why}"
     return (f"Code graph context built; {callers} cross-repo "
             f"caller{'s' if callers != 1 else ''} of the changed code.")
+
+
+#: A model-backed agent that answers a sizeable prompt with next to nothing.
+#: `[]` is a valid reply and stays valid; these bounds only decide when the run
+#: says out loud that four agents "read" a large diff in one or two tokens each.
+TERSE_REPLY_MAX_TOKENS_OUT = 3
+TERSE_REPLY_MIN_TOKENS_IN = 3000
+TERSE_REPLY_MIN_CHANGED_LINES = 50
+#: `ParameterAdjustment.parameter` / action for the note. Not a model
+#: parameter; the same road as the graph note (the literal is mirrored in
+#: `ReviewBatch.adjustments_notice`, which models.py cannot import from here).
+PARAM_AGENT_REPLY = "agent_reply"
+ADJUST_TERSE = "terse"
+
+
+def terse_reply_note(agent_results, pr) -> ParameterAdjustment | None:
+    """An adjustment naming agents that answered a big diff with ~nothing.
+
+    Never changes a verdict: the empty reply is accepted as it always was. It
+    only makes the run say so, because a lite model without reasoning tends to
+    answer `[]` and the review then approves silently. Missing usage (no
+    tokens recorded) is "cannot tell", not "terse".
+    """
+    changed = sum(
+        int(getattr(h, "added_lines", 0) or 0) + int(getattr(h, "removed_lines", 0) or 0)
+        for h in (getattr(pr, "hunks", None) or ())
+    )
+    if changed < TERSE_REPLY_MIN_CHANGED_LINES:
+        return None
+    names: list[str] = []
+    for r in agent_results:
+        if getattr(r, "error", None) or getattr(r, "findings", None):
+            continue
+        tin = int(getattr(r, "tokens_in", 0) or 0)
+        tout = int(getattr(r, "tokens_out", 0) or 0)
+        if tin >= TERSE_REPLY_MIN_TOKENS_IN and 0 < tout <= TERSE_REPLY_MAX_TOKENS_OUT:
+            names.append(str(r.agent))
+    if not names:
+        return None
+    return ParameterAdjustment(
+        agent=", ".join(names), parameter=PARAM_AGENT_REPLY,
+        requested="a reasoned review", sent=f"<= {TERSE_REPLY_MAX_TOKENS_OUT} output tokens",
+        action=ADJUST_TERSE,
+        reason=(
+            "no findings, and the reply was only a few tokens for a "
+            f"{changed}-line change; a model without reasoning tends to answer `[]` — "
+            "consider a model with reasoning or the per-agent `reasoning` setting "
+            "(docs/REVIEW_SETTINGS.md)"
+        ),
+    )
 
 
 def _record_agent_stage(stages: StageRecorder, r, *, dispatched_at: float,
@@ -1279,6 +1330,10 @@ class ReviewOrchestrator:
                 stages, r, dispatched_at=dispatched_at,
                 finished_at=getattr(self, "_agent_finished_at", {}).get(r.agent),
             )
+
+        terse = terse_reply_note(agent_results, pr)
+        if terse is not None:
+            batch.parameter_adjustments.append(terse)
 
         # Aggregate findings + Stage 11 cost accounting.
         # NB: previously silently `continue`d on error, causing critical-agent
