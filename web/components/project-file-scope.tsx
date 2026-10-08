@@ -16,8 +16,8 @@ const lines = (text: string): string[] =>
   text.split("\n").map((l) => l.trim()).filter(Boolean);
 
 export function ProjectFileScope({
-  projectId, repo,
-}: { projectId: string; repo: ProjectRepoOut }) {
+  projectId, repo, canEdit = false,
+}: { projectId: string; repo: ProjectRepoOut; canEdit?: boolean }) {
   const t = useT();
   const token = useToken();
   const qc = useQueryClient();
@@ -39,6 +39,18 @@ export function ProjectFileScope({
   });
   const active = (repo.include_globs?.length ?? 0) + (repo.exclude_globs?.length ?? 0);
 
+  // The file scope is part of the superadmin-managed MCP access: everyone else
+  // sees it, read-only (the server refuses their edits anyway).
+  if (!canEdit) {
+    const inc = (repo.include_globs ?? []).join(", ");
+    const exc = (repo.exclude_globs ?? []).join(", ");
+    return active > 0 ? (
+      <p className="text-xs text-muted-foreground">
+        {inc && <span>{t("projects.scope.include")}: <code>{inc}</code> </span>}
+        {exc && <span>{t("projects.scope.exclude")}: <code>{exc}</code></span>}
+      </p>
+    ) : null;
+  }
   if (!open) {
     return (
       <Button variant="ghost" size="sm" className="h-6 px-1 text-xs"

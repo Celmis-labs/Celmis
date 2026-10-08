@@ -78,7 +78,10 @@ async def test_another_workspace_cannot_touch_the_scope(pw):
     pid = await _project(pw, include_globs=["src"])
     r = await pw.client.patch(f"/api/projects/{pid}/repos/{A_REPO}",
                               json={"include_globs": []}, headers=pw.h("admin_b", "ws-b"))
-    assert r.status_code == 404
+    assert r.status_code == 403, "not a superadmin"
+    r = await pw.client.patch(f"/api/projects/{pid}/repos/{A_REPO}",
+                              json={"include_globs": []}, headers=pw.h("su", "ws-b"))
+    assert r.status_code == 404, "even the superadmin, from another workspace"
     got = (await pw.client.get(f"/api/projects/{pid}", headers=pw.h("su", "ws-a"))).json()
     assert got["repos"][0]["include_globs"] == ["src"]
 

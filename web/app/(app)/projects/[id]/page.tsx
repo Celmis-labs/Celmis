@@ -186,7 +186,7 @@ export default function ProjectDetailPage({
                     <TrashIcon className="h-3 w-3" />
                   </Button>
                 </div>
-                <ProjectFileScope projectId={id} repo={r} />
+                <ProjectFileScope projectId={id} repo={r} canEdit={isSuperadmin} />
                 </div>
               ))}
             </CardContent>

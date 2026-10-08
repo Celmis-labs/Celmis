@@ -14,7 +14,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api import repositories as repo
-from src.api.deps import current_workspace_id, get_current_user, readable_repo_slugs
+from src.api.deps import (
+    current_workspace_id,
+    get_current_user,
+    readable_repo_slugs,
+    require_superadmin,
+)
 from src.api.schemas import (
     ProjectIn,
     ProjectOut,
@@ -47,6 +52,34 @@ async def _owned_project(session: AsyncSession, project_id: str, ws_id: str) -> 
 
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+
+async def _has_active_token(session: AsyncSession, project_id: str) -> bool:
+    """Does an outside client hold a live (not revoked, not expired) MCP token
+    for this project?"""
+    from datetime import UTC, datetime
+
+    from src.db.models import McpProjectToken
+
+    row = await session.execute(
+        select(McpProjectToken.id).where(
+            McpProjectToken.project_id == project_id,
+            McpProjectToken.revoked_at.is_(None),
+            McpProjectToken.expires_at > datetime.now(UTC),
+        ).limit(1))
+    return row.first() is not None
+
+
+async def _guard_token_scope(session: AsyncSession, project_id: str, user: User) -> None:
+    """What a project token can reach is its repo set and file scope; while one
+    is live only the superadmin, who issues the tokens, may change either."""
+    from src.users.roles import is_superadmin
+
+    if not is_superadmin(user) and await _has_active_token(session, project_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=("This project has an active MCP token: only the superadmin "
+                    "can change its repositories or file scope."))
 
 
 def _to_out(project, chats_count: int = 0, visible: set[str] | None = None) -> ProjectOut:
@@ -220,6 +253,13 @@ async def add_repo(
     ws_id: str = Depends(current_workspace_id),
 ) -> ProjectRepoOut:
     await _owned_project(session, project_id, ws_id)
+    from src.users.roles import is_superadmin
+
+    if (payload.include_globs or payload.exclude_globs) and not is_superadmin(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the superadmin can set a project's file scope.")
+    await _guard_token_scope(session, project_id, user)
     # Same check as creation. Adding a member one at a time is the other way
     # into the same silently-bogus project.
     await _require_registered([payload.repo_slug], ws_id, user)
@@ -282,7 +322,7 @@ async def update_repo_scope(
     repo_slug: str,
     payload: ProjectRepoPatch,
     session: AsyncSession = Depends(get_async_session),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_superadmin),
     ws_id: str = Depends(current_workspace_id),
 ) -> ProjectRepoOut:
     """Set which files of a repo this project looks at (Q&A and project MCP
@@ -321,6 +361,7 @@ async def remove_repo(
     ws_id: str = Depends(current_workspace_id),
 ) -> None:
     await _owned_project(session, project_id, ws_id)
+    await _guard_token_scope(session, project_id, user)
     ok = repo_slug in await readable_repo_slugs(user, ws_id, [repo_slug])
     ok = ok and await repo.remove_repo_from_project(session, project_id, repo_slug)
     if not ok:

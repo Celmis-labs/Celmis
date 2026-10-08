@@ -19,6 +19,7 @@ import {
   type RepoDeveloperScan,
   unruledApi,
   uploadRepoArchive,
+  safeHttpUrl,
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useI18n, useT } from "@/lib/i18n";
@@ -512,7 +513,7 @@ function RepoRow({
                   nothing else on this page would say so. */}
               <RepoWebhookControl repo={repo} />
               <a
-                href={repo.url}
+                href={safeHttpUrl(repo.url)}
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex min-h-9 items-center gap-0.5 hover:underline"
@@ -899,7 +900,7 @@ function ManualPullList({ slug, repo }: { slug: string; repo: RepoOut }) {
                   </div>
                   <div className="flex items-center justify-end gap-2 sm:shrink-0">
                     <a
-                      href={pr.url}
+                      href={safeHttpUrl(pr.url)}
                       target="_blank"
                       rel="noreferrer"
                       className="inline-flex min-h-9 items-center gap-0.5 text-xs text-[var(--color-muted-foreground)] hover:underline"

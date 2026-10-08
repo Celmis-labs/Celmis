@@ -34,6 +34,17 @@ export const API_BASE =
       "http://localhost:8000"
     : process.env.NEXT_PUBLIC_API_BASE || "/backend");
 
+/** The URL when it is http(s), else undefined: a provider-supplied link must
+ * never become a javascript: or data: href. */
+export function safeHttpUrl(url: string | null | undefined): string | undefined {
+  try {
+    const u = new URL(String(url ?? ""));
+    return u.protocol === "https:" || u.protocol === "http:" ? u.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The MCP mount's public URL: the API base INCLUDING a path prefix (for
  * example https://host/backend/mcp/), absolute and with a trailing slash. */
 export function publicMcpUrl(path = "/mcp/"): string {

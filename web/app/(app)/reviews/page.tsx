@@ -11,6 +11,7 @@ import {
   feedbackApi, openPullsApi, workspacesApi,
   type ApplyFixIn, type FindingOut, type FindingsPayload, type OpenPull,
   type RepoOut, type ReviewRunOut,
+  safeHttpUrl,
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { DriftPanel } from "@/components/drift-panel";
@@ -1148,7 +1149,7 @@ function ManualTrigger() {
                     <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted-foreground)]">
                       <code className="font-mono">{prRef}</code>
                       <a
-                        href={selectedPr.url}
+                        href={safeHttpUrl(selectedPr.url)}
                         target="_blank"
                         rel="noreferrer"
                         className="inline-flex items-center gap-1 underline hover:text-[var(--color-foreground)]"
