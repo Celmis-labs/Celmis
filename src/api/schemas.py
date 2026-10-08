@@ -198,6 +198,8 @@ class RepairOutdatedOut(BaseModel):
 class RepoOut(BaseModel):
     slug: str  # internal slug e.g. github_owner-name
     provider: str
+    #: Name given at upload for an ``upload`` repository (None for git repos).
+    display_name: str | None = None
     full_name: str  # owner/repo
     url: str
     indexed: bool

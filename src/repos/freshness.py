@@ -62,7 +62,7 @@ class FreshnessCheck:
     """What one look at the remote learned."""
 
     repo_slug: str
-    #: "up_to_date" | "behind" | "never_indexed" | "unreachable"
+    #: "up_to_date" | "behind" | "never_indexed" | "unreachable" | "not_applicable"
     state: str
     remote_sha: str | None = None
     indexed_sha: str | None = None
@@ -259,6 +259,18 @@ def _basic_auth(provider: str, creds) -> dict[str, str] | None:
     return None
 
 
+def _is_upload(repo_slug: str, workspace_id: str, user_id: str) -> bool:
+    from src.api.auto_review import get_auto_review_store
+    from src.repos.upload import is_upload_provider
+
+    try:
+        store = get_auto_review_store()
+        cfg = store.get_in_workspace(workspace_id, repo_slug) or store.get(user_id, repo_slug)
+    except Exception:  # noqa: BLE001 — the regular path reports its own errors
+        return False
+    return cfg is not None and is_upload_provider(cfg.provider)
+
+
 def check_repo(
     repo_slug: str,
     *,
@@ -280,6 +292,12 @@ def check_repo(
 
     state = read_index_state(repo_slug)
     indexed = state.last_indexed_sha if state else None
+
+    if _is_upload(repo_slug, workspace_id, user_id):
+        # Code from an archive has no remote to ask; it changes only when a
+        # new archive is uploaded, and that queues its own index.
+        return FreshnessCheck(repo_slug, "not_applicable", indexed_sha=indexed,
+                              detail="uploaded from an archive — no remote")
 
     try:
         sha = remote_head(repo_slug, workspace_id=workspace_id, user_id=user_id)

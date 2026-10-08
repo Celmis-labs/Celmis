@@ -16,7 +16,18 @@ import logging
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +39,7 @@ from src.api.deps import (
     get_current_user,
     is_workspace_admin,
     require_repo_permission,
+    require_superadmin,
     require_workspace_admin,
 )
 from src.api.schemas import (
@@ -93,6 +105,15 @@ async def list_repos(
     return [r for r in everything if r.slug in allowed]
 
 
+def _upload_display_name(cfg: RepoConfig) -> str | None:
+    from src.repos.upload import is_upload_provider, read_upload_meta
+
+    if not is_upload_provider(cfg.provider):
+        return None
+    meta = read_upload_meta(cfg.repo_slug) or {}
+    return str(meta.get("name") or "") or None
+
+
 def _workspace_repos(workspace_id: str) -> list[RepoOut]:
     from src.repos.index_state import read_index_states
 
@@ -142,6 +163,7 @@ def _workspace_repos(workspace_id: str) -> list[RepoOut]:
             last_check_error=st.last_check_error if st else None,
             up_to_date=st.up_to_date if st else None,
             webhook=_webhook_out(hooks.get(slug)),
+            display_name=_upload_display_name(cfg),
             target_branches=(branches[slug][0] if slug in branches else None),
             target_branches_source=(branches[slug][1] if slug in branches else None),
         ))
@@ -351,6 +373,114 @@ def add_repo(
         index_queued=index_status == INDEX_QUEUED,
         index_status=index_status,
         webhook=_webhook_out(webhook),
+    )
+
+
+@router.post("/upload", response_model=RepoOut, status_code=status.HTTP_201_CREATED)
+def upload_repo(
+    request: Request,
+    slug: str = Form(..., max_length=200),
+    name: str = Form("", max_length=200),
+    file: UploadFile = File(...),
+    user: User = Depends(require_superadmin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> RepoOut:
+    """Add code from an archive (.zip, .tar.gz, .tgz) instead of a git host.
+
+    Superadmin only. The archive is streamed to disk, unpacked safely (no
+    links, no escaping paths, size/count caps) and swapped in as the repo's
+    working copy; the graph index is queued. Uploading again under the same
+    slug is a new version: the files are replaced and the repo is re-indexed.
+    """
+    from src.repos.indexing import INDEX_QUEUED, queue_index_if_needed
+    from src.repos.upload import (
+        UPLOAD_PROVIDER,
+        ArchiveError,
+        archive_kind,
+        install_archive,
+        is_upload_provider,
+        stream_to_temp,
+    )
+
+    slug = slug.strip()
+    filename = (file.filename or "").strip()
+    try:
+        archive_kind(filename)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    if not is_valid_repo_slug(slug):
+        raise HTTPException(
+            status_code=422,
+            detail=(f"Unsupported repository name {slug!r}: only letters, "
+                    "digits, '.', '_' and '-' (and no '..') are supported."),
+        )
+    store = get_auto_review_store()
+    slug_bound = store.existing_slug_binding(slug)
+    if slug_bound is not None and slug_bound != workspace_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=("Another repository in a different workspace already uses "
+                    f"the local name {slug!r}. Choose another name."),
+        )
+    existing = store.get_in_workspace(workspace_id, slug)
+    if existing is not None and not is_upload_provider(existing.provider):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(f"{slug!r} is already a repository connected from a git "
+                    "provider. Choose another name."),
+        )
+    full_name = f"{UPLOAD_PROVIDER}/{slug}"
+    bound = store.existing_workspace_binding(UPLOAD_PROVIDER, full_name)
+    if bound is not None and bound != workspace_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This repository is already registered in another workspace.",
+        )
+
+    from src.config import get_settings
+
+    tmp_dir = get_settings().workspace_dir / "tmp"
+    try:
+        stored = stream_to_temp(lambda: file.file.read(1024 * 1024), tmp_dir)
+    except ArchiveError as exc:
+        code = 413 if "larger than" in str(exc) else 422
+        raise HTTPException(status_code=code, detail=str(exc)) from None
+    try:
+        install_archive(stored, filename, slug, uploaded_by=user.email)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    finally:
+        stored.path.unlink(missing_ok=True)
+
+    from src.repos.upload import write_display_name
+
+    write_display_name(slug, (name or "").strip() or slug)
+    cfg = existing or RepoConfig(
+        user_id=user.id, repo_slug=slug, provider=UPLOAD_PROVIDER,
+        full_name=full_name, url=f"{UPLOAD_PROVIDER}:{slug}",
+        workspace_id=workspace_id, enabled=False, mode="manual",
+    )
+    store.upsert(cfg)
+    index_status = queue_index_if_needed(
+        slug, workspace_id=workspace_id, user_id=user.id,
+        enqueued_by=user.email, force=True,
+    )
+    record_action(
+        action="repo.uploaded", actor=user.email, actor_id=user.id,
+        workspace_id=workspace_id, target=slug, ip=client_ip(request),
+        detail={"provider": UPLOAD_PROVIDER, "sha256": stored.sha256,
+                "bytes": stored.size, "replaced": existing is not None,
+                "index_queued": index_status == INDEX_QUEUED},
+    )
+    logger.info("repo_uploaded ws=%s repo=%s bytes=%d replaced=%s index=%s by=%s",
+                workspace_id, slug, stored.size, existing is not None,
+                index_status, user.email)
+    return RepoOut(
+        slug=slug, provider=UPLOAD_PROVIDER, full_name=cfg.full_name, url=cfg.url,
+        indexed=_graph_exists(slug), auto_review_enabled=False,
+        auto_review_mode=cfg.mode, branch=None,
+        index_queued=index_status == INDEX_QUEUED, index_status=index_status,
+        display_name=(name or "").strip() or slug,
     )
 
 
@@ -1427,7 +1557,20 @@ def _registered_repo(slug: str, workspace_id: str) -> RepoConfig:
     cfg = get_auto_review_store().get_in_workspace(workspace_id, slug)
     if cfg is None:
         raise HTTPException(status_code=404, detail="Repo not registered")
+    _refuse_upload(cfg)
     return cfg
+
+
+def _refuse_upload(cfg: RepoConfig) -> None:
+    """Pull requests, branches and webhooks need a git host; code added from
+    an archive has none."""
+    from src.repos.upload import is_upload_provider
+
+    if is_upload_provider(cfg.provider):
+        raise HTTPException(
+            status_code=400,
+            detail="Not available for code added from an archive (it has no git host).",
+        )
 
 
 def _repo_credential(cfg: RepoConfig, user: User) -> tuple[str, str, Any]:
@@ -1824,6 +1967,7 @@ def _repo_or_404(workspace_id: str, slug: str) -> RepoConfig:
         # 404 for "registered in another workspace" too: whether some other
         # tenant has this slug is not this caller's business.
         raise HTTPException(status_code=404, detail="Repo not registered")
+    _refuse_upload(cfg)
     return cfg
 
 

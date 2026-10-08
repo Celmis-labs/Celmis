@@ -35,6 +35,8 @@ Request size:
 
         auth/default   1 MB     CELMIS_MAX_BODY_BYTES=1048576
         review/mcp     5 MB     CELMIS_MAX_BODY_BYTES_LARGE=5242880
+        upload         250 MB   CELMIS_MAX_UPLOAD_BYTES=262144000
+                                (POST /api/repos/upload only: code from an archive)
 
 429 responses carry Retry-After (seconds until window reset).
 """
@@ -87,16 +89,27 @@ def _limits() -> dict[str, int]:
         "review": int(os.environ.get("CELMIS_RL_REVIEW", "30")),
         "mcp": int(os.environ.get("CELMIS_RL_MCP", "120")),
         "default": int(os.environ.get("CELMIS_RL_DEFAULT", "240")),
+        "upload": int(os.environ.get("CELMIS_RL_UPLOAD", "10")),
     }
 
 
 def _body_caps() -> dict[str, int]:
     small = int(os.environ.get("CELMIS_MAX_BODY_BYTES", str(1024 * 1024)))
     large = int(os.environ.get("CELMIS_MAX_BODY_BYTES_LARGE", str(5 * 1024 * 1024)))
-    return {"auth": small, "default": small, "review": large, "mcp": large}
+    return {"auth": small, "default": small, "review": large, "mcp": large,
+            "upload": _upload_cap()}
+
+
+def _upload_cap() -> int:
+    """The archive limit plus a megabyte for the multipart envelope."""
+    from src.repos.upload import max_archive_bytes
+
+    return max_archive_bytes() + 1024 * 1024
 
 
 def _classify(path: str) -> str:
+    if path == "/api/repos/upload":
+        return "upload"
     if path.startswith("/oauth/token") or path.startswith("/api/auth/login"):
         return "auth"
     if path.startswith("/api/reviews/trigger"):

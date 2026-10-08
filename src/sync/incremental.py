@@ -58,6 +58,8 @@ def run_index(
     settings = get_settings()
     repo_path = settings.repo_path(repo_slug)
     if not repo_path.exists() or not (repo_path / ".git").exists():
+        # Also what an uploaded archive looks like: no checkout, nothing to
+        # diff. Its index is rebuilt in full whenever a new archive arrives.
         return {"status": "skipped", "reason": "clone missing", "repo": repo_slug}
 
     # Bring the CHECKOUT to the remote, not just the remote-tracking ref.

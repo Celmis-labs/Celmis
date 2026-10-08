@@ -38,6 +38,9 @@ from src.sync.clone import CloneError, RepoSync, SyncResult
 
 logger = logging.getLogger(__name__)
 
+#: A group member that is an uploaded archive, not a git address.
+UPLOAD_PREFIX = "upload:"
+
 
 @dataclass
 class _RepoIndexResult:
@@ -178,6 +181,19 @@ class GroupIndexer:
 
     # ─── per-repo ───────────────────────────────────────────────
 
+    def _uploaded_sync(self, slug: str) -> SyncResult:
+        """The "sync" of a repository that came from an archive."""
+        from src.repos.upload import read_upload_meta
+
+        path = self.settings.repo_path(slug)
+        if not path.is_dir():
+            raise CloneError(f"uploaded repository {slug!r} has no files on disk")
+        meta = read_upload_meta(slug) or {}
+        return SyncResult(
+            repo_slug=slug, path=path, commit_sha=str(meta.get("sha256") or ""),
+            changed=True,
+        )
+
     def _index_one_repo(
         self,
         repo_id: str,
@@ -197,7 +213,11 @@ class GroupIndexer:
         if progress_callback:
             progress_callback(f"sync: {repo_id}")
 
-        try:
+        if repo_id.startswith(UPLOAD_PREFIX):
+            # Code from an archive: already on disk, nothing to clone. The
+            # archive's sha-256 stands in for the commit.
+            sync_result = self._uploaded_sync(repo_id[len(UPLOAD_PREFIX):])
+        else:
             sync_result = self.sync.clone_or_update(
                 repo_id,
                 # None → default branch (universal for multi-host);
@@ -210,8 +230,6 @@ class GroupIndexer:
                 progress_callback=progress_callback,
                 gitlab_base_url=self.gitlab_base_url,
             )
-        except CloneError:
-            raise
 
         slug = sync_result.repo_slug
 

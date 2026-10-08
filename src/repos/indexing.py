@@ -118,8 +118,12 @@ def queue_index_if_needed(
     workspace_id: str,
     user_id: str,
     enqueued_by: str | None = None,
+    force: bool = False,
 ) -> str:
     """Queue a full graph index for `repo_slug` unless one is unnecessary.
+
+    ``force`` skips the "a graph already exists" shortcut — a re-uploaded
+    archive replaced the files under an existing graph.
 
     Returns one of the INDEX_* constants above. Never raises: callers run
     inside a request that has already written the repository row, and a queue
@@ -129,7 +133,7 @@ def queue_index_if_needed(
     from src.sync.queue import KIND_INDEX_REPO_FULL, enqueue
 
     try:
-        if get_settings().repo_graph_path(repo_slug).exists():
+        if not force and get_settings().repo_graph_path(repo_slug).exists():
             return INDEX_ALREADY_INDEXED
         job_id = enqueue(
             kind=KIND_INDEX_REPO_FULL,
@@ -186,12 +190,18 @@ def index_repo_sync(
 
     try:
         settings = get_settings()
+        from src.repos.upload import is_upload_provider
+
+        # Code from an archive has no remote: no credential, no clone — the
+        # files are already in place and the archive's sha-256 is the revision.
+        uploaded = is_upload_provider(cfg.provider)
         # Resolve the git credential the SAME way every other surface does
         # (workspace slot first). Without this the clone falls back to RepoSync's
         # per-user lookup, misses the ws:{id} token and goes out anonymous — which
         # is exactly how a private repo turns into "index failed, no credentials".
-        creds = resolve_git_credential(cfg.provider, user_id=user_id, workspace_id=workspace_id)
-        if creds is None:
+        creds = (None if uploaded else
+                 resolve_git_credential(cfg.provider, user_id=user_id, workspace_id=workspace_id))
+        if creds is None and not uploaded:
             # Wrapped like the rest, though this one interpolates only a
             # provider name. The rule is "any interpolated message goes
             # through it" precisely so nobody has to work out which
@@ -201,7 +211,7 @@ def index_repo_sync(
                 f"No {cfg.provider} token for this workspace — connect one on the "
                 f"Connections page, then index again."
             ))
-        kw = git_auth_kwargs(cfg.provider, creds.secret, creds.metadata)
+        kw = {} if uploaded else git_auth_kwargs(cfg.provider, creds.secret, creds.metadata)
         gitlab_base_url = None
         if cfg.provider == "gitlab":
             from src.sync.gitlab_instance import UnsafeGitLabURL, instance_for_credential
@@ -278,7 +288,8 @@ def index_repo_sync(
             full_rebuild=per_repo is not None,
             # Which branch that revision is on: the configured one, else what
             # the clone stands on (the provider default when nobody named one).
-            branch=(cfg.branch or "").strip() or clone_branch(cfg.repo_slug),
+            branch=None if uploaded else (
+                (cfg.branch or "").strip() or clone_branch(cfg.repo_slug)),
         )
 
         try:
