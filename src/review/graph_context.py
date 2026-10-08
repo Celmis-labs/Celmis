@@ -400,6 +400,7 @@ def build_graph_context(
 
     try:
         symbols, files_queried, files_beyond_cap, counts = _changed_symbols(store, pr, files)
+        parsed_empty = _parsed_without_symbols(store, files_queried, counts)
         _attach_callers(store, symbols)
     except Exception as exc:  # noqa: BLE001
         logger.warning("graph_query_failed pr=%d db=%s err=%s", pr.number, db_path, exc)
@@ -419,7 +420,10 @@ def build_graph_context(
     cross_count = sum(c.edges for callers in per_file.values() for c in callers)
 
     unparsed = _unparsed_language_files(files)
-    missing = _files_missing_from_index(pr, files_queried, counts)
+    missing = [
+        f for f in _files_missing_from_index(pr, files_queried, counts)
+        if f not in parsed_empty
+    ]
     stale, gone, undetermined = _classify_missing(missing, _clone_root(slug, settings))
     kept = {*stale, *gone, *undetermined}
     files_not_indexed = [f for f in missing if f in kept]
@@ -762,6 +766,37 @@ def _cross_repo(
             with contextlib.suppress(Exception):
                 store.close()
     return by_repo, per_file
+
+
+def _parsed_without_symbols(
+    store: Any, files: list[str], counts: dict[str, int],
+) -> set[str]:
+    """Changed files the indexer parsed that hold no symbols of their own.
+
+    Every extractor records a parsed file as one synthetic `file_module`
+    marker, so a procedural entry script, a template or a script without
+    declarations is in the graph with a marker and nothing else. That is not a
+    gap in the index. A graph holding no marker at all predates the markers
+    (or never parsed anything): there the absence of a marker proves nothing,
+    so the set is empty and the old reading of the counts stands.
+    """
+    candidates = [f for f in files if counts.get(f, 0) == 0]
+    if not candidates:
+        return set()
+    marker = {"kind": "file_module"}
+    if not store.query(
+        "MATCH (s:Symbol) WHERE s.kind = $kind RETURN s.id AS id LIMIT 1", params=marker,
+    ):
+        return set()
+    marked: set[str] = set()
+    for batch in _chunks(candidates, FILES_PER_QUERY):
+        for row in store.query(
+            "MATCH (s:Symbol) WHERE s.kind = $kind AND s.file IN $files "
+            "RETURN DISTINCT s.file AS file",
+            params={**marker, "files": list(batch)},
+        ):
+            marked.add(str(row.get("file") or ""))
+    return marked
 
 
 def _files_missing_from_index(

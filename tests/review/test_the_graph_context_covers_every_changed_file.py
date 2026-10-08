@@ -106,6 +106,12 @@ class FakeGraph:
         self.calls.append(params)
         if self.fail is not None:
             raise self.fail
+        if "kind" in params:  # file_module markers: the parsed-files lookup
+            marks = [s for s in self.symbols if s["kind"] == params["kind"]]
+            if "files" not in params:
+                return marks[:1]
+            return [{"file": f} for f in sorted({m["file"] for m in marks})
+                    if f in params["files"]]
         if "slug" in params and "files" in params:
             counts: dict[tuple, int] = {}
             for src_repo, name, module, file, kind in self.cross:
@@ -446,6 +452,30 @@ def test_files_the_index_never_saw_are_named_but_new_and_non_code_files_are_not(
     # handed over, not withheld.
     assert [s.name for s in ctx.symbols] == ["k"]
     assert "src/forgotten.py" in ctx.summary
+
+
+def test_a_parsed_file_without_symbols_is_not_a_gap(workspace):
+    """An entry script or template the extractor parsed leaves only its marker."""
+    graph = FakeGraph(symbols=[
+        _sym("src/known.py::k", file="src/known.py"),
+        _sym("public/index.php", file="public/index.php", kind="file_module"),
+    ])
+    workspace.indexed("github_acme-api", graph)
+    pr = _pr(hunks=[_hunk("src/known.py"), _hunk("public/index.php"), _hunk("src/forgotten.py")])
+
+    ctx = _build(pr, workspace)
+
+    assert ctx.files_not_indexed == ["src/forgotten.py"]
+
+
+def test_an_index_without_any_marker_keeps_the_old_reading(workspace):
+    graph = FakeGraph(symbols=[_sym("src/known.py::k", file="src/known.py")])
+    workspace.indexed("github_acme-api", graph)
+    pr = _pr(hunks=[_hunk("src/known.py"), _hunk("public/index.php")])
+
+    ctx = _build(pr, workspace)
+
+    assert ctx.files_not_indexed == ["public/index.php"]
 
 
 def test_a_deleted_file_still_counts_as_one_the_index_should_know(workspace):

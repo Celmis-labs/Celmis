@@ -283,3 +283,11 @@ function helper(int $x): int {
         call_targets = {e.raw_target for e in res.edges if e.kind == "CALLS"}
         assert "info" in call_targets   # $this->logger->info
         assert "find" in call_targets   # $this->repo->find
+
+
+class TestParsedWithoutSymbols:
+    def test_procedural_script_leaves_its_file_marker(self, extractor: PHPExtractor) -> None:
+        """The review's "not indexed" check reads this marker as "parsed"."""
+        res = _extract(extractor, "<?php\necho 'hi';\n", "public/index.php")
+        assert [s.kind for s in res.symbols] == ["file_module"]
+        assert not res.parse_errors
