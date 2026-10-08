@@ -64,6 +64,10 @@ EXCEPTIONS: dict[tuple[str, str], set[str]] = {
     # Self-service token: a login, and the handler answers 403 unless
     # CELMIS_MCP_SELF_SERVICE is on (tests/api/test_mcp_tokens_endpoints.py).
     ("POST", "/api/mcp/token"): {"get_current_user"},
+    # Project-scoped MCP tokens live under their project's path; superadmin only.
+    ("GET", "/api/projects/{project_id}/mcp-tokens"): {"require_superadmin"},
+    ("POST", "/api/projects/{project_id}/mcp-tokens"): {"require_superadmin"},
+    ("DELETE", "/api/projects/{project_id}/mcp-tokens/{token_id}"): {"require_superadmin"},
 }
 
 #: Protocol endpoints: discovery documents are public by specification, the
@@ -189,3 +193,10 @@ def test_the_two_projects_are_both_in_the_table() -> None:
     assert any(p.startswith("/api/admin/mcp-tokens") for p in mounted)
     for prefix in SURFACES:
         assert any(p.startswith(prefix) for p in mounted), f"{prefix} matches no route"
+
+
+def test_the_project_token_routes_are_for_the_superadmin_alone() -> None:
+    gates = {(m, p): g for m, p, g in ROUTES}
+    for (method, path), wanted in EXCEPTIONS.items():
+        if path.startswith("/api/projects/") and path.endswith(("mcp-tokens", "{token_id}")):
+            assert gates[(method, path)] & wanted, (method, path)
