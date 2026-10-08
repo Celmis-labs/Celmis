@@ -11,6 +11,7 @@
 
 import { useEffect } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ArrowRightIcon, DoorOpenIcon, HourglassIcon } from "lucide-react";
@@ -79,6 +80,7 @@ const SEEN_KEY = "celmis:access-decision-seen";
  */
 export function AccessDecisionNotifier() {
   const t = useT();
+  const router = useRouter();
   const me = useMyAccess();
   const req = me.data?.request;
   const decided = req && (req.status === "approved" || req.status === "rejected") ? req : null;
@@ -96,14 +98,14 @@ export function AccessDecisionNotifier() {
         .map((g) => `${g.workspace_name} (${roleLabel(t, g.role)})`)
         .join(", ");
       toast.success(t("accessRequest.toast.approved", { workspaces: names }), {
-        action: { label: t("accessRequest.toast.open"), onClick: () => window.location.assign("/access-request") },
+        action: { label: t("accessRequest.toast.open"), onClick: () => router.push("/access-request") },
       });
     } else {
       toast.error(t("accessRequest.toast.rejected"), {
-        action: { label: t("accessRequest.toast.open"), onClick: () => window.location.assign("/access-request") },
+        action: { label: t("accessRequest.toast.open"), onClick: () => router.push("/access-request") },
       });
     }
-  }, [decided, t]);
+  }, [decided, t, router]);
 
   return null;
 }

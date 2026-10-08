@@ -37,7 +37,7 @@ WEB = pathlib.Path(__file__).resolve().parents[1] / "web"
 #: Measured 2026-08-31 on `eslint app components lib`: 42 findings across 9
 #: rules, 31 of them errors. Lower this when the number falls; raising it is
 #: the change this file exists to make somebody argue for.
-BASELINE = 35
+BASELINE = 34
 
 #: Zero tolerated, whatever the baseline says. The outage rule.
 FATAL_RULES = ("react-hooks/rules-of-hooks",)

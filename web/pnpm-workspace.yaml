@@ -12,3 +12,10 @@
 allowBuilds:
   sharp: true
   unrs-resolver: true
+
+# Transitive build-time packages pulled in through next > styled-jsx, pinned
+# up to the first releases without the advisories `pnpm audit --prod` reports.
+overrides:
+  browserslist: ^4.28.7
+  "@babel/core": ^7.29.6
+  baseline-browser-mapping: ^2.11.0

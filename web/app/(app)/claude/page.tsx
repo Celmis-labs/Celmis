@@ -9,6 +9,7 @@
  */
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -322,6 +323,7 @@ function NewSessionCard({
 }) {
   const t = useT();
   const token = useToken();
+  const router = useRouter();
   // Either a slug or `project:<id>` — one select, because "what should the
   // agent see" is one question and asking it twice invites contradictory
   // answers.
@@ -433,7 +435,7 @@ function NewSessionCard({
           .catch(() => undefined);
       }
       onCreated();
-      window.location.href = `/claude/${s.id}`;
+      router.push(`/claude/${s.id}`);
     },
     onError: (e) => toast.error((e as Error).message),
   });

@@ -85,6 +85,8 @@ export function InviteView({
       document.cookie = `x-workspace=${r.workspace_slug}; path=/; max-age=31536000; SameSite=Lax`;
       forgetAgentSession();
       toast.success(t("invite.joined", { workspace: r.workspace_slug, role: roleLabel(t, r.role) }));
+      // A full load is the point (see above), not a client-side route change.
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination
       window.location.assign("/dashboard");
     } catch (err) {
       const message = (err as Error).message;
