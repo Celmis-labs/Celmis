@@ -20,6 +20,7 @@ from src.api.schemas import (
     ProjectOut,
     ProjectRepoIn,
     ProjectRepoOut,
+    ProjectRepoPatch,
 )
 from src.db.models import Project
 from src.db.session import get_async_session
@@ -63,6 +64,8 @@ def _to_out(project, chats_count: int = 0, visible: set[str] | None = None) -> P
                 repo_slug=r.repo_slug,
                 role=r.role,
                 added_at=r.added_at,
+                include_globs=list(r.include_globs or []),
+                exclude_globs=list(r.exclude_globs or []),
             )
             for r in (project.repos or [])
             if visible is None or r.repo_slug in visible
@@ -220,11 +223,14 @@ async def add_repo(
     # Same check as creation. Adding a member one at a time is the other way
     # into the same silently-bogus project.
     await _require_registered([payload.repo_slug], ws_id, user)
+    include, exclude = _clean_scope(payload.include_globs, payload.exclude_globs)
     link = await repo.add_repo_to_project(
         session,
         project_id,
         repo_slug=payload.repo_slug,
         role=payload.role,
+        include_globs=include,
+        exclude_globs=exclude,
     )
     if link is None:
         raise HTTPException(status_code=404, detail="project not found")
@@ -249,7 +255,57 @@ async def add_repo(
         logger.warning("project_materialize_enqueue_failed project=%s err=%s",
                        project_id, exc)
     return ProjectRepoOut(
-        repo_slug=link.repo_slug, role=link.role, added_at=link.added_at
+        repo_slug=link.repo_slug, role=link.role, added_at=link.added_at,
+        include_globs=list(link.include_globs or []),
+        exclude_globs=list(link.exclude_globs or []),
+    )
+
+
+def _clean_scope(
+    include: list[str] | None, exclude: list[str] | None,
+) -> tuple[list[str] | None, list[str] | None]:
+    """Validated pattern lists (``None`` stays "not sent"); 422 past the caps."""
+    from src.access.file_scope import normalize_globs
+
+    try:
+        return (
+            normalize_globs(include) if include is not None else None,
+            normalize_globs(exclude) if exclude is not None else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+@router.patch("/{project_id}/repos/{repo_slug}", response_model=ProjectRepoOut)
+async def update_repo_scope(
+    project_id: str,
+    repo_slug: str,
+    payload: ProjectRepoPatch,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(get_current_user),
+    ws_id: str = Depends(current_workspace_id),
+) -> ProjectRepoOut:
+    """Set which files of a repo this project looks at (Q&A and project MCP
+    search). Empty ``include_globs`` = every file; ``exclude_globs`` wins."""
+    project = await _owned_project(session, project_id, ws_id)
+    if repo_slug not in await readable_repo_slugs(user, ws_id, [repo_slug]):
+        raise HTTPException(status_code=404, detail=f"repo {repo_slug} not linked to project")
+    link = next((r for r in (project.repos or []) if r.repo_slug == repo_slug), None)
+    if link is None:
+        raise HTTPException(status_code=404, detail=f"repo {repo_slug} not linked to project")
+    include, exclude = _clean_scope(payload.include_globs, payload.exclude_globs)
+    if include is not None:
+        link.include_globs = include
+    if exclude is not None:
+        link.exclude_globs = exclude
+    await session.commit()
+    logger.info("project_repo_scope id=%s repo=%s include=%d exclude=%d by=%s",
+                project_id, repo_slug, len(link.include_globs or []),
+                len(link.exclude_globs or []), user.id)
+    return ProjectRepoOut(
+        repo_slug=link.repo_slug, role=link.role, added_at=link.added_at,
+        include_globs=list(link.include_globs or []),
+        exclude_globs=list(link.exclude_globs or []),
     )
 
 

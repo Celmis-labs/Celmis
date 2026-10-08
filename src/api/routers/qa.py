@@ -14,13 +14,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
+from src.access.file_scope import FileScope, scopes_for_links
 from src.api import repositories as repo
 from src.api.deps import current_workspace_id, get_current_user
 from src.api.schemas import AskRequest, AvailableRepo, MessageOut
@@ -176,11 +177,13 @@ async def ask(
     # carrying a project_id that does not, and an unscoped dereference here
     # would hand back the other tenant's repo list.
     target_repos: list[str] = []
+    file_scopes: dict[str, FileScope] = {}
     if chat.project_id:
         project = await repo.get_project(session, chat.project_id,
                                          workspace_id=workspace_id)
         if project:
             target_repos = [r.repo_slug for r in project.repos]
+            file_scopes = scopes_for_links(project.repos)
     if not target_repos and chat.repo_slug:
         target_repos = [chat.repo_slug]
     if not target_repos:
@@ -212,6 +215,7 @@ async def ask(
                 is_admin=user.is_admin,
                 workspace_id=workspace_id,
                 include_code=payload.include_code,
+                file_scopes=file_scopes,
             )
         except Exception as exc:  # noqa: BLE001
             # Same rule as the streaming twin: the body goes to the log, the
@@ -247,6 +251,7 @@ async def ask(
             is_admin=user.is_admin,
             workspace_id=workspace_id,
             include_code=payload.include_code,
+            file_scopes=file_scopes,
         ),
         media_type="text/event-stream",
         # Ping every 15s so that proxies do not drop the idle connection
@@ -269,6 +274,7 @@ async def _ask_stream(
     is_admin: bool,
     workspace_id: str,
     include_code: bool = True,
+    file_scopes: Mapping[str, FileScope] | None = None,
 ) -> AsyncIterator[dict]:
     """Async generator that yields SSE events."""
     t0 = time.perf_counter()
@@ -318,6 +324,7 @@ async def _ask_stream(
             is_admin=is_admin,
             workspace_id=workspace_id,
             include_code=include_code,
+            file_scopes=file_scopes,
         )
         vault_hits_summary = [
             {"note_path": h.note_path, "score": h.score, "repo": h.repo}
@@ -465,6 +472,7 @@ async def _generate_full(
     include_code: bool = True,
     token_filter: tuple[str, ...] | None = None,
     name_free_notice: bool = False,
+    file_scopes: Mapping[str, FileScope] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Non-streaming alternate — the full text + meta in one block.
 
@@ -479,7 +487,7 @@ async def _generate_full(
         question=question, repos=target_repos, history=history,
         user_id=user_id, is_admin=is_admin, workspace_id=workspace_id,
         include_code=include_code, token_filter=token_filter,
-        name_free_notice=name_free_notice,
+        name_free_notice=name_free_notice, file_scopes=file_scopes,
     )
     from src.llm.completion import stream_chat
     full = []

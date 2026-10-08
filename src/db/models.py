@@ -121,6 +121,10 @@ class ProjectRepo(Base, TimestampMixin):
         primary_key=True,
     )
     role: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: File scope of this repo inside the project (see
+    #: :mod:`src.access.file_scope`): empty include = every file, exclude wins.
+    include_globs: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    exclude_globs: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -2414,4 +2418,35 @@ class McpCallLog(Base):
         Index("ix_mcp_call_log_ts", "ts"),
         Index("ix_mcp_call_log_ws_ts", "workspace_id", "ts"),
         Index("ix_mcp_call_log_token", "token_id", "ts"),
+    )
+
+
+class McpProjectToken(Base):
+    """A bearer token that can search ONE project, nothing else.
+
+    Opaque (``cmcp_`` + random), shown once at creation; only its SHA-256 is
+    stored. The verifier looks the hash up on every call, so revoking or
+    expiring the row ends the token at once. ``project_id`` comes from this
+    row — never from a tool argument.
+    """
+
+    __tablename__ = "mcp_project_tokens"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    project_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    scopes: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    created_by: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_mcp_project_tokens_project", "project_id"),
     )

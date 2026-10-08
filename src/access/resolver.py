@@ -167,6 +167,19 @@ class RepoAccessDecision:
     allow_globs: tuple[str, ...] = ()  # merged, indicative (for /my + UI)
     deny_globs: tuple[str, ...] = ()   # merged, indicative
     sensitivity_tags: tuple[str, ...] = field(default=())
+    #: A project's include/exclude patterns laid over the rules (None = no
+    #: project narrowing). Only ever hides more; see :mod:`src.access.file_scope`.
+    scope: object | None = None
+
+    def with_scope(self, scope: object | None) -> RepoAccessDecision:
+        """This decision, narrowed to a project's file scope."""
+        from dataclasses import replace
+
+        return replace(self, scope=scope)
+
+    def _outside_scope(self, rel_path: str) -> bool:
+        scope = self.scope
+        return scope is not None and not scope.allows(_norm_path(rel_path))  # type: ignore[attr-defined]
 
     # ── coarse gates ────────────────────────────────────────────────
     @property
@@ -182,6 +195,8 @@ class RepoAccessDecision:
     def path_visible(self, rel_path: str) -> bool:
         """True if the source file at ``rel_path`` (repo-relative) is
         code-visible to the caller."""
+        if self._outside_scope(rel_path):
+            return False
         if self.open_default:
             return True
         if not self.rules:
@@ -195,6 +210,8 @@ class RepoAccessDecision:
         that path is hidden even at ``metadata`` level. Unlike
         ``path_visible`` this does not require ``code`` visibility, so
         ``metadata`` repos still surface their non-sensitive notes."""
+        if self._outside_scope(rel_path):
+            return True
         if self.open_default or not self.rules:
             return False
         rel = _norm_path(rel_path)

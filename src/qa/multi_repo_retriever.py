@@ -31,11 +31,12 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.access import RepoAccessDecision, resolve_access
+from src.access.file_scope import FileScope, apply_scopes
 from src.config import Settings, get_settings
 from src.llm.prompts.technical_answer import TECHNICAL_ANSWER_PROMPT, TECHNICAL_ANSWER_SYSTEM
 from src.retrieval.tier1_vault import VaultRetriever
@@ -179,8 +180,13 @@ class MultiRepoRetriever:
         include_code: bool = True,
         token_filter: tuple[str, ...] | None = None,
         name_free_notice: bool = False,
+        file_scopes: Mapping[str, FileScope] | None = None,
     ) -> RetrievalContext:
         """Returns a ready prompt + meta for streaming.
+
+        ``file_scopes`` is a project's per-repository include/exclude
+        patterns (:mod:`src.access.file_scope`): files outside them are
+        treated as not there, in every tier — notes, grep, graph and reads.
 
         ``token_filter`` is the repo list of the MCP token the question comes
         in on: access is then the token's (see :mod:`src.access.effective`).
@@ -215,6 +221,7 @@ class MultiRepoRetriever:
                 workspace_id=workspace_id,
                 repos=repos,
             )
+        access = apply_scopes(access, file_scopes)
         accessible = [r for r in repos if access[r].researchable]
         denied_targets = [r for r in repos if not access[r].researchable]
 
@@ -288,6 +295,10 @@ class MultiRepoRetriever:
         code_fallback_used = False
         if include_code:
             symbol_files = self._grep_symbol_files(question, hits, accessible)
+            symbol_files = self._text_search_files(
+                question, accessible, access, workspace_id) + symbol_files
+            symbol_files = [f for f in dict.fromkeys(symbol_files)
+                            if self._in_scope(access, f)]
             # Both of the usual ways into Tier 3 can be empty at once: without a
             # vault there are no `hits` whose modules we could walk, and a
             # question phrased in prose ("що це за сервіси" — "what are these
@@ -467,6 +478,48 @@ class MultiRepoRetriever:
         return out
 
     # ─── Tier 3 fallback: selection without a vault ──────────────────
+
+    @staticmethod
+    def _in_scope(access: Mapping[str, RepoAccessDecision], prefixed: str) -> bool:
+        """False for a repo-prefixed path a project's file scope excludes."""
+        repo, _, rel = prefixed.partition("/")
+        dec = access.get(repo)
+        return dec is None or not dec._outside_scope(rel)
+
+    def _text_search_files(
+        self,
+        question: str,
+        repos: list[str],
+        access: Mapping[str, RepoAccessDecision],
+        workspace_id: str,
+    ) -> list[str]:
+        """Files of ``upload`` repositories that mention the question's words.
+
+        Such a repository is often in a language the graph has no extractor
+        for, so the graph and the identifier grep find nothing in it; this is
+        the plain-text floor (:mod:`src.qa.text_search`). Repo-prefixed paths,
+        already filtered by the access decision and the project scope.
+        """
+        from src.api.auto_review import get_auto_review_store
+        from src.qa import text_search
+        from src.repos.upload import is_upload_provider
+
+        store = get_auto_review_store()
+        out: list[str] = []
+        for repo in repos:
+            dec = access.get(repo)
+            if dec is not None and not dec.code_visible:
+                continue
+            cfg = store.get_in_workspace(workspace_id, repo)
+            if cfg is None or not is_upload_provider(cfg.provider):
+                continue
+            root = self.settings.repo_path(repo)
+            if not root.exists():
+                continue
+            visible = dec.path_visible if dec is not None else None
+            for rel in text_search.rank_files(root, question, limit=6, visible=visible):
+                out.append(f"{repo}/{rel}")
+        return out
 
     def _fallback_files(
         self,
@@ -1101,6 +1154,8 @@ class MultiRepoRetriever:
             if access is None:
                 return True
             dec = access.get(repo_slug)
+            if dec is not None and dec._outside_scope(rel):
+                return False  # outside the project's file scope: absent, not "hidden"
             if dec is None or not dec.code_visible or not dec.path_visible(rel):
                 prefixed = f"{repo_slug}/{rel}"
                 if prefixed not in hidden_files:
@@ -1140,7 +1195,9 @@ class MultiRepoRetriever:
             if not p.exists() or not p.is_file():
                 return False
             try:
-                text = p.read_text(encoding="utf-8", errors="replace")
+                from src.qa.text_search import decode
+
+                text = decode(p.read_bytes())
             except OSError:
                 return False
             if len(text) > limit:

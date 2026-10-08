@@ -139,17 +139,27 @@ async def add_repo_to_project(
     project_id: str,
     repo_slug: str,
     role: str | None = None,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
 ) -> ProjectRepo | None:
     project = await get_project(session, project_id)
     if project is None:
         return None
-    # Idempotent — if it is already there, we update the role
+    # Idempotent — if it is already there, we update the role (and the file
+    # scope when one is sent)
     for r in project.repos:
         if r.repo_slug == repo_slug:
             r.role = role
+            if include_globs is not None:
+                r.include_globs = include_globs
+            if exclude_globs is not None:
+                r.exclude_globs = exclude_globs
             await session.flush()
             return r
-    link = ProjectRepo(project_id=project_id, repo_slug=repo_slug, role=role)
+    link = ProjectRepo(
+        project_id=project_id, repo_slug=repo_slug, role=role,
+        include_globs=include_globs or [], exclude_globs=exclude_globs or [],
+    )
     session.add(link)
     await session.flush()
     return link

@@ -652,12 +652,27 @@ class ProjectRepoIn(BaseModel):
 
     repo_slug: str = Field(min_length=1, max_length=200)
     role: str | None = Field(default=None, max_length=64)
+    include_globs: list[str] | None = Field(default=None, max_length=50)
+    exclude_globs: list[str] | None = Field(default=None, max_length=50)
+
+
+class ProjectRepoPatch(BaseModel):
+    """Narrow what a project looks at in one of its repos — PATCH body.
+
+    Only the lists that are sent change. Empty ``include_globs`` = every file;
+    ``exclude_globs`` always wins.
+    """
+
+    include_globs: list[str] | None = Field(default=None, max_length=50)
+    exclude_globs: list[str] | None = Field(default=None, max_length=50)
 
 
 class ProjectRepoOut(BaseModel):
     repo_slug: str
     role: str | None
     added_at: datetime
+    include_globs: list[str] = Field(default_factory=list)
+    exclude_globs: list[str] = Field(default_factory=list)
     model_config = ConfigDict(from_attributes=True)
 
 
