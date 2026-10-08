@@ -57,6 +57,9 @@ ARGS: dict[str, dict] = {
     "grep": {"pattern": "x"},
     "map": {"repo": "r"},
     "ask": {"question": "q"},
+    # the project-token tools (only a project token reaches them)
+    "search_project": {"query": "qq"},
+    "ask_project": {"question": "q"},
 }
 # Tools whose parameters are all optional.
 NO_REQUIRED = {

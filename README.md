@@ -48,7 +48,7 @@ That loop is the product. It closes because everything sits on one index: a symb
 graph Celmis builds from your repositories once. The same index answers questions
 that cross repository boundaries, reviews pull requests, audits dependencies into a
 CycloneDX SBOM and a verifiable evidence pack, generates documentation, and serves
-forty-nine tools over MCP — surfaces worth having, and none of them the point on
+fifty-one tools over MCP — surfaces worth having, and none of them the point on
 their own.
 
 It runs on one machine under `docker compose`, with the model provider of your
@@ -87,7 +87,7 @@ the other repository open.
 | **A pull request needs reviewing** | Agents read the diff — and, where the graph is built, who else calls what is being changed, including from another repository → [Pull-request review](#pull-request-review) |
 | **Forty services need the same thing done to them** | Write the sentence. Celmis shows which repositories it resolves to and waits for a second press, rather than finding them among forty and pressing a button forty times → [Ask for work across repositories](#ask-for-work-across-repositories) |
 | **An alert fires at 02:00 and you are not at a desk** | It lands in Celmis and goes out to the workspace's chat channel, and *Fix from here* opens a session already holding the alert. The runner opens the pull request → [Alerts, and fixing from a phone](#alerts-and-fixing-from-a-phone) |
-| **Your own agent or editor needs to understand the codebase** | Point it at `/mcp/`. Forty-nine tools over the same index, thirty-three of them read-only, under the same access rules — no second copy of your code anywhere → [Connect Claude Code and other MCP clients](#connect-claude-code-and-other-mcp-clients) |
+| **Your own agent or editor needs to understand the codebase** | Point it at `/mcp/`. Fifty-one tools over the same index, thirty-five of them read-only, under the same access rules — no second copy of your code anywhere → [Connect Claude Code and other MCP clients](#connect-claude-code-and-other-mcp-clients) |
 
 The first three are the ones a code-review tool does not do at all, and they are
 the reason this is a platform rather than a reviewer: index once, then read that
@@ -767,8 +767,8 @@ scope, through two tools, `search_project` and `ask_project`. Details and the
 
 ### What an agent can ask
 
-The HTTP mount serves **49 tools**, and a client does not necessarily see all of
-them. Thirty-three are read-only; the sixteen that write — `add_repo`,
+The HTTP mount serves **51 tools**, and a client does not necessarily see all of
+them. Thirty-five are read-only; the sixteen that write — `add_repo`,
 `start_dep_audit`, `cancel_dep_audit`, `generate_docs`, `set_auto_review`,
 `migrate_consumers`, `ack_alert`, `retry_job`, `cancel_job`, `set_budget`,
 `update_review_setting`, `propose_review_rules`, `generate_review_rules`,
@@ -803,7 +803,7 @@ The HTTP mount also writes with `review_pr` (queue a review of one PR or every o
 
 **The two transports are not the same set.** `analyzer mcp serve` over stdio
 serves 13 older, graph-shaped tools (`find_symbol`, `find_callers`,
-`query_graph`); the HTTP mount serves the 33 read-only ones above. Neither is a subset of the
+`query_graph`); the HTTP mount serves the 35 read-only ones (the two project-token tools, `search_project` and `ask_project`, among them). Neither is a subset of the
 other — pick the transport for the tools you want.
 
 A step-by-step guide, with the scopes each tool needs and the failure modes,
@@ -822,7 +822,7 @@ boundary a diff never crosses is the one this makes ordinary.
 
 
 The table below is the stdio server's graph-shaped set (`analyzer mcp serve`, 13 tools).
-The HTTP mount at `/mcp/` serves 49 tools in all (33 read, 16 write) over Streamable HTTP,
+The HTTP mount at `/mcp/` serves 51 tools in all (35 read, 16 write) over Streamable HTTP,
 authenticated like `/api/`, and a token sees only the ones its scopes allow. The graph
 lookups:
 

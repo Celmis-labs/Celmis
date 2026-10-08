@@ -3894,5 +3894,6 @@
   "projects.mcp.status.revoked": "revoked",
   "projects.mcp.status.expired": "expired",
   "projects.mcp.status.active": "active",
-  "projects.mcp.none": "No tokens yet."
+  "projects.mcp.none": "No tokens yet.",
+  "projects.mcp.copyFailed": "Copy failed."
 }

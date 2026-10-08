@@ -130,7 +130,7 @@ answer that.
 One symbol graph across repositories, built deterministically with tree-sitter.
 No model participates in constructing it. Questions are answered across
 repository boundaries with file:line citations. 23 languages plus infrastructure
-formats. An MCP server exposes 49 tools over the same index under the same
+formats. An MCP server exposes 51 tools over the same index under the same
 access rules. A sentence box acts on a *set* of repositories at once, with a
 second press required and the scope re-checked at confirmation.
 

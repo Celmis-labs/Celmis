@@ -32,12 +32,12 @@ function mcpUrl(): string {
   return `${base.replace(/\/$/, "")}/mcp/`;
 }
 
-async function copy(text: string, done: string) {
+async function copy(text: string, done: string, failed: string) {
   try {
     await navigator.clipboard.writeText(text);
     toast.success(done);
   } catch {
-    toast.error("Copy failed");
+    toast.error(failed);
   }
 }
 
@@ -107,13 +107,13 @@ export function ProjectMcpTokens({ projectId }: { projectId: string }) {
             <p className="text-xs font-medium">{t("projects.mcp.created")}</p>
             <code className="block break-all text-xs">{issued.token}</code>
             <Button size="sm" variant="outline"
-              onClick={() => copy(issued.token, t("projects.mcp.copied"))}>
+              onClick={() => copy(issued.token, t("projects.mcp.copied"), t("projects.mcp.copyFailed"))}>
               {t("projects.mcp.copy")}
             </Button>
             <p className="text-xs font-medium">{t("projects.mcp.command")}</p>
             <code className="block break-all text-xs">{command}</code>
             <Button size="sm" variant="outline"
-              onClick={() => copy(command, t("projects.mcp.copied"))}>
+              onClick={() => copy(command, t("projects.mcp.copied"), t("projects.mcp.copyFailed"))}>
               {t("projects.mcp.copy")}
             </Button>
           </div>

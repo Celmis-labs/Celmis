@@ -53,8 +53,9 @@ def _registered_tools() -> set[str]:
                     names.add(kw.value.value)
     # Tools another module registers on the mount (``register_howto(mcp, ...)``).
     from src.mcp_server.howto import TOOL_NAME as HOWTO
+    from src.mcp_server.project_tokens import TOOLS as PROJECT_TOOLS
 
-    return names | {HOWTO}
+    return names | {HOWTO} | set(PROJECT_TOOLS)
 
 
 def _scope_map() -> dict[str, str]:
@@ -152,7 +153,7 @@ def test_every_page_states_the_count_the_running_mount_serves():
             token = m.group(1)
             n = int(token) if token.isdigit() else {
                 "eighteen": 18, "nineteen": 19, "twenty-three": 23,
-                "forty-nine": 49, "thirty-three": 33}.get(token)
+                "forty-nine": 49, "thirty-three": 33, "fifty-one": 51}.get(token)
             if n in (18, 23):
                 raise AssertionError(
                     f"{page.name} still says {m.group(0)!r}; the mount serves {total}")
