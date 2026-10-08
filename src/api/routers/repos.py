@@ -376,34 +376,16 @@ def add_repo(
     )
 
 
-@router.post("/upload", response_model=RepoOut, status_code=status.HTTP_201_CREATED)
-def upload_repo(
-    request: Request,
-    slug: str = Form(..., max_length=200),
-    name: str = Form("", max_length=200),
-    file: UploadFile = File(...),
-    user: User = Depends(require_superadmin),
-    workspace_id: str = Depends(current_workspace_id),
-) -> RepoOut:
-    """Add code from an archive (.zip, .tar.gz, .tgz) instead of a git host.
-
-    Superadmin only. The archive is streamed to disk, unpacked safely (no
-    links, no escaping paths, size/count caps) and swapped in as the repo's
-    working copy; the graph index is queued. Uploading again under the same
-    slug is a new version: the files are replaced and the repo is re-indexed.
-    """
-    from src.repos.indexing import INDEX_QUEUED, queue_index_if_needed
+def _check_upload_target(slug: str, filename: str, workspace_id: str):
+    """Refuse an archive upload before any bytes are accepted. Returns the
+    store and the existing config of this slug (a re-upload) or None."""
     from src.repos.upload import (
         UPLOAD_PROVIDER,
         ArchiveError,
         archive_kind,
-        install_archive,
         is_upload_provider,
-        stream_to_temp,
     )
 
-    slug = slug.strip()
-    filename = (file.filename or "").strip()
     try:
         archive_kind(filename)
     except ArchiveError as exc:
@@ -429,22 +411,26 @@ def upload_repo(
             detail=(f"{slug!r} is already a repository connected from a git "
                     "provider. Choose another name."),
         )
-    full_name = f"{UPLOAD_PROVIDER}/{slug}"
-    bound = store.existing_workspace_binding(UPLOAD_PROVIDER, full_name)
+    bound = store.existing_workspace_binding(UPLOAD_PROVIDER, f"{UPLOAD_PROVIDER}/{slug}")
     if bound is not None and bound != workspace_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="This repository is already registered in another workspace.",
         )
+    return store, existing
 
-    from src.config import get_settings
 
-    tmp_dir = get_settings().workspace_dir / "tmp"
-    try:
-        stored = stream_to_temp(lambda: file.file.read(1024 * 1024), tmp_dir)
-    except ArchiveError as exc:
-        code = 413 if "larger than" in str(exc) else 422
-        raise HTTPException(status_code=code, detail=str(exc)) from None
+def _finish_upload(*, stored, filename: str, slug: str, name: str, existing, store,
+                   user: User, workspace_id: str, request: Request) -> RepoOut:
+    """Unpack a stored archive, register the repo and queue indexing."""
+    from src.repos.indexing import INDEX_QUEUED, queue_index_if_needed
+    from src.repos.upload import (
+        UPLOAD_PROVIDER,
+        ArchiveError,
+        install_archive,
+        write_display_name,
+    )
+
     try:
         install_archive(stored, filename, slug, uploaded_by=user.email)
     except ArchiveError as exc:
@@ -452,12 +438,10 @@ def upload_repo(
     finally:
         stored.path.unlink(missing_ok=True)
 
-    from src.repos.upload import write_display_name
-
     write_display_name(slug, (name or "").strip() or slug)
     cfg = existing or RepoConfig(
         user_id=user.id, repo_slug=slug, provider=UPLOAD_PROVIDER,
-        full_name=full_name, url=f"{UPLOAD_PROVIDER}:{slug}",
+        full_name=f"{UPLOAD_PROVIDER}/{slug}", url=f"{UPLOAD_PROVIDER}:{slug}",
         workspace_id=workspace_id, enabled=False, mode="manual",
     )
     store.upsert(cfg)
@@ -482,6 +466,189 @@ def upload_repo(
         index_queued=index_status == INDEX_QUEUED, index_status=index_status,
         display_name=(name or "").strip() or slug,
     )
+
+
+@router.post("/upload", response_model=RepoOut, status_code=status.HTTP_201_CREATED)
+def upload_repo(
+    request: Request,
+    slug: str = Form(..., max_length=200),
+    name: str = Form("", max_length=200),
+    file: UploadFile = File(...),
+    user: User = Depends(require_superadmin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> RepoOut:
+    """Add code from a (small) archive in ONE request.
+
+    Superadmin only. Large archives should use the chunked session routes
+    below, which work behind proxies that cap request bodies. The archive is
+    streamed to disk, unpacked safely (no links, no escaping paths, size/count
+    caps) and swapped in as the repo's working copy; the graph index is
+    queued. Uploading again under the same slug replaces the files.
+    """
+    from src.config import get_settings
+    from src.repos.upload import ArchiveError, stream_to_temp
+
+    slug = slug.strip()
+    filename = (file.filename or "").strip()
+    store, existing = _check_upload_target(slug, filename, workspace_id)
+    tmp_dir = get_settings().workspace_dir / "tmp"
+    try:
+        stored = stream_to_temp(lambda: file.file.read(1024 * 1024), tmp_dir)
+    except ArchiveError as exc:
+        code = 413 if "larger than" in str(exc) else 422
+        raise HTTPException(status_code=code, detail=str(exc)) from None
+    return _finish_upload(stored=stored, filename=filename, slug=slug, name=name,
+                          existing=existing, store=store, user=user,
+                          workspace_id=workspace_id, request=request)
+
+
+# Chunked, resumable upload (superadmin).
+
+
+class UploadSessionIn(BaseModel):
+    slug: str = Field(..., max_length=200)
+    name: str = Field("", max_length=200)
+    filename: str = Field(..., max_length=300)
+    size: int = Field(..., ge=1)
+    sha256: str = Field("", max_length=64)
+
+
+class UploadSessionOut(BaseModel):
+    session_id: str
+    chunk_size: int
+    parts: int
+    expires_at: float
+    received: list[int] = []
+
+
+def _session_http(exc) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=str(exc))
+
+
+def _load_session(session_id: str, user: User, workspace_id: str):
+    from src.repos import upload_sessions as us
+
+    try:
+        return us.load(session_id, workspace_id=workspace_id, user_id=user.id)
+    except us.SessionError as exc:
+        raise _session_http(exc) from None
+
+
+@router.post("/upload/sessions", response_model=UploadSessionOut,
+             status_code=status.HTTP_201_CREATED)
+def open_upload_session(
+    payload: UploadSessionIn,
+    user: User = Depends(require_superadmin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> UploadSessionOut:
+    """Start a chunked upload. Everything that can be refused (extension, size,
+    slug, free disk) is refused here, before a single byte is sent."""
+    from src.repos import upload_sessions as us
+
+    slug = payload.slug.strip()
+    _check_upload_target(slug, payload.filename.strip(), workspace_id)
+    try:
+        s = us.create(user_id=user.id, workspace_id=workspace_id, slug=slug,
+                      name=payload.name, filename=payload.filename.strip(),
+                      size=payload.size, sha256=payload.sha256)
+    except us.SessionError as exc:
+        raise _session_http(exc) from None
+    return UploadSessionOut(session_id=s.id, chunk_size=s.chunk_size, parts=s.parts,
+                            expires_at=s.expires_at)
+
+
+@router.get("/upload/sessions/{session_id}", response_model=UploadSessionOut)
+def get_upload_session(
+    session_id: str,
+    user: User = Depends(require_superadmin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> UploadSessionOut:
+    """Which parts the server already has (for resuming)."""
+    s = _load_session(session_id, user, workspace_id)
+    return UploadSessionOut(session_id=s.id, chunk_size=s.chunk_size, parts=s.parts,
+                            expires_at=s.expires_at, received=s.received())
+
+
+@router.put("/upload/sessions/{session_id}/parts/{n}", status_code=status.HTTP_204_NO_CONTENT)
+async def put_upload_part(
+    session_id: str,
+    n: int,
+    request: Request,
+    user: User = Depends(require_superadmin),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Store part ``n`` (0-based, raw body). Parts may arrive in any order and
+    be re-sent; the last copy wins. The length must be exactly the part's size."""
+    import asyncio
+
+    from fastapi import Response
+
+    from src.repos import upload_sessions as us
+
+    s = _load_session(session_id, user, workspace_id)
+    try:
+        tmp = us.part_path_for_write(s, n)
+    except us.SessionError as exc:
+        raise _session_http(exc) from None
+    want = s.expected(n)
+    got = 0
+    try:
+        with open(tmp, "wb") as out:
+            async for chunk in request.stream():
+                got += len(chunk)
+                if got > want:
+                    raise us.SessionError(f"Part {n} is larger than {want} bytes.", 413)
+                await asyncio.to_thread(out.write, chunk)
+        await asyncio.to_thread(us.commit_part, s, n, tmp)
+    except us.SessionError as exc:
+        tmp.unlink(missing_ok=True)
+        raise _session_http(exc) from None
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return Response(status_code=204)
+
+
+@router.post("/upload/sessions/{session_id}/complete", response_model=RepoOut,
+             status_code=status.HTTP_201_CREATED)
+def complete_upload_session(
+    session_id: str,
+    request: Request,
+    user: User = Depends(require_superadmin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> RepoOut:
+    """Join the parts, verify size (and sha256 when declared), then unpack and
+    index exactly like a one-request upload."""
+    from src.repos import upload_sessions as us
+
+    s = _load_session(session_id, user, workspace_id)
+    store, existing = _check_upload_target(s.slug, s.filename, workspace_id)
+    try:
+        stored = us.assemble(s)
+    except us.SessionError as exc:
+        raise _session_http(exc) from None
+    try:
+        return _finish_upload(stored=stored, filename=s.filename, slug=s.slug, name=s.name,
+                              existing=existing, store=store, user=user,
+                              workspace_id=workspace_id, request=request)
+    finally:
+        us.discard(s.id)
+
+
+@router.delete("/upload/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def abort_upload_session(
+    session_id: str,
+    user: User = Depends(require_superadmin),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Abort: forget the session and delete every received part."""
+    from fastapi import Response
+
+    from src.repos import upload_sessions as us
+
+    s = _load_session(session_id, user, workspace_id)
+    us.discard(s.id)
+    return Response(status_code=204)
 
 
 @router.delete("/{slug}")

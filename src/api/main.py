@@ -684,6 +684,14 @@ def build_app() -> FastAPI:
         get_user_store()
         logger.info("celmis_api_started cors=%s", cors_origins)
 
+        # Chunked uploads that were never completed: free their parts.
+        try:
+            from src.repos.upload_sessions import cleanup_expired
+
+            cleanup_expired()
+        except Exception:  # noqa: BLE001 - housekeeping must not block startup
+            logger.warning("upload_sessions_cleanup_failed", exc_info=True)
+
         # 2.3.2: the workspace agent prompts written before guidelines
         # existed are sorted once — a short list becomes guidelines ADDED to
         # the built-in prompt, a real prompt stays a replacement. The
