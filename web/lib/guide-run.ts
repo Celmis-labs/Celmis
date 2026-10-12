@@ -53,7 +53,9 @@ function driveGroup(
       element: el ?? undefined,
       popover: {
         description: el ? step.text : `${step.text}\n\n${t("guide.missing")}`,
-        side: "bottom",
+        // Inside an unfolded card the fields continue below the target, so
+        // the sentence goes above it; driver.js flips it if there is no room.
+        side: step.opener ? "top" : "bottom",
         align: "start",
       },
     }));

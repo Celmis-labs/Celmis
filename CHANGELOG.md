@@ -20,6 +20,18 @@ derives it from there.
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Show me" no longer says "click to open" over an already open card.** When
+  the tour targets a field inside a review agent's "Model & limits" card and the
+  card is already expanded, the client drops the opener step (the sentence comes
+  from the model, so state is read from `aria-expanded`, not trusted) and goes to
+  the field; steps inside a card put their popover above the target so it does
+  not cover the fields below.
+- **API no longer hangs on the first LLM page with litellm 1.105.** The first
+  touch of litellm from a request thread could hit `KeyError: 'litellm'` in its
+  own log filter mid-import. It is now imported once at API start.
+
 ### LLM
 
 - **Test no longer calls a level that produced no thinking a pass.** An

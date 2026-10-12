@@ -128,6 +128,27 @@ describe("resolveGroup", () => {
     expect(r[0].el).toBeNull();
   });
 
+  it("skips the opener step when its container is already open", async () => {
+    const { env, clicked } = fakeEnv({
+      here: "/p", appearAt: { toggle: 0, field: 0 }, expanded: ["toggle"],
+    });
+    const r = await resolveGroup([
+      step("toggle", "/p"),
+      step("field", "/p", { opener: "toggle" }),
+    ], env);
+    expect(clicked).toEqual([]);
+    expect(r.map((x) => x.step.target)).toEqual(["field"]);
+  });
+
+  it("keeps the opener step when its container is closed", async () => {
+    const { env } = fakeEnv({ here: "/p", appearAt: { toggle: 0, field: 0 } });
+    const r = await resolveGroup([
+      step("toggle", "/p"),
+      step("field", "/p", { opener: "toggle" }),
+    ], env);
+    expect(r.map((x) => x.step.target)).toEqual(["toggle", "field"]);
+  });
+
   it("returns el: null for a control that never appears, after a bounded wait", async () => {
     const { env } = fakeEnv({ here: "/p", appearAt: {} });
     const r = await resolveGroup([step("ghost", "/p")], env);

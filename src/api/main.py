@@ -80,6 +80,15 @@ from src.api.routers import workspaces as workspaces_router
 
 logger = logging.getLogger(__name__)
 
+# litellm 1.105 builds its logging filters and lazy attribute loader on first
+# touch and looks itself up as `sys.modules["litellm"]` while doing so. When
+# that first touch is a request thread (the first LLM page), the lookup can
+# land mid-import: `KeyError: 'litellm'` inside a log filter, and uvicorn hangs
+# on the import lock. Import it once, here, on the main thread, before any
+# request exists (and before redaction is installed, so litellm's own
+# handlers are covered by it). `src/__init__` has already set LITELLM_MODE.
+import litellm  # noqa: E402,F401
+
 # Before anything in this process logs. Under uvicorn the handlers are already
 # configured by the time this module is imported, so this catches them; the
 # startup hook runs it again for anything added since. See

@@ -101,7 +101,8 @@ async function waitFor(
 /** Open the group's page and find every control on it. A control hidden in a
  *  folded container is revealed by pressing its opener once; one that still is
  *  not there (a role that cannot see it, a setting that hides it) comes back
- *  as `el: null`, and the caller shows its sentence without a spotlight. */
+ *  as `el: null`, and the caller shows its sentence without a spotlight. An
+ *  opener that is already open (and only serves later steps) is dropped. */
 export async function resolveGroup(
   group: GuideStep[], env: GuideEnv,
 ): Promise<Resolved[]> {
@@ -116,6 +117,14 @@ export async function resolveGroup(
         el = await waitFor(env, step.target, OPEN_WAIT_MS);
       }
     }
+    // A toggle whose container is already open, and which a later step of this
+    // group only uses as an opener: its "click to open" sentence (written by the
+    // model, so not trusted to know the state) would be stale and its popover
+    // would sit on the opened fields. Go straight to the inner control.
+    if (
+      el && el.getAttribute("aria-expanded") === "true"
+      && group.some((s, j) => j > i && s.opener === step.target)
+    ) continue;
     if (el) await env.sleep(SETTLE_MS);
     out.push({ step, el });
     if (env.cancelled()) break;
