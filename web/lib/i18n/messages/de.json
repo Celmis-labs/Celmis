@@ -769,6 +769,8 @@
   "branchPicker.searchPlaceholder": "Search branches…",
   "branchPicker.truncated": "The repository has more branches than were read. Search by name to find the rest.",
   "branchPicker.useCustom": "Use “{name}”",
+  "guide.missing": "Dieses Bedienelement ist gerade nicht sichtbar. Es kann von Ihrer Rolle oder Ihren Einstellungen abhängen.",
+  "guide.showMe": "Zeig es mir",
   "prPicker.count": "{count} Treffer",
   "prPicker.label": "Offener Pull Request",
   "prPicker.more": "{count} weitere — Suche eingrenzen",

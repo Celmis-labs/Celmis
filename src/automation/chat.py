@@ -843,6 +843,7 @@ def interpret(
     from src.automation.guide import GUIDE
     from src.automation.knowledge import knowledge_for
     from src.automation.memory import last_user_text, render
+    from src.automation.tour import tour_prompt
     from src.llm.client import build_llm_client
 
     remembered = render(history or [])
@@ -930,7 +931,7 @@ def interpret(
         # The guide is the stable part, the knowledge the per-question part:
         # in that order, everything up to the knowledge is the same prefix on
         # every call.
-        system_instruction=(_SYSTEM + _HELP + GUIDE + _KNOWLEDGE_HEADER
+        system_instruction=(_SYSTEM + _HELP + GUIDE + tour_prompt() + _KNOWLEDGE_HEADER
                             + knowledge_for(topic)),
         mode="qa", operation="automation_interpret", temperature=0.0,
         # A help answer is numbered steps with links, not a sentence, and in
@@ -1111,6 +1112,7 @@ def explain_read(
     from src.automation.guide import GUIDE, keep_known_links
     from src.automation.knowledge import knowledge_for
     from src.automation.memory import last_user_text, render
+    from src.automation.tour import tour_prompt
     from src.llm.client import build_llm_client
 
     remembered = render(history or [])
@@ -1161,7 +1163,7 @@ def explain_read(
 
     response = client.generate(
         prompt=prompt, agent="automation",
-        system_instruction=(_EXPLAIN_READ + hints + GUIDE + _KNOWLEDGE_HEADER
+        system_instruction=(_EXPLAIN_READ + hints + GUIDE + tour_prompt() + _KNOWLEDGE_HEADER
                             + knowledge_for(topic)),
         mode="qa", temperature=0.0,
         operation=_EXPLAIN_OPERATIONS.get(verbs[0] if len(verbs) == 1 else "",

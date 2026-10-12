@@ -769,6 +769,8 @@
   "branchPicker.searchPlaceholder": "Search branches…",
   "branchPicker.truncated": "The repository has more branches than were read. Search by name to find the rest.",
   "branchPicker.useCustom": "Use “{name}”",
+  "guide.missing": "Tento ovládací prvek teď není na obrazovce. Může záviset na vaší roli nebo nastavení.",
+  "guide.showMe": "Ukaž mi to",
   "prPicker.count": "Shod: {count}",
   "prPicker.label": "Otevřený pull request",
   "prPicker.more": "Ještě {count} — upřesněte hledání",

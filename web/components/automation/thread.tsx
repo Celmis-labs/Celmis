@@ -35,10 +35,12 @@ import { isInAppHref } from "@/lib/in-app-href";
 import { AGENT_SESSION_KEY } from "@/lib/agent-session";
 import { cn } from "@/lib/utils";
 import { useToken } from "@/lib/use-token";
+import { sanitizeSteps } from "@/lib/guide-tour";
 import { useDictFor, useT } from "@/lib/i18n";
 import { LocalSetupGuideBody } from "@/components/local-setup-guide";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ShowMe } from "@/components/automation/show-me";
 import {
   VERB_MARKDOWN, VERB_READS, VERB_WRITES, VerbAnswer, VerbOutcome, VerbPreview,
   type VerbPreviewData,
@@ -82,6 +84,8 @@ type RunResult = {
   changed?: number;
   run_id?: string;
   steps?: { action: string; result: Record<string, unknown> }[];
+  /** Controls the answer points at (server-validated; see lib/guide-tour). */
+  tour?: unknown;
 };
 
 export type Run = {
@@ -1417,8 +1421,11 @@ function Answer({
   const token = useToken();
   const steps = result.steps ?? [];
 
+  const tour = sanitizeSteps(result.tour);
+
   return (
     <div className="space-y-3">
+      {tour.length > 0 && <ShowMe steps={tour} />}
       {steps.map((s, i) => {
         const r = s.result as Record<string, any>;
 

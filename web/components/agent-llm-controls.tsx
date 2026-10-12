@@ -613,7 +613,7 @@ export function AgentLLMRow({
             : t("settings.llm.agents.inheritedBadge")}
         </Badge>
       </div>
-      <div>
+      <div data-tour={`review-agent-model:${agent}`}>
         <Label>{t("settings.llm.agents.modelLabel")}</Label>
         {/* One combobox and one catalog answer the question on both screens —
             and the empty string means "inherit" in both. */}
@@ -665,7 +665,7 @@ export function AgentLLMRow({
         )}
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
-        <div>
+        <div data-tour={`review-agent-max-output:${agent}`}>
           <Label>{t("settings.llm.agents.maxOutLabel")}</Label>
           <Input
             type="number" min={AGENT_TOKENS_MIN}
@@ -717,7 +717,7 @@ export function AgentLLMRow({
                 })}
           </p>
         </div>
-        <div>
+        <div data-tour={`review-agent-reasoning:${agent}`}>
           <Label>{t("settings.llm.agents.reasoningLabel")}</Label>
           {reasoningControl()}
           <p className="mt-1 text-[11px] text-[var(--color-muted-foreground)]">
@@ -838,7 +838,8 @@ export function AgentTest({
     }
   };
   return (
-    <div className="mt-2 space-y-1">
+    <div className="mt-2 space-y-1"
+         data-tour={agent ? `review-agent-test:${agent}` : "llm-base-test"}>
       <Button type="button" size="sm" variant="outline"
         disabled={disabled || !model || test.isPending}
         title={model ? t("settings.llm.agents.test.hint", { model }) : t("settings.llm.agents.test.noModel")}
@@ -917,7 +918,7 @@ export function BaseReasoning({
   const inheritLabel = t("settings.llm.agents.inheritOption");
   const parsed = allowed ? reasoningValue(value, caps) : null;
   return (
-    <div id="review-reasoning" className="space-y-2 scroll-mt-20">
+    <div id="review-reasoning" className="space-y-2 scroll-mt-20" data-tour="llm-base-reasoning">
       <div className="grid gap-3 sm:grid-cols-[1fr_2fr]">
         <div>
           <Label>{t("settings.llm.base.reasoningLabel")}</Label>
@@ -952,7 +953,7 @@ export function BaseReasoning({
                 : t("settings.llm.base.hint")}
           </p>
           {allowed && (
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2" data-tour="llm-apply-all">
               <Button type="button" size="sm" variant="outline"
                 disabled={disabled || !canApply || applying || !value.trim()}
                 onClick={onApply}>

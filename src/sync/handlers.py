@@ -542,6 +542,7 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
     `src.automation.chat.interpret`), and it lands on the row as it arrives.
     """
     from src.automation.chat import interpret, resolve_scope
+    from src.automation.tour import extract_tour
     from src.sync.queue import is_cancel_requested
 
     p = job["payload"]
@@ -589,6 +590,10 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
         return
 
     d = plan.as_dict()
+    # A how-to answer may end with a [[guide]] block naming controls to point
+    # at (src.automation.tour). It is not prose: lifted out here, validated,
+    # and carried beside the answer as `result.tour`.
+    d["note"], tour = extract_tour(d["note"])
 
     if plan.reads_only and not plan.blocked:
         # A question. Answering it IS the reply — putting a card in front of
@@ -635,12 +640,16 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
                     on_note=on_note, should_stop=should_stop,
                 )
                 note = explained or note
+                note, explained_tour = extract_tour(note)
+                tour = explained_tour or tour
             except Exception as exc:  # noqa: BLE001
                 logger.warning("automation_explain_failed run=%s err=%s",
                                run_id, exc)
             if is_cancel_requested(job["id"]):
                 await _finish_automation_plan(run_id, status="stopped")
                 return
+        if tour:
+            answer["tour"] = tour
         await _finish_automation_plan(
             run_id, status="answered", steps=d["steps"], note=note,
             language=d.get("language", ""), result=answer)
@@ -682,6 +691,9 @@ def _partial_note_writer(run_id: str):
     state = {"at": 0.0, "text": ""}
 
     def _write(note: str) -> None:
+        from src.automation.tour import strip_partial
+
+        note = strip_partial(note)
         now = time.monotonic()
         if not note or note == state["text"]:
             return

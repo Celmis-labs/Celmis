@@ -344,7 +344,7 @@ function ProviderKeysCard({ config, isAdmin, onSaved }: { config: LLMConfig; isA
   });
 
   return (
-    <Card>
+    <Card data-tour="llm-provider-keys">
       <CardHeader>
         <CardTitle className="flex items-center gap-2"><KeyIcon className="h-4 w-4" /> {t("settings.llm.providerKeysTitle")}</CardTitle>
         <CardDescription>{t("settings.llm.providerKeysDescription")}</CardDescription>
@@ -518,6 +518,14 @@ function LiteLLMProxyRow({ config, isAdmin, onSaved }: { config: LLMConfig; isAd
 }
 
 // ─── One profile (chat / review / embeddings) ────────────────────────
+
+/** `data-tour` ids of the surface cards (src/automation/tour.py). */
+const PROFILE_CARD_TOUR: Partial<Record<LLMSurface, string>> = {
+  chat: "llm-chat-card",
+  agent: "llm-agent-card",
+  review: "llm-review-card",
+  embeddings: "llm-embeddings-card",
+};
 
 function ProfileCard({
   surface, icon, title, description, config, embeddings, isAdmin: workspaceAdmin,
@@ -793,7 +801,7 @@ function ProfileCard({
   });
 
   return (
-    <Card>
+    <Card data-tour={PROFILE_CARD_TOUR[surface]}>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">{icon} {title}</CardTitle>
         <CardDescription>{description}</CardDescription>
@@ -1232,7 +1240,7 @@ function ReviewAgentsCard({ config, isAdmin }: { config: LLMConfig; isAdmin: boo
   const editable = isAdmin && !claudeEngine;
 
   return (
-    <Card id="review-agents">
+    <Card id="review-agents" data-tour="llm-review-agents">
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <BrainIcon className="h-4 w-4" /> {t("settings.llm.agents.title")}
