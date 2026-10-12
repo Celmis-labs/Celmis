@@ -1022,6 +1022,30 @@ def _log_dropped(model: str, why: str) -> None:
     logger.warning("reasoning_not_sent model=%s reason=%s", model, why)
 
 
+def _drop(model: str, why: str) -> tuple[dict, str]:
+    _log_dropped(model, why)
+    return {}, why
+
+
+def reasoning_plan(model: str, reasoning: str | int | None) -> tuple[dict, str | None]:
+    """``(kwargs, why_not)``: what to send for `reasoning`, and when nothing
+    goes out, the one-line reason. ``why_not`` is None when the kwargs are
+    non-empty and also when no level was configured at all.
+
+    The reason is what lets `LLMClient.generate` SAY that a configured level
+    was not sent. A bare ``{}`` cannot tell "unknown model" from "model takes
+    no reasoning" from "provider refused it", and an alias whose /model/info
+    answer was missing looked exactly like a setting that was never made.
+    """
+    if reasoning is None:
+        return {}, None
+    if isinstance(reasoning, bool):
+        # `bool` is an `int` in Python, and True would otherwise be sent as a
+        # one-token thinking budget.
+        return _drop(model, "value is a bool, not an effort word or a budget")
+    return _reasoning_plan(model, reasoning)
+
+
 def reasoning_kwargs(model: str, reasoning: str | int | None) -> dict:
     """Translate one configured reasoning value into LiteLLM kwargs.
 
@@ -1036,20 +1060,17 @@ def reasoning_kwargs(model: str, reasoning: str | int | None) -> dict:
     a token budget cannot be honestly translated into an effort word, and on
     Gemini 3 the installed LiteLLM drops `budget_tokens` silently — sending it
     anyway would be a third way to have a setting that reaches nothing.
+    `reasoning_plan` is the same decision with the reason attached.
     """
-    if reasoning is None:
-        return {}
-    if isinstance(reasoning, bool):
-        # `bool` is an `int` in Python, and True would otherwise be sent as a
-        # one-token thinking budget.
-        _log_dropped(model, "value is a bool, not an effort word or a budget")
-        return {}
+    return reasoning_plan(model, reasoning)[0]
 
+
+def _reasoning_plan(model: str, reasoning: str | int) -> tuple[dict, str | None]:
     value: str | int = reasoning
     if isinstance(value, str):
         value = value.strip()
         if not value:
-            return {}
+            return {}, None
         # A UI that renders a number input still posts a string.
         value = int(value) if value.lstrip("-").isdigit() else value.lower()
 
@@ -1059,37 +1080,31 @@ def reasoning_kwargs(model: str, reasoning: str | int | None) -> dict:
     kind = caps.reasoning_kind
 
     if kind is None:
-        _log_dropped(
-            model,
-            "unknown to litellm" if not caps.known else "model takes no reasoning parameter",
-        )
-        return {}
+        return _drop(model, "unknown to litellm" if not caps.known else "model takes no reasoning parameter")
 
     if kind == REASONING_EFFORT:
         if not isinstance(value, str):
-            _log_dropped(model, "model takes an effort level, not a token budget")
-            return {}
+            return _drop(model, "model takes an effort level, not a token budget")
         if _EFFORT_PARAM not in params:  # pragma: no cover — kind implies the param
-            return {}
+            return {}, None
         if provider_refusal(name, PARAM_REASONING, value):
             # Already absent from the vocabulary below — checked separately so
             # the log names the provider's 400 as the cause instead of the
             # vaguer "not one of […]", which reads like a typo in the setting.
-            _log_dropped(model, f"the provider refused effort {value!r} for this model")
-            return {}
+            return _drop(model, f"the provider refused effort {value!r} for this model")
         vocabulary = caps.reasoning_values_router_accepts
         if vocabulary and value not in vocabulary:
-            _log_dropped(model, f"effort {value!r} is not one of {list(vocabulary)}")
-            return {}
-        return {_EFFORT_PARAM: value}
+            return _drop(model, f"effort {value!r} is not one of {list(vocabulary)}")
+        return {_EFFORT_PARAM: value}, None
 
     # kind == REASONING_BUDGET — the model takes a token budget and nothing else.
     if not isinstance(value, int):
-        _log_dropped(model, "model takes a token budget, not an effort level")
-        return {}
+        return _drop(model, "model takes a token budget, not an effort level")
     if _BUDGET_PARAM not in params:  # pragma: no cover — kind implies the param
-        return {}
-    return {_BUDGET_PARAM: {"type": "enabled", "budget_tokens": int(value)}}
+        return {}, None
+    return {_BUDGET_PARAM: {"type": "enabled", "budget_tokens": int(value)}}, None
+
+
 
 
 def reset_capability_caches() -> None:

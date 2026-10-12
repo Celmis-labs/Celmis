@@ -1251,6 +1251,7 @@ def test_agent_settings(
         PARAM_REASONING,
         PARAM_TEMPERATURE,
         reasoning_kwargs,
+        refused_reasoning,
     )
     from src.llm.client import build_llm_client
     from src.llm.errors import classify
@@ -1324,12 +1325,14 @@ def test_agent_settings(
     reasoning_drop = _dropped(PARAM_REASONING)
     if reasoning is None:
         return _out(status="ok", **out)
-    if reasoning_drop is not None:
+    capability_model = client._capability_model(result.model)
+    if reasoning_drop is not None and refused_reasoning(capability_model, reasoning):
         return _out(status="refused", message=reasoning_drop.reason[:500], **out)
-    if not reasoning_kwargs(client._capability_model(result.model), reasoning):
+    if not reasoning_kwargs(capability_model, reasoning):
+        why = (f" ({reasoning_drop.reason})" if reasoning_drop is not None else "")
         return _out(status="not_sent", message=(
             "Celmis did not send it: this model takes no reasoning parameter "
-            "this build can use, or not this value."), **out)
+            f"this build can use, or not this value{why}.")[:500], **out)
     return _out(status="honoured", reasoning_sent=reasoning, **out)
 
 

@@ -395,7 +395,7 @@ class LLMClient:
             clamp_output_tokens,
             forget_reasoning_refusal,
             forget_temperature_refusal,
-            reasoning_kwargs,
+            reasoning_plan,
             reasoning_refusal,
             record_reasoning_refusal,
             record_temperature_refusal,
@@ -423,14 +423,15 @@ class LLMClient:
                 action=ADJUST_CLAMPED, reason=f"model ceiling is {clamped_to}",
                 model=capability_model,
             ))
-        reasoning_params = reasoning_kwargs(capability_model, reasoning)
+        reasoning_params, withheld_why = reasoning_plan(capability_model, reasoning)
         # Empty kwargs and a configured level means the level was withheld, and
-        # `refused_reasoning_note` answers the one question that matters about
-        # that: was it withheld because THIS provider already refused it? Only
-        # then is there something for a run record to say. Every other reason
-        # for an empty dict — a model that does not reason, a word this router
-        # never had — is a configuration answer the settings page gives at save
-        # time, not news from a review that has just finished.
+        # the run record must say so whatever the reason: because THIS provider
+        # already refused it (`refused_reasoning_note`), or because Celmis could
+        # not tell the model takes it at all (`withheld_why`). The second used to
+        # be left to the settings page, and then a workspace-proxy alias whose
+        # /model/info answer was missing at review time ran every agent without
+        # the configured level while the record read like a run that had asked
+        # for none.
         reasoning_dropped = (
             refused_reasoning_note(capability_model, reasoning)
             if reasoning is not None and not reasoning_params else None
@@ -442,6 +443,19 @@ class LLMClient:
                 requested=reasoning, sent=None, action=ADJUST_DROPPED,
                 reason=remembered.reason if remembered else reasoning_dropped,
                 model=capability_model,
+            ))
+        elif withheld_why and not reasoning_params:
+            hint = ""
+            if withheld_why.startswith("unknown to litellm") \
+                    and capability_model.startswith("litellm_proxy/"):
+                hint = (" (the proxy's /model/info did not say which model this "
+                        "alias runs on)")
+            reasoning_dropped = (
+                f"reasoning level {reasoning!r} was not sent — {withheld_why}{hint}")
+            adjustments.append(ParameterAdjustment(
+                agent=agent, parameter=PARAM_REASONING,
+                requested=reasoning, sent=None, action=ADJUST_DROPPED,
+                reason=f"{withheld_why}{hint}", model=capability_model,
             ))
         # Temperature, the same way: once this process has seen the model
         # refuse the value, the value is withheld up front rather than paid
