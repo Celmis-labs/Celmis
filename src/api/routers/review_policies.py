@@ -799,7 +799,7 @@ def _validate_agent_llm_overrides(
     effective = _effective_agents(policy, workspace_id)
     for agent, entry in overrides.items():
         model = (effective.get(agent) or {}).get(_MODEL_FIELD) or ""
-        _validate_agent_entry(agent, entry, model)
+        _validate_agent_entry(agent, entry, model, workspace_id)
 
 
 
