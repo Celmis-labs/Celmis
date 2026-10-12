@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "The call failed: {message}",
   "settings.llm.agents.test.ok": "The model answered. No reasoning value was set, so only the connection was tested.",
   "settings.llm.agents.test.thinking": "The provider reported {tokens} thinking tokens, proof that reasoning ran.",
-  "settings.llm.agents.test.noThinking": "The provider reported no thinking tokens, so it cannot prove reasoning ran.",
+  "settings.llm.agents.test.noThinking": "The model accepted the level but did not think on this call (0 thinking tokens). On some models a low level means \"think only if needed\" — try a higher one.",
   "settings.llm.agents.test.tempHonoured": "Temperature accepted.",
   "settings.llm.agents.test.tempDropped": "Temperature dropped: {message}",
   "settings.llm.agents.test.meta": "{input} tokens in, {output} out, {ms} ms",

@@ -150,3 +150,10 @@ reported, when it reports them), withheld by Celmis, refused by the provider
 (in its words), or timed out. A value the provider refuses is recorded as in a
 real run, so the dropdown strikes it afterwards. The call needs the editor role
 and is rate limited (`CELMIS_RL_LLM_TEST`, 12 per minute per client).
+
+An accepted level with **0 thinking tokens** is shown as a warning, not a
+pass. Some models read a low level as "think only if needed": on a lite model
+`low` was accepted on every call yet produced no thinking on most of them,
+while `medium` thought every time. A review on such a level behaves like one
+without reasoning (`[]` in a second or two), so press Test a few times and pick
+the lowest level that reliably reports thinking tokens.

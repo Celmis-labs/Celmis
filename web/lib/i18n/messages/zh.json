@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "调用失败：{message}",
   "settings.llm.agents.test.ok": "模型已响应。未设置 reasoning 值，因此只测试了连接。",
   "settings.llm.agents.test.thinking": "提供方报告了 {tokens} 个思考 token，证明 reasoning 已运行。",
-  "settings.llm.agents.test.noThinking": "提供方未报告思考 token，因此无法证明 reasoning 已运行。",
+  "settings.llm.agents.test.noThinking": "模型接受了该级别，但本次调用没有进行思考（0 个思考 token）。在某些模型上，低级别意味着“仅在需要时思考”——请尝试更高的级别。",
   "settings.llm.agents.test.tempHonoured": "Temperature 已接受。",
   "settings.llm.agents.test.tempDropped": "Temperature 已被丢弃：{message}",
   "settings.llm.agents.test.meta": "输入 {input} 个 token，输出 {output} 个，{ms} 毫秒",

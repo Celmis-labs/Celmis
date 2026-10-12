@@ -822,7 +822,10 @@ export function AgentTest({
   });
   const r: AgentTestResult | undefined = test.data;
   const bad = test.isError || r?.status === "failed" || r?.status === "timeout";
-  const warn = r?.status === "refused" || r?.status === "not_sent";
+  const warn = r?.status === "refused" || r?.status === "not_sent"
+    // Accepted but no thinking reported: on some models a low level means
+    // "think only if needed", which reads as reasoning that never ran.
+    || (r?.status === "honoured" && r.reasoning_tokens === 0);
   const headline = (x: AgentTestResult): string => {
     const shown = String(x.reasoning_requested ?? "");
     switch (x.status) {

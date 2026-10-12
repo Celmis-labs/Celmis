@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "Volanie zlyhalo: {message}",
   "settings.llm.agents.test.ok": "Model odpovedal. Žiadna hodnota reasoning nebola nastavená, otestovalo sa len spojenie.",
   "settings.llm.agents.test.thinking": "Poskytovateľ hlási {tokens} tokenov myslenia – dôkaz, že reasoning prebehol.",
-  "settings.llm.agents.test.noThinking": "Poskytovateľ nehlási žiadne tokeny myslenia, takže nemôže preukázať, že reasoning prebehol.",
+  "settings.llm.agents.test.noThinking": "Model úroveň prijal, ale pri tomto volaní nepremýšľal (0 tokenov uvažovania). Pri niektorých modeloch nízka úroveň znamená „premýšľaj len v prípade potreby“ — skúste vyššiu.",
   "settings.llm.agents.test.tempHonoured": "Temperature prijatá.",
   "settings.llm.agents.test.tempDropped": "Temperature vynechaná: {message}",
   "settings.llm.agents.test.meta": "{input} tokenov vstup, {output} výstup, {ms} ms",

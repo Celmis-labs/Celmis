@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "呼び出しに失敗しました: {message}",
   "settings.llm.agents.test.ok": "モデルが応答しました。reasoning の値が未設定のため、接続のみテストしました。",
   "settings.llm.agents.test.thinking": "プロバイダーは {tokens} 個の思考トークンを報告しました。reasoning が実行された証拠です。",
-  "settings.llm.agents.test.noThinking": "プロバイダーが思考トークンを報告しなかったため、reasoning の実行を証明できません。",
+  "settings.llm.agents.test.noThinking": "モデルはレベルを受け入れましたが、この呼び出しでは思考しませんでした（思考トークン 0）。一部のモデルでは低いレベルは「必要な場合のみ思考」を意味します。より高いレベルを試してください。",
   "settings.llm.agents.test.tempHonoured": "Temperature は受理されました。",
   "settings.llm.agents.test.tempDropped": "Temperature は除外されました: {message}",
   "settings.llm.agents.test.meta": "入力 {input} トークン、出力 {output} トークン、{ms} ms",

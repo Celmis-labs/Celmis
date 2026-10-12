@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "호출 실패: {message}",
   "settings.llm.agents.test.ok": "모델이 응답했습니다. reasoning 값이 설정되지 않아 연결만 테스트했습니다.",
   "settings.llm.agents.test.thinking": "제공자가 사고 토큰 {tokens}개를 보고했습니다. reasoning이 실행되었다는 증거입니다.",
-  "settings.llm.agents.test.noThinking": "제공자가 사고 토큰을 보고하지 않아 reasoning 실행을 증명할 수 없습니다.",
+  "settings.llm.agents.test.noThinking": "모델이 수준을 받아들였지만 이번 호출에서는 사고하지 않았습니다(사고 토큰 0). 일부 모델에서 낮은 수준은 \"필요할 때만 사고\"를 뜻합니다. 더 높은 수준을 시도해 보세요.",
   "settings.llm.agents.test.tempHonoured": "Temperature가 수락되었습니다.",
   "settings.llm.agents.test.tempDropped": "Temperature가 제외됨: {message}",
   "settings.llm.agents.test.meta": "입력 {input} 토큰, 출력 {output} 토큰, {ms} ms",

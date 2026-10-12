@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "Çağrı başarısız oldu: {message}",
   "settings.llm.agents.test.ok": "Model yanıt verdi. Hiçbir reasoning değeri ayarlanmamıştı, yalnızca bağlantı test edildi.",
   "settings.llm.agents.test.thinking": "Sağlayıcı {tokens} düşünme token'ı bildirdi; reasoning'in çalıştığının kanıtı.",
-  "settings.llm.agents.test.noThinking": "Sağlayıcı düşünme token'ı bildirmedi, bu yüzden reasoning'in çalıştığını kanıtlayamaz.",
+  "settings.llm.agents.test.noThinking": "Model seviyeyi kabul etti ancak bu çağrıda düşünmedi (0 düşünme belirteci). Bazı modellerde düşük seviye \"yalnızca gerekirse düşün\" anlamına gelir; daha yüksek bir seviye deneyin.",
   "settings.llm.agents.test.tempHonoured": "Temperature kabul edildi.",
   "settings.llm.agents.test.tempDropped": "Temperature düşürüldü: {message}",
   "settings.llm.agents.test.meta": "{input} token giriş, {output} çıkış, {ms} ms",

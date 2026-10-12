@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "A chamada falhou: {message}",
   "settings.llm.agents.test.ok": "O modelo respondeu. Nenhum valor de reasoning estava definido, então só a conexão foi testada.",
   "settings.llm.agents.test.thinking": "O provedor informou {tokens} tokens de raciocínio, prova de que o reasoning foi executado.",
-  "settings.llm.agents.test.noThinking": "O provedor não informou tokens de raciocínio, então não consegue provar que o reasoning foi executado.",
+  "settings.llm.agents.test.noThinking": "O modelo aceitou o nível, mas não raciocinou nesta chamada (0 tokens de raciocínio). Em alguns modelos, um nível baixo significa «raciocinar só se necessário» — experimente um mais alto.",
   "settings.llm.agents.test.tempHonoured": "Temperature aceita.",
   "settings.llm.agents.test.tempDropped": "Temperature descartada: {message}",
   "settings.llm.agents.test.meta": "{input} tokens de entrada, {output} de saída, {ms} ms",

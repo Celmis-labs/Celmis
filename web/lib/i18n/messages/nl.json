@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "De aanroep mislukte: {message}",
   "settings.llm.agents.test.ok": "Het model antwoordde. Er was geen reasoning-waarde ingesteld, dus alleen de verbinding is getest.",
   "settings.llm.agents.test.thinking": "De provider meldde {tokens} denk-tokens, het bewijs dat reasoning draaide.",
-  "settings.llm.agents.test.noThinking": "De provider meldde geen denk-tokens en kan dus niet bewijzen dat reasoning draaide.",
+  "settings.llm.agents.test.noThinking": "Het model accepteerde het niveau maar dacht bij deze aanroep niet na (0 denktokens). Bij sommige modellen betekent een laag niveau „alleen nadenken als het nodig is” — probeer een hoger niveau.",
   "settings.llm.agents.test.tempHonoured": "Temperature geaccepteerd.",
   "settings.llm.agents.test.tempDropped": "Temperature weggelaten: {message}",
   "settings.llm.agents.test.meta": "{input} tokens in, {output} uit, {ms} ms",

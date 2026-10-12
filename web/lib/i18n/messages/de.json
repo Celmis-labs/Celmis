@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "Der Aufruf ist fehlgeschlagen: {message}",
   "settings.llm.agents.test.ok": "Das Modell hat geantwortet. Es war kein Reasoning-Wert gesetzt, daher wurde nur die Verbindung getestet.",
   "settings.llm.agents.test.thinking": "Der Anbieter meldete {tokens} Denk-Tokens – der Beleg, dass Reasoning lief.",
-  "settings.llm.agents.test.noThinking": "Der Anbieter meldete keine Denk-Tokens und kann daher nicht belegen, dass Reasoning lief.",
+  "settings.llm.agents.test.noThinking": "Das Modell hat die Stufe akzeptiert, bei diesem Aufruf aber nicht nachgedacht (0 Denk-Tokens). Bei manchen Modellen bedeutet eine niedrige Stufe „nur bei Bedarf denken“ — versuchen Sie eine höhere.",
   "settings.llm.agents.test.tempHonoured": "Temperature akzeptiert.",
   "settings.llm.agents.test.tempDropped": "Temperature verworfen: {message}",
   "settings.llm.agents.test.meta": "{input} Tokens ein, {output} aus, {ms} ms",

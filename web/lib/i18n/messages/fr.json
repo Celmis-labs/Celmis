@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "L'appel a échoué : {message}",
   "settings.llm.agents.test.ok": "Le modèle a répondu. Aucune valeur de reasoning n'était définie : seule la connexion a été testée.",
   "settings.llm.agents.test.thinking": "Le fournisseur a signalé {tokens} jetons de réflexion, preuve que le reasoning a eu lieu.",
-  "settings.llm.agents.test.noThinking": "Le fournisseur n'a signalé aucun jeton de réflexion et ne peut donc pas prouver que le reasoning a eu lieu.",
+  "settings.llm.agents.test.noThinking": "Le modèle a accepté le niveau mais n'a pas raisonné lors de cet appel (0 jeton de réflexion). Sur certains modèles, un niveau bas signifie « réfléchir seulement si nécessaire » — essayez un niveau plus élevé.",
   "settings.llm.agents.test.tempHonoured": "Temperature acceptée.",
   "settings.llm.agents.test.tempDropped": "Temperature ignorée : {message}",
   "settings.llm.agents.test.meta": "{input} jetons en entrée, {output} en sortie, {ms} ms",

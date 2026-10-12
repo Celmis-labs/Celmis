@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "Виклик не вдався: {message}",
   "settings.llm.agents.test.ok": "Модель відповіла. Значення reasoning не задано, тож перевірено лише з'єднання.",
   "settings.llm.agents.test.thinking": "Провайдер повідомив про {tokens} токенів міркування — доказ, що reasoning працював.",
-  "settings.llm.agents.test.noThinking": "Провайдер не повідомив токенів міркування, тож довести роботу reasoning неможливо.",
+  "settings.llm.agents.test.noThinking": "Модель прийняла рівень, але на цьому виклику не думала (0 токенів міркування). На деяких моделях низький рівень означає «думати лише за потреби» — спробуйте вищий.",
   "settings.llm.agents.test.tempHonoured": "Temperature прийнято.",
   "settings.llm.agents.test.tempDropped": "Temperature відкинуто: {message}",
   "settings.llm.agents.test.meta": "{input} токенів на вході, {output} на виході, {ms} мс",

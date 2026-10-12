@@ -22,6 +22,12 @@ derives it from there.
 
 ### LLM
 
+- **Test no longer calls a level that produced no thinking a pass.** An
+  accepted reasoning level with 0 thinking tokens reported is now a warning that
+  says so. On a lite model `low` was accepted every time but thought on few
+  calls, so a review set to it answered `[]` like one without reasoning; the
+  warning points at a higher level, and docs/REVIEW_SETTINGS.md explains how to
+  pick one.
 - **A reasoning level that was configured but not sent is now said so.** When
   Celmis cannot tell what model a workspace-proxy alias runs on (the proxy's
   `/model/info` gave no answer), the base reasoning level cannot be translated

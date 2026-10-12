@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "Apelul a eșuat: {message}",
   "settings.llm.agents.test.ok": "Modelul a răspuns. Nu era setată nicio valoare de reasoning, deci a fost testată doar conexiunea.",
   "settings.llm.agents.test.thinking": "Furnizorul a raportat {tokens} tokeni de gândire, dovada că reasoning a rulat.",
-  "settings.llm.agents.test.noThinking": "Furnizorul nu a raportat tokeni de gândire, deci nu poate dovedi că reasoning a rulat.",
+  "settings.llm.agents.test.noThinking": "Modelul a acceptat nivelul, dar nu a raționat la acest apel (0 tokeni de raționament). La unele modele un nivel scăzut înseamnă „gândește doar dacă e nevoie” — încercați unul mai mare.",
   "settings.llm.agents.test.tempHonoured": "Temperature acceptată.",
   "settings.llm.agents.test.tempDropped": "Temperature omisă: {message}",
   "settings.llm.agents.test.meta": "{input} tokeni la intrare, {output} la ieșire, {ms} ms",

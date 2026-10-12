@@ -2337,7 +2337,7 @@
   "settings.llm.agents.test.failed": "Wywołanie nie powiodło się: {message}",
   "settings.llm.agents.test.ok": "Model odpowiedział. Nie ustawiono wartości reasoning, więc przetestowano tylko połączenie.",
   "settings.llm.agents.test.thinking": "Dostawca zgłosił {tokens} tokenów myślenia — dowód, że reasoning zadziałał.",
-  "settings.llm.agents.test.noThinking": "Dostawca nie zgłosił tokenów myślenia, więc nie może udowodnić, że reasoning zadziałał.",
+  "settings.llm.agents.test.noThinking": "Model przyjął poziom, ale w tym wywołaniu nie rozumował (0 tokenów rozumowania). W niektórych modelach niski poziom oznacza „myśl tylko w razie potrzeby” — spróbuj wyższego.",
   "settings.llm.agents.test.tempHonoured": "Temperature przyjęta.",
   "settings.llm.agents.test.tempDropped": "Temperature pominięta: {message}",
   "settings.llm.agents.test.meta": "{input} tokenów wejścia, {output} wyjścia, {ms} ms",
