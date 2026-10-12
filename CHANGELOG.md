@@ -18,7 +18,7 @@ derives it from there.
 
 ---
 
-## [Unreleased]
+## [2.3.16] — 2026-10-12
 
 ### LLM
 
