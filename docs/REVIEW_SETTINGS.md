@@ -118,4 +118,35 @@ If the summary carries an `ADJUSTED` line saying agents gave a near-empty
 reply, they returned `[]` after a handful of output tokens on a large diff.
 That is a valid answer and the verdict is not changed, but a lite model without
 reasoning tends to do this. Switch those agents to a model with reasoning, or
-raise the per-agent `reasoning` setting, and run the dry run again.
+set Reasoning on the PR Review card in Settings → LLM and press **Apply to all
+agents**, and run the dry run again.
+
+### Per-agent model parameters: which value wins
+
+Each agent's model, reasoning, temperature and max output tokens are layered.
+The first layer that sets a value wins, and an empty field means "inherit":
+
+1. **Repository agent override** (Settings → Review settings, per repository).
+2. **Workspace agent override** (Settings → LLM → Review agents).
+3. **Workspace base** (Settings → LLM → PR Review card): the review model, and
+   its Reasoning level.
+4. **The model's default** (nothing is requested).
+
+The model is the exception in layer 1: a repository chooses it in its own
+per-agent model field, and an agent with no per-repo model inherits the
+workspace one. The base level covers reasoning only; temperature and the
+output ceiling fall through to the install defaults.
+
+**Apply to all agents** saves the chosen Reasoning as the base and clears the
+agents' own Reasoning at the workspace layer, so they all follow it (their
+model, temperature and ceiling are kept). A repository override still beats
+it.
+
+Every agent row, at both levels and on the base card, has a **Test** button.
+It makes one tiny real call to the model that row would use, with the values in
+the form (saved or not), through the same client a review uses, and says
+whether the value was honoured (with the thinking tokens the provider
+reported, when it reports them), withheld by Celmis, refused by the provider
+(in its words), or timed out. A value the provider refuses is recorded as in a
+real run, so the dropdown strikes it afterwards. The call needs the editor role
+and is rate limited (`CELMIS_RL_LLM_TEST`, 12 per minute per client).

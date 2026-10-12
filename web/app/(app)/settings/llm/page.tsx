@@ -31,7 +31,7 @@ import { cn } from "@/lib/utils";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import {
-  AgentLLMRow, DEFAULT_AGENT_MAX_OUTPUT, agentDraftFrom, agentEntryToSave,
+  AgentLLMRow, BaseReasoning, DEFAULT_AGENT_MAX_OUTPUT, agentDraftFrom, agentEntryToSave,
   agentMaxOutError, agentMaxOutLimit, storedReasoning, useAgentCapabilities,
   type AgentDraft,
 } from "@/components/agent-llm-controls";
@@ -545,12 +545,16 @@ function ProfileCard({
   // Review card only: the model a failing agent retries on once the primary
   // is exhausted. "" = no fallback, which is also the backend's default.
   const [fallbackModel, setFallbackModel] = useState(config.review_fallback_model ?? "");
+  // Review card only: the base reasoning level agents on "inherit" run with.
+  const savedReasoning = config.review_reasoning != null ? String(config.review_reasoning) : "";
+  const [baseReasoning, setBaseReasoning] = useState(savedReasoning);
 
   useEffect(() => {
     setProvider(prof.provider); setModel(prof.model);
     setDims(String(prof.dimensions ?? 3072)); setBaseUrl(prof.base_url ?? "");
     setFallbackModel(config.review_fallback_model ?? "");
-  }, [prof.provider, prof.model, prof.dimensions, prof.base_url, config.review_fallback_model]);
+    setBaseReasoning(savedReasoning);
+  }, [prof.provider, prof.model, prof.dimensions, prof.base_url, config.review_fallback_model, savedReasoning]);
 
   // Chat, review and the agent planner share one LiteLLM path
   // (build_llm_client → resolve_profile → api_base), so all three may point
@@ -631,6 +635,11 @@ function ProfileCard({
       // The fallback rides the same save as the review model so the backend
       // can judge the pair together — "" clears it (empty = no fallback).
       ...(surface === "review" ? { review_fallback_model: fallbackModel.trim() } : {}),
+      // Only when changed: the server judges it against the model this save
+      // ends up with, and an untouched value must not turn a model change
+      // into a refusal about a level nobody edited.
+      ...(surface === "review" && baseReasoning.trim() !== savedReasoning
+        ? { review_reasoning: baseReasoning.trim() } : {}),
       // An optional key typed on this card rides along in the same save.
       // Local servers rarely need one, so it has no row in the keys card.
       ...(isLocal && localKey.trim() ? { provider_keys: { [SELF_HOSTED]: localKey.trim() } } : {}),
@@ -638,6 +647,39 @@ function ProfileCard({
     onSuccess: () => { toast.success(t("settings.llm.profileSaved", { title })); setLocalKey(""); qc.invalidateQueries({ queryKey: ["llm-config"] }); },
     onError: (e) => toast.error(t("settings.llm.error", { message: (e as Error).message })),
   });
+  // "Apply to all agents": the base level becomes the one every agent runs
+  // with. Agents holding their own value would still beat it, so those are
+  // reset to inherit in the same save (the agents block is sent whole — it is
+  // the only way to say "stop overriding that"); their other overrides stay.
+  const overridingReasoning = REVIEW_AGENTS.filter(
+    (a) => storedReasoning(config.agents?.[a]) != null);
+  const applyAll = useMutation({
+    mutationFn: () => {
+      const agents: Partial<Record<ReviewAgent, AgentLLMOverride>> = {};
+      REVIEW_AGENTS.forEach((a) => {
+        const rest: AgentLLMOverride = config.agents?.[a] ?? {};
+        const entry: AgentLLMOverride = {};
+        if (rest.model) entry.model = rest.model;
+        if (rest.max_output_tokens != null) entry.max_output_tokens = rest.max_output_tokens;
+        if (rest.temperature != null) entry.temperature = rest.temperature;
+        if (Object.keys(entry).length > 0) agents[a] = entry;
+      });
+      return llmApi.saveConfig(token!, { review_reasoning: baseReasoning.trim(), agents });
+    },
+    onSuccess: () => {
+      toast.success(t("settings.llm.base.applied"));
+      qc.invalidateQueries({ queryKey: ["llm-config"] });
+    },
+    onError: (e) => toast.error(t("settings.llm.error", { message: (e as Error).message })),
+  });
+  // The LiteLLM string the capability lookups are asked about. The draft is
+  // what the operator is looking at, saved or not, so it is derived here
+  // rather than read back from a per-agent `effective_model`.
+  const baseModelString = !model ? ""
+    : provider === LITELLM ? `litellm_proxy/${model}`
+      : provider === "google" ? `gemini/${model}`
+        : provider === SELF_HOSTED ? `openai/${model}`
+          : `${provider}/${model}`;
   const localKeyStatus = config.provider_keys.find((k) => k.provider === SELF_HOSTED);
   const [localTest, setLocalTest] = useState<TestOutcome | null>(null);
   const testLocal = useMutation({
@@ -933,6 +975,21 @@ function ProfileCard({
               {t("settings.llm.fallbackModelHint")}
             </div>
           </div>
+        )}
+        {/* Directly under the model every agent inherits: the level they run
+            with when they set none of their own. */}
+        {isReview && !claudeEngine && !isLocal && (
+          <BaseReasoning
+            model={baseModelString}
+            value={baseReasoning}
+            onChange={setBaseReasoning}
+            disabled={!isAdmin}
+            overriding={overridingReasoning}
+            // The server judges the level against the SAVED review model.
+            canApply={model === prof.model && provider === prof.provider}
+            applying={applyAll.isPending}
+            onApply={() => applyAll.mutate()}
+          />
         )}
         {isEmbeddingsInfo && (
           /* The WHY, on the page and not behind a toggle: indexing ships

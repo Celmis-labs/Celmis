@@ -1775,6 +1775,9 @@ export type LLMConfig = {
    *  Null = no fallback (the default) — the trade is liveness for
    *  comparability between runs, and it is the operator's to make. */
   review_fallback_model?: string | null;
+  /** Base reasoning level: what an agent left on "inherit" runs with.
+   *  Order: repo agent -> workspace agent -> this -> none. */
+  review_reasoning?: string | number | null;
   /** Language the generated vault documentation is written in. */
   docs_language?: string;
   /** Which engine writes it: `api` (one prompt) or `claude_code`
@@ -1879,10 +1882,33 @@ export type LLMConfigUpdate = {
   /** Review fallback model — "" clears it (empty means no fallback);
    *  omitting the key keeps whatever is stored. */
   review_fallback_model?: string;
+  /** Base reasoning — "" clears it; omitting the key keeps what is stored. */
+  review_reasoning?: string | number;
   /** Whole "agents" map, replaced as one blob — a partial PUT would have no
    *  way to say "clear this override", since absent already means inherit. */
   agents?: Partial<Record<ReviewAgent, AgentLLMOverride>>;
   provider_keys?: Record<string, string>;
+};
+
+/** POST /api/llm/test-agent — what one tiny real call showed. */
+export type AgentTestBody = {
+  agent?: string | null;
+  model: string;
+  reasoning?: string | number | null;
+  temperature?: number | null;
+};
+export type AgentTestResult = {
+  status: "honoured" | "not_sent" | "refused" | "timeout" | "failed" | "ok";
+  model: string;
+  message: string;
+  reasoning_requested: string | number | null;
+  reasoning_sent: string | number | null;
+  temperature_status: "honoured" | "dropped" | null;
+  temperature_message: string;
+  reasoning_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  latency_ms: number | null;
 };
 
 export type ProviderModels = {
@@ -1987,6 +2013,9 @@ export const llmApi = {
   modelCapabilities: (token: string, model: string) =>
     api<ModelCapabilities>(
       `/api/llm/model-capabilities?model=${encodeURIComponent(model)}`, { token }),
+  /** One tiny real call with the chosen model / reasoning / temperature. */
+  testAgent: (token: string, body: AgentTestBody) =>
+    api<AgentTestResult>("/api/llm/test-agent", { token, method: "POST", json: body }),
   reindexEmbeddings: (token: string) =>
     api<{ enqueued: number; repos: string[]; signature: string; detail: string }>(
       "/api/llm/embeddings/reindex", { token, method: "POST" }),

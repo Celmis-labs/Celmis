@@ -24,12 +24,12 @@
  */
 
 import Link from "next/link";
-import { useQueries } from "@tanstack/react-query";
+import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 
 import {
   llmApi,
   AGENT_TOKENS_MAX, AGENT_TOKENS_MIN,
-  type AgentLLMOverride, type AgentSettings, type ModelCapabilities,
+  type AgentLLMOverride, type AgentSettings, type AgentTestResult, type ModelCapabilities,
   type ProviderRefusal,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -39,6 +39,7 @@ import { useT } from "@/lib/i18n";
 import { formatDate } from "@/lib/format";
 import { ModelSelect } from "@/components/model-select";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
@@ -722,6 +723,20 @@ export function AgentLLMRow({
           <p className="mt-1 text-[11px] text-[var(--color-muted-foreground)]">
             {reasoningHint()}
           </p>
+          <AgentTest
+            agent={agent}
+            model={model}
+            reasoning={
+              (reasoningAllowed ? reasoningValue(liveReasoning, caps) : null)
+              ?? effective?.effective_reasoning ?? null
+            }
+            temperature={
+              (draft.temperature ?? "").trim() !== "" && Number.isFinite(Number(draft.temperature))
+                ? Number(draft.temperature)
+                : effective?.effective_temperature ?? null
+            }
+            disabled={disabled || loading || inheritedPending}
+          />
           {/* Every refusal on file for this model, with the provider's own
               sentence and the date it was learned — the explanation the
               struck options above are pointing at. */}
@@ -771,6 +786,187 @@ export function AgentLLMRow({
           </Link>.
         </p>
       )}
+    </div>
+  );
+}
+
+
+/** The Test button and its answer: ONE tiny real call to the model this agent
+ *  ends up on, with the values as they stand in the form (saved or not).
+ *
+ *  The server goes through the same client a review agent does, so a value
+ *  the provider refuses is recorded the way a real run records it; the
+ *  capability lookups are invalidated on a refusal so the struck-through
+ *  options and the dated sentence appear without a reload.
+ */
+export function AgentTest({
+  agent, model, reasoning, temperature, disabled,
+}: {
+  /** null = the PR Review base card. */
+  agent: string | null;
+  model: string;
+  reasoning: string | number | null;
+  temperature: number | null;
+  disabled: boolean;
+}) {
+  const t = useT();
+  const token = useToken();
+  const qc = useQueryClient();
+  const test = useMutation({
+    mutationFn: () => llmApi.testAgent(token!, { agent, model, reasoning, temperature }),
+    onSuccess: (r) => {
+      if (r.status === "refused" || r.temperature_status === "dropped") {
+        void qc.invalidateQueries({ queryKey: ["model-capabilities"] });
+      }
+    },
+  });
+  const r: AgentTestResult | undefined = test.data;
+  const bad = test.isError || r?.status === "failed" || r?.status === "timeout";
+  const warn = r?.status === "refused" || r?.status === "not_sent";
+  const headline = (x: AgentTestResult): string => {
+    const shown = String(x.reasoning_requested ?? "");
+    switch (x.status) {
+      case "honoured": return t("settings.llm.agents.test.honoured", { value: shown });
+      case "not_sent": return t("settings.llm.agents.test.notSent", { value: shown });
+      case "refused": return t("settings.llm.agents.test.refused", { message: x.message });
+      case "timeout": return t("settings.llm.agents.test.timeout");
+      case "failed": return t("settings.llm.agents.test.failed", { message: x.message });
+      default: return t("settings.llm.agents.test.ok");
+    }
+  };
+  return (
+    <div className="mt-2 space-y-1">
+      <Button type="button" size="sm" variant="outline"
+        disabled={disabled || !model || test.isPending}
+        title={model ? t("settings.llm.agents.test.hint", { model }) : t("settings.llm.agents.test.noModel")}
+        onClick={() => test.mutate()}>
+        {test.isPending ? t("settings.llm.agents.test.running") : t("settings.llm.agents.test.button")}
+      </Button>
+      {test.isError && (
+        <p className="text-[11px] text-red-600 dark:text-red-400 wrap-anywhere">
+          {t("settings.llm.agents.test.error", { message: (test.error as Error).message })}
+        </p>
+      )}
+      {r && (
+        <div role="status" className={cn(
+          "text-[11px] wrap-anywhere space-y-0.5",
+          bad ? "text-red-600 dark:text-red-400"
+            : warn ? "text-amber-600 dark:text-amber-400"
+              : "text-emerald-700 dark:text-emerald-400",
+        )}>
+          <p>{headline(r)}</p>
+          {r.status === "honoured" && (
+            <p>
+              {r.reasoning_tokens > 0
+                ? t("settings.llm.agents.test.thinking", { tokens: r.reasoning_tokens })
+                : t("settings.llm.agents.test.noThinking")}
+            </p>
+          )}
+          {r.temperature_status === "honoured" && (
+            <p>{t("settings.llm.agents.test.tempHonoured")}</p>
+          )}
+          {r.temperature_status === "dropped" && (
+            <p>{t("settings.llm.agents.test.tempDropped", { message: r.temperature_message })}</p>
+          )}
+          {r.latency_ms != null && (
+            <p className="text-[var(--color-muted-foreground)]">
+              {t("settings.llm.agents.test.meta", {
+                input: r.input_tokens, output: r.output_tokens, ms: r.latency_ms,
+              })}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The base Reasoning control on the PR Review card: what every agent left on
+ *  "inherit" runs with, the Test button, and "Apply to all agents".
+ *
+ *  Capability-aware the way the per-agent row is — the same lookups, the same
+ *  `takesReasoning` rule — but flatter, because there is no layer above to
+ *  explain.
+ */
+export function BaseReasoning({
+  model, value, onChange, disabled, overriding, canApply, applying, onApply,
+}: {
+  /** LiteLLM model string of the base review model, as the draft stands. */
+  model: string;
+  value: string;
+  onChange: (v: string) => void;
+  disabled: boolean;
+  /** Agents holding their own reasoning value (they beat the base). */
+  overriding: string[];
+  canApply: boolean;
+  applying: boolean;
+  onApply: () => void;
+}) {
+  const t = useT();
+  const [{ caps, loading }] = useAgentCapabilities([model]);
+  const allowed = takesReasoning(caps);
+  const kind = caps?.reasoning_kind ?? null;
+  const refusedWords = Array.from(new Set(
+    providerRefusals(caps, "reasoning")
+      .map((r) => String(r.value ?? "").trim())
+      .filter((w) => w && !(caps?.reasoning_values ?? []).includes(w)),
+  ));
+  const inheritLabel = t("settings.llm.agents.inheritOption");
+  const parsed = allowed ? reasoningValue(value, caps) : null;
+  return (
+    <div id="review-reasoning" className="space-y-2 scroll-mt-20">
+      <div className="grid gap-3 sm:grid-cols-[1fr_2fr]">
+        <div>
+          <Label>{t("settings.llm.base.reasoningLabel")}</Label>
+          {!allowed ? (
+            <Select className="w-full" disabled value="" onChange={() => {}}
+              options={[{ value: "", label: inheritLabel }]} />
+          ) : kind === "effort" ? (
+            <Select className="w-full" disabled={disabled} value={value}
+              onChange={onChange}
+              options={[
+                { value: "", label: t("settings.llm.base.noneOption") },
+                ...(caps?.reasoning_values ?? []).map((v) => ({ value: v, label: v })),
+                ...refusedWords.map((v) => ({
+                  value: v, label: v, disabled: true,
+                  hint: t("settings.llm.agents.refusedOptionHint"),
+                })),
+              ]} />
+          ) : (
+            <Input type="number" min={0} max={AGENT_TOKENS_MAX} disabled={disabled}
+              value={value} placeholder={t("settings.llm.base.noneOption")}
+              onChange={(e) => onChange(e.target.value)} />
+          )}
+          <AgentTest agent={null} model={model} reasoning={parsed}
+            temperature={null} disabled={disabled || loading} />
+        </div>
+        <div className="space-y-2 text-xs text-[var(--color-muted-foreground)]">
+          <p>
+            {loading
+              ? t("settings.llm.agents.reasoningChecking")
+              : !allowed
+                ? t("settings.llm.base.unavailable")
+                : t("settings.llm.base.hint")}
+          </p>
+          {allowed && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button type="button" size="sm" variant="outline"
+                disabled={disabled || !canApply || applying || !value.trim()}
+                onClick={onApply}>
+                {applying ? "…" : t("settings.llm.base.applyAll")}
+              </Button>
+              <span>
+                {overriding.length > 0
+                  ? t("settings.llm.base.applyAllOverriding", { agents: overriding.join(", ") })
+                  : t("settings.llm.base.applyAllHint")}
+              </span>
+            </div>
+          )}
+          {allowed && !canApply && (
+            <p>{t("settings.llm.base.saveModelFirst")}</p>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

@@ -18,6 +18,25 @@ derives it from there.
 
 ---
 
+## [Unreleased]
+
+### LLM
+
+- **Reasoning can be set once for every review agent, and tried before a
+  review.** The PR Review card has a Reasoning control for the base model, and
+  an agent left on "inherit" now runs with it (order: repository agent override,
+  workspace agent override, base, none) -- before, only an agent with its own
+  value got any, so the rest answered `[]` in seconds. **Apply to all agents**
+  saves it as the base and clears the agents' own Reasoning in one save. Every
+  agent row (workspace and per repository) and the base card gain a **Test**
+  button: `POST /api/llm/test-agent` makes one tiny call through the review
+  client and reports honoured (with reported thinking tokens), withheld by
+  Celmis, refused by the provider in its words (recorded as a real run records
+  it), or timed out. It is its own rate-limit class (`CELMIS_RL_LLM_TEST`). The
+  near-empty-reply `ADJUSTED` note now points at the new control.
+
+---
+
 ## [2.3.14] — 2026-10-08
 
 ### LLM
