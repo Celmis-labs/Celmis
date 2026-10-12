@@ -59,6 +59,10 @@ class LLMResult:
     cost_source: str        # "openrouter_actual" | "manual_price" | "proxy_price" | "litellm_estimate" | "unknown"
     provider: str           # extracted from model prefix ("anthropic/..." → "anthropic")
     cached_input_tokens: int = 0  # provider-native prompt cache reads (Anthropic)
+    #: Thinking tokens the provider reports inside `output_tokens`
+    #: (`completion_tokens_details.reasoning_tokens`). 0 means "none reported",
+    #: which is also what a provider that does not itemise them says.
+    reasoning_tokens: int = 0
     #: The model's own output ceiling, when the requested one was above it and
     #: the call was cut down. None when nothing was clamped. Carried on the
     #: result so a caller can put it on its run record: a configured value the
@@ -758,6 +762,7 @@ class LLMClient:
                 cost_source=cost_source,
                 provider=provider,
                 cached_input_tokens=cached_input_tokens,
+                reasoning_tokens=_reasoning_tokens(getattr(response, "usage", None)),
                 max_output_tokens_clamped_to=clamped_to,
                 reasoning_dropped=reasoning_dropped,
                 temperature_dropped=temperature_dropped,
@@ -898,6 +903,21 @@ def _usage_numbers(usage: Any) -> tuple[int, int, int]:
         detail_cached = getattr(details, "cached_tokens", 0) or 0
     cached = int(getattr(usage, "cache_read_input_tokens", 0) or detail_cached or 0)
     return input_tokens, output_tokens, cached
+
+
+def _reasoning_tokens(usage: Any) -> int:
+    """Thinking tokens out of a usage object; 0 when the provider says nothing.
+
+    Same dict-or-wrapper tolerance as `_usage_numbers`: this runs after the
+    model has answered and must never be the thing that fails the call.
+    """
+    details = getattr(usage, "completion_tokens_details", None)
+    value = (details.get("reasoning_tokens") if isinstance(details, dict)
+             else getattr(details, "reasoning_tokens", None))
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _chunk_delta(chunk: Any) -> tuple[str, str]:

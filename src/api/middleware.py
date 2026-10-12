@@ -12,6 +12,7 @@ Rate limiting:
     Path classes + default limits (per minute, override via env):
         auth      (/oauth/token, /api/auth/login)      CELMIS_RL_AUTH=10
         review    (/api/reviews/trigger)               CELMIS_RL_REVIEW=30
+        llm_test  (/api/llm/test-agent: a real, paid call) CELMIS_RL_LLM_TEST=12
         mcp       (/mcp/*)                             CELMIS_RL_MCP=120
         default   (everything else under /api, /oauth) CELMIS_RL_DEFAULT=240
 
@@ -90,6 +91,7 @@ def _limits() -> dict[str, int]:
         "auth": int(os.environ.get("CELMIS_RL_AUTH", "10")),
         "review": int(os.environ.get("CELMIS_RL_REVIEW", "30")),
         "mcp": int(os.environ.get("CELMIS_RL_MCP", "120")),
+        "llm_test": int(os.environ.get("CELMIS_RL_LLM_TEST", "12")),
         "default": int(os.environ.get("CELMIS_RL_DEFAULT", "240")),
         "upload": int(os.environ.get("CELMIS_RL_UPLOAD", "10")),
         "upload_part": int(os.environ.get("CELMIS_RL_UPLOAD_PART", "600")),
@@ -99,7 +101,8 @@ def _limits() -> dict[str, int]:
 def _body_caps() -> dict[str, int]:
     small = int(os.environ.get("CELMIS_MAX_BODY_BYTES", str(1024 * 1024)))
     large = int(os.environ.get("CELMIS_MAX_BODY_BYTES_LARGE", str(5 * 1024 * 1024)))
-    return {"auth": small, "default": small, "review": large, "mcp": large,
+    return {"auth": small, "default": small, "llm_test": small,
+            "review": large, "mcp": large,
             "upload": _upload_cap(), "upload_part": _part_cap()}
 
 
@@ -126,6 +129,8 @@ def _classify(path: str) -> str:
         return "auth"
     if path.startswith("/api/reviews/trigger"):
         return "review"
+    if path.startswith("/api/llm/test-agent"):
+        return "llm_test"
     if path.startswith("/mcp"):
         return "mcp"
     return "default"

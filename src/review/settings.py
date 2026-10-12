@@ -697,9 +697,14 @@ def resolve_agent_llm(
             ws_entry.get("max_output_tokens"),
             default_agent_max_output_tokens(agent, s),
         ),
+        # repo agent entry → workspace agent entry → workspace BASE → none.
+        # The base layer (`review_reasoning`, set on the PR Review card) is
+        # what an agent left on "inherit" runs with; without it the chain
+        # ended at "nothing", and a lite model answered `[]` in seconds.
         reasoning=_first_reasoning(
             policy_entry.get("reasoning"),
             ws_entry.get("reasoning"),
+            workspace_cfg.get("review_reasoning"),
         ),
         temperature=_first_temperature(
             policy_entry.get("temperature"),

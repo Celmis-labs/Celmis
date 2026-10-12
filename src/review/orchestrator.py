@@ -186,8 +186,8 @@ def terse_reply_note(agent_results, pr) -> ParameterAdjustment | None:
         reason=(
             "no findings, and the reply was only a few tokens for a "
             f"{changed}-line change; a model without reasoning tends to answer `[]` — "
-            "consider a model with reasoning or the per-agent `reasoning` setting "
-            "(docs/REVIEW_SETTINGS.md)"
+            "consider a model with reasoning, or set Reasoning on /settings/llm "
+            "and press \"Apply to all agents\" (docs/REVIEW_SETTINGS.md)"
         ),
     )
 

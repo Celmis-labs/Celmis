@@ -61,6 +61,7 @@ from src.api.deps import (
     client_ip,
     current_workspace_id,
     get_current_user,
+    require_prompt_editor,
     require_workspace_admin,
 )
 from src.llm.keys import workspace_slot
@@ -267,6 +268,9 @@ class LLMConfigOut(BaseModel):
     # (two runs of one PR may be judged by different models) for liveness,
     # and that trade is the operator's to make, never ours.
     review_fallback_model: str | None = None
+    # The BASE reasoning level: what a review agent left on "inherit" runs
+    # with. Order: repo agent entry -> workspace agent entry -> this -> none.
+    review_reasoning: str | int | None = None
     # Language the generated vault documentation is written in. Every
     # generation prompt used to hardcode "Пишеш українською" ("You write in
     # Ukrainian"), so a workspace whose people read German got Ukrainian docs
@@ -345,6 +349,10 @@ class LLMConfigIn(BaseModel):
     # this surface. Validated in the handler against the primary this same
     # request saves, not the one it replaces.
     review_fallback_model: str | None = Field(default=None, max_length=200)
+    # Base reasoning for every review agent that does not set its own. None =
+    # keep current; "" = clear. Judged against the review model this same
+    # request saves, with the rules a per-agent value goes through.
+    review_reasoning: str | int | None = Field(default=None)
     # Documentation output language (None = keep current).
     docs_language: str | None = Field(default=None, max_length=16)
     docs_engine: str | None = Field(
@@ -834,6 +842,35 @@ def _review_selection(cfg: dict[str, Any], workspace_id: str) -> tuple[str, str]
     return provider or p.provider, model or p.model
 
 
+def _base_reasoning(cfg: dict[str, Any]) -> str | int | None:
+    """The stored base reasoning level, or None. Blank is "not set"."""
+    raw = cfg.get("review_reasoning")
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw.strip() or None
+    return raw if isinstance(raw, int) else None
+
+
+def _validated_base_reasoning(cfg: dict[str, Any], workspace_id: str) -> str | int | None:
+    """The base reasoning this save may keep, or the 422 saying why not.
+
+    Judged against the review model as it will be AFTER the save, by the very
+    check a per-agent value goes through (`_validate_agent_entry`), so the two
+    levels cannot disagree about what a model accepts.
+    """
+    value = _base_reasoning(cfg)
+    if value is None:
+        return None
+    from src.llm.capabilities import resolve_litellm_model
+    provider, model = _review_selection(cfg, workspace_id)
+    entry: dict[str, Any] = {"reasoning": value}
+    _validate_agent_entry(
+        "review", entry, resolve_litellm_model(model or "", provider), workspace_id,
+    )
+    return entry["reasoning"]
+
+
 def _validated_review_fallback(cfg: dict[str, Any], workspace_id: str) -> str | None:
     """The review fallback model this save may keep — or the 422 saying why not.
 
@@ -1154,6 +1191,148 @@ def get_model_capabilities(
     return ModelCapabilitiesOut(**_capabilities_for(model, workspace_id).as_dict())
 
 
+class TestAgentIn(BaseModel):
+    """What to try: the values as they stand in the form, saved or not."""
+
+    #: A review agent, or None for the PR Review base card.
+    agent: str | None = Field(default=None, max_length=64)
+    #: The model the agent ends up on (the override, else the inherited one).
+    model: str = Field(min_length=1, max_length=200)
+    reasoning: str | int | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+
+
+class TestAgentOut(BaseModel):
+    #: honoured | not_sent | refused | timeout | failed | ok (no reasoning asked)
+    status: str
+    model: str
+    message: str = ""
+    reasoning_requested: str | int | None = None
+    #: What reached the provider: the requested value, or None when it was
+    #: withheld (by our own rules, or because the provider refused it).
+    reasoning_sent: str | int | None = None
+    #: honoured | dropped | None (no temperature asked)
+    temperature_status: str | None = None
+    temperature_message: str = ""
+    #: Thinking tokens the provider reported; 0 = none reported.
+    reasoning_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    latency_ms: int | None = None
+
+
+#: A tiny prompt on purpose: the answer is irrelevant, the parameters are the test.
+_TEST_AGENT_PROMPT = "Reply with the single word: ok"
+_TEST_AGENT_MAX_TOKENS = 512
+_TEST_AGENT_TIMEOUT_S = 30.0
+
+
+@router.post("/test-agent", response_model=TestAgentOut)
+def test_agent_settings(
+    payload: TestAgentIn,
+    user: User = Depends(require_prompt_editor),
+    workspace_id: str = Depends(current_workspace_id),
+) -> TestAgentOut:
+    """One tiny real call with the chosen model, reasoning and temperature.
+
+    Goes through `LLMClient.generate` — the call every review agent makes — so
+    a value the provider refuses is retried without it and RECORDED exactly as
+    a real run records it (`/model-capabilities` then lists the refusal). The
+    answer says which of four things happened: honoured, withheld by our own
+    rules, refused by the provider (in its words), or timed out.
+
+    Rate-limited as the `llm_test` class (src/api/middleware.py): it spends
+    the workspace's money, though only a few hundred tokens of it.
+    """
+    import time
+
+    from src.llm.capabilities import (
+        ADJUST_DROPPED,
+        PARAM_REASONING,
+        PARAM_TEMPERATURE,
+        reasoning_kwargs,
+    )
+    from src.llm.client import build_llm_client
+    from src.llm.errors import classify
+
+    if payload.agent is not None and payload.agent not in _agent_names():
+        raise HTTPException(status_code=422, detail=(
+            f"unknown agent '{payload.agent}' — the review agents are: "
+            f"{', '.join(_agent_names())}"
+        ))
+    model = payload.model.strip()
+    reasoning = payload.reasoning
+    if isinstance(reasoning, bool):
+        raise HTTPException(status_code=422, detail="reasoning must be a level or a token budget")
+    if isinstance(reasoning, str):
+        reasoning = reasoning.strip() or None
+        if reasoning is not None and reasoning.isdigit():
+            reasoning = int(reasoning)
+    if isinstance(reasoning, str) and len(reasoning) > 32:
+        raise HTTPException(status_code=422, detail="reasoning is not a known level")
+    if isinstance(reasoning, int) and not (0 <= reasoning <= AGENT_TOKENS_MAX):
+        raise HTTPException(status_code=422, detail=(
+            f"a reasoning budget must be between 0 and {AGENT_TOKENS_MAX} tokens"
+        ))
+
+    # Only models the workspace could run anyway: on a LiteLLM proxy that is
+    # the proxy's own list, so this endpoint is not a way to call anything else.
+    review_provider, _ = _review_selection(_load_workspace_config(workspace_id), workspace_id)
+    if review_provider == _LITELLM_PROVIDER:
+        _ProxyModels().require(
+            model.removeprefix("litellm_proxy/"), workspace_id, "test model")
+
+    def _out(**kw: Any) -> TestAgentOut:
+        return TestAgentOut(
+            model=model, reasoning_requested=reasoning,
+            latency_ms=int((time.monotonic() - t0) * 1000), **kw)
+
+    t0 = time.monotonic()
+    try:
+        client = build_llm_client(
+            user.id, workspace_id, surface="review", resolve_model=lambda _agent: model)
+        result = client.generate(
+            prompt=_TEST_AGENT_PROMPT, agent=payload.agent or "review",
+            operation="settings_test_agent",
+            temperature=payload.temperature, max_output_tokens=_TEST_AGENT_MAX_TOKENS,
+            reasoning=reasoning, num_retries=0, timeout=_TEST_AGENT_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001 — every failure is an answer here
+        from src.llm.capabilities import ReasoningValueRefused
+        failure = classify(exc)
+        logger.info("test_agent_failed model=%s code=%s", model, failure.code)
+        if isinstance(exc, ReasoningValueRefused):
+            return _out(status="refused", message=str(exc)[:500])
+        if failure.code == "local_timeout" or "timeout" in type(exc).__name__.lower():
+            return _out(status="timeout", message=failure.reason[:500])
+        return _out(status="failed", message=failure.reason[:500])
+
+    def _dropped(parameter: str):
+        return next((a for a in result.parameter_adjustments
+                     if a.parameter == parameter and a.action == ADJUST_DROPPED), None)
+
+    out: dict[str, Any] = {
+        "reasoning_tokens": result.reasoning_tokens,
+        "input_tokens": result.input_tokens,
+        "output_tokens": result.output_tokens,
+    }
+    temp_drop = _dropped(PARAM_TEMPERATURE)
+    if payload.temperature is not None:
+        out["temperature_status"] = "dropped" if temp_drop else "honoured"
+        out["temperature_message"] = temp_drop.reason[:500] if temp_drop else ""
+
+    reasoning_drop = _dropped(PARAM_REASONING)
+    if reasoning is None:
+        return _out(status="ok", **out)
+    if reasoning_drop is not None:
+        return _out(status="refused", message=reasoning_drop.reason[:500], **out)
+    if not reasoning_kwargs(client._capability_model(result.model), reasoning):
+        return _out(status="not_sent", message=(
+            "Celmis did not send it: this model takes no reasoning parameter "
+            "this build can use, or not this value."), **out)
+    return _out(status="honoured", reasoning_sent=reasoning, **out)
+
+
 # ─── Endpoints ───────────────────────────────────────────────────────
 
 
@@ -1302,6 +1481,7 @@ def get_config(
         review_engine=str(cfg.get("review_engine") or "api"),
         review_language=str(cfg.get("review_language") or "en"),
         review_fallback_model=str(cfg.get("review_fallback_model") or "").strip() or None,
+        review_reasoning=_base_reasoning(cfg),
         docs_language=resolve_docs_language(cfg.get("docs_language")),
         docs_engine=str(cfg.get("docs_engine") or "api"),
         embeddings_reindex_needed=reindex_needed,
@@ -1437,6 +1617,7 @@ def _put_config(
         # here — it is how the form says "no fallback any more" — and the
         # falsy-fallthrough would silently resurrect the cleared model.
         "review_fallback_model": _keep("review_fallback_model"),
+        "review_reasoning": _keep("review_reasoning"),
         "docs_language": resolve_docs_language(
             payload.docs_language or prev.get("docs_language")),
         "docs_engine": payload.docs_engine or prev.get("docs_engine") or "api",
@@ -1525,6 +1706,11 @@ def _put_config(
     # primary this save ends up with — whichever of the pair this request
     # changed (see _validated_review_fallback).
     cfg["review_fallback_model"] = _validated_review_fallback(cfg, workspace_id)
+    # Only when this request carries it: a stored level that a later model
+    # change made unsendable is dropped at call time (reasoning_kwargs) and
+    # must not turn an unrelated save into a 422.
+    if "review_reasoning" in sent:
+        cfg["review_reasoning"] = _validated_base_reasoning(cfg, workspace_id)
     if cfg.get("provider") == _LITELLM_PROVIDER and ({"provider", "model"} & sent) \
             and "review" not in (payload.profiles or {}):
         # The legacy top-level pair (mirrors the review profile).
