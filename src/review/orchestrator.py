@@ -617,8 +617,17 @@ class _PRSummaryJob:
                         batch.pull_request.number, res.error)
             return False, ("The overview was degraded; the summary was posted "
                            "without the parts that failed.")
-        return True, (f"Overview and walkthrough of {len(batch.walkthrough)} "
-                      f"file{'s' if len(batch.walkthrough) != 1 else ''} generated.")
+        n_rows = len(batch.walkthrough)
+        if n_rows == 0:
+            # The overview came back and not one per-file row matched a changed
+            # file. "Walkthrough of 0 files" read as if the model had been shown
+            # none; it was shown them all and its rows were unusable.
+            n_files = len(batch.pull_request.changed_files)
+            return True, (f"Overview generated; the walkthrough has no rows — none of "
+                          f"the model's per-file lines named one of the {n_files} "
+                          f"changed file{'s' if n_files != 1 else ''}.")
+        return True, (f"Overview and walkthrough of {n_rows} "
+                      f"file{'s' if n_rows != 1 else ''} generated.")
 
 
 @dataclass

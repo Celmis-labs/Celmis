@@ -225,6 +225,24 @@ def _json_object(text: str) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
+def _canonical_path(raw: str, changed: set[str]) -> str:
+    """The changed file `raw` names, or `raw` itself when it names none.
+
+    The model copies the path out of a markdown digest, so it hands back what
+    it saw dressed the way models dress code: in backticks, with a `./` or a
+    diff-style `a/` / `b/` in front. Matching those byte-for-byte dropped every
+    row of a reply that was otherwise right, and the walkthrough read "0 files".
+    Only an exact match of a path the PR changes is ever returned.
+    """
+    path = raw.strip().strip("`'\"").strip()
+    if path in changed:
+        return path
+    for prefix in ("./", "a/", "b/"):
+        if path.startswith(prefix) and path[len(prefix):] in changed:
+            return path[len(prefix):]
+    return path
+
+
 def parse_reply(text: str, files: list[str]) -> tuple[str, dict[str, str]]:
     """(overview, {path: one line}) from the model's reply; ("", {}) if unreadable.
 
@@ -243,7 +261,7 @@ def parse_reply(text: str, files: list[str]) -> tuple[str, dict[str, str]]:
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            path = str(entry.get("path") or "").strip()
+            path = _canonical_path(str(entry.get("path") or ""), changed)
             line = sanitize_prose(entry.get("summary") or "", FILE_LINE_MAX_CHARS)
             if path in changed and line and path not in walkthrough:
                 walkthrough[path] = line

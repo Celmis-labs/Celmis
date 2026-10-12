@@ -18,6 +18,29 @@ derives it from there.
 
 ---
 
+## [Unreleased]
+
+### LLM
+
+- **A reasoning level that was configured but not sent is now said so.** When
+  Celmis cannot tell what model a workspace-proxy alias runs on (the proxy's
+  `/model/info` gave no answer), the base reasoning level cannot be translated
+  and is withheld. That used to leave no trace on the run, so the agents ran
+  without the level and the record read like a run that had asked for none. Each
+  call now carries a `reasoning` parameter adjustment with the reason (and, for a
+  proxy alias, that `/model/info` did not name the model behind it). The
+  settings Test call reports the same case as "not sent" with the reason rather
+  than "refused".
+
+### Review
+
+- **The "Generate summary" stage no longer says "walkthrough of 0 files" when
+  the overview arrived.** The model's per-file rows were dropped when the path it
+  echoed was dressed (backticks, `./`, `a/`, `b/`); those now match the changed
+  file, and a reply with no usable rows is reported as exactly that.
+
+---
+
 ## [2.3.16] — 2026-10-12
 
 ### LLM
