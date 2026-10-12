@@ -22,3 +22,8 @@ export function forgetAgentSession(): void {
     /* private mode — nothing was stored */
   }
 }
+
+/** Window event the guided tour uses to tuck the agent panel away while it
+ *  points at the page (the panel sits over the settings it is showing) and to
+ *  bring it back afterwards. `detail.open` is the wanted state. */
+export const AGENT_PANEL_EVENT = "celmis:agent-panel";

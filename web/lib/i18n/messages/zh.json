@@ -769,6 +769,8 @@
   "branchPicker.searchPlaceholder": "Search branches…",
   "branchPicker.truncated": "The repository has more branches than were read. Search by name to find the rest.",
   "branchPicker.useCustom": "Use “{name}”",
+  "guide.missing": "此控件当前不在屏幕上，可能取决于您的角色或设置。",
+  "guide.showMe": "带我看看",
   "prPicker.count": "{count} 个匹配",
   "prPicker.label": "打开的 pull request",
   "prPicker.more": "还有 {count} 个——请缩小搜索范围",

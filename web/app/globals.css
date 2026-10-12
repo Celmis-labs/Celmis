@@ -292,6 +292,20 @@
   }
 }
 
+/* "Show me" spotlight: the control the agent points at breathes an outline
+ * while its popover is open. Off for people who asked for less motion. */
+@keyframes celmis-tour-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-brand) 55%, transparent); }
+  50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--color-brand) 0%, transparent); }
+}
+.celmis-tour-pulse {
+  animation: celmis-tour-pulse 1.6s ease-in-out infinite;
+  border-radius: 8px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .celmis-tour-pulse { animation: none; outline: 2px solid var(--color-brand); outline-offset: 3px; }
+}
+
 /* ── driver.js tour popover ──────────────────────────────────────────────
  * Theme overrides for the product tour (lib/tour.ts). Every popover gets
  * `popoverClass: "celmis-tour"`, which both scopes these rules and gives

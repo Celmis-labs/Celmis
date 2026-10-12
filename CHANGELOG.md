@@ -18,6 +18,30 @@ derives it from there.
 
 ---
 
+## [Unreleased]
+
+### Agent
+
+- **"Show me": an answer can point at the control instead of describing it.**
+  A how-to answer in the Celmis agent panel now ends with a **Show me** button
+  when it is about a place in the settings. Pressing it tucks the panel away,
+  opens the page, unfolds what hides the control (an agent's "Model & limits"),
+  scrolls to it, dims the rest of the screen and pulses the control while a
+  small popover says what to do there -- one step or several, across pages
+  (driver.js, already the product tour's engine; updated to 1.9.0). Esc and the
+  close button end it, `prefers-reduced-motion` turns the animation off, and
+  the panel comes back afterwards. The model never invents a place: it may only
+  name controls from a server-side table (`src/automation/tour.py`), which also
+  supplies the page to open; unknown names are dropped, steps are capped at six
+  and arrive as `result.tour` of the answered run. The same names are
+  `data-tour` attributes in the web app (a test keeps the two in step): each
+  review agent's Model & limits button, model, max output tokens, reasoning and
+  Test, and on LLM settings the PR Review, Chat, Agent and Embeddings cards,
+  base reasoning, its Test, Apply to all agents, the review-agents card and the
+  provider keys. New strings are translated in all 16 interface languages.
+
+---
+
 ## [2.3.16] — 2026-10-12
 
 ### LLM

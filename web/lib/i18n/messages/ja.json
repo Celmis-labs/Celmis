@@ -769,6 +769,8 @@
   "branchPicker.searchPlaceholder": "Search branches…",
   "branchPicker.truncated": "The repository has more branches than were read. Search by name to find the rest.",
   "branchPicker.useCustom": "Use “{name}”",
+  "guide.missing": "この項目は現在画面にありません。ロールや設定によって表示されない場合があります。",
+  "guide.showMe": "場所を見せて",
   "prPicker.count": "{count} 件一致",
   "prPicker.label": "オープンなプルリクエスト",
   "prPicker.more": "ほか {count} 件 — 検索を絞り込んでください",

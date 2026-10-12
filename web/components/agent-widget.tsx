@@ -34,7 +34,7 @@ import {
 } from "lucide-react";
 
 import { useT } from "@/lib/i18n";
-import { AGENT_WIDGET_OPEN_KEY } from "@/lib/agent-session";
+import { AGENT_PANEL_EVENT, AGENT_WIDGET_OPEN_KEY } from "@/lib/agent-session";
 import { useToken } from "@/lib/use-token";
 import {
   Reply, newSessionId, sendsOnEnter, useAutomationThread, type Run,
@@ -151,6 +151,17 @@ export function AgentWidget() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, hidden]);
+
+  // A guided tour ("Show me") tucks the panel away while it points at the
+  // page behind it, and brings it back when it ends.
+  useEffect(() => {
+    const onPanel = (e: Event) => {
+      const wanted = (e as CustomEvent<{ open?: boolean }>).detail?.open;
+      if (typeof wanted === "boolean") setOpen(wanted);
+    };
+    window.addEventListener(AGENT_PANEL_EVENT, onPanel);
+    return () => window.removeEventListener(AGENT_PANEL_EVENT, onPanel);
+  }, []);
 
   if (!token || hidden) return null;
 
