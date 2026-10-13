@@ -18,7 +18,7 @@ derives it from there.
 
 ---
 
-## [Unreleased]
+## [2.3.17] — 2026-10-13
 
 ### Fixed
 
