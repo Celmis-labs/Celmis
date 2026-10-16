@@ -324,7 +324,6 @@ def add_repo(
         workspace_id=workspace_id,
         branch=requested_branch,
         enabled=req.auto_review,
-        # Bitbucket cannot poll — force manual mode if user toggled auto for BB
         mode=_default_mode(parsed.provider.value, req.auto_review),
     )
     store.upsert(cfg)
@@ -1043,9 +1042,11 @@ def toggle_auto_review(
     cfg = store.get_in_workspace(workspace_id, slug)
     if cfg is None:
         raise HTTPException(status_code=404, detail="Repo not registered")
+    was_enabled = cfg.enabled
     cfg.enabled = req.enabled
     cfg.mode = _default_mode(cfg.provider, req.enabled, requested_mode=req.mode)
     store.upsert(cfg)
+    restart_polling_cursor(cfg, was_enabled, store)
     return RepoOut(
         slug=cfg.repo_slug,
         provider=cfg.provider,
@@ -2259,7 +2260,7 @@ def delete_repo_webhook(
     """Remove our webhook from the provider (only ours — matched by URL).
 
     Auto-review stays as it was; only the delivery mode falls back to what the
-    provider supports without a webhook (polling, or manual on Bitbucket).
+    provider supports without a webhook (polling, Bitbucket included).
     """
     from src.review import webhook_install as wi
 
@@ -2310,12 +2311,21 @@ def _get(url: str, *, timeout: float = 15.0, gitlab: Any = None,
 
 
 def _default_mode(provider: str, enabled: bool, *, requested_mode: str | None = None) -> str:
-    """Bitbucket auto-review enables manual mode; others default to polling."""
+    """Auto-review on defaults to polling for every provider (Bitbucket too,
+    see src/review/poller.py); off is manual."""
     if not enabled:
         return "manual"
-    if provider == "bitbucket":
-        return "manual"
     return requested_mode or "polling"
+
+
+def restart_polling_cursor(cfg: Any, was_enabled: bool, store: Any) -> None:
+    """Auto-review just switched on for a Bitbucket repository: its polling
+    starts from now, like a webhook installed now. Without this, a cursor
+    left from an earlier spell would sweep every pull request updated since.
+    Call after the upsert."""
+    if cfg.enabled and not was_enabled and cfg.provider == "bitbucket":
+        store.reset_polling_cursor(cfg.user_id, cfg.repo_slug)
+        cfg.last_polled_at = None
 
 
 def _bare_name(query: str) -> str:

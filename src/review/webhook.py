@@ -670,6 +670,7 @@ async def _dispatch_review(
     skip_reason: str | None = None,
     pr_meta: dict | None = None,
     event: str = "",
+    source: str = "webhook",
 ) -> None:
     """Enqueue the review as a durable job. If the sync queue fails,
     fall back to inline dispatch (legacy behaviour) so a broken DB
@@ -681,6 +682,10 @@ async def _dispatch_review(
     trace read, on the pull-requests page, exactly like a webhook that never
     arrived. A draft whose base branch the target patterns exclude is
     recorded as that skip instead: marking it ready would not get it reviewed.
+
+    `source` is who noticed the change: "webhook", or "poller" for a
+    Bitbucket repository polled instead (src/review/poller.py) — the same
+    gates either way, so the two never disagree about a pull request.
     """
     # Derive the tenant from the repo — the webhook is unauthenticated, so this
     # is the ONLY tenant binding. workspace_for_repo returns None when the repo
@@ -740,7 +745,7 @@ async def _dispatch_review(
         )
         await asyncio.to_thread(
             record_gate_skip, provider_name, repo, pr_number,
-            user_id=cfg.user_id, workspace_id=workspace_id, source="webhook",
+            user_id=cfg.user_id, workspace_id=workspace_id, source=source,
             gate_key="gate_enabled", gate_name="Check review is enabled",
             reason=("Auto-review disabled: automatic review is switched off for "
                     "this repository."),
@@ -768,7 +773,7 @@ async def _dispatch_review(
                 provider_name, repo, pr_number, base_ref, workspace_id)
             await asyncio.to_thread(
                 record_gate_skip, provider_name, repo, pr_number,
-                user_id=cfg.user_id, workspace_id=workspace_id, source="webhook",
+                user_id=cfg.user_id, workspace_id=workspace_id, source=source,
                 gate_key="gate_target_branch", gate_name="Validate target branch",
                 reason=skip_sentence(base_ref, patterns),
                 pr_meta=pr_meta,
@@ -780,7 +785,7 @@ async def _dispatch_review(
                     provider_name, repo, pr_number, workspace_id)
         await asyncio.to_thread(
             record_gate_skip, provider_name, repo, pr_number,
-            user_id=cfg.user_id, workspace_id=workspace_id, source="webhook",
+            user_id=cfg.user_id, workspace_id=workspace_id, source=source,
             gate_key="gate_draft", gate_name="Check draft status",
             reason=("Draft: the pull request is a draft; it is reviewed once it "
                     "is marked ready."),
@@ -806,7 +811,7 @@ async def _dispatch_review(
         sentence = messages.t("gate.title", "en", keyword=matched)
         await asyncio.to_thread(
             record_gate_skip, provider_name, repo, pr_number,
-            user_id=cfg.user_id, workspace_id=workspace_id, source="webhook",
+            user_id=cfg.user_id, workspace_id=workspace_id, source=source,
             gate_key="gate_title", gate_name="Check title keywords",
             reason=sentence[:1].upper() + sentence[1:] + ".",
             pr_meta=pr_meta,
@@ -857,7 +862,7 @@ async def _dispatch_review(
                 await asyncio.to_thread(
                     record_gate_skip, provider_name, repo, pr_number,
                     user_id=cfg.user_id, workspace_id=workspace_id,
-                    source="webhook", gate_key="gate_cadence",
+                    source=source, gate_key="gate_cadence",
                     gate_name="Check review cadence",
                     reason=_cadence_reason(decision, registered, gates),
                     pr_meta=pr_meta,
@@ -885,7 +890,7 @@ async def _dispatch_review(
         "user_id": cfg.user_id,
         # Who asked and when — the run's "Review started" and "Queued"
         # stages are written from these when the worker picks the job up.
-        "source": "webhook",
+        "source": source,
         "enqueued_at": now_iso(),
     }
     try:
@@ -897,7 +902,7 @@ async def _dispatch_review(
             kind=KIND_REVIEW,
             payload=payload,
             dedup_key=dedup,
-            enqueued_by=f"webhook:{provider_name}",
+            enqueued_by=f"{source}:{provider_name}",
         )
         return
     except Exception as exc:  # noqa: BLE001

@@ -5,9 +5,10 @@ Strategy per provider (per research May 2026):
                304 doesn't count against rate limit. Cheap.
     GitLab:    Per-project GET /merge_requests?state=opened&updated_after=
                with ETag. New MRs discovered since last poll are reviewed.
-    Bitbucket: Manual mode only — UI lists PRs + user clicks Review.
-               (Bitbucket no aggregated notifications API; per-repo polling
-                is feasible but kept manual per requirements.)
+    Bitbucket: Per-repository GET /pullrequests with a BBQL filter: open,
+               updated since the last poll, into a target branch. No
+               aggregated notifications API, so the requests are budgeted
+               (see `_bitbucket_due`) to stay far below the hourly limit.
 
 Loop:
     Every POLL_INTERVAL_SECONDS (default 60s):
@@ -24,8 +25,11 @@ Concurrency:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
+import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -122,7 +126,8 @@ def _poll_cycle() -> None:
                 instance = instance_for_credential(cred_rows.get((provider, ws)))
                 for cfg in cfg_list:
                     _poll_gitlab_project(secret, cfg, instance)
-            # Bitbucket polling intentionally not supported — manual mode only
+            elif provider == "bitbucket":
+                _poll_bitbucket(secret, cred_rows.get((provider, ws)), cfg_list)
         except Exception as exc:  # noqa: BLE001
             logger.exception(
                 "poller_provider_failed provider=%s workspace=%s err=%s",
@@ -203,6 +208,187 @@ def _poll_github(token: str, configs: list[RepoConfig]) -> None:
         store = get_auto_review_store()
         for cfg in configs:
             store.update_polling_state(cfg.user_id, cfg.repo_slug, etag=new_etag)
+
+
+# ─── Bitbucket: per-repository, budgeted, branch-filtered ─────────────
+#
+# Bitbucket has no account-wide feed, so every polled repository costs one
+# listing per poll. Two limits keep that far below Bitbucket's hourly quota
+# (about 1000 requests per hour per account), which the reviews themselves
+# also draw on:
+#   * a repository is listed at most every BITBUCKET_MIN_INTERVAL_SECONDS;
+#   * the repositories sharing one token together stay within
+#     BITBUCKET_HOURLY_BUDGET listings an hour — with more repositories,
+#     each one is listed less often.
+# The listing asks only for open pull requests updated since the last poll
+# into the repository's target branches, so pull requests into other branches
+# are never sent, and a quiet repository costs one small response.
+#
+# What a listed pull request then goes through is the webhook's own dispatch
+# (`webhook._dispatch_review`, source="poller"): enabled switch, target
+# branch, draft, title keywords, "this commit is already reviewed", cadence,
+# and the queue's dedup with any webhook delivery for the same pull request.
+
+BITBUCKET_MIN_INTERVAL_SECONDS = int(
+    os.environ.get("CELMIS_BITBUCKET_POLL_INTERVAL", "120"))
+BITBUCKET_HOURLY_BUDGET = max(1, int(
+    os.environ.get("CELMIS_BITBUCKET_POLL_BUDGET", "300")))
+
+#: The listing asks from a little before the last poll, so a pull request
+#: updated while that poll ran is not missed; `_BB_SEEN` drops the repeats.
+_BB_OVERLAP_SECONDS = 120
+#: After a failed listing (not a 429), the repository waits this long.
+_BB_ERROR_BACKOFF_SECONDS = 300
+#: After a 429 that names no wait, the token waits this long.
+_BB_RATE_LIMIT_BACKOFF_SECONDS = 600
+
+#: (workspace, repo, pr) → (head, title, draft) last handed to dispatch. A
+#: listing that repeats it (the overlap, or a comment that moved
+#: `updated_on`) dispatches nothing. In memory: after a restart the dispatch's
+#: own "already reviewed" check answers instead.
+_BB_SEEN: dict[tuple[str, str, int], tuple[str, str, bool]] = {}
+_BB_SEEN_MAX = 5000
+#: Monotonic deadlines: per token key, and per repository after an error.
+_BB_BACKOFF_UNTIL: dict[Any, float] = {}
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _bitbucket_interval(repo_count: int) -> int:
+    """Seconds between two listings of one repository when `repo_count`
+    repositories share a token."""
+    return max(BITBUCKET_MIN_INTERVAL_SECONDS,
+               math.ceil(repo_count * 3600 / BITBUCKET_HOURLY_BUDGET))
+
+
+def _bitbucket_due(cfg: RepoConfig, interval: int, now: datetime) -> bool:
+    """True when the repository's last listing is `interval` seconds old (a
+    few seconds early counts: the poll loop ticks at its own pace)."""
+    last = _parse_iso(cfg.last_polled_at)
+    if last is None:
+        return True
+    return (now - last).total_seconds() >= interval - 5
+
+
+def _poll_bitbucket(token: str, cred_row: object, configs: list[RepoConfig]) -> None:
+    """One cycle for the Bitbucket repositories sharing one token."""
+    from src.review.providers.bitbucket import BitbucketPRProvider
+
+    if not configs:
+        return
+    token_key = ("bitbucket-token", configs[0].workspace_id)
+    if time.monotonic() < _BB_BACKOFF_UNTIL.get(token_key, 0.0):
+        return
+    now = datetime.now(UTC)
+    interval = _bitbucket_interval(len(configs))
+    due = [c for c in configs
+           if _bitbucket_due(c, interval, now)
+           and time.monotonic() >= _BB_BACKOFF_UNTIL.get(
+               ("bitbucket-repo", c.workspace_id, c.full_name), 0.0)]
+    if not due:
+        return
+    metadata = getattr(cred_row, "metadata", None)
+    email = metadata.get("atlassian_email") if isinstance(metadata, dict) else None
+    with BitbucketPRProvider(token, email=email,
+                             workspace_id=configs[0].workspace_id) as provider:
+        for cfg in due:
+            if not _poll_bitbucket_repo(provider, cfg, token_key):
+                return  # rate limited: the whole token waits
+
+
+def _poll_bitbucket_repo(provider: Any, cfg: RepoConfig, token_key: Any) -> bool:
+    """List one repository and dispatch what changed. False when Bitbucket
+    rate-limited the token (the caller stops this cycle)."""
+    from src.review.providers.bitbucket import BitbucketRateLimited
+    from src.review.review_defaults import target_branches_for_repo
+
+    store = get_auto_review_store()
+    last = _parse_iso(cfg.last_polled_at)
+    if last is None:
+        # First poll after auto-review was switched on: the baseline. Like a
+        # webhook, polling reviews what changes from now on — the pull
+        # requests already open are not swept (Review runs one on demand).
+        store.update_polling_state(cfg.user_id, cfg.repo_slug)
+        logger.info("bitbucket_poll_baseline repo=%s ws=%s",
+                    cfg.full_name, cfg.workspace_id)
+        return True
+    since = last - timedelta(seconds=_BB_OVERLAP_SECONDS)
+    patterns = target_branches_for_repo("bitbucket", cfg.full_name)
+    try:
+        prs = provider.list_open_pull_requests(
+            cfg.full_name, updated_after=since, target_patterns=patterns)
+    except BitbucketRateLimited as exc:
+        wait = exc.retry_after or _BB_RATE_LIMIT_BACKOFF_SECONDS
+        _BB_BACKOFF_UNTIL[token_key] = time.monotonic() + wait
+        logger.warning("bitbucket_poll_rate_limited repo=%s wait=%ds",
+                       cfg.full_name, int(wait))
+        return False
+    except PullRequestProviderError as exc:
+        _BB_BACKOFF_UNTIL[("bitbucket-repo", cfg.workspace_id, cfg.full_name)] = (
+            time.monotonic() + _BB_ERROR_BACKOFF_SECONDS)
+        logger.warning("bitbucket_poll_failed repo=%s err=%s", cfg.full_name, exc)
+        return True
+
+    for pr in prs:
+        try:
+            _dispatch_bitbucket_pr(cfg, pr)
+        except Exception as exc:  # noqa: BLE001 — one PR never stops the rest
+            logger.warning("bitbucket_poll_dispatch_failed repo=%s pr=%s err=%s",
+                           cfg.full_name, pr.get("id"), type(exc).__name__)
+    store.update_polling_state(cfg.user_id, cfg.repo_slug)
+    logger.debug("bitbucket_poll_done repo=%s listed=%d", cfg.full_name, len(prs))
+    return True
+
+
+def _dispatch_bitbucket_pr(cfg: RepoConfig, pr: dict) -> None:
+    """Hand one listed pull request to the webhook's dispatch, unless the
+    poller already handed over this head with this title and draft state."""
+    import asyncio
+
+    from src.review.review_defaults import run_on_drafts_for_repo
+    from src.review.webhook import _bitbucket_pr_meta, _dispatch_review
+
+    try:
+        number = int(pr.get("id") or 0)
+    except (TypeError, ValueError):
+        return
+    if number <= 0:
+        return
+    head = str(((pr.get("source") or {}).get("commit") or {}).get("hash") or "")
+    title = str(pr.get("title") or "")
+    draft = bool(pr.get("draft"))
+    key = (cfg.workspace_id, cfg.full_name, number)
+    if _BB_SEEN.get(key) == (head, title, draft):
+        return
+    if len(_BB_SEEN) >= _BB_SEEN_MAX:
+        _BB_SEEN.clear()
+    _BB_SEEN[key] = (head, title, draft)
+
+    skip_reason = None
+    if draft and not run_on_drafts_for_repo("bitbucket", cfg.full_name):
+        skip_reason = "draft"
+    logger.info("bitbucket_poll_dispatch repo=%s pr=%d head=%s",
+                cfg.full_name, number, head[:12])
+    asyncio.run(_dispatch_review(
+        "bitbucket", cfg.full_name, number,
+        head_sha=head,
+        # A listing says only "this PR changed", exactly like the delivery:
+        # the same-commit check then keeps a title edit (or Celmis's own
+        # comment moving `updated_on`) from starting another review.
+        event="pullrequest:updated",
+        expected_workspace_id=cfg.workspace_id,
+        skip_reason=skip_reason,
+        pr_meta=_bitbucket_pr_meta({"pullrequest": pr}),
+        source="poller",
+    ))
 
 
 # ─── GitLab: per-project MR polling ───────────────────────────────────

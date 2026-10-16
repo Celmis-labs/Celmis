@@ -291,6 +291,11 @@ services:
       SMTP_FROM: "${SMTP_FROM:-}"
       SMTP_STARTTLS: "${SMTP_STARTTLS:-true}"
       PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-}"
+      # Bitbucket auto-review is polled: at most one listing per repository per
+      # interval (seconds), and per token at most BUDGET listings an hour
+      # (with more repositories each is polled less often).
+      CELMIS_BITBUCKET_POLL_INTERVAL: "${CELMIS_BITBUCKET_POLL_INTERVAL:-120}"
+      CELMIS_BITBUCKET_POLL_BUDGET: "${CELMIS_BITBUCKET_POLL_BUDGET:-300}"
       # Generation model override (free-tier keys have 0 quota on -pro; set
       # to a flash model in .env to make Q&A/reviews work on such keys).
       GEMINI_GENERATION_MODEL: "${GEMINI_GENERATION_MODEL:-gemini-3.1-pro-preview}"

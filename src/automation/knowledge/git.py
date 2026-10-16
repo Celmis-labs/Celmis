@@ -64,7 +64,10 @@ Pull requests Write. "Workspace slug" is the `<workspace>` in
 bitbucket.org/<workspace>/; "Atlassian email" is the address you log in to
 Bitbucket with. Errors: 401 = wrong email or token; 403 = the token cannot
 read that workspace (`workspace:read` missing); 404 = wrong slug. Bitbucket
-is never polled: review it by webhook or by hand.
+is polled too, every ~2 min (budgeted per token), only PRs into the repo's
+target branches; the first poll after auto-review is switched on is a baseline
+(already-open PRs are not reviewed, only new PRs and new commits). A webhook is
+optional and makes it instant.
 
 For the one-press "Install webhook" on Repositories the token must also be
 allowed to manage webhooks: GitHub classic `admin:repo_hook` (or `repo` with

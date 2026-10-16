@@ -144,7 +144,7 @@ function AutoReviewPanel() {
       api<RepoOut>(`/api/repos/${repo.slug}/auto-review`, {
         method: "PATCH",
         token,
-        json: { enabled, mode: repo.provider === "bitbucket" ? "manual" : "polling" },
+        json: { enabled, mode: "polling" },
       }),
     onSuccess: (_d, { enabled }) => {
       toast.success(t(enabled ? "reviews.autoReviewEnabled" : "reviews.autoReviewDisabled"));
@@ -171,7 +171,7 @@ function AutoReviewPanel() {
                 <div className="min-w-0">
                   <div className="text-sm font-medium truncate">{repo.full_name}</div>
                   <div className="text-xs text-[var(--color-muted-foreground)]">
-                    {t(repo.provider === "bitbucket" ? "reviews.manualMode" : "reviews.pollingMode")}
+                    {t("reviews.pollingMode")}
                   </div>
                   {repo.target_branches != null && (
                     <div className="text-xs text-[var(--color-muted-foreground)]">

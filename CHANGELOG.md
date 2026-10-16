@@ -20,6 +20,19 @@ derives it from there.
 
 ## [Unreleased]
 
+### Added
+
+- **Bitbucket auto-review is now polled.** The background poller lists each
+  Bitbucket repository's open PRs updated since the last poll, filtered to the
+  repository's target branches, at most every 120 s per repository
+  (`CELMIS_BITBUCKET_POLL_INTERVAL`); repositories sharing one token stay within
+  `CELMIS_BITBUCKET_POLL_BUDGET` listings per hour (default 300), so with many
+  repositories each is polled less often. The first poll after auto-review is
+  switched on is a baseline: PRs already open are not swept, only new PRs and
+  new commits. A webhook still works (and is instant); a repository with one
+  installed is not polled. Existing enabled Bitbucket repositories in manual
+  mode move to polling once.
+
 ## [2.3.20] — 2026-10-16
 
 ### Added

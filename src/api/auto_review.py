@@ -122,6 +122,17 @@ class AutoReviewStore:
                 conn.execute(
                     "ALTER TABLE auto_review_config ADD COLUMN branch TEXT"
                 )
+            # Once: Bitbucket used to be forced to `manual` whenever its
+            # auto-review was switched on (it could not be polled). It can now,
+            # so those rows become `polling` — the mode they would have been
+            # given. user_version marks it done, so a `manual` chosen later is
+            # never rewritten.
+            if int(conn.execute("PRAGMA user_version").fetchone()[0]) < 1:
+                conn.execute(
+                    "UPDATE auto_review_config SET mode='polling' "
+                    "WHERE provider='bitbucket' AND mode='manual' AND enabled=1"
+                )
+                conn.execute("PRAGMA user_version = 1")
 
     @contextmanager
     def _connect(self):
@@ -368,6 +379,17 @@ class AutoReviewStore:
                        updated_at = ?
                    WHERE user_id=? AND repo_slug=?""",
                 (etag, last_seen_pr_id, now, now, user_id, repo_slug),
+            )
+
+    def reset_polling_cursor(self, user_id: str, repo_slug: str) -> None:
+        """Forget when the repository was last polled — its next poll is a
+        baseline (see poller._poll_bitbucket_repo). `upsert` never writes the
+        polling columns, so this is the one way to clear it."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE auto_review_config SET last_polled_at = NULL "
+                "WHERE user_id=? AND repo_slug=?",
+                (user_id, repo_slug),
             )
 
     def delete(self, user_id: str, repo_slug: str) -> bool:

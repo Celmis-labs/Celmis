@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit
 
@@ -111,6 +111,75 @@ _EMPTY_DIFF_BACKOFF = (2.0, 5.0)
 #: wait this provider accepts (a review is already minutes long).
 _DEFAULT_RETRY_AFTER = 5.0
 _MAX_RETRY_AFTER = 30.0
+
+
+#: The fields the poller's listing asks for — a page of fifty open pull
+#: requests stays a few kilobytes instead of the full objects.
+_POLL_FIELDS = ",".join((
+    "next", "values.id", "values.title", "values.draft", "values.updated_on",
+    "values.source.commit.hash", "values.source.branch.name",
+    "values.destination.branch.name", "values.author.display_name",
+    "values.author.nickname", "values.links.html.href",
+))
+_POLL_PAGELEN = 50
+_GLOB_CHARS = "*?["
+
+
+class BitbucketRateLimited(PullRequestProviderError):
+    """Bitbucket answered 429. `retry_after` is the wait it named, in seconds
+    (None when it named none)."""
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float | None:
+    """The `Retry-After` of a 429 in seconds, or None when absent/unreadable."""
+    try:
+        wait = float(resp.headers.get("Retry-After", ""))
+    except ValueError:
+        return None
+    return wait if math.isfinite(wait) and wait > 0 else None
+
+
+def _bbql_string(value: str) -> str:
+    """A BBQL string literal: double quotes, with `\\` and `"` escaped."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def open_prs_query(updated_after: datetime, target_patterns: list[str] | None) -> str:
+    """The BBQL filter of the poller's listing: open pull requests updated
+    after `updated_after`, into a branch the target patterns may include.
+
+    The branch clause is what keeps the listing small — Bitbucket drops the
+    pull requests into other branches before they are sent. An exact name is
+    an `=`; a glob is a `~` (contains) on its literal prefix, which can only
+    let MORE through, never fewer: the caller still matches every base branch
+    against the patterns. Excludes (`!x`) are left to that match. A pattern
+    with no literal prefix (`*`) or no include at all means every branch, so
+    there is no branch clause.
+    """
+    from src.review.branch_patterns import split_patterns
+
+    stamp = updated_after.astimezone(UTC).isoformat(timespec="seconds")
+    clauses = ['state = "OPEN"', f"updated_on > {stamp}"]
+    includes, _excludes = split_patterns(target_patterns)
+    branch_terms: list[str] = []
+    for pattern in includes:
+        cut = min((pattern.find(c) for c in _GLOB_CHARS if c in pattern),
+                  default=-1)
+        if cut == -1:
+            branch_terms.append(f"destination.branch.name = {_bbql_string(pattern)}")
+        elif cut > 0:
+            branch_terms.append(
+                f"destination.branch.name ~ {_bbql_string(pattern[:cut])}")
+        else:
+            branch_terms = []
+            break
+    if branch_terms:
+        clauses.append("(" + " OR ".join(branch_terms) + ")")
+    return " AND ".join(clauses)
 
 
 def _api_host() -> tuple[str, ...]:
@@ -627,6 +696,50 @@ class BitbucketPRProvider(PullRequestProvider):
             return None
         cid = body.get("id") if isinstance(body, dict) else None
         return cid if isinstance(cid, int) else None
+
+    # ─── Polling: the open pull requests that changed ───
+
+    def list_open_pull_requests(
+        self, repo: str, *, updated_after: datetime,
+        target_patterns: list[str] | None = None, max_pages: int = 4,
+    ) -> list[dict[str, Any]]:
+        """Open pull requests of `repo` updated after `updated_after`, into a
+        branch the target patterns may include (see `open_prs_query`) — what
+        the poller asks once per repository per cycle. One request unless more
+        than fifty changed; `max_pages` bounds it. Raises
+        BitbucketRateLimited on a 429, PullRequestProviderError otherwise."""
+        from urllib.parse import urlencode
+
+        ws, name = self._split_repo(repo)
+        url = (f"{BITBUCKET_API_BASE}/repositories/{ws}/{name}/pullrequests?"
+               + urlencode({
+                   "q": open_prs_query(updated_after, target_patterns),
+                   "pagelen": str(_POLL_PAGELEN), "fields": _POLL_FIELDS,
+               }))
+        base = urlsplit(BITBUCKET_API_BASE)
+        out: list[dict[str, Any]] = []
+        for _page in range(max_pages):
+            resp = self._get_follow(url)
+            if resp.status_code == 429:
+                raise BitbucketRateLimited(
+                    "Bitbucket rate limit reached while listing pull requests",
+                    retry_after=_retry_after_seconds(resp),
+                )
+            self._expect_ok(resp, "Bitbucket pull request listing")
+            try:
+                body = resp.json()
+            except ValueError as exc:
+                raise PullRequestProviderError(
+                    "Bitbucket pull request listing is not JSON") from exc
+            out.extend(v for v in (body.get("values") or []) if isinstance(v, dict))
+            nxt = str(body.get("next") or "")
+            if not nxt:
+                break
+            parts = urlsplit(nxt)
+            if (parts.scheme, parts.hostname) != (base.scheme, base.hostname):
+                break
+            url = nxt
+        return out
 
     # ─── Incremental review: commits, two-commit diff, threads ───
 

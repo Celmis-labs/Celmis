@@ -606,6 +606,28 @@ class TestBitbucket:
         assert fake.state is None
         assert result["review_state"]["done"] == ["withdrew_request-changes"]
 
+    def test_a_token_that_cannot_read_its_own_account_still_sets_the_state(
+        self, settings,
+    ) -> None:
+        # A scoped API token without `read:user` gets 403 on /user, so our
+        # participant state is unknown: every needed call is sent, and a 404
+        # on a DELETE (nothing of ours to take back) still counts as done.
+        fake = _Bitbucket()
+        fake.user_status = 403
+        fake.user_body = {"error": {"message": "lacks scopes"}}
+        result = _bitbucket(fake).post_review(_batch(
+            _pr("bitbucket", "ws/r", 3), [_finding(FindingSeverity.CRITICAL)],
+            actions=PRActions(approve_when_clean=True, request_changes_on_critical=True)))
+        assert fake.calls == ["DELETE approve", "POST request-changes"]
+        assert fake.state == "changes_requested"
+        assert result["review_state"]["failed"] == []
+
+        fake.calls.clear()
+        _bitbucket(fake).post_review(_batch(
+            _pr("bitbucket", "ws/r", 3), actions=PRActions(approve_when_clean=True)))
+        assert fake.calls == ["DELETE request-changes", "POST approve"]
+        assert fake.state == "approved"
+
     def test_off_sends_nothing(self, settings) -> None:
         fake = _Bitbucket()
         fake.state = "approved"

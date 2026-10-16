@@ -40,8 +40,10 @@ SECTIONS = (
   missing or has the wrong secret (check the provider's delivery log: 401/403
   = secret, 500 = no secret generated); the workspace id in the URL is
   another workspace's; GitHub polling with a fine-grained token (needs a
-  classic token with `notifications`, or use a webhook); Bitbucket is never
-  polled; the base branch is not among the policy's "Target branches"; the PR
+  classic token with `notifications`, or use a webhook); Bitbucket is polled
+  only every ~2 min (budgeted per token; with many repos each is polled less
+  often), the first poll is a baseline that skips already-open PRs, and a webhook
+  would make it instant; the base branch is not among the policy's "Target branches"; the PR
   is a draft (and `run_on_drafts` is off); review is off in the policy.
 - Review ran but posted no comments: "Post comments" was off for a manual
   run; findings were below the policy's "Post comments for" level (still in

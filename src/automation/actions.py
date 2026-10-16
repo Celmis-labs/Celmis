@@ -557,7 +557,7 @@ def set_auto_review(
     named and quietly reviewing whatever the provider calls default.
     """
     from src.api.auto_review import get_auto_review_store
-    from src.api.routers.repos import _default_mode
+    from src.api.routers.repos import _default_mode, restart_polling_cursor
 
     store = get_auto_review_store()
     registered = {c.repo_slug: c for c in workspace_configs(actor)}
@@ -589,11 +589,13 @@ def set_auto_review(
     updated: list[dict[str, Any]] = []
     for slug in chosen:
         cfg = registered[slug]
+        was_enabled = cfg.enabled
         cfg.enabled = bool(enabled)
         cfg.mode = _default_mode(cfg.provider, cfg.enabled, requested_mode=mode)
         if branch:
             cfg.branch = branch
         store.upsert(cfg)
+        restart_polling_cursor(cfg, was_enabled, store)
         updated.append({
             "repo": slug, "enabled": cfg.enabled,
             "mode": cfg.mode, "branch": cfg.branch,
