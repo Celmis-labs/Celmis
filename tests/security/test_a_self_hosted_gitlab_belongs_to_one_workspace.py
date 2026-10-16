@@ -197,8 +197,12 @@ def test_a_valid_instance_is_verified_then_stored_beside_the_token(connections, 
                server=srv)
     assert res.ok and res.username == "a-bot"
     assert res.base_url == "https://git.example.com/gitlab"
-    assert [str(r.url) for r in srv.requests] == ["https://git.example.com/gitlab/api/v4/user"]
-    assert srv.requests[0].headers["PRIVATE-TOKEN"] == TOKEN_A
+    # The account first, then the token's own scopes — both on this instance only.
+    assert [str(r.url) for r in srv.requests] == [
+        "https://git.example.com/gitlab/api/v4/user",
+        "https://git.example.com/gitlab/api/v4/personal_access_tokens/self",
+    ]
+    assert all(r.headers["PRIVATE-TOKEN"] == TOKEN_A for r in srv.requests)
     assert srv.kwargs[0]["extra_allowed_hosts"] == ("git.example.com",)
     row = connections.store.load(provider="gitlab", user_id="ws:ws-a")
     assert row.secret == TOKEN_A

@@ -1407,7 +1407,9 @@ class BitbucketPRProvider(PullRequestProvider):
                     logger.warning("bitbucket_viewer_lookup_anonymous")
             else:
                 logger.warning(
-                    "bitbucket_viewer_lookup_failed status=%d", resp.status_code,
+                    "bitbucket_viewer_lookup_failed status=%d — the token needs "
+                    "the read:user:bitbucket scope; without it a re-run cannot "
+                    "remove its old comments", resp.status_code,
                 )
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning("bitbucket_viewer_lookup_error err=%s", exc)

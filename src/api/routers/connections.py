@@ -124,6 +124,15 @@ def list_connections(
     return out
 
 
+@router.get("/scopes")
+def required_scopes(user: User = Depends(get_current_user)) -> dict:
+    """What every git token must be allowed to do — the catalogue the
+    Connections page lists next to each token form."""
+    from src.credentials.token_scopes import catalogue_for_ui
+
+    return catalogue_for_ui()
+
+
 @router.put("/{provider}", response_model=ConnectionVerifyResult)
 def upsert_connection(
     provider: str,
@@ -178,6 +187,14 @@ def upsert_connection(
     # background workers must keep polling and commenting after whoever saved
     # the token leaves. Who *saved* it stays in metadata for the audit trail.
     metadata["saved_by"] = user.id
+    # What the token was found to lack when it was saved, so the card can say
+    # so on every visit — the keys only (src/credentials/token_scopes.py).
+    if verify.token_kind:
+        metadata["token_kind"] = verify.token_kind
+        metadata["scopes_checked"] = verify.scopes_checked
+        metadata["missing_scopes"] = [m["key"] for m in verify.missing_scopes]
+        metadata["missing_optional_scopes"] = [
+            m["key"] for m in verify.missing_optional_scopes]
     store = get_credential_store()
     slot = _slot_for(provider, workspace_id)
     store.save(
@@ -290,9 +307,26 @@ def verify_existing(
 
 
 def _verify_token(provider: str, req: ConnectionUpsert) -> ConnectionVerifyResult:
+    """Verify the token, then say which of the scopes Celmis needs it lacks
+    (src/credentials/token_scopes.py) — git providers only."""
+    result = _verify_token_raw(provider, req)
+    if result.ok and provider in ("github", "gitlab", "bitbucket"):
+        from src.credentials.token_scopes import assess, token_kind
+
+        found = assess(token_kind(provider, req.token),
+                       result.scopes if result.scopes_known else None)
+        result.token_kind = found["kind"]
+        result.scopes_checked = found["checked"]
+        result.missing_scopes = found["missing_required"]
+        result.missing_optional_scopes = found["missing_optional"]
+    return result
+
+
+def _verify_token_raw(provider: str, req: ConnectionUpsert) -> ConnectionVerifyResult:
     """Call provider's /user endpoint."""
     import httpx
 
+    from src.credentials.token_scopes import parse_header_scopes
     from src.http import build_client
 
     try:
@@ -306,10 +340,11 @@ def _verify_token(provider: str, req: ConnectionUpsert) -> ConnectionVerifyResul
                 login = resp.json().get("login")
                 # Classic PATs report granted scopes here; fine-grained PATs
                 # send an empty header (their permissions aren't enumerable).
-                raw = resp.headers.get("X-OAuth-Scopes", "")
-                scopes = [s.strip() for s in raw.split(",") if s.strip()]
+                raw = resp.headers.get("X-OAuth-Scopes")
+                scopes = [s.strip() for s in (raw or "").split(",") if s.strip()]
                 return ConnectionVerifyResult(
                     ok=True, provider=provider, username=login, scopes=scopes,
+                    scopes_known=raw is not None,
                 )
             return ConnectionVerifyResult(
                 ok=False, provider=provider,
@@ -340,8 +375,10 @@ def _verify_token(provider: str, req: ConnectionUpsert) -> ConnectionVerifyResul
                 if resp.status_code == 200:
                     body = resp.json()
                     username = body.get("slug") or body.get("name") or req.workspace
+                    raw = resp.headers.get("x-oauth-scopes")
                     return ConnectionVerifyResult(
                         ok=True, provider=provider, username=str(username),
+                        scopes=parse_header_scopes(raw), scopes_known=raw is not None,
                     )
                 if resp.status_code == 401:
                     return ConnectionVerifyResult(
@@ -355,7 +392,7 @@ def _verify_token(provider: str, req: ConnectionUpsert) -> ConnectionVerifyResul
                         error=f"Bitbucket: token authenticates but cannot access "
                               f"workspace '{req.workspace}' (403). Either the token "
                               f"is scoped to a different workspace, or it lacks "
-                              f"`workspace:read` permission.",
+                              f"the `read:workspace:bitbucket` scope.",
                     )
                 if resp.status_code == 404:
                     return ConnectionVerifyResult(
@@ -377,7 +414,10 @@ def _verify_token(provider: str, req: ConnectionUpsert) -> ConnectionVerifyResul
                 )
             if resp.status_code == 200:
                 username = resp.json().get("username") or resp.json().get("nickname")
-                return ConnectionVerifyResult(ok=True, provider=provider, username=username)
+                raw = resp.headers.get("x-oauth-scopes")
+                return ConnectionVerifyResult(
+                    ok=True, provider=provider, username=username,
+                    scopes=parse_header_scopes(raw), scopes_known=raw is not None)
             return ConnectionVerifyResult(
                 ok=False, provider=provider,
                 error=f"Bitbucket /user returned {resp.status_code}. "
@@ -454,6 +494,25 @@ def _verify_jira(req: ConnectionUpsert) -> ConnectionVerifyResult:
         ok=True, provider=provider, username=name, base_url=instance.base_url)
 
 
+def _gitlab_token_scopes(instance, token: str) -> tuple[list[str], bool]:
+    """The token's own scopes (GET /personal_access_tokens/self, GitLab 15.5+;
+    project and group access tokens answer it too). ([], False) when the
+    instance cannot say — never raises."""
+    from src.sync.gitlab_instance import build_gitlab_client
+
+    try:
+        with build_gitlab_client(instance, token=token, timeout=10.0) as http:
+            resp = http.get(f"{instance.api_base}/personal_access_tokens/self")
+        if resp.status_code != 200:
+            return [], False
+        scopes = (resp.json() or {}).get("scopes")
+    except Exception:  # noqa: BLE001 — optional: unknown, not an error
+        return [], False
+    if not isinstance(scopes, list):
+        return [], False
+    return [str(x) for x in scopes], True
+
+
 def _verify_gitlab(req: ConnectionUpsert) -> ConnectionVerifyResult:
     """URL rules → address rules → GET /api/v4/user with the token.
 
@@ -521,8 +580,10 @@ def _verify_gitlab(req: ConnectionUpsert) -> ConnectionVerifyResult:
             return ConnectionVerifyResult(
                 ok=False, provider=provider,
                 error=f"{where}: /api/v4/user did not answer like GitLab — check the URL")
+        scopes, known = _gitlab_token_scopes(instance, req.token)
         return ConnectionVerifyResult(ok=True, provider=provider, username=str(username),
-                                      base_url=instance.base_url)
+                                      base_url=instance.base_url,
+                                      scopes=scopes, scopes_known=known)
     if resp.status_code in (401, 403):
         return ConnectionVerifyResult(
             ok=False, provider=provider,

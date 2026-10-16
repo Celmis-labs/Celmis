@@ -136,9 +136,21 @@ class ConnectionVerifyResult(BaseModel):
     # GitLab: the normalised instance the token was verified against.
     base_url: str | None = None
     # Token scopes/permissions when the provider exposes them (GitHub classic
-    # PATs report them in a header). Empty when unknown (fine-grained PATs,
-    # GitLab, Bitbucket) — the caller shows "could not read scopes".
+    # PATs and Bitbucket report them in a header, GitLab on
+    # /personal_access_tokens/self). Empty when unknown (fine-grained PATs).
     scopes: list[str] = Field(default_factory=list)
+    #: True when `scopes` is what the provider reported (an empty list then
+    #: means "no scopes"), False when the provider does not say.
+    scopes_known: bool = False
+    # Compared with src/credentials/token_scopes.py: which catalogue entry
+    # applies, whether it could be checked, and what is missing — each item
+    # {key, label, required, purpose}. A token missing a required scope is
+    # still saved (it may be enough for what it is used for); the page says
+    # what will not work.
+    token_kind: str | None = None
+    scopes_checked: bool = False
+    missing_scopes: list[dict] = Field(default_factory=list)
+    missing_optional_scopes: list[dict] = Field(default_factory=list)
 
 
 # ─── Repositories ─────────────────────────────────────────────────────

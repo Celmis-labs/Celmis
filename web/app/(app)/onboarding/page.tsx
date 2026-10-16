@@ -39,6 +39,7 @@ import { SPOTLIGHT_KEY } from "@/lib/tour";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { SectionTabs } from "@/components/section-tabs";
+import { TokenScopes, missingLabels } from "@/components/token-scopes";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -472,7 +473,13 @@ function GitStep({ done, onDone }: { done: boolean; onDone: () => void }) {
     onSuccess: (r) => {
       setResult(r);
       if (r.ok) {
-        toast.success(t("onboarding.git.connected"));
+        if (r.missing_scopes?.length) {
+          toast.warning(t("connections.scopesMissingToast", {
+            name: GIT_PROVIDERS.find((g) => g.value === provider)?.label ?? provider, scopes: missingLabels(r.missing_scopes),
+          }));
+        } else {
+          toast.success(t("onboarding.git.connected"));
+        }
         qc.invalidateQueries({ queryKey: ["connections"] });
         onDone();
       }
@@ -505,6 +512,12 @@ function GitStep({ done, onDone }: { done: boolean; onDone: () => void }) {
                 <Input value={workspace} onChange={(e) => setWorkspace(e.target.value)} /></div>
             </div>
           )}
+          <TokenScopes
+            provider={provider}
+            kind={result?.token_kind}
+            missing={result ? { required: result.missing_scopes, optional: result.missing_optional_scopes } : undefined}
+            scopesChecked={result?.ok ? result.scopes_checked : undefined}
+          />
           <Button size="sm" disabled={!tok.trim() || verify.isPending} onClick={() => verify.mutate()}>
             {verify.isPending ? <Loader2Icon className="h-4 w-4 animate-spin" /> : <ShieldCheckIcon className="mr-1 h-4 w-4" />}
             {t("onboarding.git.verify")}

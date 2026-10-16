@@ -410,6 +410,9 @@ FIELDS: tuple[UiField, ...] = (
     UiField("connection_provider", "connections", "connection-provider:{agent}",
             "The card of one git provider (github, gitlab or bitbucket): "
             "paste the token here."),
+    UiField("connection_scopes", "connections", "connection-scopes:{agent}",
+            "The list of permissions (scopes) the token of one git provider "
+            "needs, with the ones a Verify found missing highlighted."),
     UiField("memories_add", "memories", "memories-add",
             "The Add memory button: a short fact about how the team works."),
     UiField("review_rules_list", "review_rules", "page-review-rules",

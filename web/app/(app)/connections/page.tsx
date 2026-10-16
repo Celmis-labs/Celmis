@@ -22,6 +22,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import { JiraConnectionCard } from "@/components/jira-connection-card";
+import { TokenScopes, missingLabels } from "@/components/token-scopes";
 
 type Provider = "github" | "gitlab" | "bitbucket";
 
@@ -196,6 +197,18 @@ function ProviderCard({
   // a toast disappears before anyone has read "resolves to a private address".
   const [formError, setFormError] = useState<string | null>(null);
   const connected = Boolean(current?.connected);
+  // What the last save / verify found; before either, what the saved
+  // connection recorded (keys only).
+  const [lastResult, setLastResult] = useState<ConnectionVerifyResult | null>(null);
+  const meta = current?.metadata ?? {};
+  const asKeys = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : []);
+  const scopeKind = lastResult?.token_kind ?? (meta.token_kind as string | undefined);
+  const scopeMissing = lastResult
+    ? { required: lastResult.missing_scopes, optional: lastResult.missing_optional_scopes }
+    : { required: asKeys(meta.missing_scopes), optional: asKeys(meta.missing_optional_scopes) };
+  const scopesChecked = lastResult
+    ? lastResult.scopes_checked
+    : typeof meta.scopes_checked === "boolean" ? meta.scopes_checked : undefined;
   // Self-hosted GitLab: the saved instance root ("" = gitlab.com).
   const gitlabUrl =
     provider === "gitlab" ? String(current?.metadata?.gitlab_base_url ?? "") : "";
@@ -217,7 +230,16 @@ function ProviderCard({
       }),
     onSuccess: (res) => {
       setFormError(res.ok ? null : (res.error ?? t("connections.verificationFailed")));
-      if (res.ok) {
+      if (res.ok) setLastResult(res);
+      if (res.ok && res.missing_scopes?.length) {
+        toast.warning(
+          t("connections.scopesMissingToast", {
+            name: info.name,
+            scopes: missingLabels(res.missing_scopes),
+          }),
+        );
+        onUpdated();
+      } else if (res.ok) {
         toast.success(
           res.username
             ? t("connections.connectedAs", { name: info.name, username: res.username })
@@ -251,8 +273,18 @@ function ProviderCard({
         method: "POST",
         token,
       }),
-    onSuccess: (res) =>
-      res.ok
+    onSuccess: (res) => {
+      if (res.ok) setLastResult(res);
+      if (res.ok && res.missing_scopes?.length) {
+        toast.warning(
+          t("connections.scopesMissingToast", {
+            name: info.name,
+            scopes: missingLabels(res.missing_scopes),
+          }),
+        );
+        return;
+      }
+      return res.ok
         ? toast.success(
             t("connections.tokenStillWorks", {
               name: info.name,
@@ -264,7 +296,8 @@ function ProviderCard({
               name: info.name,
               error: res.error ?? t("connections.verifyFailed"),
             }),
-          ),
+          );
+    },
   });
 
   const onSubmit = (e: React.FormEvent<HTMLFormElement>) => {
@@ -323,6 +356,14 @@ function ProviderCard({
               </span>
             )}
           </CardDescription>
+          <div className="mt-3">
+            <TokenScopes
+              provider={provider}
+              kind={scopeKind}
+              missing={scopeMissing}
+              scopesChecked={scopesChecked}
+            />
+          </div>
         </div>
         {connected && (
           <div className="flex items-center gap-2">

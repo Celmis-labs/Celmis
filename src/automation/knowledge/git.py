@@ -59,8 +59,13 @@ posted). gitlab.com requires an expiry date, at most 400 days. The value
 starts with `glpat-` and is shown once.
 
 Bitbucket — Atlassian API token (Atlassian account → Security → Create API
-token), workspace-scoped recommended, permissions Repositories Admin/Write and
-Pull requests Write. "Workspace slug" is the `<workspace>` in
+token), workspace-scoped recommended. Required scopes: `read:user:bitbucket`,
+`read:workspace:bitbucket`, `read:repository:bitbucket`,
+`read:pullrequest:bitbucket`, `write:pullrequest:bitbucket`; optional:
+`write:repository:bitbucket` ("Apply fix"), `read:webhook:bitbucket` +
+`write:webhook:bitbucket` ("Install webhook"). "Verify" on a Git connection
+(and the list under each token form) now names the scopes the token lacks, as
+required or optional. "Workspace slug" is the `<workspace>` in
 bitbucket.org/<workspace>/; "Atlassian email" is the address you log in to
 Bitbucket with. Errors: 401 = wrong email or token; 403 = the token cannot
 read that workspace (`workspace:read` missing); 404 = wrong slug. Bitbucket

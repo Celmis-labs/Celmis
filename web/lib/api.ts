@@ -167,6 +167,27 @@ export interface ConnectionVerifyResult {
   scopes?: string[];
   /** GitLab / Jira: the normalised site the token was verified against. */
   base_url?: string | null;
+  /** Git tokens: which catalogue entry the token matched, and whether its
+   *  scopes could be read at all (fine-grained GitHub tokens cannot). */
+  token_kind?: string | null;
+  scopes_checked?: boolean;
+  scopes_known?: boolean;
+  missing_scopes?: ScopeNeed[];
+  missing_optional_scopes?: ScopeNeed[];
+}
+
+/** One permission a git token needs (src/credentials/token_scopes.py). */
+export interface ScopeNeed {
+  key: string;
+  label: string;
+  required: boolean;
+  purpose: string;
+}
+
+/** GET /api/connections/scopes */
+export interface ScopeCatalogue {
+  kinds: Record<string, ScopeNeed[]>;
+  default_kind: Record<string, string>;
 }
 
 /** GET /api/task-context/issue/{key}: one Jira task as a review reads it. */

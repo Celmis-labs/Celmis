@@ -20,8 +20,19 @@ derives it from there.
 
 ## [Unreleased]
 
+## [2.3.21] — 2026-10-16
+
 ### Added
 
+- **Git connections say which token scopes they need — and which are missing.**
+  The Connections page and the onboarding git step list every scope a GitHub,
+  GitLab or Bitbucket token needs, as the provider's token page names it, with
+  what breaks without it. Save and Verify compare it with the scopes the
+  provider reports (`X-OAuth-Scopes`, GitLab `personal_access_tokens/self`,
+  Bitbucket `x-oauth-scopes`) and warn about the missing ones; the result is
+  kept on the connection. A Bitbucket API token without `read:user:bitbucket`
+  is now flagged: without it re-runs cannot remove their old comments.
+  `GET /api/connections/scopes` returns the catalogue.
 - **Bitbucket auto-review is now polled.** The background poller lists each
   Bitbucket repository's open PRs updated since the last poll, filtered to the
   repository's target branches, at most every 120 s per repository
