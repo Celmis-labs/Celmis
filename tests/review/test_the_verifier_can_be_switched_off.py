@@ -108,7 +108,7 @@ def run(monkeypatch):
         comp_mod, "run_compliance", lambda ctx: AgentRunResult(agent="compliance"),
     )
 
-    def _run(agents, *, policy, verdict='{"keep": [], "reasons": {}}'):
+    def _run(agents, *, policy, verdict='{"keep": [], "reasons": {"0": "defined above", "1": "defined above", "2": "defined above", "3": "defined above"}}'):
         llm = MagicMock()
         reply = MagicMock()
         reply.text, reply.input_tokens, reply.output_tokens = verdict, 10, 5

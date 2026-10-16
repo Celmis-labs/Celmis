@@ -38,9 +38,25 @@ So the split here:
 
     llm_pass()    optional. "verifier" in a repo policy's `disabled_agents`
                   switches it off — and ONLY it. Proven findings never enter
-                  it. Fails open on every error.
+                  it. Fails open on every error. Runs from
+                  `REVIEW_VERIFIER_MIN_FINDINGS` judgeable findings (default
+                  1), each judged WITH repository evidence.
 
     verify()      the two in sequence, for callers that want both.
+
+What the evidence changes, and what it does not. The veto above was measured
+with a prompt that held the first five hunks of the PR cut at 2000 characters.
+It could not refute the false positives a cheap model produces most — "undefined
+constant X" when X lives in another file, "undefined variable" when the loop
+that sets it is above the hunk, "missing check" when the check is many lines
+up — because the refutation is not in the diff. `verifier_evidence.py` now puts
+that code in front of it, per finding, and the prompt drops only on REFUTATION
+by that evidence, with a one-line reason per drop (a drop without a reason is
+kept). The "risk, not a consequence" and severity rules that deleted true
+positives are gone. What has NOT been measured: this has not been re-run on the
+benchmark above, so there is no number here for its effect on precision or
+recall; the stage record (judged / dropped, with reasons) is how to audit it
+on real reviews.
 
 Before the split the whole of this lived in `verify()`, so switching the veto
 off also switched off the dedup and the sort — the providers' cap then
@@ -55,6 +71,7 @@ import re
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any
 
 from src.review.agents.base import (
     _REASONING_BLOCK,
@@ -182,7 +199,15 @@ def _stable_key(f: Finding) -> tuple[str, int, str, str, str]:
 
 
 def _title_tokens(title: str) -> frozenset[str]:
-    return frozenset(re.findall(r"[a-z0-9]+", (title or "").lower()))
+    """Word tokens of a title, in any script.
+
+    This was `[a-z0-9]+`, which reads a review written in Ukrainian, Polish,
+    German or Greek as a handful of identifiers and nothing else: every
+    Cyrillic title scored 0.0 against every other, so neither clustering pass
+    folded anything and one defect copied into six files posted six comments.
+    `[^\\W_]+` is "letters and digits" in every script; underscores still
+    split, so `snake_case` identifiers tokenize as they did."""
+    return frozenset(re.findall(r"[^\W_]+", (title or "").lower()))
 
 
 def title_jaccard(a: str, b: str) -> float:
@@ -235,6 +260,47 @@ class VerifierResult:
     #: review with the most unfiltered noise in it — and the author reading
     #: that noise has no way to know it was never filtered.
     error: str | None = None
+    #: How many findings the veto actually judged (0 = it did not run).
+    judged: int = 0
+    #: One entry per finding the veto dropped: title, file, line and the
+    #: reason it gave, which cites evidence. The run record carries these so a
+    #: dropped finding can be audited — "the filter ate something" is the
+    #: claim this module exists to stop making.
+    dropped_findings: list[dict[str, object]] = field(default_factory=list)
+    #: Findings the model dropped WITHOUT a reason and that were kept anyway.
+    unjustified_drops: int = 0
+    #: What the evidence gatherer collected (`EvidenceBundle.stats`).
+    evidence: dict[str, object] = field(default_factory=dict)
+    #: Model calls the veto took (see `_VetoOutcome.attempts`).
+    veto_attempts: int = 0
+
+
+@dataclass
+class _VetoOutcome:
+    """What one `_llm_verify` call produced."""
+
+    verified: list[Finding]
+    dropped: list[tuple[Finding, str]] = field(default_factory=list)
+    tokens_in: int = 0
+    tokens_out: int = 0
+    error: str | None = None
+    unjustified: int = 0
+    evidence: dict[str, object] = field(default_factory=dict)
+    #: Model calls the pass took: 2 when the first reply was unreadable or
+    #: timed out and the one extra ask was spent.
+    attempts: int = 0
+
+
+#: `"keep": [0, 2]` on its own, for a reply whose wrapper is not valid JSON.
+_KEEP_ARRAY = re.compile(r'"keep"\s*:\s*\[\s*((?:\d+\s*(?:,\s*\d+\s*)*)?)\]')
+
+
+#: One `"<idx>": "<reason>"` pair of a `reasons` object.
+_REASON_ENTRY = re.compile(r'"#?(\d+)"\s*:\s*"((?:[^"\\\n]|\\.){1,400})"')
+
+
+#: Extra asks the veto may spend on an unreadable reply or a timeout.
+_VETO_EXTRA_ATTEMPTS = 1
 
 
 def prefilter(
@@ -311,7 +377,7 @@ def prefilter(
         by_rule[(f.file_path, f.rule_id)].append(f)
     groups: list[list[Finding]] = []
     for bucket in by_rule.values():
-        for cluster in _cluster_by_title(bucket):
+        for cluster in _cluster_by_root_cause(_cluster_by_title(bucket)):
             groups.append(cluster)
             result.dropped_near_duplicate += len(cluster) - 1
 
@@ -348,6 +414,38 @@ def _cluster_by_title(bucket: list[Finding]) -> list[list[Finding]]:
         else:
             clusters.append([f])
     return clusters
+
+
+def _cluster_by_root_cause(clusters: list[list[Finding]]) -> list[list[Finding]]:
+    """Fold clusters of ONE (file, rule) bucket that are about the same things.
+
+    The title comparison above needs shared WORDS, and one defect reported at
+    three places by a model is three differently worded sentences (see
+    `root_cause_keys`). This pass compares what the findings are about — the
+    variable, the function, the tag — instead. Same shape as the title pass,
+    for the same reason: a cluster is joined only through its FIRST member, so
+    every fold rests on one comparison a reader can repeat, and a chain of
+    pairwise overlaps cannot drag an unrelated finding in.
+
+    Held back: proven findings (a lookup's title is a template, see
+    `_folds_across_files`) and findings that name nothing usable.
+    """
+    from src.review.agents.root_cause_keys import root_cause_keys, share_a_root_cause
+
+    out: list[list[Finding]] = []
+    keys: list[frozenset[str]] = []
+    for cluster in clusters:
+        rep = cluster[0]
+        k = frozenset() if rep.is_proven else root_cause_keys(rep.title, rep.body)
+        for i, target in enumerate(out):
+            if share_a_root_cause(k, keys[i]):
+                target.extend(cluster)
+                target.sort(key=_stable_key)
+                break
+        else:
+            out.append(list(cluster))
+            keys.append(k)
+    return out
 
 
 def _folds_across_files(group: list[Finding]) -> bool:
@@ -609,29 +707,31 @@ class VerifierAgent:
     ) -> VerifierResult:
         """The optional LLM veto, over findings the prefilter already shaped.
 
-        Skipped below three judgeable findings — the pass exists to thin a
-        pile, and two findings are not a pile. Fails open: an unreachable or
-        unreadable verifier keeps everything.
+        Runs from `ReviewSettings.verifier_min_findings` judgeable findings
+        up (default 1). It used to need three — "the pass exists to thin a
+        pile" — which held while the veto saw only the diff; with repository
+        evidence (`verifier_evidence.py`) one finding is worth judging, and a
+        typical pull request has one or two, which is where the false
+        positives were. Fails open: an unreachable or unreadable verifier
+        keeps everything.
 
         Proven findings never enter it. The pass exists to catch a model's
         hallucinations, and a proven finding is not a model's judgement — it
         is a lookup (a purl+version that matched an OSV advisory, an ast-grep
-        rule that fired). Worse, the pass's own prompt says to drop findings
-        whose line is not in the diff, and a CVE finding anchored in a
-        lockfile that review filtering kept OUT of the hunks fails that test
-        while being exactly right. An LLM must not be able to veto a database.
+        rule that fired). Worse, a lockfile CVE finding is anchored in a file
+        review filtering kept OUT of the hunks, and an LLM must not be able to
+        veto a database.
         """
         import time
 
         t0 = time.time()
         result = VerifierResult(kept=list(findings))
         judgeable = [f for f in findings if getattr(f, "evidence_kind", "") != "proven"]
-        if len(judgeable) >= 3:
-            verified, llm_dropped, tokens_in, tokens_out, error = self._llm_verify(
-                judgeable, context,
-            )
-            result.error = error
-            survivors = {id(f) for f in verified}
+        minimum = max(1, int(getattr(get_review_settings(), "verifier_min_findings", 1) or 1))
+        if len(judgeable) >= minimum:
+            out = self._llm_verify(judgeable, context)
+            result.error = out.error
+            survivors = {id(f) for f in out.verified}
             # Filtered in place rather than `proven + verified`, so the
             # severity order the prefilter established survives the pass —
             # the providers cap on position.
@@ -639,9 +739,17 @@ class VerifierAgent:
                 f for f in findings
                 if getattr(f, "evidence_kind", "") == "proven" or id(f) in survivors
             ]
-            result.dropped_llm_filter = llm_dropped
-            result.tokens_in = tokens_in
-            result.tokens_out = tokens_out
+            result.judged = len(judgeable)
+            result.dropped_llm_filter = len(out.dropped)
+            result.dropped_findings = [
+                {"title": f.title, "file": f.file_path, "line": f.line, "reason": why}
+                for f, why in out.dropped
+            ]
+            result.unjustified_drops = out.unjustified
+            result.evidence = out.evidence
+            result.veto_attempts = out.attempts
+            result.tokens_in = out.tokens_in
+            result.tokens_out = out.tokens_out
         result.elapsed_seconds = time.time() - t0
         return result
 
@@ -677,15 +785,29 @@ class VerifierAgent:
         self,
         findings: list[Finding],
         context: AgentContext,
-    ) -> tuple[list[Finding], int, int, int, str | None]:
-        """Optional LLM pass — drop hallucinated/over-confident findings.
+    ) -> _VetoOutcome:
+        """Optional LLM pass — drop findings the repository's code refutes.
 
-        Returns (verified, dropped_count, tokens_in, tokens_out, error).
-        `error` is None when the pass ran; a user-safe sentence when it could
-        not, in which case every finding is kept — see `VerifierResult.error`.
-        If the LLM call fails — pass through all findings (fail-open).
+        `error` on the outcome is None when the pass ran; a user-safe sentence
+        when it could not, in which case every finding is kept — see
+        `VerifierResult.error`. If the LLM call fails — pass through all
+        findings (fail-open). Gathering evidence is the first step and fails
+        open on its own: no evidence is the old prompt, not an error.
         """
-        prompt = self._build_verification_prompt(findings, context)
+        from src.review.agents.verifier_evidence import (
+            EvidenceBundle,
+            gather_evidence,
+        )
+
+        try:
+            bundle = gather_evidence(
+                findings, context.pull_request,
+                provider=getattr(context, "code_provider", None))
+        except Exception as exc:  # noqa: BLE001 - never fail a review for this
+            logger.warning("verifier_evidence_unavailable err=%s", exc)
+            bundle = EvidenceBundle()
+        prompt = self._build_verification_prompt(findings, context, bundle)
+        evidence_stats = dict(bundle.stats)
 
         # Every other agent takes `context.llm_client` when the orchestrator
         # built one and only falls back to the native client otherwise. This
@@ -711,72 +833,49 @@ class VerifierAgent:
         # index. So 1024 is now the FLOOR (ReviewSettings.
         # verifier_max_output_tokens) and a per-agent setting can lift it.
         llm = agent_llm_settings(context, "verifier")
-        try:
-            if context.llm_client is not None:
-                response = context.llm_client.generate(
-                    prompt=prompt,
-                    agent="verifier",
-                    mode="qa",
-                    operation="review_verifier",
-                    repo=context.pull_request.repo_slug,
-                    system_instruction=verifier_system_prompt(context),
-                    temperature=llm.temperature,
-                    max_output_tokens=llm.max_output_tokens,
-                    reasoning=llm.reasoning,
-                    # Stated, like the retry budget beside it and for the same
-                    # reason: `generate`'s 120s default was inherited by every
-                    # review call and could be changed by nobody. This pass
-                    # asks for a large structured reply from a reasoning model
-                    # over every finding in the review — the slowest single
-                    # call the pipeline makes.
-                    timeout=_llm_timeout(),
-                    num_retries=0,
-                )
-            else:
-                # Through the gateway like everything else. This was the last
-                # place in review that reached Google directly.
-                from src.llm.client import build_llm_client
+        attempts = 0
+        tokens_in = tokens_out = 0
+        response = None
+        keep_indices: list[int] | None = None
+        while True:
+            attempts += 1
+            try:
+                response = self._call_llm(prompt, context, llm)
+            except Exception as exc:  # noqa: BLE001
+                from src.llm.errors import TRANSIENT, classify
 
-                response = build_llm_client(
-                    getattr(context, "user_id", None) or "system",
-                    context.workspace_id,
-                    surface="review",
-                    resolve_model=_review_model(context.workspace_id),
-                ).generate(
-                    agent="verifier",
-                    prompt=prompt,
-                    mode="qa",
-                    operation="review_verifier",
-                    repo=context.pull_request.repo_slug,
-                    system_instruction=verifier_system_prompt(context),
-                    temperature=llm.temperature,
-                    max_output_tokens=llm.max_output_tokens,
-                    reasoning=llm.reasoning,
-                    # Stated, like the retry budget beside it and for the same
-                    # reason: `generate`'s 120s default was inherited by every
-                    # review call and could be changed by nobody. This pass
-                    # asks for a large structured reply from a reasoning model
-                    # over every finding in the review — the slowest single
-                    # call the pipeline makes.
-                    timeout=_llm_timeout(),
-                    num_retries=0,
-                )
-        except Exception as exc:  # noqa: BLE001
-            from src.llm.errors import classify
+                failure = classify(exc)
+                if (failure.disposition == TRANSIENT
+                        and attempts <= _VETO_EXTRA_ATTEMPTS):
+                    # A timeout or a provider blip is the one failure worth
+                    # a second ask; a throttle or a terminal error is not
+                    # (resending into a window that just refused is the
+                    # bug num_retries=0 above was written to end).
+                    logger.info("verifier_llm_retry code=%s", failure.code)
+                    continue
+                logger.warning("verifier_llm_failed code=%s err=%s — pass-through",
+                               failure.code, exc)
+                # Fail open, and SAY SO. `failure.reason` and not `exc`: a
+                # provider's exception text is not something this product puts
+                # in front of a user, which is the whole point of the errors
+                # module.
+                return _VetoOutcome(findings, tokens_in=tokens_in,
+                                    tokens_out=tokens_out, error=failure.reason,
+                                    evidence=evidence_stats, attempts=attempts)
 
-            failure = classify(exc)
-            logger.warning("verifier_llm_failed code=%s err=%s — pass-through",
-                           failure.code, exc)
-            # Fail open, and SAY SO. `failure.reason` and not `exc`: a
-            # provider's exception text is not something this product puts in
-            # front of a user, which is the whole point of the errors module.
-            return findings, 0, 0, 0, failure.reason
+            text = getattr(response, "text", "") or ""
+            tokens_in += int(getattr(response, "input_tokens", 0) or 0)
+            tokens_out += int(getattr(response, "output_tokens", 0) or 0)
+            keep_indices = self._parse_keep_indices(text, total=len(findings))
+            if keep_indices is not None or attempts > _VETO_EXTRA_ATTEMPTS:
+                break
+            # The reply arrived and could not be read. A sampled answer is not
+            # a fixed one: the same prompt asked again usually comes back as
+            # JSON, and the alternative is every finding of the review kept
+            # unfiltered.
+            logger.info("verifier_unreadable_retry attempt=%d", attempts)
 
-        text = getattr(response, "text", "") or ""
-        tokens_in = int(getattr(response, "input_tokens", 0) or 0)
-        tokens_out = int(getattr(response, "output_tokens", 0) or 0)
 
-        keep_indices = self._parse_keep_indices(text, total=len(findings))
         if keep_indices is None:
             # The reply could not be read. Fail OPEN — an unreadable verifier
             # must not silently delete a real finding.
@@ -786,18 +885,166 @@ class VerifierAgent:
             # was paid for, and its reply could not be read. Same consequence
             # as an unreachable verifier — every finding kept, unfiltered —
             # so the same disclosure.
-            return (findings, 0, tokens_in, tokens_out,
-                    "the verifier's reply could not be read")
+            return _VetoOutcome(
+                findings, tokens_in=tokens_in, tokens_out=tokens_out,
+                error="the verifier's reply could not be read",
+                evidence=evidence_stats, attempts=attempts)
 
-        verified = [findings[i] for i in keep_indices if 0 <= i < len(findings)]
-        dropped = len(findings) - len(verified)
-        return verified, dropped, tokens_in, tokens_out, None
+        keep = {i for i in keep_indices if 0 <= i < len(findings)}
+        reasons = self._parse_reasons(text)
+        verified: list[Finding] = []
+        dropped: list[tuple[Finding, str]] = []
+        unjustified = 0
+        overridden = 0
+        items = list(getattr(bundle, "items", None) or [])
+        for i, f in enumerate(findings):
+            if i in keep:
+                verified.append(f)
+                continue
+            why = reasons.get(i, "")
+            ev = items[i] if i < len(items) else None
+            if why and getattr(ev, "non_pr_source", False):
+                # The evidence behind this drop includes code that is NOT the
+                # pull request's (the clone's HEAD, newer than the PR, or the
+                # provider's default branch). A definition found only there
+                # may have appeared after the PR was written - the typo'd
+                # constant "defined" by a later merge. Unclear, so kept;
+                # decided here in code, not left to the prompt's wording.
+                overridden += 1
+                verified.append(f)
+                continue
+            if not why:
+                # A drop must say what refutes the claim. One that does not
+                # is a model that gave up on a finding, not one that checked
+                # it — and "keep unless refuted" means this is kept.
+                unjustified += 1
+                verified.append(f)
+                continue
+            dropped.append((f, why))
+        if unjustified:
+            logger.info("verifier_unjustified_drops_kept n=%d", unjustified)
+        if overridden:
+            logger.info("verifier_non_pr_evidence_drops_kept n=%d", overridden)
+            evidence_stats["drops_kept_non_pr_evidence"] = overridden
+        return _VetoOutcome(
+            verified, dropped, tokens_in, tokens_out, None, unjustified,
+            evidence_stats, attempts)
+
+    def _call_llm(self, prompt: str, context: AgentContext, llm: Any) -> Any:
+        """One veto call through the gateway client; raises on provider error.
+
+        Split out of `_llm_verify` so the caller can ask twice (an unreadable
+        reply, a timeout) without writing the two transports out twice.
+        """
+        if context.llm_client is not None:
+            return context.llm_client.generate(
+                prompt=prompt,
+                agent="verifier",
+                mode="qa",
+                operation="review_verifier",
+                repo=context.pull_request.repo_slug,
+                system_instruction=verifier_system_prompt(context),
+                temperature=llm.temperature,
+                max_output_tokens=llm.max_output_tokens,
+                reasoning=llm.reasoning,
+                # Stated, like the retry budget beside it and for the same
+                # reason: `generate`'s 120s default was inherited by every
+                # review call and could be changed by nobody. This pass
+                # asks for a large structured reply from a reasoning model
+                # over every finding in the review — the slowest single
+                # call the pipeline makes.
+                timeout=_llm_timeout(),
+                num_retries=0,
+            )
+        else:
+            # Through the gateway like everything else. This was the last
+            # place in review that reached Google directly.
+            from src.llm.client import build_llm_client
+
+            return build_llm_client(
+                getattr(context, "user_id", None) or "system",
+                context.workspace_id,
+                surface="review",
+                resolve_model=_review_model(context.workspace_id),
+            ).generate(
+                agent="verifier",
+                prompt=prompt,
+                mode="qa",
+                operation="review_verifier",
+                repo=context.pull_request.repo_slug,
+                system_instruction=verifier_system_prompt(context),
+                temperature=llm.temperature,
+                max_output_tokens=llm.max_output_tokens,
+                reasoning=llm.reasoning,
+                # Stated, like the retry budget beside it and for the same
+                # reason: `generate`'s 120s default was inherited by every
+                # review call and could be changed by nobody. This pass
+                # asks for a large structured reply from a reasoning model
+                # over every finding in the review — the slowest single
+                # call the pipeline makes.
+                timeout=_llm_timeout(),
+                num_retries=0,
+            )
+
+    @staticmethod
+    def _parse_reasons(text: str) -> dict[int, str]:
+        """`reasons` from the reply as {index: one-line reason}; {} when there
+        are none or they cannot be read. Never raises: a reason is a label on
+        a drop, and an unreadable one means the drop is not honoured."""
+        import json
+
+        cleaned = _REASONING_BLOCK.sub(" ", text)
+        for m in re.finditer(r"\{", cleaned):
+            span = balanced_json_span(cleaned[m.start():], "{")
+            if not span:
+                continue
+            try:
+                data = json.loads(span, strict=False)
+            except json.JSONDecodeError:
+                continue
+            raw = data.get("reasons") if isinstance(data, dict) else None
+            if isinstance(raw, dict):
+                out: dict[int, str] = {}
+                for k, v in raw.items():
+                    try:
+                        idx = int(str(k).strip().lstrip("#"))
+                    except ValueError:
+                        continue
+                    one = " ".join(str(v or "").split())
+                    if one:
+                        out[idx] = one[:300]
+                return out
+            if isinstance(raw, list):
+                return {}
+        # The wrapper was not valid JSON but the reasons may still be
+        # readable one by one: `"3": "line 12 defines it"` after the key.
+        at = cleaned.find('"reasons"')
+        if at >= 0:
+            out = {}
+            for m in _REASON_ENTRY.finditer(cleaned, at):
+                one = " ".join(m.group(2).split())
+                if one:
+                    out[int(m.group(1))] = one[:300]
+            return out
+        return {}
+        return {}
 
     @staticmethod
     def _build_verification_prompt(
-        findings: list[Finding], context: AgentContext,
+        findings: list[Finding],
+        context: AgentContext,
+        evidence: object | None = None,
     ) -> str:
+        """One section per finding: the claim, then everything the reader
+        would open to check it — the file around the line, the PR's changes to
+        that file, and what a search of the repository found for the symbols
+        the claim names (`verifier_evidence.render_evidence`). Without
+        `evidence` the section holds the claim and the finding's own hunks,
+        which is what is known without reading the repository."""
+        from src.review.agents.verifier_evidence import FindingEvidence, render_evidence
+
         pr = context.pull_request
+        items = list(getattr(evidence, "items", None) or [])
         lines = [
             f"## PR: {pr.title}",
             "",
@@ -810,23 +1057,29 @@ class VerifierAgent:
                 f"rule: {f.rule_id}, confidence: {f.confidence})"
             )
             lines.append(f"**Location:** {f.file_path}:{f.line}")
-            lines.append(f"**Title:** {f.title}")
-            lines.append(f"**Body:** {f.body[:500]}")
+            ev = items[i] if i < len(items) else None
+            if ev is None:
+                hunks = "\n".join(
+                    h.content for h in pr.hunks if h.file_path == f.file_path)
+                ev = FindingEvidence(hunks=hunks[:2000])
+            rendered = render_evidence(ev)
+            # The evidence first, the claim after it: a reader who has the
+            # claim in mind reads the code for what supports it.
             lines.append("")
-
-        lines.append("## Diff (subset)")
-        lines.append("")
-        # Truncate diff aggressively — the verifier only needs context
-        for hunk in pr.hunks[:5]:
-            lines.append(f"### {hunk.file_path}")
-            lines.append("```diff")
-            lines.append(hunk.content[:2000])
-            lines.append("```")
+            lines.append(rendered or "_No repository evidence could be gathered "
+                                     "for this finding._")
+            lines.append("")
+            lines.append(f"**Claim to check — title:** {f.title}")
+            lines.append(f"**Claim — body:** {f.body[:500]}")
             lines.append("")
 
         lines.append(
-            "Return JSON: {\"keep\": [<finding indices that are valid>], "
-            "\"reasons\": {\"<index>\": \"<why dropped>\"}}"
+            "Return JSON: {\"checks\": {\"<index>\": \"premise: ... | read: "
+            "... | verdict: holds|refuted|unclear\"}, \"keep\": [<indices of "
+            "findings to keep>], \"reasons\": {\"<dropped index>\": \"<one "
+            "line: the evidence that refutes the claim>\"}}. Every finding "
+            "gets a check; every index not in keep needs a reason that cites "
+            "the evidence above; a drop without one is ignored."
         )
         return "\n".join(lines)
 
@@ -858,7 +1111,7 @@ class VerifierAgent:
             if not span:
                 continue
             try:
-                data = json.loads(span)
+                data = json.loads(span, strict=False)
             except json.JSONDecodeError:
                 continue
             if not isinstance(data, dict):
@@ -867,6 +1120,18 @@ class VerifierAgent:
             keep = data.get("keep")
             if isinstance(keep, list):
                 return [int(i) for i in keep if isinstance(i, (int, float))]
+
+        # Salvage — the object was not valid JSON (an unescaped quote or a
+        # raw newline in a "checks" sentence quoting code is enough) but the
+        # decision is still there in plain sight. Read the `"keep": [...]`
+        # array by itself. Only a closed array of numbers counts, so a reply
+        # cut off mid-array stays unreadable, and it runs BEFORE the
+        # saw-an-object give-up below: that give-up fired on the inner
+        # "checks" object, which parses on its own, and threw the real
+        # verdict away with the broken wrapper.
+        m_keep = _KEEP_ARRAY.search(cleaned)
+        if m_keep:
+            return [int(n) for n in re.findall(r"\d+", m_keep.group(1))]
 
         # Fallback — a bare array of indices, for a model that skipped the
         # wrapper object entirely. Deliberately NOT reached when the model did
@@ -887,32 +1152,76 @@ class VerifierAgent:
 
 _VERIFIER_SYSTEM = """You are the last filter before a review reaches a human.
 
-You get candidate findings and the diff. Decide which survive.
+You get candidate findings. Each comes with the evidence a reader would open
+before judging it, shown BEFORE the claim: the file around the line at the PR
+head, the PR's changes to that file, the bodies of the functions called next to
+the line, and what a search of the repository found for the symbols the claim
+names. Decide which survive.
 
-KEEP a finding when it names a concrete consequence of running the changed
-code — a wrong value, an exception, a check that does not fire, a branch that
-cannot be taken — and the diff shows the line that causes it. Keep it even if
-the wording is plain, the severity is modest, or another agent said something
-nearby. A defect stated flatly is worth more than a risk stated well.
+HOW TO CHECK A FINDING — in this order, written down in "checks" before you
+decide anything:
+    1. PREMISE. Restate in one sentence what must be true of the running code
+       for the claim to hold ("after the catch, execution reaches line 70
+       with $r never assigned"; "the discount applies to an item that is
+       already free"). Name the assumption the claim needs that the
+       changed line does not state itself — an orientation, a unit, what a
+       variable is summed from, what the called function does — because that
+       is the part the claim took on trust and the evidence may show.
+    2. CHECK IT LINE BY LINE against the evidence, not against the claim's own
+       account of it. Follow the control flow the claim relies on: what the
+       function called on that path does when it is called — returns, throws,
+       or ends the process (exit, die, abort, os.Exit, process.exit); whether
+       the value is assigned on the path that reaches the line. A "Lookups"
+       block, when present, holds table lookups already evaluated for you
+       (`$map[3][1] = 4`): use those values as given, and when a claim says an
+       index or key is wrong or duplicated, compare the evaluated values
+       before anything else. Read names as
+       the code defines them: what a variable is computed from decides what it
+       measures, whatever its name suggests.
+    3. VERDICT: "holds" (the lines you read are consistent with the premise),
+       "refuted" (a specific line you can cite makes the premise false), or
+       "unclear" (the evidence does not reach the premise).
 
-DROP a finding when:
-    - the line it points at is not in the diff
-    - it describes a RISK or a PREFERENCE rather than a consequence: "could
-      become a bottleneck", "may confuse future readers", "breaks callers"
-      with no caller named, "lacks tests" with no branch named
-    - the evidence is a generalisation — no line, no value, no condition
-    - the severity does not match the consequence: "critical" for something
-      that changes no behaviour
-    - it is about surrounding code the PR did not touch
-    - it repeats another candidate (local dedup runs first, so this is rare)
+KEEP is the default. Drop a finding only when step 3 is "refuted" — a line of
+the evidence, cited by number, contradicts the premise. Typical refutations:
+    - a symbol the claim calls undefined or misspelled IS defined or used under
+      that name (a constant in another file, a global the repository really
+      names that way, a variable set in the enclosing loop above the hunk)
+    - a guard, check or fix the claim says is missing IS present in the code
+      shown
+    - the code path the claim says continues does not: the called function
+      shown ends the process, throws, or returns before the line in question
+    - the quantity the claim says is wrong is, by the lines that compute it,
+      the right one (the value is built from the very terms the claim says
+      should be used)
+    - markup, config or a mapping shown LACKS what the claim assumes (the
+      element has no such class; the index matches the mapping defined above)
+    - the value the claim fears cannot occur, by code shown
+
+KEEP the finding when:
+    - the evidence is absent, partial or ambiguous — a search that found
+      nothing, or a hosted index that covers another branch, refutes nothing
+    - the only line you would cite comes from evidence labelled "NOT THE PULL
+      REQUEST'S CODE" / "NEWER than the pull request": it may have appeared
+      after the pull request was written (the code deletes such a drop anyway)
+    - the evidence is consistent with the claim, or does not address it
+    - you disagree about severity, style, wording, or whether it is "a risk
+      rather than a consequence" — those are never reasons to drop
+    - you cannot point to a line of the evidence that contradicts the claim
+    - the premise rests on something you had to assume, because it is not in
+      the evidence
 
 The asymmetry is deliberate. Dropping a real defect costs the author a bug in
-production; keeping a weak observation costs them ten seconds. When a finding
-sits on the line between the two, keep it — but only if you can say, in your
-own words, what goes wrong when the code runs. If you cannot finish that
-sentence, drop it.
+production; keeping a weak observation costs them ten seconds. Evidence
+labelled as coming from the default branch or a clone HEAD may differ from the
+PR head; weigh it accordingly.
 
-Return JSON: {"keep": [<indices keep>], "reasons": {"<dropped_idx>": "<why>"}}
+Return JSON with "checks" FIRST, then the decision:
+{"checks": {"<idx>": "premise: <one sentence> | read: <lines you checked, by number> | verdict: holds|refuted|unclear"},
+ "keep": [<indices keep>],
+ "reasons": {"<dropped_idx>": "<one line citing the line that refutes the claim>"}}
+Every finding gets a "checks" entry, kept to one line. A dropped index with no
+reason is ignored.
 """
 
 

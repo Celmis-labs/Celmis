@@ -112,7 +112,8 @@ def test_an_unreadable_reply_is_the_same_kind_of_open():
 
 def test_a_veto_that_ran_reports_no_error():
     """The distinction has to cut both ways, or it is decoration."""
-    result, _ = _pass("[0, 1]")
+    result, _ = _pass(
+        '{"keep": [0, 1], "reasons": {"2": "defined in lib.php", "3": "guard above"}}')
 
     assert result.error is None
     assert len(result.kept) == 2

@@ -308,6 +308,10 @@ services:
       REVIEW_VERIFIER_MAX_OUTPUT_TOKENS: "${REVIEW_VERIFIER_MAX_OUTPUT_TOKENS:-32768}"
       REVIEW_COMPLIANCE_MAX_OUTPUT_TOKENS: "${REVIEW_COMPLIANCE_MAX_OUTPUT_TOKENS:-256}"
       REVIEW_AGENT_CONCURRENCY: "${REVIEW_AGENT_CONCURRENCY:-3}"
+      REVIEW_CODE_CONTEXT_ENABLED: "${REVIEW_CODE_CONTEXT_ENABLED:-true}"
+      REVIEW_CODE_CONTEXT_CHARS: "${REVIEW_CODE_CONTEXT_CHARS:-40000}"
+      REVIEW_CODE_CONTEXT_CALLSITES: "${REVIEW_CODE_CONTEXT_CALLSITES:-8}"
+      REVIEW_FETCH_HEAD_TIMEOUT_S: "${REVIEW_FETCH_HEAD_TIMEOUT_S:-60}"
       # Скільки рев'ю воркер бере одночасно. Кожне рев'ю саме по собі жене
       # до REVIEW_AGENT_CONCURRENCY паралельних викликів до провайдера, тож
       # два одночасні рев'ю дають шість з'єднань — рівно та кількість, на якій
@@ -365,6 +369,8 @@ services:
       # Детермінований префільтр (дедуп, кластеризація, deny-list правил,
       # поріг впевненості, сортування) працює завжди й цим не вимикається.
       REVIEW_VERIFIER_ENABLED: "${REVIEW_VERIFIER_ENABLED:-false}"
+      # Скільки знахідок (не proven) мінімум будить вето; 1 = судити кожну.
+      REVIEW_VERIFIER_MIN_FINDINGS: "${REVIEW_VERIFIER_MIN_FINDINGS:-1}"
       # Оренда job-а в черзі. Мусить перевищувати найдовше рев'ю, інакше
       # сусідній воркер забирає рядок, поки перший ще в хендлері: 3.5% з 517
       # рев'ю виконувались двічі. Хендлер тепер продовжує оренду, поки

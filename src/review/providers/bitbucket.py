@@ -54,6 +54,7 @@ from src.review.models import (
 from src.review.pr_actions import APPROVE, REQUEST_CHANGES, review_decision
 from src.review.providers.base import (
     MAX_FILE_BYTES,
+    CodeHit,
     CommitInfo,
     EmptyDiffError,
     FileChange,
@@ -1358,6 +1359,31 @@ class BitbucketPRProvider(PullRequestProvider):
             raise PullRequestProviderError(
                 f"{path} is larger than {MAX_FILE_BYTES} bytes; not read")
         return resp.content.decode("utf-8", "replace")
+
+    def search_code(self, repo: str, query: str, limit: int = 5) -> list[CodeHit]:
+        """Bitbucket code search, scoped to this repository. The index covers
+        the default branch only, and the workspace must have it enabled — a
+        workspace without it answers 4xx, which raises and is read as "no
+        evidence"."""
+        ws, name = self._split_repo(repo)
+        q = f"{query} repo:{name}"
+        resp = self._get_follow(
+            f"{BITBUCKET_API_BASE}/workspaces/{quote(ws, safe='')}/search/code"
+            f"?search_query={quote(q, safe='')}&pagelen={max(1, min(int(limit), 20))}")
+        self._expect_ok(resp, "Bitbucket code search")
+        hits: list[CodeHit] = []
+        for v in (resp.json() or {}).get("values") or []:
+            path = str(((v.get("file") or {}).get("path")) or "")
+            if not path:
+                continue
+            lines: list[str] = []
+            for cm in v.get("content_matches") or []:
+                for ln in cm.get("lines") or []:
+                    text = "".join(str(s.get("text") or "") for s in ln.get("segments") or [])
+                    if text.strip():
+                        lines.append(f"{ln.get('line', '')}: {text.rstrip()}")
+            hits.append(CodeHit(path=path, lines=tuple(lines)))
+        return hits[:limit]
 
     def commits_touching(
         self, repo: str, ref: str, path: str, *,

@@ -219,30 +219,32 @@ def test_the_orchestrator_owns_no_second_lookup():
 # ─── every agent reads the graph in its own size ─────────────────────
 
 
-def test_the_defect_agent_gets_no_graph_at_all():
-    """It used to get the BRIEF, on the theory that a little structural
-    context helps where the full summary would drown.
+def test_the_defect_agent_gets_the_summary_cut_but_not_the_brief():
+    """It once got no graph at all, on the strength of an observational
+    precision gap and a boundary rule that forbade acting on cross-file facts.
+    The rule now reads "provable from the code shown", and the summary tells
+    the agent which changed symbols have callers — so it returns, cut to a few
+    thousand characters and labelled as orientation. The brief (the three-line
+    rendering for agents the summary would drown) is still not sent."""
+    from src.review.agents.defect import _GRAPH_CHARS
 
-    Reading the brief killed that theory: every line of it is about OTHER
-    files — caller counts, cross-repo references, most-depended-on symbols —
-    and this agent's boundary rule forbids acting on any of it. A claim only
-    true because of what another file contains belongs to the contract agent.
-    So the brief was cross-file evidence handed to the one agent told not to
-    use it, and the 50-PR bench measured reviews with a COMPLETE graph at
-    40.2% precision against 51.1% with a partial one.
-    """
     prompt = DefectAgent(passes=1)._build_prompt(AgentContext(
         pull_request=_pr(),
         graph_brief="Most depended-on: `parse` (12 callers)",
         graph_summary="THE FULL SUMMARY",
     ))
-    assert "Blast radius" not in prompt
     assert "Most depended-on" not in prompt
-    assert "THE FULL SUMMARY" not in prompt
+    assert "THE FULL SUMMARY" in prompt
+    assert "orientation only" in prompt
+
+    long = DefectAgent(passes=1)._build_prompt(AgentContext(
+        pull_request=_pr(), graph_summary="S" * (_GRAPH_CHARS * 3),
+    ))
+    assert long.count("S") < _GRAPH_CHARS * 2
 
 
 def test_the_diff_and_the_style_guide_still_reach_it():
-    """The removal is of cross-file context, not of context."""
+    """The numbered diff and the style guide are still in the prompt."""
     prompt = DefectAgent(passes=1)._build_prompt(AgentContext(
         pull_request=_pr(), style_guide="TABS NOT SPACES",
     ))

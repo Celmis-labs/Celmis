@@ -24,13 +24,16 @@ exactly like the others; rule ids are `perf.<rule>`.
 
 from __future__ import annotations
 
+import re
+from typing import Any
+
 from src.review.agents.base import (
     AVOID_LIST_PROMPT,
     FINDING_OUTPUT_FORMAT,
     SECOND_DEFECT_PROMPT,
     LLMReviewAgent,
 )
-from src.review.models import FindingSeverity
+from src.review.models import Finding, FindingSeverity
 from src.review.settings import get_review_settings
 
 _ROLE = """You are an experienced engineer reviewing what a Pull Request's changes COST
@@ -118,28 +121,45 @@ request to /files; it grows with every upload, and the handler then uses ten
 rows of it". A sentence that names no repetition and no quantity is not a
 reasoning sentence here — write nothing."""
 
+_INPUT_SIZE_FIELD = """Performance findings carry ONE more field, "input_size", written right after "severity":
+    "input_size": "<how big the repeated collection or input can get, and what sets that size — e.g. 'one row per upload, no LIMIT: grows with every user's uploads, 100k+ in production' or 'the ids array of a POST body, no max length checked' — or \"bounded\" / \"unknown\" when the shown code does not say>"
+It is what the severity is judged on (below), so fill it from the code and the context, never from a guess about production."""
+
 _SEVERITY = """rule_id format: `perf.<rule>` (e.g. `perf.n-plus-one`, `perf.quadratic`,
 `perf.blocking-io`, `perf.redundant-work`, `perf.memory`, `perf.unbounded`,
 `perf.missing-cache`, `perf.dom-thrash`).
 
 Severity — decided by how the cost grows and where it is paid, not by how
-inelegant the code looks:
+inelegant the code looks, and above all by whether the SHOWN code lets the
+size grow:
 
     critical — work that grows without bound on a request path and can take
                the service down: a call per item over a user-sized
                collection on every request, an unbounded table read into
                memory, a render or fetch loop that never settles
     error    — N+1 or quadratic work on a path every request or every render
-               takes, with a collection that grows in production; blocking
-               I/O inside an async handler
-    warning  — a real cost on a path that needs specific conditions — a
-               large input, a rarely-used endpoint, a batch job — or
-               redundant work repeated in a loop
+               takes, over input that THE SHOWN CODE demonstrates is
+               unbounded or user-controlled in size (a request body or query
+               parameter with no cap, a table read with no LIMIT that grows
+               with users, a collection the diff itself appends to without a
+               bound), with "input_size" saying how big; blocking I/O inside
+               an async handler
+    warning  — everything else that is a real cost: a loop over a handful of
+               items or a fixed list, a collection whose size nothing in the
+               shown code lets grow, a cache or buffer that has a TTL or an
+               eviction, redundant work repeated in a loop, a cost on a path
+               that needs specific conditions (a large input, a rarely-used
+               endpoint, a batch job). "It could be large in production" is
+               not a demonstration: if you cannot point at the line that
+               lets the size grow, the finding is a warning, however many
+               round-trips you can multiply out of it
     info     — do not write these; if the cost does not grow, it is not a
                finding
 
 Every severity above "info" requires the quantity that grows to be named in
-the reasoning sentence."""
+the reasoning sentence. `error` and `critical` also require "input_size" to
+state a size or say it is unbounded / user-controlled; without it the finding
+is lowered to `warning` before anyone sees it."""
 
 # Role, the shared output contract, this agent's form of the reasoning
 # sentence directly after the contract it narrows, the shared avoid-list and
@@ -148,7 +168,8 @@ the reasoning sentence."""
 # shape.
 _SYSTEM = (
     "\n\n".join([
-        _ROLE, FINDING_OUTPUT_FORMAT, _REASONING_FORM, AVOID_LIST_PROMPT,
+        _ROLE, FINDING_OUTPUT_FORMAT, _REASONING_FORM, _INPUT_SIZE_FIELD,
+        AVOID_LIST_PROMPT,
         SECOND_DEFECT_PROMPT, _SEVERITY,
     ])
     + "\n"
@@ -182,6 +203,46 @@ line in it. Don't hallucinate.
 """
 
 
+# Words that say "this does not grow", whatever else the sentence contains.
+_NO_GROWTH = re.compile(
+    r"^\W*(?:n/?a|none|null|unknown|unclear|not (?:shown|known|stated)|"
+    r"bounded|small|fixed|handful|few)\b|\b(?:handful|a few|bounded by [a-z ]*constant)\b",
+    re.IGNORECASE,
+)
+_GROWS = re.compile(
+    r"\d|unbounded|no (?:limit|cap|max)|user[- ](?:controlled|supplied|sized)|"
+    r"grows with|without (?:a )?(?:limit|cap|bound)",
+    re.IGNORECASE,
+)
+
+#: Severities that need the shown code to demonstrate a growing input.
+_NEEDS_A_BOUND = (FindingSeverity.ERROR, FindingSeverity.CRITICAL)
+
+DOWNGRADE_NOTE = (
+    "_Severity lowered to warning: the reply does not show an input that is "
+    "unbounded or user-controlled in size, which is what error/critical need "
+    "for this agent._"
+)
+
+
+def states_a_growing_input(input_size: Any) -> bool:
+    """True when `input_size` names a size or says the input is unbounded.
+
+    Deliberately shallow and honest about it: this cannot verify the claim,
+    it can only refuse to promote a finding whose author did not make one.
+    A reply that omits the field, writes "unknown"/"bounded"/"a handful", or
+    names neither a number nor an unbounded/user-controlled source reads as
+    "no demonstrated growth". Whether the stated size is TRUE is the
+    verifier's job, with the repository in front of it.
+    """
+    if not isinstance(input_size, str):
+        return False
+    text = input_size.strip()
+    if len(text) < 8 or _NO_GROWTH.search(text):
+        return False
+    return bool(_GROWS.search(text))
+
+
 class PerformanceAgent(LLMReviewAgent):
     """Cost review — N+1, complexity, blocking I/O, memory, DOM thrash."""
 
@@ -192,3 +253,28 @@ class PerformanceAgent(LLMReviewAgent):
 
     def __init__(self, model: str | None = None) -> None:
         self.model = model or get_review_settings().performance_model
+
+    def _dict_to_finding(
+        self, data: dict[str, Any], changed_files: frozenset[str] | None = None,
+    ) -> Finding | None:
+        """The shared parse, then the severity gate this agent owns.
+
+        In the scored runs every performance finding posted at `error` (an
+        N+1 over a handful of items, `in_array` in a short loop, an "unbounded"
+        array that had a TTL) was minor or speculative: the prompt asked for
+        the growing quantity to be NAMED, and a model can always name one.
+        So `error` and `critical` now also need `input_size` to state a size
+        or an unbounded / user-controlled source (`states_a_growing_input`);
+        otherwise the finding is kept, at `warning`, with a note saying why.
+        The finding is not dropped — a real cost is still worth a comment —
+        only kept from the severity that gets posted. A finding the pipeline
+        already proved (`evidence_kind == "proven"`) is never lowered.
+        """
+        finding = super()._dict_to_finding(data, changed_files)
+        if finding is None or finding.severity not in _NEEDS_A_BOUND:
+            return finding
+        if finding.evidence_kind == "proven" or states_a_growing_input(data.get("input_size")):
+            return finding
+        finding.severity = FindingSeverity.WARNING
+        finding.body = f"{finding.body}\n\n{DOWNGRADE_NOTE}" if finding.body else DOWNGRADE_NOTE
+        return finding

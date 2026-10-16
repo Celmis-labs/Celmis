@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -236,8 +237,16 @@ class StructuralAgent(ReviewAgent):
     name = "structural"
     severity_default = FindingSeverity.WARNING
 
-    def __init__(self, rules: list[StructuralRule] | None = None) -> None:
+    def __init__(
+        self,
+        rules: list[StructuralRule] | None = None,
+        clone_root: Callable[[Any], Path | None] | None = None,
+    ) -> None:
         self.rules: list[StructuralRule] = rules if rules is not None else list(_RULES)
+        # Where the repository checkout lives, for the one rule that needs
+        # more than the diff (`structural.undefined-class-constant`). Injected
+        # by tests; production resolves it the way the code graph does.
+        self._clone_root = clone_root
 
     def review(self, context: AgentContext) -> AgentRunResult:
         t0 = time.time()
@@ -301,6 +310,8 @@ class StructuralAgent(ReviewAgent):
                         continue
                     findings.append(self._match_to_finding(rule, file_path, line_1based, m))
 
+        findings.extend(self._undefined_constants(pr))
+
         logger.info(
             "structural_done files_scanned=%d files_failed=%d findings=%d elapsed=%.2fs",
             files_scanned, files_failed, len(findings), time.time() - t0,
@@ -311,6 +322,22 @@ class StructuralAgent(ReviewAgent):
             tokens_in=0, tokens_out=0,
             elapsed_seconds=time.time() - t0,
         )
+
+    def _undefined_constants(self, pr: Any) -> list[Finding]:
+        """`structural.undefined-class-constant` — see `structural_constants`.
+
+        Needs the checkout, not just the diff, so it sits beside the ast-grep
+        rules rather than among them. Fail-open: no clone, no finding."""
+        try:
+            from src.review.structural_constants import (
+                clone_root_for,
+                find_undefined_constants,
+            )
+            resolve = self._clone_root or clone_root_for
+            return find_undefined_constants(pr, resolve(pr))
+        except Exception as exc:  # noqa: BLE001
+            logger.info("undefined_constant_skipped err=%s", exc)
+            return []
 
     @staticmethod
     def _hunk_new_side_lines(hunk: Any) -> list[str]:

@@ -73,6 +73,7 @@ from src.review.pr_actions import APPROVE, REQUEST_CHANGES, review_decision
 from src.review.providers.base import (
     MAX_FILE_BYTES,
     SUGGESTION_GITHUB,
+    CodeHit,
     CommitInfo,
     FileChange,
     OurThread,
@@ -1402,6 +1403,30 @@ class GitHubPRProvider(PullRequestProvider):
             raise PullRequestProviderError(
                 f"{path} is larger than {MAX_FILE_BYTES} bytes; not read")
         return resp.content.decode("utf-8", "replace")
+
+    def search_code(self, repo: str, query: str, limit: int = 5) -> list[CodeHit]:
+        """GitHub code search, scoped to this repository. Indexes the default
+        branch; `text-match` asks for the matching fragments."""
+        owner, name = self._split_repo(repo)
+        resp = self._http.get(
+            f"{GITHUB_API_BASE}/search/code",
+            params={"q": f"{query} repo:{owner}/{name}",
+                    "per_page": max(1, min(int(limit), 20))},
+            headers={"Accept": "application/vnd.github.text-match+json"},
+        )
+        self._expect_ok(resp, "GitHub code search")
+        hits: list[CodeHit] = []
+        for item in (resp.json() or {}).get("items") or []:
+            path = str(item.get("path") or "")
+            if not path:
+                continue
+            lines: list[str] = []
+            for tm in item.get("text_matches") or []:
+                lines.extend(
+                    ln.rstrip() for ln in str(tm.get("fragment") or "").splitlines()
+                    if ln.strip())
+            hits.append(CodeHit(path=path, lines=tuple(lines)))
+        return hits[:limit]
 
     def commits_touching(
         self, repo: str, ref: str, path: str, *,

@@ -980,6 +980,13 @@ class ReviewOrchestrator:
             provider=provider,
         )
         stages.end("context", "success", _context_sentence(context))
+        # The head of an OPEN pull request is rarely in the clone the indexer
+        # keeps at the default branch; the code context, the veto's evidence
+        # and the constant check read that clone at the head sha. One
+        # best-effort fetch, fail-open, recorded as its own stage.
+        from src.review.head_fetch import ensure_head_in_clone, record_head_fetch
+        record_head_fetch(stages, ensure_head_in_clone(
+            pr, workspace_id=workspace_id, user_id=user_id))
         batch.task_context = getattr(context, "task_context", None)
 
         batch.cross_repo_callers = context.cross_repo_callers_count
@@ -1514,6 +1521,16 @@ class ReviewOrchestrator:
             batch.dropped_by_veto = v_result.dropped_llm_filter
             batch.tokens_in += v_result.tokens_in
             batch.tokens_out += v_result.tokens_out
+            veto_meta = {
+                "judged": v_result.judged,
+                "dropped": v_result.dropped_llm_filter,
+                "dropped_findings": v_result.dropped_findings[:20],
+                "unjustified_drops": v_result.unjustified_drops,
+                "evidence": v_result.evidence,
+                "attempts": v_result.veto_attempts,
+                "tokens_in": v_result.tokens_in,
+                "tokens_out": v_result.tokens_out,
+            }
             if v_result.error:
                 # FAILED, not skipped. The two words are the distinction
                 # `agents_skipped` was built for: "verifier" lands in the
@@ -1533,17 +1550,27 @@ class ReviewOrchestrator:
                 stages.end("verifier", "failed",
                            f"The LLM veto did not answer; {len(v_result.kept)} "
                            f"findings were kept unfiltered.",
-                           meta={"kept": len(v_result.kept),
-                                 "tokens_in": v_result.tokens_in,
-                                 "tokens_out": v_result.tokens_out})
+                           meta={**veto_meta, "kept": len(v_result.kept)})
             else:
-                stages.end("verifier", "success",
-                           f"Kept {len(v_result.kept)} of {len(all_findings)} "
-                           f"findings ({v_result.dropped_llm_filter} vetoed).",
-                           meta={"kept": len(v_result.kept),
-                                 "vetoed": v_result.dropped_llm_filter,
-                                 "tokens_in": v_result.tokens_in,
-                                 "tokens_out": v_result.tokens_out})
+                if v_result.judged:
+                    reason = (
+                        f"Kept {len(v_result.kept)} of {len(all_findings)} "
+                        f"findings; the veto judged {v_result.judged} with "
+                        f"repository evidence and dropped "
+                        f"{v_result.dropped_llm_filter}")
+                    if v_result.dropped_findings:
+                        reason += ": " + "; ".join(
+                            f"{d['title']} ({d['reason']})"
+                            for d in v_result.dropped_findings[:5])
+                    reason += "."
+                else:
+                    reason = (
+                        f"Kept {len(v_result.kept)} of {len(all_findings)} "
+                        f"findings; too few judgeable findings for the veto "
+                        f"to run.")
+                stages.end("verifier", "success", reason[:1500],
+                           meta={**veto_meta, "kept": len(v_result.kept),
+                                 "vetoed": v_result.dropped_llm_filter})
 
         # ── The wall-clock budget, checked HERE and not enforced by killing
         # anything mid-flight.
@@ -2052,10 +2079,12 @@ class ReviewOrchestrator:
         return AgentContext(
             pull_request=pr,
             task_context=task_context,
+            code_provider=provider,
             graph_summary=graph.summary,
             graph_brief=graph.brief,
             graph_note=graph.note,
             cross_repo_callers_count=graph.cross_repo_callers_count,
+            file_provider=provider,
             repo_overview=self._load_repo_overview(pr),
             style_guide=self._load_style_guide(pr),
             cross_repo_drift=drift_md,

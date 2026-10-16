@@ -18,6 +18,129 @@ derives it from there.
 
 ---
 
+## [Unreleased]
+
+## [2.3.18] — 2026-10-16
+
+### Added
+
+- **The review can read the head of an open pull request from the local
+  clone.** The call sites in the defect agent's code context, the veto's
+  repository evidence and the undefined-class-constant check all read the clone
+  at the pull request's head sha, but the indexer keeps the clone at the default
+  branch, so for an open pull request that commit was usually missing and the
+  three features quietly did little. Once per review, before them, Celmis now
+  fetches the source branch (then the sha itself) into a private ref
+  (`refs/celmis/pr-heads/<number>`) of the clone: no branch, HEAD or working
+  tree file changes. It authenticates the way the freshness check does (one-shot
+  credential helper, nothing in argv or logs), takes a per-clone lock, is bounded
+  by `REVIEW_FETCH_HEAD_TIMEOUT_S` (default 60, 0 = off), fails open, and shows
+  up as the run stage "Fetch pull request head" (`head fetched into clone` or
+  `unavailable: <reason>`). When the head stays unavailable, the constant check
+  searches the clone's HEAD and applies the diff's own definitions on top
+  (added = present, removed = absent only if no other definition remains) and
+  says so in the finding.
+- **Findings about the same variable, function or tag fold into one comment.**
+  One validation guard (`if ($coupon)`) could be reported at three lines of a
+  file and an unclosed `<figure>` at two, each in different words, so the
+  title-token comparison scored them near 0.0 and posted every one. After the title pass,
+  clusters of one (file, rule) bucket now fold when the identifiers their
+  titles and bodies name (backticked names, `$variables`, `Class::member`,
+  `<tag>`s) overlap on at least half of the smaller set. Names every file has
+  (`$data`, `$result`, a bare `<div>`) do not count, a shared builtin call does
+  not count, proven findings are never folded, and the fold goes through the
+  first member only, so a chain of overlaps cannot drag an unrelated finding
+  in. The merged comment keeps every line ("Also at lines 240, 380.").
+
+- **The veto is handed table lookups already evaluated.** A defect finding such
+  as "the `express` branch reads `$rates[3][1]`, the index `freight` uses" can
+  survive the veto although the table is in the window it was shown: refuting
+  it is arithmetic, and a small model believes the claim instead of
+  computing. The evidence gatherer now evaluates literal lookups
+  (`name[3][1]`, `NAME['k']`) on the lines around the finding against the
+  nearest earlier array/map literal (PHP `[]`/`array()`, Python, JS with
+  quoted keys), and shows `$map[3][1] = 4  (line 60; $map defined at line
+  37)` as computed fact. It refuses anything it cannot be sure of: a table
+  reassigned between definition and use, non-scalar leaves, assignment
+  targets, member access. The verifier prompt says to compare those values
+  first when a claim calls an index or key wrong or duplicated.
+
+- **The LLM veto asks once more when its reply is unreadable or timed out,
+  and reads a verdict out of damaged JSON.** A review could end with "the LLM veto
+  did not answer" after a quick call that spent far less than its output
+  ceiling. The prompt asks for a `checks` object first and its sentences quote
+  code, so one stray quote or raw newline made the wrapper invalid JSON; the
+  reader then took the inner `checks` object for the answer and refused to
+  look for the `"keep"` array that sat right after it. A closed `"keep"` array
+  is now read on its own (a reply cut inside the array stays unreadable),
+  control characters in strings are tolerated, and `reasons` are salvaged
+  entry by entry. If the reply is still unreadable, or the call timed out, the
+  veto is asked one more time (not after a throttle or a terminal error, which
+  a resend only makes worse); both calls' tokens are counted and the stage
+  meta records `attempts`.
+
+- **The LLM veto reads repository code before it drops anything.** Until now
+  it saw the first five hunks of the PR, cut at 2000 characters, and nothing
+  else, so it could not refute a claim whose answer lives outside the diff (a
+  constant defined in another file, a guard many lines above the hunk, markup
+  that lacks the class the finding assumes). For each finding it now gets the
+  finding's file around the line at the PR head, the PR's hunks for that file,
+  and search hits for the symbols the claim names (from the local clone with
+  `git grep` when the commit is there, else the provider's code search, which
+  sees the default branch and is labelled so). A finding is dropped only when
+  that evidence refutes its premise, with a one-line reason citing it; absent
+  or ambiguous evidence keeps it. The stage record lists what was judged and
+  dropped, with the reasons. Every step fails open. The old DROP rules ("a
+  risk, not a consequence", severity mismatch, line not in the diff) are gone,
+  and a drop without a reason is kept. Not yet re-measured on the benchmark.
+- `REVIEW_VERIFIER_MIN_FINDINGS` (default 1): the fewest non-proven findings
+  that wake the veto. It was a fixed 3, which left the typical one- or
+  two-finding review unjudged. The veto itself stays opt-in.
+- `search_code(repo, query, limit)` on the review providers (Bitbucket and
+  GitHub; GitLab answers no hits).
+
+- **When the pull request's head is not in the clone, its code is "base +
+  diff", not the clone's newer HEAD.** The veto's evidence, the
+  undefined-class-constant check and the code context used to fall back to the
+  clone's HEAD, which is the default branch and newer than the pull request. If
+  the pull request mistyped a class constant and a later merge defined a
+  constant of that name, the veto would read "file.php:21 defines const X" as
+  proof the constant existed and drop a true finding. One shared
+  resolution (`src/review/code_revision.py`) now reads, in order, the head
+  commit; else the pull request's base commit (`PullRequest.base_sha`) with the
+  diff's hunks applied to the files it touches; else the clone's HEAD, labelled
+  "newer than the pull request". The veto's evidence carries its provenance,
+  says so in the prompt, and a drop whose evidence includes code that is not
+  the pull request's is overridden in code and kept. The "Fetch pull request
+  head" stage records which revision was used.
+
+### Changed
+
+- **The defect agent now reads the code around the diff, not the diff alone.**
+  Each hunk is printed with new-side line numbers, followed by the full
+  enclosing function at the PR head (lines the PR changed are marked), a few
+  call sites of the changed functions found with `git grep` in the local clone,
+  and the short bodies of same-file callees invoked on changed lines. File text
+  comes from the clone the code graph was built from when it holds the head
+  commit, else from the provider's file read; the enclosing function is found
+  with tree-sitter and, failing that, a brace/indent scanner that ignores braces
+  in strings and comments. Everything is budgeted (`REVIEW_CODE_CONTEXT_CHARS`,
+  `REVIEW_CODE_CONTEXT_CALLSITES`, off with `REVIEW_CODE_CONTEXT_ENABLED=false`)
+  and fails open to the numbered diff.
+- **A "change lens" in the defect prompt.** The agent pairs each `-` line with
+  its `+` line and checks polarity flips, removed fallbacks and guards, changed
+  return/status codes, caller/callee shape mismatches, accessor-versus-field
+  semantics and copy-paste swaps. The second pass asks this question instead of
+  repeating the first pass's.
+- **Evidence rules.** Claims are provable from the code shown (hunks, enclosing
+  functions, call sites) rather than "inside the file"; a claim that a variable,
+  constant, index or function is missing must say where it looked and that the
+  symbol is absent from the shown context; inferred evidence caps confidence.
+- The defect agent receives the graph summary again, cut to 4 000 characters
+  and labelled as orientation.
+
+---
+
 ## [2.3.17] — 2026-10-13
 
 ### Fixed

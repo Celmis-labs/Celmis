@@ -315,6 +315,19 @@ class PathCommit:
     url: str | None = None
 
 
+@dataclass(frozen=True)
+class CodeHit:
+    """One file a provider's code search matched, with the lines it matched.
+
+    `lines` are the matched source lines (or the provider's text fragment,
+    split into lines) — what the search index holds, which for the hosted
+    providers is the DEFAULT branch, not the pull request's head.
+    """
+
+    path: str
+    lines: tuple[str, ...] = ()
+
+
 #: The largest file a head check will read. A file over it is "unreadable",
 #: never an empty answer: a prompt cannot hold it and a hash of half of it
 #: would call an unchanged file changed.
@@ -406,6 +419,18 @@ class PullRequestProvider(ABC):
         not be read (no scope, a rate limit, too large, an outage)."""
         raise PullRequestProviderError(
             f"{self.name or 'this provider'} cannot read a file")
+
+    def search_code(self, repo: str, query: str, limit: int = 5) -> list[CodeHit]:
+        """Files of `repo` whose text contains `query`, at most `limit`.
+
+        Non-abstract and empty by default: a provider with no code search (or
+        one this product has not wired) answers "no hits", which the evidence
+        gatherer reads as "nothing found" and never as "the symbol does not
+        exist". Hosted indexes lag the pull request — they see the default
+        branch — so a hit proves existence there and a miss proves nothing.
+        Raises PullRequestProviderError when the search could not be asked.
+        """
+        return []
 
     def commits_touching(
         self, repo: str, ref: str, path: str, *,

@@ -987,6 +987,7 @@ Raise one and the other has to follow; a test enforces it.
 | `REVIEW_LLM_TIMEOUT_RETRY_FACTOR` | 2.0 | how much longer the retry gets after a timeout; 1.0 disables the widening |
 | `REVIEW_MAX_DIFF_SIZE_BYTES` | 500000 | larger diffs are refused, not truncated |
 | `REVIEW_VERIFIER_ENABLED` | false | the LLM false-positive veto |
+| `REVIEW_VERIFIER_MIN_FINDINGS` | 1 | fewest non-proven findings that wake the veto once it is on |
 | `REVIEW_AGENT_CONCURRENCY` | 3 | provider calls in flight per review |
 | `CELMIS_JOB_LEASE_SECONDS` | 600 | ceiling on worker silence before a job may be reclaimed |
 | `CELMIS_DEPLOYMENT_MODE` | single_tenant | `multi_tenant` isolates workspaces from each other |

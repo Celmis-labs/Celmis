@@ -106,7 +106,12 @@ def test_proven_findings_alone_never_trigger_the_llm_pass():
     assert len(result.kept) == 1, "identical findings still dedup"
 
 
-def test_mixed_batch_below_threshold_keeps_everything_unjudged():
+def test_mixed_batch_below_threshold_keeps_everything_unjudged(monkeypatch):
+    from src.review.settings import ReviewSettings
+
+    monkeypatch.setattr(
+        "src.review.agents.verifier.get_review_settings",
+        lambda: ReviewSettings(verifier_min_findings=3))
     findings = [_proven_cve(), _inferred(1)]
     agent = VerifierAgent()
     ctx = AgentContext(pull_request=_pr(), llm_client=MagicMock())

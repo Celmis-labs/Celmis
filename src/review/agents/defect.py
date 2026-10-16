@@ -29,6 +29,7 @@ in the diff. Recall lives here.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 from src.review.agents.base import (
@@ -37,6 +38,7 @@ from src.review.agents.base import (
     SECOND_DEFECT_PROMPT,
     LLMReviewAgent,
 )
+from src.review.code_context import build_code_context, render_numbered_diff
 from src.review.models import FindingSeverity
 from src.review.settings import get_review_settings
 
@@ -44,8 +46,9 @@ logger = logging.getLogger(__name__)
 
 _ROLE = """You are an experienced engineer reviewing Pull Request changes.
 
-YOUR WHOLE JOB — defects in the changed lines, provable inside the file that
-carries them.
+YOUR WHOLE JOB — defects in the changed lines, provable from the code shown to
+you: the numbered hunks, the full enclosing function of each hunk, the call
+sites of the changed functions and the same-file callees printed below.
 
     A defect is something that produces a wrong result, an exception, or
     behaviour the author plainly did not intend, when this code RUNS. It is not
@@ -91,16 +94,23 @@ HOW TO READ THE DIFF — one changed line at a time, in order, to the end.
     one file are two findings, one per line. Leaving out a line that matched,
     because other findings were already written, is the defect shipping.
 
-THE BOUNDARY — one file.
+THE BOUNDARY — the code shown to you.
 
-    Every claim you make must be provable from the changed file itself and
-    the context printed below. If the claim is only true because of what some
-    OTHER file contains — a caller that breaks, a consumer that deserializes
-    this, a sibling repository still carrying the old value — it belongs to
-    the contract reviewer, who sees the symbol graph and holds such claims to
-    a stricter standard of evidence. Do not write it, even when you are sure.
-    Measured across 179 judged findings: claims that stayed inside the file
-    were right 48% of the time; claims that reached outside it, 14%.
+    Every claim you make must be provable from the code printed below: the
+    hunks (new-side line numbers in the left gutter), the enclosing functions
+    (lines marked * are the ones this PR changed), the call sites and the
+    callees. Quote the line that proves it. A caller or a callee is fair game
+    when its lines are shown; a claim about code that is NOT shown — a file
+    you were not given, a function whose body is absent, a sibling repository
+    — is not provable from here: it belongs to the contract reviewer, who sees
+    the symbol graph. Do not write it, even when you are sure. Claims that
+    stay inside what was shown are right far more often than claims that reach
+    outside it.
+
+    When the evidence is INFERRED rather than read — you assume what a helper
+    returns, how a caller uses a value, what a library does — say so in the
+    body and put the confidence at 0.5 or below. Only a defect you can trace
+    line by line from shown code earns 0.7 or more.
 
 WHAT COUNTS AS EVIDENCE.
 
@@ -116,6 +126,21 @@ WHAT COUNTS AS EVIDENCE.
     judged false positives: confident, well-quoted, single-file, and about a
     behaviour nobody checked.
 
+BEFORE YOU CLAIM THAT SOMETHING IS MISSING.
+
+    "Undefined variable", "missing constant", "wrong or out-of-range index",
+    "function does not exist", "property never set": each of these is a claim
+    about the ABSENCE of a symbol, and an absence can only be shown by
+    looking. Report it only when you can say that the symbol is absent from
+    the enclosing function and the file context printed below — name where
+    you looked. A variable declared in a loop or branch above the hunk, a
+    mapping array declared higher in the file, a helper defined elsewhere in
+    the file: all of these are common, and none of them is visible in a
+    three-line hunk. If the declaration could simply be outside what you were
+    shown, you do not have the finding — write nothing. The same goes for a
+    "wrong type" claim: before writing it, find the call site in the context
+    and check what it actually passes.
+
 DO NOT WRITE:
     - architectural opinions — coupling, module boundaries, "consider
       extracting", "this pattern is inconsistent with"
@@ -124,6 +149,53 @@ DO NOT WRITE:
       context
     - stylistic concerns beyond what the repo's own style guide states
     - issues in surrounding, unchanged code"""
+
+# THE BEHAVIOUR-CHANGE LENS.
+#
+# The first pass reads the diff for the shapes in `_ROLE`, which are all
+# properties of the NEW code. They miss the defects that are properties of the
+# CHANGE: the new line is perfectly valid, and wrong only because of what it
+# replaced. A flipped comparison, a deleted fallback, a status code that used
+# to be 200 — read as new code each is plausible. Only the `-`/`+` pair, or a
+# `-` line with no `+` partner at all, shows the problem. A reviewer who looks
+# only at added lines cannot see that something was REMOVED, and deleted lines
+# were measurably where a small model's recall went.
+#
+# Used twice: in the system prompt, so the first pass applies it, and as the
+# question of the second pass (see `_SECOND_PASS`), which used to repeat the
+# first pass's question and re-find what pass one already had.
+_BEHAVIOUR_LENS = """THE CHANGE LENS — compare what was removed with what replaced it.
+
+    The `-` lines are as much a part of the diff as the `+` lines. For every
+    hunk, pair each `-` line with the `+` line that replaced it (or note that
+    nothing did) and ask what behaviour CHANGED:
+      - POLARITY: a negation added, dropped or doubled (`!x`, `!!x`, `!=`,
+        `!==` versus `===`), `<` versus `<=`, `&&` versus `||`, `empty()`
+        versus `isset()`, a swapped branch of a ternary or if/else
+      - REMOVED SAFETY NET: a deleted fallback, default value, null/empty
+        guard, early return, `else` branch, try/catch, validation or
+        `continue`. A `-` line with no `+` partner is a deletion — ask what
+        the code below it does now that the line is gone
+      - RETURN AND STATUS: a changed return value, error code or HTTP status,
+        and whether something downstream (the caller, a later assignment, a
+        finally block) overwrites or ignores it
+      - CALLER/CALLEE SHAPE: a value serialized, stringified or wrapped on
+        one side (`JSON.stringify(x)`, a cast, an array of one) while the
+        other side — a call site or callee shown below — expects the original
+        shape: object versus JSON string, array versus object, string versus
+        number
+      - CALLEE SEMANTICS: a raw field replaced by an accessor, or the
+        reverse, where the callee's body (shown below when it is in the same
+        file) does something the raw field does not — a conversion, a default,
+        a clamp, a unit
+      - COPY-PASTE: a branch duplicated from its sibling in which one
+        variable, coordinate or index (x/y, start/end) was not
+        swapped
+
+    A change from one valid behaviour to another is not a defect on its own.
+    It is a finding when the code shown proves the OLD behaviour was the
+    intended one, or that the new behaviour breaks a reader you can quote.
+    The evidence rules above are unchanged."""
 
 # A second admissible shape for the `reasoning` sentence.
 #
@@ -202,43 +274,37 @@ genuinely a finding, however many of them the diff turns out to contain."""
 # directly after the contract it widens, because read apart from it the two
 # forms have nothing to be forms OF.
 _SYSTEM = (
-    "\n\n".join([_ROLE, FINDING_OUTPUT_FORMAT, _REASONING_FORMS, AVOID_LIST_PROMPT, SECOND_DEFECT_PROMPT, _SEVERITY])
+    "\n\n".join([_ROLE, _BEHAVIOUR_LENS, FINDING_OUTPUT_FORMAT, _REASONING_FORMS, AVOID_LIST_PROMPT, SECOND_DEFECT_PROMPT, _SEVERITY])
     + "\n"
 )
 
 
-# NO GRAPH AT ALL — not the summary, and no longer the brief either.
+# THE GRAPH SUMMARY IS BACK, SMALL, AND LABELLED.
 #
-# The brief was kept on the theory that a little structural context helps and
-# the full summary drowns. Reading what it actually contains killed that: every
-# line of it is about OTHER files. "12 changed symbols, 4 reached from
-# elsewhere in this repository (31 callers), 2 cross-repo references. Most
-# depended-on: parse (parser.py, 12 callers)." Caller counts, cross-repo
-# references, most-depended-on symbols.
+# It was removed on the strength of an observational number (40.2% precision
+# on a complete graph against 51.1% on a partial one) and on this agent's own
+# rule that a claim about another file belongs to the contract reviewer. Both
+# premises have changed. The rule now reads "provable from the code shown",
+# and the summary is where the agent learns which changed symbols have
+# callers at all — so it knows when the call-sites section below it is the
+# evidence to look for. The 40.2/51.1 gap was never shown to be causal, and
+# the old summary was printed whole; here it is cut to `_GRAPH_CHARS`.
 #
-# And this agent's own boundary rule, four paragraphs up, forbids acting on
-# any of it: a claim that is only true because of what another file contains
-# belongs to the contract reviewer. So the brief was a block of cross-file
-# facts handed to the one agent told not to use them — temptation with no
-# admissible use.
-#
-# The measurement is consistent with that costing something. On the 50-PR
-# bench, reviews where the graph came back COMPLETE ran 40.2% precision
-# against 51.1% where it came back partial — more structural context, worse
-# single-file precision. Observational, not causal: a repository with a
-# complete graph may simply be a harder one. So this is a hypothesis worth one
-# run, and it falsifies cleanly — precision up with recall unchanged, or the
-# brief was load-bearing after all.
-#
-# The full graph, the cross-repo counts and the drift block stay with the
-# contract agent, whose claims are about exactly that context.
+# It is orientation, not evidence: the prompt says a claim still has to quote
+# a shown line. The cross-repo counts and the drift block stay with the
+# contract agent.
+_GRAPH_CHARS = 4_000
+
 _USER_TEMPLATE = """## PR
 **Title:** {pr_title}
 **Description:**
 {pr_description}
 
-## Diff
+## Diff (new-side line numbers in the left gutter; `-` lines have none)
 {diff}
+
+## Symbol graph (orientation only — quote shown lines, not this summary)
+{graph_summary}
 
 ## Style guide
 {style_guide}
@@ -276,8 +342,12 @@ consequence.
 
 {already}
 
-Now read the diff again, from the first changed line to the last, and report
-the defects the first pass did not.
+Now read the diff again with a DIFFERENT question. The first pass asked "is
+this new code wrong?". Ask instead: "what behaviour did this change alter, and
+is the old behaviour the one that was meant?" Apply THE CHANGE LENS above to
+every hunk — pair each `-` line with its `+` line, look at every deletion that
+has no partner, and check the caller/callee shape against the call sites and
+callees shown. Report the defects the first pass did not.
 
 Most second passes find one or two. Some find none, and `[]` is the correct
 answer when the first pass was thorough — it is not a failure to agree with
@@ -305,8 +375,67 @@ class DefectAgent(LLMReviewAgent):
         self.model = model or settings.defect_model
         self.passes = max(1, int(passes if passes is not None else settings.defect_passes))
 
+    #: The context being rendered, and the code-context text already built for
+    #: it. Set by `_build_prompt` so `_format_diff_for_prompt` (which the base
+    #: class calls with the pull request alone) can reach the provider and the
+    #: clone; the cache means the second pass does not run `git` again.
+    _ctx = None
+    _extra_cache: tuple[int, str] | None = None
+
+    def _code_context_text(self, pr, hunks) -> str:
+        """The enclosing-function / callee / call-site sections for `hunks`.
+
+        Built once per pull request and reused by the second pass. Empty when
+        the feature is off or nothing could be read; never raises.
+        """
+        key = id(pr)
+        if self._extra_cache is not None and self._extra_cache[0] == key:
+            return self._extra_cache[1]
+        settings = get_review_settings()
+        text = ""
+        if settings.code_context_enabled:
+            provider = getattr(self._ctx, "file_provider", None)
+            text = build_code_context(
+                pr, hunks, provider=provider,
+                max_chars=settings.code_context_chars,
+                max_callsites=settings.code_context_callsites,
+            ).render()
+        self._extra_cache = (key, text)
+        return text
+
+    def _format_diff_for_prompt(  # type: ignore[override]
+        self, pr, max_chars: int = 50_000, hunks=None,
+    ) -> str:
+        """The diff with line numbers, followed by the code it sits in.
+
+        Falls back to the plain rendering on any error or when the feature is
+        off: a renderer bug must cost context, never the review.
+        """
+        plain = LLMReviewAgent._format_diff_for_prompt
+        if not get_review_settings().code_context_enabled:
+            return plain(pr, max_chars, hunks)
+        try:
+            use = pr.hunks if hunks is None else hunks
+            diff = render_numbered_diff(use, max_chars)
+            extra = self._code_context_text(pr, use)
+            return diff + ("\n" + extra if extra else "")
+        except Exception:  # noqa: BLE001
+            logger.warning("defect_code_context_failed", exc_info=True)
+            return plain(pr, max_chars, hunks)
+
     def _build_prompt(self, context) -> str:
-        prompt = super()._build_prompt(context)
+        # The graph summary is orientation, not evidence: cut it, so a large
+        # monorepo's blast radius cannot crowd out the code itself.
+        if len(context.graph_summary or "") > _GRAPH_CHARS:
+            context = dataclasses.replace(
+                context,
+                graph_summary=context.graph_summary[:_GRAPH_CHARS] + "\n... (summary cut)",
+            )
+        self._ctx = context
+        try:
+            prompt = super()._build_prompt(context)
+        finally:
+            self._ctx = None
         if not self._already_found:
             return prompt
         listed = "\n".join(

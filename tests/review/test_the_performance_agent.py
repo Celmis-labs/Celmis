@@ -63,6 +63,8 @@ _N_PLUS_ONE = {
     "file": "app/report.py",
     "line": 12,
     "severity": "error",
+    "input_size": "one lookup per order, orders come from the unpaginated "
+                  "report query: 5,000+ rows per request",
     "title": "N+1 query: one User lookup per order",
     "body": "Load the users with one `IN` query before the loop.",
     "rule_id": "perf.n-plus-one",
@@ -150,3 +152,31 @@ def test_its_findings_are_counted_under_performance_in_the_summary():
     batch.agents_run = ["performance"]
     text = "\n".join(_rich_findings_lines(batch))
     assert "**By category:** Performance: **1**" in text
+
+
+def test_error_without_a_demonstrated_growing_input_is_lowered_to_warning():
+    for size in (None, "", "unknown", "bounded", "a handful of items", "n/a"):
+        item = {k: v for k, v in _N_PLUS_ONE.items() if k != "input_size"}
+        if size is not None:
+            item["input_size"] = size
+        [f] = _run([item])[0].findings
+        assert f.severity is FindingSeverity.WARNING, size
+        assert "Severity lowered to warning" in f.body
+
+
+def test_critical_is_gated_the_same_way_and_a_stated_bound_keeps_it():
+    bare = {k: v for k, v in _N_PLUS_ONE.items() if k != "input_size"}
+    [lowered] = _run([{**bare, "severity": "critical"}])[0].findings
+    assert lowered.severity is FindingSeverity.WARNING
+    [kept] = _run([{**_N_PLUS_ONE, "severity": "critical",
+                    "input_size": "ids array in the POST body, no max length"}])[0].findings
+    assert kept.severity is FindingSeverity.CRITICAL
+    assert "Severity lowered" not in kept.body
+
+
+def test_warning_findings_are_untouched_and_the_prompt_states_the_rule():
+    [f] = _run([{**_N_PLUS_ONE, "severity": "warning", "input_size": "unknown"}])[0].findings
+    assert f.severity is FindingSeverity.WARNING and "lowered" not in f.body
+    prompt = PerformanceAgent.system_prompt
+    assert '"input_size"' in prompt and "unbounded or user-controlled" in prompt
+    assert "TTL" in prompt

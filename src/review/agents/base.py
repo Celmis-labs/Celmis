@@ -279,6 +279,10 @@ class AgentContext:
     #: Why there is no graph when there is none — a ParameterAdjustment the
     #: orchestrator appends to the batch. None when the graph answered in full.
     graph_note: ParameterAdjustment | None = None
+    #: The provider adapter of this pull request, kept so an agent can read a
+    #: file at the head commit when no local clone holds it
+    #: (`read_file_at`). None = unavailable; every user must fail open.
+    file_provider: object | None = None
     cross_repo_callers_count: int = 0
     repo_overview: str = ""            # existing PRD overview (vault) — optional
     style_guide: str = ""              # repo-level conventions (from CLAUDE.md etc.)
@@ -324,6 +328,12 @@ class AgentContext:
     #: business-logic agent, and only when the workspace connected Jira. None
     #: when nobody looked (the setting is off, or the agent will not run).
     task_context: TaskContext | None = None
+    #: The pull-request provider this review runs against, handed to the one
+    #: agent that reads repository code beyond the diff — the verifier, when
+    #: the local clone cannot answer (`verifier_evidence.py`). Any object with
+    #: `read_file_at` / `search_code`; None means "no provider to ask", and
+    #: the evidence then comes from the clone alone or not at all.
+    code_provider: object | None = None
 
 
 #: The longest base instruction any prompt carries. Kodus caps its own at the

@@ -13,6 +13,7 @@ Environment vars:
     REVIEW_TIMEOUT_SECONDS    — wall-clock budget for one review (default 900)
     REVIEW_LLM_TIMEOUT_SECONDS — deadline for one model call (default 300)
     REVIEW_VERIFIER_ENABLED   — run the LLM false-positive veto (default off)
+    REVIEW_VERIFIER_MIN_FINDINGS — fewest judgeable findings that wake the veto (default 1)
     REVIEW_LLM_TIMEOUT_RETRY_FACTOR — how much longer a timeout's retry gets (2.0)
     REVIEW_CVE_LOOKUP_TIMEOUT_SECONDS — wall clock for the OSV sweep (120)
     REVIEW_MAX_DIFF_SIZE_BYTES — skip a review whose diff is larger (default 500000)
@@ -116,6 +117,28 @@ class ReviewSettings(BaseSettings):
     #: look off (REVIEW_DEFECT_PASSES=1) — it costs one LLM call per review,
     #: which is exactly the call the five-to-three merge freed.
     defect_passes: int = 2
+
+    #: Show the defect agent the code AROUND the diff, not the diff alone: new-
+    #: side line numbers, the full enclosing function of each hunk at the PR
+    #: head, a few call sites of the changed functions and the same-file
+    #: callees invoked on changed lines (src/review/code_context.py). Off
+    #: (REVIEW_CODE_CONTEXT_ENABLED=false) returns to the bare hunks. Every
+    #: piece is budgeted and fails open: with no clone and no provider access
+    #: the agent still gets the numbered diff.
+    code_context_enabled: bool = True
+    #: Characters of enclosing-function / callee / call-site text added to the
+    #: defect prompt, on top of the diff (a third of it per file).
+    code_context_chars: int = 40_000
+    #: Call sites shown across all changed functions; 0 turns them off.
+    code_context_callsites: int = 8
+    #: Seconds the review may spend making the PR head commit available in
+    #: the local clone (src/review/head_fetch.py): waiting for the clone's
+    #: fetch lock plus the `git fetch` itself. The clone is kept at the
+    #: default branch by the indexer, so the head of an OPEN pull request is
+    #: usually not in it; without this step the call sites, the veto's
+    #: repository evidence and the undefined-constant check read the wrong
+    #: commit or nothing. 0 turns the step off (REVIEW_FETCH_HEAD_TIMEOUT_S=0).
+    fetch_head_timeout_s: int = 60
 
     #: The model a FRESH INSTALL reviews with.
     #:
@@ -372,6 +395,18 @@ class ReviewSettings(BaseSettings):
     #: the rule deny-list, the confidence floor, the severity sort — is NOT
     #: this and always runs. Only the model's veto is off.
     verifier_enabled: bool = False
+
+    #: The fewest findings the model may have left (proven ones excluded) for
+    #: the veto to run at all. It was a literal 3 in `llm_pass`: "the pass
+    #: exists to thin a pile, and two findings are not a pile". That reasoning
+    #: held while the veto saw only the diff and could not refute anything a
+    #: reader could not already see; a typical pull request has one or two
+    #: findings, so the veto sat idle exactly where the false positives were.
+    #: Now that the veto is given repository evidence (`verifier_evidence.py`)
+    #: a single finding is worth judging, and the default is 1: a repository
+    #: that opted into the veto gets every model finding judged. Raise it to
+    #: spend the second call only on larger piles. Below 1 is read as 1.
+    verifier_min_findings: int = 1
 
     # ─── Skip patterns ──────────────────────────────────────────────
     skip_filename_patterns: list[str] = Field(

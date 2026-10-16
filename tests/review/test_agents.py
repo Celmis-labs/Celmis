@@ -268,8 +268,13 @@ class TestVerifierDedup:
         assert result.kept[0].severity == FindingSeverity.CRITICAL
         assert result.kept[-1].severity == FindingSeverity.INFO
 
-    def test_small_batch_skips_llm_verify(self) -> None:
-        """< 3 findings — LLM verifier skipped."""
+    def test_small_batch_skips_llm_verify(self, monkeypatch) -> None:
+        """Below REVIEW_VERIFIER_MIN_FINDINGS (here 3) — LLM verifier skipped."""
+        from src.review.settings import ReviewSettings
+
+        monkeypatch.setattr(
+            "src.review.agents.verifier.get_review_settings",
+            lambda: ReviewSettings(verifier_min_findings=3))
         verifier = VerifierAgent(confidence_threshold=0.0)
         findings = [
             Finding(file_path="a.py", line=1, rule_id="r", confidence=0.9),
