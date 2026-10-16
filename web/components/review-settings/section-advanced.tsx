@@ -50,6 +50,7 @@ export function AdvancedSection() {
     >
       <McpSources />
       <Group
+        tour="advanced-folder-rules"
         title={t("reviewSettings.advanced.legacyGroup")}
         description={t("reviewSettings.advanced.legacyHint")}
       >
@@ -99,6 +100,7 @@ function McpSources() {
     patch({ mcpSources: sources.map((s, j) => (j === i ? { ...s, ...p } : s)) });
   return (
     <Group
+      tour="advanced-mcp"
       title={t("reviewSettings.advanced.mcpGroup")}
       description={t("reviewSettings.advanced.mcpHint")}
       action={(

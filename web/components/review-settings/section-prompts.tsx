@@ -83,6 +83,7 @@ function RepoInstructionsRow() {
   return (
     <SettingRow
       label={t("reviewSettings.prompts.repoInstructions")}
+      tour="prompt-repo-instructions"
       htmlFor={id}
       description={t("reviewSettings.prompts.repoInstructionsHint")}
       set={set}
@@ -121,9 +122,11 @@ function useFocusAgent(agent: string, ref: React.RefObject<HTMLElement | null>) 
  *  is what the built-in prompt already covers (Kodus shows the category's
  *  default description the same way), so a team writes only what it adds. */
 function GuidelinesEditor({
-  id, value, onChange, disabled, hint, placeholder,
+  id, value, onChange, disabled, hint, placeholder, tour,
 }: {
   id: string;
+  /** `data-tour` id of the box (src/automation/ui_catalogue.py). */
+  tour?: string;
   value: string;
   onChange: (v: string) => void;
   disabled: boolean;
@@ -133,7 +136,7 @@ function GuidelinesEditor({
   const t = useT();
   const over = value.trim().length > GUIDELINES_MAX;
   return (
-    <div className="mt-2 space-y-1.5">
+    <div className="mt-2 space-y-1.5" data-tour={tour}>
       <label htmlFor={id} className="text-xs font-medium">
         {t("reviewSettings.prompts.guidelines")}
       </label>
@@ -174,10 +177,10 @@ function GuidelinesEditor({
 
 /** "Advanced: replace the built-in prompt" — folded, with the warning
  *  first. Open on arrival when this scope already replaces the prompt. */
-function AdvancedReplace({ active, children }: { active: boolean; children: React.ReactNode }) {
+function AdvancedReplace({ active, children, tour }: { active: boolean; children: React.ReactNode; tour?: string }) {
   const t = useT();
   return (
-    <details className="mt-3 rounded-md border border-[var(--color-border)] px-3 py-2" open={active || undefined}>
+    <details className="mt-3 rounded-md border border-[var(--color-border)] px-3 py-2" open={active || undefined} data-tour={tour}>
       <summary className="flex cursor-pointer select-none flex-wrap items-center gap-2 text-xs font-medium">
         {t("reviewSettings.prompts.advancedReplace")}
         {active && (
@@ -238,7 +241,7 @@ function RepoAgentPrompt({ agent, ws }: { agent: string; ws?: AgentInfo }) {
   const write = (v: string) => patch({ agentPrompts: { ...draft.agentPrompts, [agent]: v } });
 
   return (
-    <div ref={ref} className="px-4 py-3.5" id={`prompt-${agent}`}>
+    <div ref={ref} className="px-4 py-3.5" id={`prompt-${agent}`} data-tour={`prompt-agent:${agent}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-h-8 flex-wrap items-center gap-2">
           <span className="text-sm font-medium">{agentLabel(agent)}</span>
@@ -262,13 +265,14 @@ function RepoAgentPrompt({ agent, ws }: { agent: string; ws?: AgentInfo }) {
               {t("reviewSettings.prompts.reset")}
             </Button>
           )}
-          <Button type="button" variant="ghost" size="sm" onClick={() => setPreview(true)}>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setPreview(true)} data-tour={`prompt-preview:${agent}`}>
             <EyeIcon className="h-3.5 w-3.5" aria-hidden />
             {t("reviewSettings.prompts.preview")}
           </Button>
         </div>
       </div>
       <GuidelinesEditor
+        tour={`prompt-guidelines:${agent}`}
         id={id}
         value={guidelines}
         onChange={writeGuidelines}
@@ -278,7 +282,7 @@ function RepoAgentPrompt({ agent, ws }: { agent: string; ws?: AgentInfo }) {
           ? t("reviewSettings.prompts.inheritsWorkspaceGuidelines", { text: wsGuidelines })
           : t("reviewSettings.prompts.guidelinesPlaceholder")}
       />
-      <div className="mt-2 flex items-start gap-2">
+      <div className="mt-2 flex items-start gap-2" data-tour={`prompt-extend:${agent}`}>
         <Switch
           id={extendId}
           checked={extend}
@@ -292,7 +296,7 @@ function RepoAgentPrompt({ agent, ws }: { agent: string; ws?: AgentInfo }) {
           </span>
         </label>
       </div>
-      <AdvancedReplace active={ownReplace}>
+      <AdvancedReplace active={ownReplace} tour={`prompt-replace:${agent}`}>
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
           <label htmlFor={replaceId} className="text-xs font-medium">
             {ownReplace
@@ -547,7 +551,7 @@ function WorkspaceAgentPrompt({
   });
 
   return (
-    <div ref={ref} className="px-4 py-3.5" id={`prompt-${agent.name}`}>
+    <div ref={ref} className="px-4 py-3.5" id={`prompt-${agent.name}`} data-tour={`prompt-agent:${agent.name}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-h-8 flex-wrap items-center gap-2">
           <span className="text-sm font-medium">{agent.display_name}</span>
@@ -573,7 +577,7 @@ function WorkspaceAgentPrompt({
               {t("reviewSettings.prompts.reset")}
             </Button>
           )}
-          <Button type="button" variant="ghost" size="sm" onClick={() => setPreview(true)}>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setPreview(true)} data-tour={`prompt-preview:${agent.name}`}>
             <EyeIcon className="h-3.5 w-3.5" aria-hidden />
             {t("reviewSettings.prompts.preview")}
           </Button>
@@ -581,6 +585,7 @@ function WorkspaceAgentPrompt({
       </div>
       <p className="mt-0.5 text-xs text-[var(--color-muted-foreground)]">{agent.role}</p>
       <GuidelinesEditor
+        tour={`prompt-guidelines:${agent.name}`}
         id={id}
         value={guidelines}
         onChange={writeGuidelines}
@@ -597,7 +602,7 @@ function WorkspaceAgentPrompt({
           <RepoLinks agent={agent.name} repos={guidelineRepos} />
         </div>
       )}
-      <AdvancedReplace active={custom || changed || d.reset}>
+      <AdvancedReplace active={custom || changed || d.reset} tour={`prompt-replace:${agent.name}`}>
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
           <label htmlFor={replaceId} className="text-xs font-medium">
             {t("reviewSettings.prompts.systemPrompt")}

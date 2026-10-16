@@ -221,6 +221,7 @@ export default function MemoriesPage() {
   return (
     <PageShell width="wide">
       <PageHeader
+        tour="page-memories"
         icon={<BrainIcon className="h-6 w-6" />}
         title={t("memories.title")}
         description={t("memories.description")}
@@ -321,7 +322,7 @@ export default function MemoriesPage() {
 
       {view === "memories" && canEdit && (
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => setEditing("new")} disabled={editing === "new"}>
+          <Button onClick={() => setEditing("new")} disabled={editing === "new"} data-tour="memories-add">
             <PlusIcon /> {t("memories.add")}
           </Button>
         </div>

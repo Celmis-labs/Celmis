@@ -56,10 +56,12 @@ def _sections() -> tuple[Section, ...]:
         pages,
         review,
         troubleshooting,
+        ui_map,
     )
 
     out: list[Section] = []
-    for mod in (pages, git, review, llm, access, ask, ops, troubleshooting):
+    for mod in (pages, git, review, llm, access, ask, ops, troubleshooting,
+                ui_map):
         out.extend(mod.SECTIONS)
     ids = [s.id for s in out]
     dupes = sorted({i for i in ids if ids.count(i) > 1})

@@ -36,6 +36,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.automation import ui_catalogue
+
 logger = logging.getLogger(__name__)
 
 #: The verbs a sentence may reach. Every one operates on a SET — that is the
@@ -115,16 +117,16 @@ CATALOGUE: dict[str, dict[str, Any]] = {
     # tests/automation/test_it_explains_running_your_own_model.py is the
     # tie-breaker that notices.
     "help": {
-        "summary": "Answer a how-do-I or where-is question about using the "
-                   "app: adding GitHub, GitLab or Bitbucket tokens and which "
-                   "scopes they need, editing review prompts, review "
-                   "policies and reviewers globally or per repository, "
-                   "webhooks, indexing, issues, analytics, provider API "
-                   "keys, a LiteLLM proxy, usage and budget, alerts, SSO, "
-                   "members, roles and invitations, who may change what, "
-                   "teams and code access — letting another team explore "
-                   "the code, MCP tokens for an editor — or which page "
-                   "holds a setting. Answered from the guide.",
+        "summary": "Answer a question about HOW SOMETHING WORKS or WHAT IT "
+                   "MEANS, in words: which scopes a GitHub, GitLab or "
+                   "Bitbucket token needs, how prompt layering or webhooks "
+                   "behave, what an option does, who may change what, how "
+                   "roles, SSO, a LiteLLM proxy or letting another team "
+                   "explore the code work. NOT for \"where do I set / how do "
+                   "I add / I need to configure X\" requests: those open the "
+                   "page with show_in_ui, which may be combined with this "
+                   "when they also ask what the options do. Answered from "
+                   "the guide.",
         "reads": True,
         "arguments": {},
     },
@@ -527,6 +529,11 @@ CATALOGUE: dict[str, dict[str, Any]] = {
     },
 }
 
+#: The verb that opens the app at a setting. Defined beside the screen map it
+#: validates against (`ui_catalogue`), so the planner is offered exactly the
+#: destinations and focus keys that exist.
+CATALOGUE["show_in_ui"] = ui_catalogue.spec()
+
 #: The reads whose answer is explained by a SECOND model call, written from
 #: what the read returned (`explain_read`, run by the worker). The plan's note
 #: is written before anything is read, so for these it can only be generic;
@@ -623,6 +630,12 @@ last is a person watching nothing happen for several seconds.
 #: provider which caches a stable prefix should get to cache all of it.
 _HELP = """
 HOW-TO AND WHERE-IS QUESTIONS — the help action.
+
+(A request to SET UP, ADD or FIND a control — "I need custom prompts for repo
+X", "where do I add a Slack channel", "how do I connect GitHub" — is not
+answered in words: it is the show_in_ui action described further down, which
+opens the page. Use help for the explanation behind a screen, or beside
+show_in_ui when the person also asks what the options mean.)
 
 For help, the plan's note is not one sentence: it IS the whole answer, and the
 person reads it while you write it. Write it from the product guide and the
@@ -931,7 +944,8 @@ def interpret(
         # The guide is the stable part, the knowledge the per-question part:
         # in that order, everything up to the knowledge is the same prefix on
         # every call.
-        system_instruction=(_SYSTEM + _HELP + GUIDE + tour_prompt() + _KNOWLEDGE_HEADER
+        system_instruction=(_SYSTEM + ui_catalogue.routing_prompt() + _HELP + GUIDE
+                            + tour_prompt() + _KNOWLEDGE_HEADER
                             + knowledge_for(topic)),
         mode="qa", operation="automation_interpret", temperature=0.0,
         # A help answer is numbered steps with links, not a sentence, and in
@@ -1030,6 +1044,19 @@ sensibly), then what stands out or what to do next, only if the data shows it.
 #: `_EXPLAIN_READ`. `review_settings` carries the long mechanics text.
 _EXPLAIN_HINTS: dict[str, str] = {
     "review_settings": _EXPLAIN_SETTINGS,
+    "show_in_ui": """
+The data is the result of asking the app to open a page for the person, and
+it did NOT simply work. Read `error` and `mode`:
+- repo_ambiguous: several repositories fit what they wrote (`candidates`).
+  Ask which one, listing them, in one or two sentences.
+- repo_not_found: no repository they may read looks like `asked`. Say so and
+  ask them to name it as it appears on the Repositories page.
+- repo_required: this page edits one repository; ask which.
+- mode "link" (ok is true): the page opens but they cannot change it. Say in
+  one or two sentences which roles can (`needs`, theirs is `role`) and that
+  they can still look at the page through the button.
+Do not describe the steps of the setting. Short.
+""",
     "get_review_run": """
 The data is one code-review run of a pull request: status and verdict, the
 counts by severity, the agents that ran or failed, a summary, and the findings
@@ -1478,6 +1505,37 @@ def _resolve_ops_step(step: Step, caller: dict[str, Any] | None) -> None:
         step.blocked = refusal
 
 
+def add_ui_safety_net(plan: Plan, message: str,
+                      repos: list[dict[str, Any]] | None = None) -> Plan:
+    """Turn a `help`-only answer to a setup question into a spotlight too.
+
+    The planner sometimes files "where do I paste the GitLab token" under
+    `help`. When the plan has `help` and no `show_in_ui` and the sentence
+    clearly asks where to set something that the catalogue knows
+    (`ui_catalogue.suggest_destination`), a `show_in_ui` step is appended in
+    code. The help text stays: the person gets the words and the page. When
+    `repos` (the ones the caller may read) is given and the sentence names one,
+    the step carries it; a name that fits several is passed as typed, and the
+    existing ambiguity path asks which. A plan
+    with any other step (a write, an audit) is left alone, as is every
+    question that merely explains something.
+    """
+    actions = [st.action for st in plan.steps]
+    if "help" not in actions or "show_in_ui" in actions:
+        return plan
+    if any(a not in ("help", "show_in_ui") for a in actions):
+        return plan
+    found = ui_catalogue.suggest_destination(message)
+    if found is None:
+        return plan
+    logger.info("automation_ui_safety_net destination=%s", found["destination"])
+    repo = ui_catalogue.find_repo_in_text(message, repos or [])
+    if repo:
+        found["repo"] = repo
+    plan.steps.append(Step(action="show_in_ui", arguments=found))
+    return plan
+
+
 def resolve_scope(plan: Plan, *, workspace_id: str,
                   caller: dict[str, Any] | None = None) -> Plan:
     """Fill in which repositories each step actually covers, and block early.
@@ -1638,7 +1696,8 @@ async def _run_ops(action: str, args: dict[str, Any], actor, session) -> dict[st
     return await ops.list_members(actor, session)
 
 
-async def execute(plan: Plan, actor, session) -> dict[str, Any]:
+async def execute(plan: Plan, actor, session, caller: dict[str, Any] | None = None,
+                  language: str = "") -> dict[str, Any]:
     """Run an approved plan. Refuses anything the plan itself blocked.
 
     All steps or none. A plan is approved as a whole, and half-running one is
@@ -1706,6 +1765,16 @@ async def execute(plan: Plan, actor, session) -> dict[str, Any]:
             outcome = {"links": guide_links(plan.note)}
         elif step.action == "list_repos":
             outcome = await list_repos(actor)
+        elif step.action == "show_in_ui":
+            # Not a change: a validated instruction for the browser. The
+            # repository is resolved here, against the ones this person may
+            # read, so a name that matches nothing (or two things) comes back
+            # as a question instead of opening somebody else's settings.
+            repos = (await list_repos(actor)).get("repos", [])
+            outcome = ui_catalogue.build_ui_action(
+                destination=args.get("destination"), repo=args.get("repo"),
+                focus=args.get("focus"), repos=repos, caller=caller,
+                workspace_id=actor.workspace_id, language=language)
         elif step.action == "review_settings":
             # A snapshot, not prose: the answer is written from it by a second
             # model call in the worker (`explain_review_settings`), so what

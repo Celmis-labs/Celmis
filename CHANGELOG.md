@@ -20,6 +20,52 @@ derives it from there.
 
 ## [Unreleased]
 
+## [2.3.20] — 2026-10-16
+
+### Added
+
+- **The Celmis agent now opens the page and points at the field, instead of
+  describing where it is.** Asked "I need to add custom prompts for repo
+  shop-api" (in any language), the agent names the repository, and the browser
+  opens Review settings on that repository's Custom prompts section and walks
+  the fields one by one with the same spotlight "Show me" uses: the base
+  instruction, the guidelines box of an agent, the advanced "replace the
+  built-in prompt" option. The same works for ignore files, the severity
+  threshold, the verifier, an agent's model and reasoning, summary, commands,
+  memories, Git connections, LLM keys, alerts and notification channels. The
+  repository is matched against the ones the asker may read (a slug, `owner/name`,
+  a bare name or a typo); two equally good matches are asked about, never
+  guessed. A person whose role cannot change the page gets the link and the
+  roles that can, not a spotlight on a disabled field. The answer shows a
+  "Showing you: …" card with a "Show again" button, and a reloaded or old
+  answer never starts a tour by itself.
+- **One catalogue of screens** (`src/automation/ui_catalogue.py`): every
+  destination, every control with its `data-tour` anchor, its built-in default
+  and what it does (advanced options marked). The planner is offered exactly
+  these names, the answer to "what do the advanced settings give" is quoted
+  from them, and a test reads `web/` so an anchor that moved, a review setting
+  without an entry or a setting listed under the wrong section fails the build.
+- `scripts/eval_agent_ui.py`: a live check (not in CI) that replays realistic
+  setup questions in English, Ukrainian and Russian through the real planner.
+
+### Fixed
+
+- **The agent no longer files a "where do I set this" question under plain
+  help.** When the planner answers such a question with text only and the
+  sentence clearly names one settings page (a Git token, ignore files, the
+  severity threshold, custom prompts, an API key, a notification channel), the
+  page is opened and the field highlighted as well (on the repository the
+  sentence names, when it names one); explanations ("what is
+  ...", "why ...") are left alone. When the page cannot be opened (an ambiguous
+  repository, a role that cannot edit) the reason is added to the help text
+  instead of replacing it, and the highlight captions follow the language of
+  the question, falling back to English when the model wrote them in another.
+
+### Changed
+
+- The `help` verb is described as the explanation of how something works; "where
+  do I set / how do I add X" requests go to the new `show_in_ui` verb.
+
 ## [2.3.18] — 2026-10-16
 
 ### Added

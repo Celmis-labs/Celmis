@@ -196,7 +196,7 @@ function AgentCard({
   const title = agent === "verifier" ? t("reviewSettings.agents.verifier") : category ?? agentLabel(agent);
   const [open, setOpen] = useState(focusAgent === agent);
   return (
-    <div className="px-4 py-3.5" id={`agent-${agent}`}>
+    <div className="px-4 py-3.5" id={`agent-${agent}`} data-tour={field ? "setting:verifier_enabled" : `review-agent:${agent}`}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
           <div className="flex min-h-8 flex-wrap items-center gap-x-2 gap-y-1">

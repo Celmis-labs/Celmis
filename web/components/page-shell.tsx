@@ -62,7 +62,10 @@ export function PageHeader({
   badge,
   actions,
   tabs,
+  tour,
 }: {
+  /** `data-tour` id of the page (src/automation/ui_catalogue.py). */
+  tour?: string;
   title: React.ReactNode;
   description?: React.ReactNode;
   icon?: React.ReactNode;
@@ -73,7 +76,7 @@ export function PageHeader({
   tabs?: React.ReactNode;
 }) {
   return (
-    <div>
+    <div data-tour={tour}>
       {/* One column on a phone. 390px cannot hold a title that already needs
           three lines, a workspace name and a "New …" button on one row: the
           title floors at its longest word and the other two overflow the

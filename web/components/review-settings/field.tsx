@@ -37,7 +37,7 @@ export function SectionFrame({
   children: React.ReactNode;
 }) {
   return (
-    <section aria-labelledby={`${id}-title`} className="space-y-6">
+    <section aria-labelledby={`${id}-title`} className="space-y-6" data-tour={`settings-section:${id}`}>
       <header className="space-y-1">
         <h2 id={`${id}-title`} className="text-lg font-semibold tracking-tight">{title}</h2>
         <p className="max-w-[70ch] text-sm text-[var(--color-muted-foreground)]">{description}</p>
@@ -51,8 +51,10 @@ export function SectionFrame({
  *  role="group" named by its title, so a screen reader announces the group
  *  with each control inside it. */
 export function Group({
-  title, description, children, className, action,
+  title, description, children, className, action, tour,
 }: {
+  /** `data-tour` id (src/automation/ui_catalogue.py). */
+  tour?: string;
   title?: string;
   description?: React.ReactNode;
   children: React.ReactNode;
@@ -64,6 +66,7 @@ export function Group({
     <div
       role="group"
       aria-labelledby={title ? titleId : undefined}
+      data-tour={tour}
       className={cn("min-w-0 space-y-2", className)}
     >
       {(title || action) && (
@@ -152,8 +155,10 @@ export function ResetButton({
  */
 export function SettingRow({
   field, label, description, control, inline = false, describeInherited, htmlFor, extra,
-  set: forcedSet, onReset,
+  set: forcedSet, onReset, tour,
 }: {
+  /** `data-tour` id for a row that is not one inheritable field. */
+  tour?: string;
   field?: InheritableKey;
   label: string;
   description?: React.ReactNode;
@@ -173,7 +178,7 @@ export function SettingRow({
   const inherited = field ? inh.values[field] : undefined;
   const labelId = useId();
   return (
-    <div className="px-4 py-3.5" data-field={field}>
+    <div className="px-4 py-3.5" data-field={field} data-tour={tour ?? (field ? `setting:${field}` : undefined)}>
       <div className={cn("flex gap-4", inline ? "items-start justify-between" : "flex-col gap-2")}>
         <div className="min-w-0 flex-1">
           <div className="flex min-h-8 flex-wrap items-center gap-x-2 gap-y-1">

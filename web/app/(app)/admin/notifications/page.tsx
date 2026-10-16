@@ -77,6 +77,7 @@ export default function NotificationsPage() {
   return (
     <PageShell width="wide">
       <PageHeader
+        tour="page-notifications"
         icon={<BellIcon className="h-6 w-6" />}
         title={t("admin.notifications.title")}
         description={t("admin.notifications.pageDescription")}
@@ -145,7 +146,7 @@ function ChannelCreate({ onCreated }: { onCreated: () => void }) {
   });
 
   return (
-    <Card>
+    <Card data-tour="notifications-channel">
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2">
           <PlusIcon className="h-4 w-4" /> {t("admin.notifications.newChannel")}
@@ -244,7 +245,7 @@ function BindingCreate({
   });
 
   return (
-    <Card>
+    <Card data-tour="notifications-binding">
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2">
           <PlusIcon className="h-4 w-4" /> {t("admin.notifications.newBinding")}

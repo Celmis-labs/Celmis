@@ -133,6 +133,7 @@ export default function ConnectionsPage() {
   return (
     <PageShell width="wide">
       <PageHeader
+        tour="page-connections"
         title={t("connections.title")}
         description={t("connections.intro")}
         tabs={<SectionTabs set="settings" />}
@@ -288,7 +289,7 @@ function ProviderCard({
   };
 
   return (
-    <Card>
+    <Card data-tour={`connection-provider:${provider}`}>
       <CardHeader className="flex-row items-start gap-4">
         <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${info.color} font-bold`}>
           {info.name.slice(0, 1)}

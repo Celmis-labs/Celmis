@@ -236,6 +236,7 @@ export default function ReviewRulesPage() {
   return (
     <PageShell width="wide">
       <PageHeader
+        tour="page-review-rules"
         icon={<ListChecksIcon className="h-6 w-6" />}
         title={t("admin.reviewRules.title")}
         description={t("admin.reviewRules.description")}

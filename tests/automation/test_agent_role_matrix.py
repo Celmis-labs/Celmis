@@ -125,6 +125,9 @@ MATRIX: dict[str, Row] = {
     "explain": R("explain", {"topic": "product"}, ALL_ROLES, "",
                  "none (canned text)", "chat.py execute() explain"),
     "help": R("help", {}, ALL_ROLES, "", "none (canned text)", "chat.py execute() help"),
+    "show_in_ui": R("show_in_ui", {"destination": "llm"}, ALL_ROLES, "",
+                    "none (opens a page; the page's own routes enforce roles)",
+                    "ui_catalogue.build_ui_action (readable repos only)"),
 
     # ── what the workspace has ──
     "list_repos": R("list_repos", {}, ALL_ROLES, "",

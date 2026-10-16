@@ -541,7 +541,7 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
     streams, the human-readable sentence is written first (see
     `src.automation.chat.interpret`), and it lands on the row as it arrives.
     """
-    from src.automation.chat import interpret, resolve_scope
+    from src.automation.chat import add_ui_safety_net, interpret, resolve_scope
     from src.automation.tour import extract_tour
     from src.sync.queue import is_cancel_requested
 
@@ -571,6 +571,8 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
             # an older job, which is then read on its own, as it always was.
             history=p.get("history"),
         )
+        plan = add_ui_safety_net(
+            plan, p["message"], await _repos_for_net(plan, p))
         plan = resolve_scope(plan, workspace_id=workspace_id,
                              caller=p.get("caller"))
     except Exception as exc:  # noqa: BLE001
@@ -618,7 +620,8 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
                 note = written if note == d["note"] else f"{note}\n\n{written}"
                 break
         explained_steps = [r for r in steps_read
-                           if r.get("action") in EXPLAINED_READS]
+                           if r.get("action") in EXPLAINED_READS
+                           or _ui_needs_words(r)]
         if explained_steps and note == d["note"]:
             # The plan's note was written before anyone had looked at the
             # data, so it can only say generic things about it. A second
@@ -639,7 +642,7 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
                     language=d.get("language", ""), history=p.get("history"),
                     on_note=on_note, should_stop=should_stop,
                 )
-                note = explained or note
+                note = _join_explained(note, explained, d["steps"])
                 note, explained_tour = extract_tour(note)
                 tour = explained_tour or tour
             except Exception as exc:  # noqa: BLE001
@@ -648,6 +651,14 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
             if is_cancel_requested(job["id"]):
                 await _finish_automation_plan(run_id, status="stopped")
                 return
+        ui = next((r["result"] for r in steps_read
+                   if r.get("action") == "show_in_ui"
+                   and (r.get("result") or {}).get("ok")), None)
+        if ui:
+            # The browser's "Showing you" card; the steps are the same shape
+            # a [[guide]] block yields, so one runner serves both.
+            answer["ui"] = {k: v for k, v in ui.items() if k != "steps"}
+            tour = ui["steps"] if ui.get("mode") == "tour" else tour
         if tour:
             answer["tour"] = tour
         await _finish_automation_plan(
@@ -660,6 +671,36 @@ async def handle_automation_plan(job: dict[str, Any]) -> None:
         language=d.get("language", ""),
         resolved_repos=d["resolved_repos"], blocked=d["blocked"],
     )
+
+
+def _join_explained(note: str, explained: str, steps: list[dict[str, Any]]) -> str:
+    """The note after the second, data-fed call has written its sentence.
+
+    Normally the sentence replaces the plan's note, which was written before
+    anything was looked at. A plan that also carries a `help` answer is the
+    exception: that note IS the help text, and the second call only has the
+    reason or the question about the page that could not be opened. Replacing
+    would throw the help away, so the two are joined, help first.
+    """
+    if not explained:
+        return note
+    if any(st.get("action") == "help" for st in steps):
+        return f"{note}\n\n{explained}" if note else explained
+    return explained
+
+
+def _ui_needs_words(read: dict[str, Any]) -> bool:
+    """A `show_in_ui` result the plan's note could not have anticipated.
+
+    The note is written before the repository is resolved, so when the name
+    was ambiguous, unknown, or the person's role cannot change the page, the
+    sentence "opening it now" would be false. Those results get the second,
+    data-fed call; a clean one keeps the one-line note.
+    """
+    if read.get("action") != "show_in_ui":
+        return False
+    res = read.get("result") or {}
+    return not res.get("ok") or res.get("mode") == "link"
 
 
 #: How often the sentence being written is allowed to reach the database.
@@ -754,6 +795,28 @@ def _cancel_poller(job_id: str):
     return _stop
 
 
+async def _repos_for_net(plan: Any, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """The repositories the asker may read, fetched only when the net could fire.
+
+    A plan of `help` alone is the only one `add_ui_safety_net` touches, so any
+    other plan costs no query. A failure is an empty list: the spotlight then
+    opens without a repository, exactly as before.
+    """
+    actions = [st.action for st in plan.steps]
+    if "help" not in actions or any(a not in ("help",) for a in actions):
+        return []
+    try:
+        from src.automation.actions import Actor, list_repos
+        actor = Actor(user_id=payload.get("user_id", ""),
+                      email=payload.get("user_email", ""),
+                      workspace_id=payload.get("workspace_id", "default"),
+                      label="chat")
+        return (await list_repos(actor)).get("repos", [])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("automation_net_repos_failed err=%s", exc)
+        return []
+
+
 async def _run_automation_reads(plan: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """Run a read-only plan through the same execute every write goes through.
 
@@ -772,7 +835,11 @@ async def _run_automation_reads(plan: Any, payload: dict[str, Any]) -> dict[str,
         label="chat",
     )
     async with async_session() as session:
-        return await execute(plan, actor, session)
+        from src.automation.ui_catalogue import detect_language
+
+        return await execute(plan, actor, session,
+                             caller=payload.get("caller"),
+                             language=detect_language(payload.get("message")))
 
 
 async def _finish_automation_plan(

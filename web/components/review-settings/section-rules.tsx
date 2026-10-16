@@ -46,7 +46,7 @@ export function RulesSection() {
       title={t("reviewSettings.section.rules")}
       description={repo ? t("reviewSettings.rules.descRepo") : t("reviewSettings.rules.descGlobal")}
     >
-      <Group>
+      <Group tour="rules-overview">
         <div className="px-4 py-4">
           {rules.error ? (
             <Callout tone="danger">{t("common.loadError")}: {(rules.error as Error).message}</Callout>

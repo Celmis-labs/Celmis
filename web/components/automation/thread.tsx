@@ -41,6 +41,8 @@ import { LocalSetupGuideBody } from "@/components/local-setup-guide";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ShowMe } from "@/components/automation/show-me";
+import { ShowInUi } from "@/components/automation/show-in-ui";
+import { sanitizeUiAction } from "@/lib/ui-action";
 import {
   VERB_MARKDOWN, VERB_READS, VERB_WRITES, VerbAnswer, VerbOutcome, VerbPreview,
   type VerbPreviewData,
@@ -86,6 +88,8 @@ type RunResult = {
   steps?: { action: string; result: Record<string, unknown> }[];
   /** Controls the answer points at (server-validated; see lib/guide-tour). */
   tour?: unknown;
+  /** The page the agent opened for the person (`show_in_ui`; lib/ui-action). */
+  ui?: unknown;
 };
 
 export type Run = {
@@ -192,7 +196,7 @@ const READS = [
   "review_settings", "list_reviews", "get_review_run", "list_issues",
   "ask_code", "search_code",
   "get_spend", "get_usage", "get_budget", "list_alerts", "list_jobs",
-  "audit_delta", "export_sbom", "list_members",
+  "audit_delta", "export_sbom", "list_members", "show_in_ui",
 ] as const;
 const WRITES = [
   "generate_docs", "start_dep_audit", "set_auto_review",
@@ -716,7 +720,8 @@ export function Reply({
       )}
 
       {run.status === "answered" && (
-        <Answer result={run.result} language={run.language} onPick={onPick} />
+        <Answer result={run.result} language={run.language} onPick={onPick}
+          runId={run.id} createdAt={run.created_at} />
       )}
 
       {/* One block per step. The list, not the count: a misread scope is
@@ -1411,23 +1416,32 @@ function SelfHosted({
  *  All of it is the CONTENT of a reply, so all of it is read out of the
  *  language of the question rather than of the switcher. */
 function Answer({
-  result, language, onPick,
+  result, language, onPick, runId, createdAt,
 }: {
   result: RunResult;
   language?: string;
   onPick: (text: string) => void;
+  runId?: string;
+  createdAt?: string;
 }) {
   const t = useDictFor(language);
   const token = useToken();
   const steps = result.steps ?? [];
 
   const tour = sanitizeSteps(result.tour);
+  const ui = sanitizeUiAction(result.ui, result.tour);
 
   return (
     <div className="space-y-3">
-      {tour.length > 0 && <ShowMe steps={tour} />}
+      {ui
+        ? <ShowInUi ui={ui} runId={runId ?? ""} createdAt={createdAt ?? ""} />
+        : tour.length > 0 && <ShowMe steps={tour} />}
       {steps.map((s, i) => {
         const r = s.result as Record<string, any>;
+
+        // `show_in_ui` is drawn as the card above the list (its result is an
+        // instruction for the browser, not figures to print).
+        if (s.action === "show_in_ui") return null;
 
         // The operations reads: figures and short lists under the note (which
         // is the explanation, for the explained ones), and the page to open.

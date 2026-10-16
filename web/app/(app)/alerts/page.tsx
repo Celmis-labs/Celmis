@@ -67,6 +67,7 @@ export default function AlertsPage() {
   return (
     <PageShell width="wide">
       <PageHeader
+        tour="page-alerts"
         icon={<BellRingIcon className="h-6 w-6" />}
         title={t("alerts.title")}
         badge={<WorkspaceBadge />}
@@ -157,7 +158,7 @@ function IngestCard() {
     : null;
 
   return (
-    <Card>
+    <Card data-tour="alerts-webhook">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           {t("alerts.ingestTitle")}
