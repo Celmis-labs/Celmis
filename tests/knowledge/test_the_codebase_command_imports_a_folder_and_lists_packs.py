@@ -17,6 +17,7 @@ The contract (docs/CODEBASE.md, "Command line"):
 
 from __future__ import annotations
 
+import re
 import secrets
 
 import pytest
@@ -213,10 +214,17 @@ def test_list_prints_every_pack_with_audience_version_and_files(shell, tmp_path)
     assert shell.run("list", "-w", "nowhere").exit_code == 1
 
 
+def _help(*args: str) -> tuple[int, str]:
+    # Rich colours the help when it sees GITHUB_ACTIONS, and the escape codes
+    # split an option name; read the text the way a person reads it.
+    r = runner.invoke(app, [*args, "--help"], env={"COLUMNS": "200", "NO_COLOR": "1"})
+    return r.exit_code, re.sub(r"\x1b\[[0-9;]*m", "", r.output)
+
+
 def test_the_command_is_documented_in_the_help():
-    r = runner.invoke(app, ["codebase", "--help"])
-    assert r.exit_code == 0 and "import" in r.output and "list" in r.output
-    r = runner.invoke(app, ["codebase", "import", "--help"])
-    assert r.exit_code == 0
+    code, out = _help("codebase")
+    assert code == 0 and "import" in out and "list" in out
+    code, out = _help("codebase", "import")
+    assert code == 0
     for flag in ("--workspace", "--pack", "--audience", "--team", "--as", "--note"):
-        assert flag in r.output, flag
+        assert flag in out, flag
