@@ -40,6 +40,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Callout } from "@/components/ui/callout";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -383,6 +384,16 @@ function InviteSection({ wsId, wsSlug, grantable }: {
     queryFn: () => invitesApi.list(token!, wsSlug),
     enabled: !!token,
   });
+  // Room for a person who has no account yet? The link below is issued either
+  // way; what it can do depends on this (src/users/seats.py): an account that
+  // exists joins whatever the seats say, a newcomer has to sign up first.
+  const seat = useQuery({
+    queryKey: ["invite-seats", wsId],
+    queryFn: () => invitesApi.freeSeat(token!, wsSlug),
+    enabled: !!token,
+    retry: false,
+  });
+  const noFreeSeat = seat.data?.has_free_seat === false;
 
   const create = useMutation({
     mutationFn: (mode: "email" | "link") =>
@@ -449,6 +460,11 @@ function InviteSection({ wsId, wsSlug, grantable }: {
           <LinkIcon className="h-3.5 w-3.5 mr-1" /> {t("invite.byLink")}
         </Button>
       </div>
+      {noFreeSeat && (
+        <div className="mt-2">
+          <Callout tone="warning">{t("invite.noFreeSeat")}</Callout>
+        </div>
+      )}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <Label htmlFor={`invite-expiry-${wsId}`} className="text-xs">
           {t("invite.expiryLabel")}

@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { KeyRoundIcon } from "lucide-react";
 import { BrandMark, BrandWord } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
+import { Callout } from "@/components/ui/callout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
@@ -17,6 +18,7 @@ import { LanguageSwitcher } from "@/components/language-switcher";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useT } from "@/lib/i18n";
+import { SEAT_LIMIT_MESSAGE_KEY, isSeatLimitCode, type SeatLimitCode } from "@/lib/seats";
 import { SsoButton } from "@/ee/sso/sso-button";
 import { forgetAgentSession } from "@/lib/agent-session";
 
@@ -97,8 +99,20 @@ function LoginInner({ passwordLogin, ssoName }: { passwordLogin: boolean; ssoNam
   // the right language) instead of stacking another.
   const authError = params.get("error");
   useEffect(() => {
-    if (authError) toast.error(t("auth.sso.failed"), { id: SSO_ERROR_TOAST_ID });
+    if (!authError) return;
+    // A full installation is not a failed sign-in: auth.ts passes the refusal
+    // code (src/users/seats.py) and the person is told what to do about it.
+    if (isSeatLimitCode(authError)) {
+      toast.error(t(SEAT_LIMIT_MESSAGE_KEY[authError]), { id: SSO_ERROR_TOAST_ID });
+    } else {
+      toast.error(t("auth.sso.failed"), { id: SSO_ERROR_TOAST_ID });
+    }
   }, [authError, t]);
+  // The same refusal as a notice that stays (a toast is gone in seconds, and
+  // this one is not fixed by trying again): from the redirect above, or from
+  // the sign-up form below.
+  const [refusedCode, setRefusedCode] = useState<SeatLimitCode | null>(null);
+  const seatLimit = refusedCode ?? (isSeatLimitCode(authError) ? authError : null);
 
   // Reaching the sign-in page means there is no session — including one that
   // expired, where the proxy redirects here without a sign-out. Drop the
@@ -123,6 +137,11 @@ function LoginInner({ passwordLogin, ssoName }: { passwordLogin: boolean; ssoNam
         redirect: false,
       });
       if (res?.error) {
+        if (isSeatLimitCode(res.code)) {
+          setRefusedCode(res.code);
+          toast.error(t(SEAT_LIMIT_MESSAGE_KEY[res.code]));
+          return;
+        }
         toast.error(
           mode === "signup" ? t("login.signupFailed") : t("login.invalidCredentials"),
         );
@@ -226,6 +245,11 @@ function LoginInner({ passwordLogin, ssoName }: { passwordLogin: boolean; ssoNam
             <CardDescription>{description}</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
+            {seatLimit && (
+              <div role="alert">
+                <Callout tone="warning">{t(SEAT_LIMIT_MESSAGE_KEY[seatLimit])}</Callout>
+              </div>
+            )}
             {passwordLogin ? (
               <>
                 <Tabs value={mode} onValueChange={(v) => setMode(v as "login" | "signup")}>

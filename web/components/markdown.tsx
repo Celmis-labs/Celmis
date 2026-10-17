@@ -8,19 +8,61 @@
  * (`repo/path/file.ts:123` or `file.ts#L12`) renders as a button that jumps
  * to /search pre-filled with the file's basename — the search page already
  * resolves files to provider links.
+ *
+ * Images load from wherever the text says, so text somebody else wrote can make
+ * a viewer's browser call an address of its choosing just by being opened.
+ * `images="alt"` renders every image as its alt text (and, where it is not
+ * already inside a link, a plain link to it that only a click follows): the
+ * text of a knowledge pack is shown that way.
  */
 
-import ReactMarkdown from "react-markdown";
+import { createContext, useContext } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useRouter } from "next/navigation";
 
+import { imageAsText } from "@/lib/markdown-image";
 import { cn } from "@/lib/utils";
 
 /** `repo/path/to/file.ts:123`, `path.py#L12`, `web/lib/api.ts` … */
 const FILE_CITE_RE =
   /^[\w./-]+\.(ts|tsx|py|go|rs|js|jsx|md|json|yml|yaml|sql|css)(#L\d+|:\d+)?$/;
 
-export function Markdown({ text, className }: { text: string; className?: string }) {
+/** True inside a link, where a second link would be an anchor in an anchor. */
+const InsideLink = createContext(false);
+
+/** An image shown as text: its alt text, and a link to it that is followed only
+ *  by a click. Nothing is fetched. */
+function ImageAsText({ alt, src }: { alt?: string; src?: string | Blob }) {
+  const insideLink = useContext(InsideLink);
+  const { text, href } = imageAsText(typeof src === "string" ? src : "", alt ?? "");
+  if (!href || insideLink) return text ? <span className="italic">{text}</span> : null;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="text-[var(--color-brand)] italic underline underline-offset-2 hover:opacity-80"
+    >
+      {text}
+    </a>
+  );
+}
+
+const imageAsTextComponent: NonNullable<Components["img"]> = ({ alt, src }) => (
+  <ImageAsText alt={alt} src={src} />
+);
+
+export function Markdown({
+  text,
+  className,
+  images = "show",
+}: {
+  text: string;
+  className?: string;
+  /** `"alt"`: show an image as its alt text instead of loading it. */
+  images?: "show" | "alt";
+}) {
   const router = useRouter();
 
   const openCitation = (raw: string) => {
@@ -41,9 +83,10 @@ export function Markdown({ text, className }: { text: string; className?: string
               rel="noreferrer"
               className="text-[var(--color-brand)] underline underline-offset-2 hover:opacity-80"
             >
-              {children}
+              <InsideLink.Provider value>{children}</InsideLink.Provider>
             </a>
           ),
+          ...(images === "alt" ? { img: imageAsTextComponent } : {}),
           code: ({ className: codeClass, children }) => {
             const content = String(children ?? "");
             // Block code (fenced) carries a language-* class or newlines;

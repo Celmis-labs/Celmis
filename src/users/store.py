@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Collection
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -249,6 +250,75 @@ class UserStore:
         with self._connect() as conn:
             cur = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
             return cur.rowcount > 0
+
+    # ─── single-column writes, conditional on the row as it is NOW ─────
+    #
+    # `update` writes every column from the object it is handed, so a caller
+    # holding a copy read a moment ago puts back whatever that copy said —
+    # an account erased or deactivated in between included. The seat flows
+    # (src/users/seats.py) change one thing and must not touch the rest, so
+    # each of these is one UPDATE that names the state it expects and reports
+    # whether it found it. SQLite applies it atomically, whatever process
+    # the other writer is in.
+
+    def set_active(self, user_id: str, active: bool, *, expect: bool | None = None) -> bool:
+        """Switch an account on or off and nothing else. With ``expect``, only
+        when the row is in that state now. True when a row was changed."""
+        sql, params = "UPDATE users SET is_active = ? WHERE id = ?", [int(active), user_id]
+        if expect is not None:
+            sql += " AND is_active = ?"
+            params.append(int(expect))
+        with self._connect() as conn:
+            return conn.execute(sql, params).rowcount > 0
+
+    def bind_oidc(self, user_id: str, issuer: str, subject: str) -> bool:
+        """Bind an ACTIVE account that has no single sign-on identity yet.
+        False when the row is gone, switched off or already bound. Raises
+        UserExistsError when another account holds that identity."""
+        try:
+            with self._connect() as conn:
+                return conn.execute(
+                    "UPDATE users SET oidc_iss = ?, oidc_sub = ? WHERE id = ? "
+                    "AND is_active = 1 AND (oidc_sub IS NULL OR oidc_sub = '')",
+                    (issuer, subject, user_id),
+                ).rowcount > 0
+        except sqlite3.IntegrityError as exc:
+            raise UserExistsError("oidc subject already linked") from exc
+
+    def unbind_oidc(self, user_id: str, issuer: str, subject: str) -> bool:
+        """Take back a binding made by :meth:`bind_oidc`: only if the row still
+        holds exactly that identity."""
+        with self._connect() as conn:
+            return conn.execute(
+                "UPDATE users SET oidc_iss = NULL, oidc_sub = NULL WHERE id = ? "
+                "AND oidc_iss = ? AND oidc_sub = ?",
+                (user_id, issuer, subject),
+            ).rowcount > 0
+
+    def count_people(self, *, exclude_ids: Collection[str] = (), exclude_email: str = "",
+                     oidc_only: bool = False) -> int:
+        """How many ACTIVE accounts there are, without loading them: not those
+        in ``exclude_ids``, not the unbound (no Google, no OIDC) account that
+        holds ``exclude_email`` (the master address), and with ``oidc_only``
+        only those bound to single sign-on. The platform's own accounts are
+        named by the caller (src/users/seats.py), not here."""
+        where, params = ["is_active = 1"], []
+        ids = sorted(set(exclude_ids))
+        if ids:
+            where.append(f"id NOT IN ({','.join('?' * len(ids))})")
+            params.extend(ids)
+        email = exclude_email.strip().lower()
+        if email:
+            where.append("NOT (email = ? AND (google_sub IS NULL OR google_sub = '') "
+                         "AND (oidc_sub IS NULL OR oidc_sub = ''))")
+            params.append(email)
+        if oidc_only:
+            where.append("oidc_sub IS NOT NULL AND oidc_sub != ''")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT count(*) AS c FROM users WHERE " + " AND ".join(where), params,
+            ).fetchone()
+        return int(row["c"]) if row else 0
 
     def update_last_login(self, user_id: str) -> None:
         now = datetime.now(UTC).isoformat()

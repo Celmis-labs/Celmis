@@ -5,12 +5,24 @@
     GET    /api/admin/users/{user_id}/memberships           — one person's workspaces + roles
     PUT    /api/admin/users/{user_id}/memberships/{ws_id}   — add / change {role}
     DELETE /api/admin/users/{user_id}/memberships/{ws_id}   — remove
+    POST   /api/admin/users/{user_id}/deactivate            — switch the account off (frees its seat)
+    POST   /api/admin/users/{user_id}/reactivate            — switch it on again (needs a free seat)
 
 One person can be admin of several workspaces and editor of several others —
 memberships were always per workspace; what was missing was a place that shows
 them per PERSON. Superadmin only (`require_superadmin`), and every write goes
 through `change_membership`, the same rule and audit row as PUT
 /api/workspaces/{id}/members — this page has no rule of its own to drift.
+
+DEACTIVATING is the way to free a seat (src/users/seats.py) without erasing
+anybody: the account is switched off, and every way in refuses it at once —
+the session and its refresh, password, Google and single sign-on sign-in,
+MCP tokens, publish tokens made by that person — while its workspaces, packs,
+tokens' rows and history stay as they were. Reactivating goes through
+`seats.reactivate_person`, so it is refused (403, the same code a sign-up gets)
+when the installation is full. The master account, the local default user and
+the caller themselves cannot be switched off; each change leaves an audit row
+(`auth.user_deactivated` / `auth.user_reactivated`) naming ids only.
 """
 
 from __future__ import annotations
@@ -25,7 +37,7 @@ from src.api.memberships import change_membership
 from src.api.routers.users import PLATFORM_USER_IDS
 from src.db.models import Workspace, WorkspaceMember
 from src.db.session import get_async_session
-from src.users import User, UserStore
+from src.users import User, UserNotFoundError, UserStore, seats
 from src.users.roles import is_superadmin
 
 router = APIRouter(prefix="/api/admin", tags=["admin-users"])
@@ -58,6 +70,11 @@ class MembershipOut(BaseModel):
     workspace_name: str
     workspace_slug: str
     role: str
+
+
+class ActiveOut(BaseModel):
+    id: str
+    is_active: bool
 
 
 class MembershipIn(BaseModel):
@@ -187,6 +204,66 @@ async def remove_membership(
         new_role=None, via="admin_users", ip=client_ip(request),
     )
     return await _memberships(session, user_id)
+
+
+def _audit_active(su: User, user_id: str, *, active: bool, request: Request) -> None:
+    from src.security.audit import record_action
+
+    record_action(
+        action="auth.user_reactivated" if active else "auth.user_deactivated",
+        actor=su.email, actor_id=su.id, target=user_id, ip=client_ip(request),
+        detail={"user_id": user_id, "via": "admin_users"},
+    )
+
+
+@router.post("/users/{user_id}/deactivate", response_model=ActiveOut)
+def deactivate_user(
+    user_id: str,
+    request: Request,
+    su: User = Depends(require_superadmin),
+    users: UserStore = Depends(get_users),
+) -> ActiveOut:
+    """Switch an account off. Idempotent: an account that is off stays off."""
+    target = _target(users, user_id)
+    if target.id == su.id or seats.is_platform_account(target):
+        raise HTTPException(
+            status_code=409, detail="This account cannot be deactivated")
+    try:
+        changed = seats.deactivate_person(users, target.id)
+    except UserNotFoundError:
+        raise HTTPException(status_code=404, detail="User not found") from None
+    except ValueError:
+        raise HTTPException(
+            status_code=409, detail="This account cannot be deactivated") from None
+    if changed:
+        _audit_active(su, target.id, active=False, request=request)
+    return ActiveOut(id=target.id, is_active=False)
+
+
+@router.post("/users/{user_id}/reactivate", response_model=ActiveOut)
+def reactivate_user(
+    user_id: str,
+    request: Request,
+    su: User = Depends(require_superadmin),
+    users: UserStore = Depends(get_users),
+) -> ActiveOut:
+    """Switch an account on again — refused with 403 `seat_limit_reached` (or
+    `sso_seat_limit_reached`) when the installation has no room for it."""
+    from src.api.routers.auth import seat_limit_refusal
+
+    target = _target(users, user_id)
+    was_active = target.is_active
+    try:
+        fresh = seats.reactivate_person(users, target)
+    except seats.SeatLimitReached as exc:
+        raise seat_limit_refusal(
+            exc, request, flow="reactivate", actor=su.email, actor_id=su.id,
+        ) from exc
+    except UserNotFoundError:
+        raise HTTPException(status_code=404, detail="User not found") from None
+    if not was_active and fresh.is_active:
+        _audit_active(su, target.id, active=True, request=request)
+    return ActiveOut(id=target.id, is_active=fresh.is_active)
 
 
 __all__ = ["router"]

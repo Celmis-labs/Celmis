@@ -76,7 +76,7 @@ an unreachable repository answers exactly like one that does not exist. If a
 repo you expect is missing, ask `get_my_access`, then ask the operator for the
 repository to be added to the token's list (see `docs/mcp-access.md`).
 
-**Two endpoints.** `/mcp/dev/` is the compact read-only profile (nine tools, scope
+**Two endpoints.** `/mcp/dev/` is the compact read-only profile (eleven tools, scope
 `read:code`); `/mcp/` is the full mount (49 tools). A dev token is refused on the
 full mount and the other way round.
 
@@ -160,7 +160,8 @@ settings; list them with `tools/list`). Verified against a live instance on
 2026-08-25 and recounted against the tool registry on 2026-10-06.
 
 For day-to-day development there is a second, compact endpoint, `/mcp/dev`
-(nine read-only tools, a few hundred tokens of tool list), and a Claude Code
+(eleven read-only tools, about 1,500 tokens of tool list, among them `brief` and
+`skills` for the workspace's knowledge packs), and a Claude Code
 plugin that wires it up: `packaging/claude-plugin/celmis-code`. This skill is
 for operators; the plugin carries its own search-workflow skill.
 

@@ -112,13 +112,34 @@ export async function api<T = unknown>(
     }
   }
   if (!resp.ok) {
-    const detail =
-      (body && typeof body === "object" && "detail" in (body as Record<string, unknown>))
-        ? String((body as Record<string, unknown>).detail)
-        : `${resp.status} ${resp.statusText}`;
-    throw new ApiError(resp.status, body, detail);
+    throw new ApiError(resp.status, body, errorMessage(body, `${resp.status} ${resp.statusText}`));
   }
   return body as T;
+}
+
+/** The sentence an error body carries: `detail` as a string, the `message`
+ * of a structured detail (`{code, message, hits}` — an upload the server
+ * refused), or the messages of a validation error list. Without these a
+ * structured detail printed as "[object Object]". The structured body itself
+ * stays on `ApiError.body`. */
+export function errorMessage(body: unknown, fallback: string): string {
+  if (!body || typeof body !== "object" || !("detail" in (body as Record<string, unknown>))) {
+    return fallback;
+  }
+  const detail = (body as Record<string, unknown>).detail;
+  if (detail && typeof detail === "object" && !Array.isArray(detail)
+      && typeof (detail as Record<string, unknown>).message === "string") {
+    return (detail as { message: string }).message;
+  }
+  // FastAPI's own validation errors: a list of {loc, msg}.
+  if (Array.isArray(detail) && detail.length > 0
+      && detail.every((d) => d && typeof d === "object" && typeof d.msg === "string")) {
+    return detail.map((d: { loc?: unknown[]; msg: string }) => {
+      const field = Array.isArray(d.loc) ? d.loc.filter((x) => x !== "body").join(".") : "";
+      return field ? `${field}: ${d.msg}` : d.msg;
+    }).join("; ");
+  }
+  return String(detail);
 }
 
 // ─── Typed wrappers ─────────────────────────────────────────────────
@@ -2579,6 +2600,15 @@ export const adminUsersApi = {
     api<UserMembership[]>(
       `/api/admin/users/${encodeURIComponent(userId)}/memberships/${encodeURIComponent(wsId)}`,
       { token, method: "DELETE" }),
+  /** Switch an account off: it signs in nowhere and its seat is free again.
+   *  Nothing is deleted. Never the master or the local default account. */
+  deactivate: (token: string, userId: string) =>
+    api<{ id: string; is_active: boolean }>(
+      `/api/admin/users/${encodeURIComponent(userId)}/deactivate`, { token, method: "POST" }),
+  /** Switch it on again. Needs a free seat (403 `seat_limit_reached` when none). */
+  reactivate: (token: string, userId: string) =>
+    api<{ id: string; is_active: boolean }>(
+      `/api/admin/users/${encodeURIComponent(userId)}/reactivate`, { token, method: "POST" }),
 };
 
 // ─── Access requests (src/api/routers/access_requests.py) ────────────
@@ -3255,6 +3285,12 @@ export const invitesApi = {
   }),
   revoke: (token: string, id: string, wsSlug?: string) =>
     api<void>(`/api/invites/${id}`, { token, method: "DELETE", headers: wsHeader(wsSlug) }),
+  /** Could one more person WITHOUT an account still be added? (A yes or no —
+   *  src/users/seats.py. Somebody who already has an account is never refused.
+   *  Answered only to people who may invite into a TEAM workspace; anybody else,
+   *  and anybody in their own personal workspace, gets a 403.) */
+  freeSeat: (token: string, wsSlug?: string) =>
+    api<{ has_free_seat: boolean }>("/api/invites/seats", { token, headers: wsHeader(wsSlug) }),
   preview: (inviteToken: string) =>
     api<InvitePreview>(`/api/invites/preview/${inviteToken}`),
   accept: (token: string, inviteToken: string) =>
@@ -3844,4 +3880,265 @@ export const mcpTokensApi = {
 export const unruledApi = {
   list: (token: string) =>
     api<{ count: number; repos: string[] }>("/api/access/unruled", { token }),
+};
+
+// ─── Codebase: knowledge packs ──────────────────────────────────────
+//
+// A pack is a named, versioned bundle of files (skills, API examples,
+// checklists, notes) that a workspace shows to its coding agents. WHO sees a
+// pack is the API's decision; a pack the caller may not see answers exactly
+// like one that does not exist, so nothing here tries to tell the two apart.
+
+export type PackAudience = "workspace" | "teams" | "restricted";
+export type PackPermission = "read" | "maintain";
+export type PackItemKind = "skill" | "api" | "checklist" | "note" | "doc" | "file";
+
+export type PackTeamGrant = { id: string; name: string; permission: PackPermission };
+
+export type PackVersionBrief = {
+  number: number; created_at: string; file_count: number; sha: string;
+};
+
+export type PackOut = {
+  id: string;
+  slug: string;
+  title: string;
+  description: string;
+  audience: PackAudience;
+  /** Null before the first upload. */
+  current_version: PackVersionBrief | null;
+  counts: { skills: number; files: number };
+  /** Empty unless the caller maintains the pack. */
+  teams: PackTeamGrant[];
+  can_maintain: boolean;
+  updated_at: string;
+};
+
+export type PackList = { packs: PackOut[]; can_create: boolean };
+
+export type PackItemRow = {
+  id: string; path: string; kind: PackItemKind; skill: string | null; name: string;
+  description: string; size_bytes: number; sha: string;
+};
+
+export type PackMember = {
+  user_id: string; email: string | null; permission: PackPermission; via_invite: boolean;
+};
+
+export type PackDetail = PackOut & {
+  items: PackItemRow[];
+  /** Maintainers only; empty for everybody else. */
+  members: PackMember[];
+  /** Maintainers only; null for everybody else. Counts and times, never people. */
+  usage: PackUsage | null;
+  created_by: string | null;
+};
+
+export type PackSkillUsage = { skill: string; opens_30d: number; last_used_at: string | null };
+
+/** What agents did with a pack in the last 30 days. No person, no token. */
+export type PackUsage = {
+  calls_30d: number;
+  last_used_at: string | null;
+  skills: PackSkillUsage[];
+};
+
+export type PackPublishToken = {
+  id: string; label: string; created_at: string | null; expires_at: string | null;
+  last_used_at: string | null; revoked: boolean; created_by: string | null;
+};
+
+export type PackPublishTokenCreated = {
+  token_info: PackPublishToken;
+  /** Shown once: the server keeps only a hash. */
+  token: string;
+};
+
+export type PackVersionRow = {
+  number: number; note: string; created_at: string; created_by: string | null;
+  file_count: number; total_bytes: number; sha: string; current: boolean;
+};
+
+/** `ignored` is capped by the server; `ignored_total` says how many there were.
+ *  `allowed` lists the lines accepted only because they carry the allow marker:
+ *  where and which rule, never the text. */
+export type PackUploaded = {
+  version: PackVersionRow; ignored: string[]; skills: string[]; ignored_total?: number;
+  allowed?: { path: string; line: number; rule: string }[];
+};
+
+/** Paths added, removed or changed between two versions. */
+export type PackDiff = { added: string[]; removed: string[]; changed: string[] };
+
+export type PackItem = {
+  id: string; path: string; kind: PackItemKind; skill: string | null; name: string;
+  description: string; content: string; sha: string; size_bytes: number; version: number;
+};
+
+export type PackInvite = {
+  id: string; created_at: string; expires_at: string; max_uses: number;
+  used_count: number; revoked: boolean; created_by: string | null;
+};
+
+export type PackInviteCreated = {
+  invite: PackInvite;
+  /** Shown once: the server keeps only a hash. */
+  token: string;
+  /** The in-app path of the join page, `/codebase/join/<token>`. */
+  path: string;
+};
+
+export type PackInvitePreview = {
+  pack_title: string; pack_description: string;
+  workspace_slug: string; workspace_name: string; already_member: boolean;
+};
+
+export type PackSearchHit = {
+  pack_id: string; pack_slug: string; pack_title: string; item_id: string;
+  path: string; kind: PackItemKind; skill: string | null; name: string;
+  snippet: string; score: number;
+};
+
+export type PackBrief = {
+  text: string;
+  /** True when some pack files could not be read for this answer. */
+  truncated?: boolean;
+  items: { pack_slug: string; item_id: string; path: string; kind: PackItemKind; name: string }[];
+};
+
+export type PackCreateIn = {
+  slug: string; title: string; description?: string; audience?: PackAudience;
+  teams?: { team_id: string; permission: PackPermission }[];
+};
+export type PackPatchIn = { title?: string; description?: string; audience?: PackAudience };
+
+/** Where a picked file sits inside the folder it came from. A file chosen
+ * on its own has no folder, so its name is its path. */
+export function relativePathOf(file: File): string {
+  return (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+}
+
+const packPath = (id: string) => `/api/codebase/packs/${encodeURIComponent(id)}`;
+
+/**
+ * Upload a new pack version: one `.zip` (`archive`) or a folder's files
+ * (`files`, each named by its relative path). XMLHttpRequest rather than
+ * fetch because only it reports how much of the body has been sent, and an
+ * upload that shows nothing for a minute reads as a hang. Headers still come
+ * from `requestHeaders`, so the active-workspace hint travels with it.
+ */
+export function uploadPackVersion(
+  token: string,
+  packId: string,
+  input: { archive?: File; files?: File[]; note?: string },
+  opts: { onProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
+): Promise<PackUploaded> {
+  return new Promise<PackUploaded>((resolve, reject) => {
+    if (opts.signal?.aborted) {
+      reject(new DOMException("Upload cancelled", "AbortError"));
+      return;
+    }
+    const form = new FormData();
+    if (input.archive) form.append("archive", input.archive, input.archive.name);
+    for (const file of input.files ?? []) {
+      form.append("files", file, relativePathOf(file));
+      // The path again as a plain field: a form field is read as UTF-8, a file
+      // name in a part header is not always, and folders here are named in
+      // every language. The server uses `paths` when it matches `files`.
+      form.append("paths", relativePathOf(file));
+    }
+    if (input.note) form.append("note", input.note);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE}${packPath(packId)}/versions`);
+    requestHeaders(token).forEach((value, key) => xhr.setRequestHeader(key, value));
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && e.total > 0) opts.onProgress?.(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let body: unknown = undefined;
+      if (xhr.responseText) {
+        try { body = JSON.parse(xhr.responseText); } catch { body = xhr.responseText; }
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body as PackUploaded);
+      } else {
+        reject(new ApiError(xhr.status, body, errorMessage(body, `${xhr.status} ${xhr.statusText}`)));
+      }
+    };
+    xhr.onerror = () => reject(new ApiError(0, undefined, "Network error"));
+    xhr.onabort = () => reject(new DOMException("Upload cancelled", "AbortError"));
+    opts.signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send(form);
+  });
+}
+
+export const codebaseApi = {
+  list: (token: string) => api<PackList>("/api/codebase/packs", { token }),
+  create: (token: string, body: PackCreateIn) =>
+    api<PackOut>("/api/codebase/packs", { token, method: "POST", json: body }),
+  get: (token: string, id: string) => api<PackDetail>(packPath(id), { token }),
+  update: (token: string, id: string, body: PackPatchIn) =>
+    api<PackOut>(packPath(id), { token, method: "PATCH", json: body }),
+  remove: (token: string, id: string) =>
+    api<void>(packPath(id), { token, method: "DELETE" }),
+  /** Replaces the whole set of team grants. */
+  setTeams: (token: string, id: string,
+             teams: { team_id: string; permission: PackPermission }[]) =>
+    api<PackOut>(`${packPath(id)}/teams`, { token, method: "PUT", json: { teams } }),
+  addMember: (token: string, id: string, email: string, permission: PackPermission) =>
+    api<{ members: PackMember[] }>(`${packPath(id)}/members`, {
+      token, method: "POST", json: { email, permission },
+    }),
+  removeMember: (token: string, id: string, userId: string) =>
+    api<void>(`${packPath(id)}/members/${encodeURIComponent(userId)}`, {
+      token, method: "DELETE",
+    }),
+  versions: (token: string, id: string) =>
+    api<{ versions: PackVersionRow[] }>(`${packPath(id)}/versions`, { token }),
+  upload: uploadPackVersion,
+  activate: (token: string, id: string, number: number) =>
+    api<PackOut>(`${packPath(id)}/versions/${number}/activate`, { token, method: "POST" }),
+  diff: (token: string, id: string, number: number, against: number) =>
+    api<PackDiff>(`${packPath(id)}/versions/${number}/diff${queryString({ against })}`, { token }),
+  /** Saves the version as a .zip named by the server (`<slug>-v<n>.zip`). */
+  downloadArchive: (token: string, id: string, number: number, fallbackName: string) =>
+    downloadWithAuth(
+      `${API_BASE}${packPath(id)}/versions/${number}/archive`, fallbackName, token),
+  item: (token: string, id: string, itemId: string) =>
+    api<PackItem>(`${packPath(id)}/items/${encodeURIComponent(itemId)}`, { token }),
+  invites: (token: string, id: string) =>
+    api<{ invites: PackInvite[] }>(`${packPath(id)}/invites`, { token }),
+  createInvite: (token: string, id: string,
+                 body: { expires_in_days: number; max_uses: number }) =>
+    api<PackInviteCreated>(`${packPath(id)}/invites`, { token, method: "POST", json: body }),
+  revokeInvite: (token: string, id: string, inviteId: string) =>
+    api<void>(`${packPath(id)}/invites/${encodeURIComponent(inviteId)}`, {
+      token, method: "DELETE",
+    }),
+  /** Tokens that publish this pack from a script (`celmis-pack push`). */
+  publishTokens: (token: string, id: string) =>
+    api<{ tokens: PackPublishToken[] }>(`${packPath(id)}/tokens`, { token }),
+  createPublishToken: (token: string, id: string,
+                       body: { label: string; expires_in_days: number }) =>
+    api<PackPublishTokenCreated>(`${packPath(id)}/tokens`, { token, method: "POST", json: body }),
+  revokePublishToken: (token: string, id: string, tokenId: string) =>
+    api<void>(`${packPath(id)}/tokens/${encodeURIComponent(tokenId)}`, {
+      token, method: "DELETE",
+    }),
+  /** The invite token travels in the body, never in a URL. */
+  previewInvite: (token: string, inviteToken: string) =>
+    api<PackInvitePreview>("/api/codebase/invites/preview", {
+      token, method: "POST", json: { token: inviteToken },
+    }),
+  redeemInvite: (token: string, inviteToken: string) =>
+    api<{ pack_id: string; workspace_slug: string }>("/api/codebase/invites/redeem", {
+      token, method: "POST", json: { token: inviteToken },
+    }),
+  search: (token: string, q: string, limit = 20) =>
+    api<{ hits: PackSearchHit[]; truncated?: boolean }>(
+      `/api/codebase/search${queryString({ q, limit })}`, { token }),
+  /** The text an agent gets for a task, exactly as the MCP `brief` tool builds it. */
+  brief: (token: string, task: string) =>
+    api<PackBrief>("/api/codebase/brief", { token, method: "POST", json: { task } }),
 };

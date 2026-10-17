@@ -14,6 +14,7 @@ app = typer.Typer(
     name="analyzer",
     help="Code Analysis System — generates PRD/BRD and answers questions about code.",
     no_args_is_help=True,
+    pretty_exceptions_show_locals=False,    # a traceback must not print the variables (files, tokens)
 )
 console = Console()
 
@@ -1070,6 +1071,19 @@ def auth_gitlab_cmd(
     )
 
 
+def _publish_licence_limits() -> None:
+    """Tell the seat code which licence is configured, as the API does at
+    start-up (src/api/main.py): without it a licensed installation would be
+    held to the community limit here. The same guarded import — a build
+    without the enterprise package is the community edition, and that is what
+    this process then is."""
+    try:
+        from src.ee import publish_seat_limits
+    except ImportError:
+        return
+    publish_seat_limits()
+
+
 @auth_app.command("google")
 def auth_google_cmd(
     no_browser: bool = typer.Option(
@@ -1102,6 +1116,7 @@ def auth_google_cmd(
         UserAuthMethod,
         UserExistsError,
         get_user_store,
+        seats,
     )
     from src.users.google_oauth import (
         GoogleOAuthError,
@@ -1130,6 +1145,9 @@ def auth_google_cmd(
     # Create or update User in the local DB
     store = get_user_store()
     existing = store.get_by_google_sub(info.sub)
+    if existing and not existing.is_active:
+        console.print("[red]✗ This account is deactivated.[/red]")
+        raise typer.Exit(1)
     if existing:
         # Update last_login
         store.update_last_login(existing.id)
@@ -1138,6 +1156,9 @@ def auth_google_cmd(
 
     # Maybe link to existing email-only user?
     by_email = store.get_by_email(info.email)
+    if by_email is not None and not by_email.is_active:
+        console.print("[red]✗ This account is deactivated.[/red]")
+        raise typer.Exit(1)
     if by_email is not None:
         # Link Google to existing user
         by_email.google_sub = info.sub
@@ -1163,8 +1184,14 @@ def auth_google_cmd(
         name=info.name,
         is_active=True,
     )
+    # The same seat limit as the web sign-ups, under the same licence; there
+    # is no flag to skip it.
+    _publish_licence_limits()
     try:
-        store.create(new_user)
+        seats.create_person(store, new_user)
+    except seats.SeatLimitReached as exc:
+        console.print(f"[red]✗ {exc.message}[/red]")
+        raise typer.Exit(1) from None
     except UserExistsError as exc:
         console.print(f"[red]✗ Failed to create user: {exc}[/red]")
         raise typer.Exit(1) from None
@@ -1297,6 +1324,79 @@ def auth_migrate_git_tokens_cmd(
         console.print("[green]Nothing to migrate.[/green]")
     elif not apply:
         console.print("\n[cyan]Dry run — re-run with --apply to make it so.[/cyan]")
+
+
+def _set_account_active(email: str, *, active: bool) -> None:
+    """``analyzer auth deactivate|reactivate``: the same action as the admin
+    users page. Deactivating frees a seat and signs the person out
+    everywhere (every way in checks the account), and deletes nothing;
+    reactivating needs a free seat, under the licence configured here."""
+    from src.users import UserNotFoundError, get_user_store, seats
+
+    store = get_user_store()
+    user = store.get_by_email(email)
+    if user is None:
+        console.print(f"[red]No user with email {email}.[/red]")
+        raise typer.Exit(1)
+    if seats.is_platform_account(user):
+        console.print("[red]✗ The master and the local default account cannot be "
+                      "switched off.[/red]")
+        raise typer.Exit(1)
+    if active:
+        _publish_licence_limits()
+        if user.is_active:
+            console.print(f"[green]{email} is already active.[/green]")
+            return
+        try:
+            seats.reactivate_person(store, user)
+        except seats.SeatLimitReached as exc:
+            console.print(f"[red]✗ {exc.message}[/red]")
+            raise typer.Exit(1) from None
+        except UserNotFoundError:
+            console.print(f"[red]No user with email {email}.[/red]")
+            raise typer.Exit(1) from None
+    else:
+        if not user.is_active:
+            console.print(f"[green]{email} is already deactivated.[/green]")
+            return
+        try:
+            seats.deactivate_person(store, user.id)
+        except (UserNotFoundError, ValueError):
+            console.print(f"[red]Could not deactivate {email}.[/red]")
+            raise typer.Exit(1) from None
+    from src.security.audit import record_action
+
+    record_action(
+        action="auth.user_reactivated" if active else "auth.user_deactivated",
+        actor="(command line)", target=user.id, detail={"user_id": user.id, "via": "cli"},
+    )
+    console.print(f"[green]✓ {email} is {'active again' if active else 'deactivated'}.[/green]")
+
+
+@auth_app.command("deactivate")
+def auth_deactivate_cmd(
+    email: str = typer.Argument(..., help="User email"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Switch an account off: it signs in nowhere, its seat is free again.
+
+    Nothing is deleted — workspaces, packs and history stay. `reactivate`
+    switches it back on (it needs a free seat). Requires access to the
+    server/DB, so that is exactly the trust boundary. The master account and
+    the local default user cannot be switched off.
+    """
+    _setup_logging(verbose)
+    _set_account_active(email, active=False)
+
+
+@auth_app.command("reactivate")
+def auth_reactivate_cmd(
+    email: str = typer.Argument(..., help="User email"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Switch a deactivated account on again (it needs a free seat)."""
+    _setup_logging(verbose)
+    _set_account_active(email, active=True)
 
 
 @auth_app.command("make-admin")
@@ -1534,6 +1634,176 @@ def mcp_issue_token_cmd(
         f"# id={view.id} user={holder.email} workspace={ws.id} "
         f"repos={','.join(view.patterns)} write={view.allow_write} "
         f"expires={view.expires_at.date().isoformat()}\n")
+
+
+# ─── Codebase: knowledge packs from the command line ────────────────
+
+codebase_app = typer.Typer(
+    name="codebase",
+    help="Knowledge packs: import a folder or a zip into a workspace's Codebase, list the packs.",
+    no_args_is_help=True,
+)
+app.add_typer(codebase_app, name="codebase")
+
+
+def _run_codebase(coro):
+    """Run one async piece of work against the configured database."""
+    import asyncio
+
+    async def go():
+        from src.db import session as db_session
+
+        try:
+            return await coro()
+        finally:
+            await db_session.dispose()
+
+    return asyncio.run(go())
+
+
+@codebase_app.command("import")
+def codebase_import_cmd(
+    source: str = typer.Argument(..., metavar="DIR", help="A folder, or a .zip, of the pack's files."),
+    workspace: str = typer.Option(..., "--workspace", "-w", help="Workspace id or slug."),
+    pack: str = typer.Option(..., "--pack", "-p", help="Pack slug (lowercase letters, digits, dashes)."),
+    title: str = typer.Option("", "--title", help="Title when the pack is created (default: the slug)."),
+    description: str = typer.Option("", "--description", help="Description when the pack is created."),
+    audience: str = typer.Option(
+        "teams", "--audience", help="When the pack is created: workspace | teams | restricted."),
+    team: list[str] | None = typer.Option(  # noqa: B008 — typer's repeatable option needs the list type
+        None, "--team", help="Grant a team when the pack is created: TEAM_ID_OR_NAME[:read|maintain]. Repeatable."),
+    note: str = typer.Option("", "--note", help="A line shown next to the new version."),
+    as_user: str = typer.Option(
+        "", "--as", help="Act as this person (email or id) instead of as the operator."),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Add a version to a pack, creating the pack if there is none of that slug.
+
+    Reads the database directly, like `mcp issue-token`. Without --as it acts as
+    the operator (the superadmin's standing); with --as the person must be a
+    member allowed to create packs, or a maintainer of the pack that exists. The
+    folder is checked exactly as a web upload is: archive limits, secret files
+    and secrets inside files are refused, and a refusal names the file and the
+    line, never the value. Prints one line: pack, version, files, skills,
+    ignored — never a file's contents. A line taken on `celmis:allow-secret` is
+    listed by place and rule, and counted as `allowed=N`.
+    """
+    _setup_logging(verbose)
+    # `_setup_logging` is global: every command prints the structlog INFO lines of
+    # the audit writer (`audit_written`, as JSON) on stderr. Here a success is one
+    # line of output, so only this command keeps them quiet (warnings and errors
+    # still show), and -v brings them back.
+    logging.getLogger("audit").setLevel(logging.NOTSET if verbose else logging.WARNING)
+    from pathlib import Path
+
+    from src.knowledge import importer, ingest, store
+    from src.knowledge.visibility import PackNotAccessible
+
+    path = Path(source)
+    try:
+        if path.is_file() and path.suffix.lower() == ".zip":
+            result = ingest.ingest_zip(path.read_bytes())
+        else:
+            result = ingest.ingest_directory(path)
+    except ingest.IngestError as exc:
+        console.print(f"[red]✗[/red] {exc.code}: {exc.message}")
+        for hit in exc.hits:
+            console.print(f"  {hit['path']}:{hit['line']} {hit['label']}")
+        raise typer.Exit(1) from None
+    except OSError:
+        console.print("[red]✗[/red] cannot read that path")
+        raise typer.Exit(1) from None
+
+    async def work():
+        from src.db.session import async_session
+        from src.knowledge.visibility import principal_for
+        from src.users import get_user_store
+
+        async with async_session() as session:
+            ws = await importer.workspace_by_ref(session, workspace)
+            principal = importer.OPERATOR
+            person = None
+            if as_user.strip():
+                users = get_user_store()
+                person = users.get_by_id(as_user.strip()) or (
+                    users.get_by_email(as_user.strip()) if "@" in as_user else None)
+                if person is None:
+                    raise importer.ImportRefusedError("no such user")
+                principal = await principal_for(session, person, ws.id)
+            grants = [await importer.team_grant(session, ws.id, spec) for spec in (team or [])]
+            summary = await importer.import_pack(
+                session, principal, ws.id, slug=pack, result=result, title=title,
+                description=description, audience=audience, teams=grants, note=note)
+            return ws, summary, person
+
+    try:
+        ws, summary, person = _run_codebase(work)
+    except importer.ImportRefusedError as exc:
+        console.print(f"[red]✗[/red] {exc}")
+        raise typer.Exit(1) from None
+    except store.PackError as exc:
+        console.print(f"[red]✗[/red] {exc.message}")
+        raise typer.Exit(1) from None
+    except PackNotAccessible as exc:                # with --as: the pack is hidden from that person
+        console.print(f"[red]✗[/red] {exc}")
+        raise typer.Exit(1) from None
+
+    try:
+        from src.security.audit import record_action
+
+        # Who did it: the person named by --as, else the operator at the keyboard.
+        who = ({"actor": person.email, "actor_id": person.id} if person is not None
+               else {"actor": importer.CLI_ACTOR, "actor_id": None})
+        if summary.created:
+            record_action(
+                action="codebase.pack_created", workspace_id=ws.id, target=summary.pack_id,
+                detail={"audience": audience, "teams": len(team or []), "via": "cli"}, **who)
+        record_action(
+            action="codebase.version_uploaded", workspace_id=ws.id, target=summary.pack_id,
+            detail={"number": summary.version, "file_count": summary.files,
+                    "allowed_count": summary.allowed, "created": summary.created, "via": "cli"},
+            **who)
+    except Exception:  # noqa: BLE001 — never block the operation it records
+        pass
+    for hit in result.allowed:
+        console.print(f"  allowed by celmis:allow-secret: {hit['path']}:{hit['line']} {hit['rule']}")
+    console.print(
+        f"[green]✓[/green] pack={summary.slug} {'created' if summary.created else 'updated'} "
+        f"version={summary.version} files={summary.files} skills={summary.skills} "
+        f"ignored={summary.ignored} allowed={summary.allowed}")
+
+
+@codebase_app.command("list")
+def codebase_list_cmd(
+    workspace: str = typer.Option(..., "--workspace", "-w", help="Workspace id or slug."),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """List the packs of a workspace: slug, audience, current version, files.
+
+    Reads the database directly, so it lists every pack, restricted ones too —
+    like the superadmin.
+    """
+    _setup_logging(verbose)
+    from src.knowledge import importer
+
+    async def work():
+        from src.db.session import async_session
+
+        async with async_session() as session:
+            ws = await importer.workspace_by_ref(session, workspace)
+            return await importer.list_for_operator(session, ws.id)
+
+    try:
+        infos = _run_codebase(work)
+    except importer.ImportRefusedError as exc:
+        console.print(f"[red]✗[/red] {exc}")
+        raise typer.Exit(1) from None
+    if not infos:
+        console.print("no packs")
+        return
+    for info in infos:
+        version = f"v{info.version.number}" if info.version else "-"
+        print(f"{info.slug}\t{info.audience}\t{version}\t{info.files}")
 
 
 # ─── Access bootstrap (default-deny rollout) ────────────────────────

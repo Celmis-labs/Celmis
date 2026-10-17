@@ -10,11 +10,14 @@
  * discovery from `issuer`, so it serves both cases; the id is "oidc", making
  * the redirect URI /api/auth/callback/oidc.
  *
- * Registration does not need a licence; the exchange does. The id_token is
- * posted to the API's /api/auth/oidc, which exists only when the API's
- * licence grants "sso" (src/ee/sso). Unlicensed, that request 404s, auth.ts
- * drops the session, and the login page never showed the button anyway —
- * it asks /api/capabilities first (app/login/page.tsx).
+ * Registration does not need a licence, and neither does the exchange for the
+ * first five people (LICENSE_EE section 2). The id_token is posted to the
+ * API's /api/auth/oidc (src/ee/sso), which is always mounted and refuses a
+ * sixth person without a licence that grants "sso" (a seat-limit redirect to
+ * /login, see auth.ts). A build whose API has no src/ee does not mount it at
+ * all: that request 404s, auth.ts sends the person back to /login, and the
+ * login page never showed the button anyway — it asks /api/capabilities first
+ * (app/login/page.tsx).
  */
 import type { Provider } from "next-auth/providers";
 import Keycloak from "next-auth/providers/keycloak";

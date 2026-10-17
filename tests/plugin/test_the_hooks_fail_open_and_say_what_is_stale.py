@@ -168,6 +168,34 @@ def test_the_manual_mcp_server_name_works_too(checkout) -> None:
     assert "app/orders.py" in _context(out)
 
 
+def test_the_pack_tools_are_celmis_tools_to_the_hook_and_their_lines_are_never_code_hits(
+        checkout) -> None:
+    """`brief` and `skills` answer with pack text and `Repos:` pointers, not with
+    `slug path:line` hits, so a modified local file is not reported stale because a
+    pack happened to name it."""
+    repo, sha = checkout
+    (repo / "app" / "orders.py").write_text("changed\n")
+    brief = "\n".join([
+        f"idx: github_acme-shop develop@{sha[:8]} 2h fresh",
+        "## How other services do it",
+        "- retries [shop-pack@v3] - Retries in invoicing",
+        "  Repos: github_acme-shop:app/orders.py:1-2, github_acme-shop:app/users.py:1",
+    ])
+    skills = "\n".join([
+        "idx: none",
+        'open: skills name="pack/skill", or name="pack" path="file"',
+        "shop-pack/notes/orders.md [note] - app/orders.py:1 explained",
+        "shop-pack/billing/SKILL.md [skill] - Call the billing client.",
+        "  # Billing app/orders.py:1",
+    ])
+    for tool in ("brief", "skills"):
+        assert tool in C.DEV_TOOLS
+        assert hook._tool_is_celmis(C.PLUGIN_PREFIX + tool)
+    assert hook.parse_hits(brief) == {} and hook.parse_hits(skills) == {}
+    assert _post(repo, brief, tool=C.PLUGIN_PREFIX + "brief") == ""
+    assert _post(repo, skills, tool=C.PLUGIN_PREFIX + "skills") == ""
+
+
 # ─── injection safety ────────────────────────────────────────────────
 
 
@@ -272,6 +300,14 @@ def test_session_start_prints_at_most_three_lines(checkout, monkeypatch) -> None
     assert 2 <= len(lines) <= 3
     assert f"develop@{sha[:8]}" in ctx and "1 tracked file(s) modified" in ctx
     assert "github_acme-shop" in ctx or "acme/shop" in ctx
+
+
+def test_session_start_points_at_brief_for_a_new_task(checkout, monkeypatch) -> None:
+    repo, _ = checkout
+    for k, v in _CONFIGURED.items():
+        monkeypatch.setenv(k, v)
+    ctx = _context(hook.run("session", json.dumps({"cwd": str(repo)})))
+    assert "brief" in ctx and len(ctx.splitlines()) <= 3
 
 
 def test_session_start_tells_an_unconfigured_user_how_to_configure(checkout, monkeypatch) -> None:

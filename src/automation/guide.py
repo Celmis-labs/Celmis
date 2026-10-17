@@ -160,7 +160,7 @@ GUIDE_ROUTES: frozenset[str] = _routes(GUIDE) | _knowledge_routes()
 #: than inferred from "any child of a known route", because `/settings` is
 #: known and `/settings/github` is a 404.
 _PARENTS_OF_DETAIL_PAGES = frozenset({
-    "/projects", "/claude",
+    "/projects", "/claude", "/codebase/packs",
 })
 
 

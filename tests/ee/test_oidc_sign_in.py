@@ -281,12 +281,14 @@ def client(users, monkeypatch):
 
 
 @pytest.mark.parametrize("features", [(), ("analytics",)], ids=["no-licence", "analytics-only"])
-def test_without_an_sso_licence_the_endpoint_is_not_there(users, monkeypatch, features):
-    """Not a 403 from a mounted route: absent, so /api/capabilities reports
-    `sso` off from the route table and the login page hides the button."""
+def test_without_an_sso_licence_the_endpoint_is_the_free_allowance(users, monkeypatch, features):
+    """LICENSE_EE lets an installation use single sign-on without a licence
+    while no more than five people sign in through it, so the route is there
+    (and /api/capabilities reports `sso` on) with no licence and with one for
+    other features. The limit itself is tested in test_the_sso_allowance.py."""
     c = TestClient(_app(users, monkeypatch, features=features))
-    assert c.post("/api/auth/oidc", json={"id_token": _token()}).status_code == 404
-    assert users.get_by_oidc(ISSUER, "kc-subject-1") is None
+    assert c.post("/api/auth/oidc", json={"id_token": _token()}).status_code == 200
+    assert users.get_by_oidc(ISSUER, "kc-subject-1") is not None
 
 
 def _password_user(users, email="dev@example.com"):
@@ -416,7 +418,20 @@ def test_an_erased_sso_user_can_sign_in_again_as_a_new_account(
         async def execute(self, *_a, **_k):
             class _R:
                 rowcount = 0
+
+                def all(self):
+                    return []
             return _R()
+
+        def begin_nested(self):
+            # the pack cleanup runs in a savepoint; this fake has nothing to roll back
+            class _Savepoint:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_exc):
+                    return False
+            return _Savepoint()
 
         async def commit(self):
             return None

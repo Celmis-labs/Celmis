@@ -4,8 +4,10 @@
  *
  * Company SSO (enterprise, web/ee/sso) is offered only when BOTH halves are
  * there: the web side is configured for OIDC (AUTH_OIDC_*), and the API
- * reports the `sso` capability — i.e. its licence granted "sso" and it
- * mounted /api/auth/oidc. Either alone is a button that dead-ends.
+ * reports the `sso` capability — i.e. it mounted /api/auth/oidc, which an
+ * enterprise build does with or without a licence (up to five people without
+ * one; the build without src/ee has no endpoint). Either alone is a button
+ * that dead-ends.
  *
  * This is the one consumer of /api/capabilities that hides on an UNKNOWN
  * answer, deliberately, and it does not contradict the capabilities contract

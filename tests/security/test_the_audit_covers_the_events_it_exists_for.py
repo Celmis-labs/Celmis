@@ -43,6 +43,23 @@ def client() -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
+@pytest.fixture(autouse=True)
+def _own_user_store(tmp_path, monkeypatch):
+    """Every test signs somebody up, through the real app. Without this they
+    signed up in the developer's real users.db (~/code-analysis/secrets) and
+    left an account behind on every run — and a Celmis holds five people
+    without a licence (src/users/seats.py), so the sixth sign-up of a store
+    that had collected hundreds of these was refused. A throwaway store per
+    test keeps the real one out of it."""
+    import src.users.store as users_mod
+    from src.users import UserStore
+
+    store = UserStore(tmp_path / "users.db")
+    store.ensure_default_user()
+    monkeypatch.setattr(users_mod, "_default_store", store)
+    return store
+
+
 @pytest.fixture
 def recorded(monkeypatch):
     """Every `record_action` call made during the block."""

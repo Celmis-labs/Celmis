@@ -13,7 +13,7 @@ token the authenticated checks are skipped (``RESULT: SKIP``; a failure under
 ``CELMIS_E2E_STRICT=1``).
 
 Checks here: the endpoint exists and refuses anonymous callers, ``tools/list``
-is the nine contract tools, ``repos`` leads with the freshness (``idx:``) line,
+is the contract tools (``DEV_TOOLS``), ``repos`` leads with the freshness (``idx:``) line,
 and a call for a repository that does not exist answers like any other refusal.
 
 Skips (exit 0, ``RESULT: SKIP``) while the endpoint is not deployed; with
@@ -31,8 +31,9 @@ from tests.e2e_local.client import McpClient, McpHttpError
 BASE = os.environ.get("E2E_API_BASE", "http://api:8000").rstrip("/")
 PATH = "/mcp/dev/"
 STRICT = os.environ.get("CELMIS_E2E_STRICT") == "1"
-TOOLS = {"repos", "find", "outline", "read_symbol", "refs", "grep", "map", "ask", "howto"}
-CORE = TOOLS - {"howto"}  # howto ships with the howto lane
+TOOLS = {"repos", "find", "outline", "read_symbol", "refs", "grep", "map", "ask", "howto",
+         "skills", "brief"}
+CORE = TOOLS - {"howto", "skills", "brief"}  # these ship with their own lanes
 IDX = re.compile(r"^idx: .+", re.M)
 
 failures: list[str] = []

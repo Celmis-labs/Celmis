@@ -50,6 +50,8 @@ def _roles_body() -> str:
             flags.append("may edit prompts and review policies")
         if role in r.WORKSPACE_ADMIN_ROLES:
             flags.append("administers the workspace")
+        if role in r.PACK_AUTHOR_ROLES:
+            flags.append("may create Codebase knowledge packs")
         extra = f" ({'; '.join(flags)})" if flags else ""
         lines.append(f"- `{role}`{extra} — {what.get(role, '')}".rstrip(" —"))
 

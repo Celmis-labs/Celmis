@@ -327,3 +327,18 @@ def _howto_freshness_provider_is_restored(monkeypatch):
     from src.mcp_server.howto import engine
 
     monkeypatch.setattr(engine, "_idx_provider", engine._idx_provider)
+
+
+# The knowledge-pack world of the `skills` / `brief` tests (a fixture; see pack_world.py).
+from tests.mcp_server.dev.pack_world import pack_world  # noqa: E402, F401
+
+
+@pytest.fixture(autouse=True)
+def _the_rate_limiter_starts_and_ends_empty():
+    """Calls made through the real envelope count against a per-process limit;
+    what one test spends must not be missing for the next one (here or elsewhere)."""
+    from src.mcp_server import limits
+
+    limits.reset()
+    yield
+    limits.reset()

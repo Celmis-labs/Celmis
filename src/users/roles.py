@@ -22,6 +22,11 @@ What each role may do inside its workspace:
   * ``owner``   — admin, plus admin/editor management, and the one who may
     delete the workspace.
 
+Codebase (knowledge packs) adds no role. ``editor`` and above may CREATE a
+pack (`PACK_AUTHOR_ROLES`); who may SEE or MAINTAIN a given pack is the pack's
+audience and grants (`src/knowledge/visibility.py`), not the workspace role
+alone.
+
 Who may GRANT a role is a separate question with one answer, `can_change`:
 
   * owner (`PRIVILEGED_ROLES`) — the SUPERADMIN only: granting it, changing
@@ -65,6 +70,20 @@ WORKSPACE_ADMIN_ROLES: frozenset[str] = frozenset({"owner", "admin"})
 
 #: Roles that may edit agent prompts and review policies in their workspace.
 PROMPT_EDITOR_ROLES: frozenset[str] = frozenset({"owner", "admin", "editor"})
+
+#: Roles that may create knowledge packs in their workspace (Codebase).
+PACK_AUTHOR_ROLES: frozenset[str] = frozenset({"owner", "admin", "editor"})
+
+#: Roles that may hold the right to CHANGE a pack (a "maintain" grant, an explicit
+#: member or a team grant). A viewer reads and never writes, whatever a pack names:
+#: demoting someone to viewer takes their write rights with it.
+PACK_MAINTAINER_ROLES: frozenset[str] = frozenset({"owner", "admin", "editor", "member"})
+
+#: Pack grant permissions (team grants and explicit members).
+PACK_PERMISSIONS: tuple[str, ...] = ("read", "maintain")
+
+#: Who a pack may be shown to.
+PACK_AUDIENCES: tuple[str, ...] = ("workspace", "teams", "restricted")
 
 #: Roles only the superadmin may grant, change to or from, or remove.
 PRIVILEGED_ROLES: frozenset[str] = frozenset({"owner"})

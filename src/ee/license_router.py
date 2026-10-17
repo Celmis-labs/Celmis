@@ -121,6 +121,10 @@ class LicenseSummaryOut(BaseModel):
     issued_at: str
     expires_at: str
     expired: bool
+    #: People the licence lets the installation hold / sign in through single
+    #: sign-on; None = unlimited.
+    seats: int | None = None
+    sso_seats: int | None = None
 
 
 class LicenseStateOut(BaseModel):
@@ -146,6 +150,8 @@ def _summary(lic: License) -> LicenseSummaryOut:
         issued_at=lic.issued_at.isoformat(),
         expires_at=lic.expires_at.isoformat(),
         expired=lic.expired(datetime.now(UTC)),
+        seats=lic.seats,
+        sso_seats=lic.sso_seats,
     )
 
 

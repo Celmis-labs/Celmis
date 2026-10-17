@@ -41,6 +41,8 @@ BUDGETS: dict[str, tuple[int, int]] = {
     "map": (800, 2000),
     "ask": (1500, 2000),
     "howto": (1200, 4000),
+    "skills": (800, 4000),
+    "brief": (2000, 4000),
 }
 WITHHELD = "output withheld: redaction failed"
 

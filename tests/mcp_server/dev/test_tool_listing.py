@@ -22,10 +22,16 @@ def _listing(mcp) -> list:
     return asyncio.run(mcp.list_tools())
 
 
-def test_the_whole_tool_listing_stays_under_six_thousand_characters(dev_mcp):
+#: Nine tools fitted in 6,000 characters. `skills` and `brief` (the workspace's
+#: knowledge packs) add two tools with descriptions of about 150 characters each
+#: and a small schema, so the cap is 6,500: the cost of the two, no more.
+LISTING_CAP = 6500
+
+
+def test_the_whole_tool_listing_stays_under_sixty_five_hundred_characters(dev_mcp):
     tools = _listing(dev_mcp)
     wire = json.dumps([t.model_dump(mode="json", exclude_none=True) for t in tools])
-    assert len(wire) <= 6000, len(wire)
+    assert len(wire) <= LISTING_CAP, len(wire)
 
 
 def test_every_description_is_at_most_two_hundred_characters(dev_mcp):
@@ -44,9 +50,11 @@ def test_every_tool_is_marked_read_only(dev_mcp):
         assert t.annotations is not None and t.annotations.readOnlyHint is True, t.name
 
 
-def test_the_nine_profile_tools_are_listed_howto_included(dev_mcp):
-    names = {t.name for t in _listing(dev_mcp)}
-    assert names == set(DEV_TOOLS)
+def test_the_eleven_profile_tools_are_listed_howto_skills_and_brief_included(dev_mcp):
+    names = [t.name for t in _listing(dev_mcp)]
+    assert len(names) == len(set(names)) == 11
+    assert set(names) == set(DEV_TOOLS)
+    assert DEV_TOOLS[-2:] == ("skills", "brief")
 
 
 def test_the_list_does_not_depend_on_who_is_asking(dev_mcp, as_caller, world):

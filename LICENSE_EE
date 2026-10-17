@@ -29,6 +29,24 @@ not get easier with time.
    out, to develop against, or to decide whether to buy a licence, is not
    production use and needs no licence.
 
+   Exception - the single sign-on allowance. The single sign-on feature
+   (`src/ee/sso/` and its counterpart in `web/ee/sso/`) may be used in
+   production or for internal use, without a commercial licence, by an
+   installation in which no more than five people are bound to single
+   sign-on. The count is of the accounts bound to single sign-on that are
+   active at the time a new person is added. The check that makes that count
+   and refuses the person who would be the sixth is the one in the covered
+   files under `src/ee/` (`src/ee/sso/allowance.py`, and the hook through
+   which every way of adding or switching on a person asks it); it is a
+   licence check within the meaning of the next paragraph.
+
+   The software refuses to add a person beyond the allowance. It does not
+   switch off anybody who is already signed in, and a licence that lapses
+   leaves them signed in. That is a property of the software and does not
+   remove the requirement of a commercial licence: for more than five people
+   bound to single sign-on, a commercial licence that grants the `sso`
+   feature is required, whatever the software happens to enforce.
+
    You may not remove or circumvent any licence check the covered files
    contain, and you may not redistribute them with such a check removed.
 

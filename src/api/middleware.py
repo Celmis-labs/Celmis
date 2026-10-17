@@ -31,8 +31,13 @@ Rate limiting:
 
 Request size:
     Requests with Content-Length above the per-class cap are rejected
-    with 413 before the body is read. Chunked uploads without
-    Content-Length are capped by uvicorn's own h11 limits.
+    with 413 before the body is read. The cap is ALSO enforced on the bytes
+    that actually arrive (the header is only a claim: a proxy, or an HTTP
+    parser that lets Transfer-Encoding win over Content-Length, makes it a
+    wrong one): once the running total passes the class limit the body is cut
+    off and the answer is 413, whatever the headers said. The one-request and
+    pack uploads (the classes that demand a length) also refuse
+    Transfer-Encoding altogether (411), so the declared length is the real one.
 
         auth/default   1 MB     CELMIS_MAX_BODY_BYTES=1048576
         review/mcp     5 MB     CELMIS_MAX_BODY_BYTES_LARGE=5242880
@@ -40,6 +45,11 @@ Request size:
                                 (POST /api/repos/upload only: one-request archive upload)
         upload_part    chunk + 1 MB  CELMIS_UPLOAD_CHUNK_BYTES (default 32 MiB, under 100 MB)
                                 (PUT /api/repos/upload/sessions/{id}/parts/{n})
+        pack_upload    5 MB     CELMIS_MAX_BODY_BYTES_LARGE (the knowledge-pack upload: a zip or
+                                the files of a pack; POST /api/codebase/packs/{id}/versions and
+                                POST /api/codebase/publish), rate-limited like `upload`
+                                (CELMIS_RL_UPLOAD); the GETs of the publish routes (status,
+                                pull) are ordinary reads of the default class
 
 429 responses carry Retry-After (seconds until window reset).
 """
@@ -48,12 +58,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.types import Message, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +106,7 @@ def _limits() -> dict[str, int]:
         "llm_test": int(os.environ.get("CELMIS_RL_LLM_TEST", "12")),
         "default": int(os.environ.get("CELMIS_RL_DEFAULT", "240")),
         "upload": int(os.environ.get("CELMIS_RL_UPLOAD", "10")),
+        "pack_upload": int(os.environ.get("CELMIS_RL_UPLOAD", "10")),
         "upload_part": int(os.environ.get("CELMIS_RL_UPLOAD_PART", "600")),
     }
 
@@ -103,7 +116,8 @@ def _body_caps() -> dict[str, int]:
     large = int(os.environ.get("CELMIS_MAX_BODY_BYTES_LARGE", str(5 * 1024 * 1024)))
     return {"auth": small, "default": small, "llm_test": small,
             "review": large, "mcp": large,
-            "upload": _upload_cap(), "upload_part": _part_cap()}
+            "upload": _upload_cap(), "upload_part": _part_cap(),
+            "pack_upload": large}
 
 
 def _upload_cap() -> int:
@@ -120,9 +134,21 @@ def _part_cap() -> int:
     return part_body_cap()
 
 
-def _classify(path: str) -> str:
+#: A knowledge pack's new version: exactly this path, and only the POST that
+#: carries the files (listing the versions is a plain GET).
+_PACK_UPLOAD = re.compile(r"^/api/codebase/packs/[^/]+/versions$")
+#: The publish route of a pack token (a laptop or a pipeline): only the POST
+#: carries files. Its GETs (status, pull) are ordinary authenticated reads and
+#: draw from the default bucket, so a pipeline that checks status before and
+#: after a push is not locked out by its own pushes.
+_PACK_PUBLISH = re.compile(r"^/api/codebase/publish$")
+
+
+def _classify(path: str, method: str = "") -> str:
     if path == "/api/repos/upload":
         return "upload"
+    if method == "POST" and (_PACK_UPLOAD.match(path) or _PACK_PUBLISH.match(path)):
+        return "pack_upload"
     if path.startswith("/api/repos/upload/sessions/") and "/parts/" in path:
         return "upload_part"
     if path.startswith("/oauth/token") or path.startswith("/api/auth/login"):
@@ -202,25 +228,111 @@ def _build_window():
     return _MemoryWindow()
 
 
+class _CountedBody:
+    """Counts the request body as it is read and answers 413 past the class cap.
+
+    ``receive`` hands the application the body until the running total passes
+    the cap; from then on it reports a disconnect, so a form parser or a stream
+    reader stops at once. ``send`` then drops whatever the application answers
+    (a parser that was cut off says 400) and puts one 413 in its place — unless
+    the response had already started, which cannot be taken back.
+    """
+
+    def __init__(self, scope: Scope, receive: Receive, send: Send, cls: str) -> None:
+        self._scope = scope
+        self._receive = receive
+        self._send = send
+        self._cls = cls
+        self._cap: int | None = None
+        self.seen = 0
+        self.exceeded = False
+        self._started = False
+        self._answered = False
+
+    async def receive(self) -> Message:
+        if self.exceeded:
+            return {"type": "http.disconnect"}
+        message = await self._receive()
+        if message["type"] == "http.request":
+            self.seen += len(message.get("body", b""))
+            if self._cap is None:                   # resolved on the first body, not per request
+                self._cap = _body_caps()[self._cls]
+            if self.seen > self._cap:
+                self.exceeded = True
+                return {"type": "http.disconnect"}
+        return message
+
+    async def send(self, message: Message) -> None:
+        if self._answered:                          # the 413 is the whole answer
+            return
+        if self.exceeded and not self._started:
+            await self.answer()
+            return
+        if message["type"] == "http.response.start":
+            self._started = True
+        await self._send(message)
+
+    async def answer(self) -> None:
+        """The 413, once."""
+        if self._answered or self._started:
+            return
+        self._answered = True
+        self._started = True
+
+        async def no_body() -> Message:
+            return {"type": "http.disconnect"}
+
+        await JSONResponse(
+            {"detail": f"request body too large (limit {self._cap} bytes)"},
+            status_code=413,
+        )(self._scope, no_body, self._send)
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app) -> None:  # noqa: ANN001
         super().__init__(app)
         self._window = _build_window()
         self._enabled = os.environ.get("CELMIS_RATE_LIMIT_ENABLED", "1").strip() != "0"
 
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not self._enabled:
+            await super().__call__(scope, receive, send)
+            return
+        # The cap holds for the bytes that arrive, whatever the headers claim.
+        counted = _CountedBody(scope, receive, send, _classify(scope["path"], scope["method"]))
+        try:
+            await super().__call__(scope, counted.receive, counted.send)
+        except Exception:
+            if not counted.exceeded:
+                raise
+            # The application was cut off in the middle of reading and failed
+            # (a stream reader says "client disconnected"); the cause is the cap.
+        if counted.exceeded:                        # unless it had already answered, say why
+            await counted.answer()
+
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         if not self._enabled:
             return await call_next(request)
 
-        cls = _classify(path)
+        cls = _classify(path, request.method)
         exempt = _is_exempt(path)
 
         # ── Body size — ALWAYS enforced, even on rate-limit-exempt paths.
         # Webhooks buffer the whole body before HMAC verification, so an
         # unbounded body is a pre-auth memory-exhaustion DoS.
         cl = request.headers.get("content-length")
-        if cls == "upload" and request.method == "POST" and not cl:
+        if cls in ("upload", "pack_upload") and request.method == "POST" \
+                and request.headers.get("transfer-encoding"):
+            # A chunked body has no length to check, and where a parser lets
+            # Transfer-Encoding win over a small Content-Length the header is
+            # a lie. Uploads are sent with the length they have.
+            return JSONResponse(
+                {"detail": "Transfer-Encoding is not accepted for archive uploads; "
+                           "send a Content-Length"},
+                status_code=411,
+            )
+        if cls in ("upload", "pack_upload") and request.method == "POST" and not cl:
             # The multipart body of the one-request upload is parsed (spooled
             # to disk) BEFORE authentication runs; without a declared length
             # the cap below could not apply, so an anonymous client could

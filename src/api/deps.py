@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 import jwt
 from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
 from src.api.jwt_auth import decode_token
+from src.db.session import get_async_session
 from src.users import User, UserStore, get_user_store
+
+if TYPE_CHECKING:
+    from src.knowledge.store import PublishAuth
 
 logger = logging.getLogger(__name__)
 
@@ -729,6 +735,90 @@ async def require_prompt_editor(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Editing prompts requires editor, admin or owner on this workspace",
     )
+
+
+async def require_codebase_reader(
+    user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> User:
+    """A global admin, or anyone who holds a role in the ACTIVE workspace.
+
+    The first gate of every Codebase route. It says nothing about any pack:
+    whether this person may see a given pack is the pack's own audience and
+    grants (`src/knowledge/visibility.py`), checked after this gate, and a pack
+    they may not see is a 404 that reads like a missing one. A person with no
+    role gets the same 403 whether or not the pack they named exists.
+    """
+    if user.is_admin:
+        return user
+    import asyncio
+
+    from src.users.roles import VALID_WORKSPACE_ROLES
+
+    role = await asyncio.to_thread(workspace_role, user.id, workspace_id)
+    if role in VALID_WORKSPACE_ROLES:
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Requires workspace membership",
+    )
+
+
+async def require_pack_author(
+    user: User = Depends(get_current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> User:
+    """A global admin, or editor, admin or owner of the ACTIVE workspace — the
+    people who may CREATE a knowledge pack. Changing a pack that exists is not
+    decided here but by the pack (its audience and grants)."""
+    if user.is_admin:
+        return user
+    import asyncio
+
+    from src.users.roles import PACK_AUTHOR_ROLES
+
+    role = await asyncio.to_thread(workspace_role, user.id, workspace_id)
+    if role in PACK_AUTHOR_ROLES:
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Requires the editor role or higher to create packs",
+    )
+
+
+async def require_pack_token(
+    authorization: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_async_session),
+) -> PublishAuth:
+    """A pack publish token (`cpk_…`) whose maker can maintain the pack NOW.
+
+    The ONLY gate that reads such a token, and used by `/api/codebase/publish*`
+    alone: `get_current_user`, the MCP verifier and the project-token path all
+    refuse a `cpk_` token as not theirs, and this gate refuses every other kind
+    of token. It does NOT depend on `get_current_user` — the token IS the
+    credential — and it answers one fixed 401 for every way a token can fail
+    (never issued, revoked, expired, its maker gone or switched off, or no longer
+    allowed to maintain the pack), so a caller learns nothing about which.
+    """
+    from src.knowledge import store
+
+    refused = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=store.TOKEN_INVALID,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise refused
+    granted = await store.authenticate_token(session, authorization.split(" ", 1)[1])
+    if granted is None:
+        raise refused
+    return granted
+
+
+async def require_signed_in(user: User = Depends(get_current_user)) -> User:
+    """Any signed-in person. For routes that cannot know the workspace from the
+    request — an invite link names its own — and decide for themselves."""
+    return user
 
 
 async def may_use_memories(user: User, workspace_id: str) -> bool:

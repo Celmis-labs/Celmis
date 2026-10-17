@@ -1,0 +1,964 @@
+#!/usr/bin/env python3
+"""celmis-pack: publish, check and fetch a Celmis knowledge pack from a folder.
+
+A pack is a folder of skills (SKILL.md plus the files next to it), checklists,
+API examples and notes that a workspace curates for its agents. This tool puts
+such a folder on the server from a laptop or a CI job, with a per-pack publish
+token instead of a login. Standard library only; safe to run as `python3 -I`.
+
+  celmis-pack push DIR [--note TEXT] [--dry-run]
+      Check DIR the way the server does, upload it as a new version and print
+      what the server stored. With --dry-run nothing is stored. Files that are
+      identical to the current version create no new version.
+  celmis-pack status [DIR]
+      The pack the token publishes, its current version and 30-day usage.
+      With DIR, compare every file with the server's copy.
+  celmis-pack verify DIR
+      `status DIR`, then ask the server, as YOU (your own MCP token), whether
+      every skill in DIR is visible to you.
+  celmis-pack pull DIR
+      Download the current version into an empty or new DIR.
+
+Configuration (environment):
+  CELMIS_URL         address of the server, e.g. https://celmis.example.com
+                     (http is accepted for localhost, 127.0.0.1 and [::1] only)
+  CELMIS_PACK_TOKEN  the pack publish token (cpk_...), else the macOS keychain
+                     entry "celmis-pack-token", else `secret-tool lookup service
+                     celmis-pack-token`
+  CELMIS_TOKEN       (verify only) your own Celmis token: the keychain entry
+                     "celmis-token" first, else CELMIS_TOKEN. This is the order
+                     of celmis-auth-header, so verify checks the token your
+                     agent connects with
+
+The tokens are never printed, logged or written anywhere.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import io
+import json
+import os
+import re
+import secrets
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
+from pathlib import Path, PurePosixPath
+
+PROG = "celmis-pack"
+
+EXIT_OK = 0
+EXIT_FAILED = 1      # the server or the network said no, or something broke
+EXIT_USAGE = 2       # a missing or unusable setting or argument
+EXIT_DIFFERENT = 3   # status / verify: not in sync, or not visible to you
+EXIT_REFUSED = 4     # the files are not acceptable (checked here or by the server)
+
+EPILOG = """\
+exit codes:
+  0  done; in sync and visible
+  1  failed: network error, token not accepted (revoked, expired, creator can no
+     longer maintain the pack), server error, unexpected error
+  2  bad usage or setting: CELMIS_URL missing or not https, no token or a token
+     with characters a token never has, DIR missing or unusable
+  3  status / verify found a difference: files changed, new or removed on either
+     side, or a skill that is not visible to you
+  4  the files are refused: by the checks here (too many, too large, binary,
+     link, unsafe path) or by the server (a secret was found: path:line and
+     the kind of secret are printed, never the file's contents)
+"""
+
+# ─── The server's rules (src/knowledge/ingest.py) ────────────────────
+# A copy, kept equal by tests/plugin/test_the_celmis_pack_tool_publishes_checks_
+# and_fetches_a_pack.py. The server is the authority: it also scans for secrets,
+# which this tool cannot, and refuses anything this tool lets through.
+
+MAX_ARCHIVE_BYTES = 5 * 1024 * 1024
+MAX_FILES = 400
+MAX_ENTRIES = 20_000
+MAX_FILE_BYTES = 512 * 1024
+MAX_TOTAL_BYTES = 8 * 1024 * 1024
+MAX_PATH_CHARS = 300
+MAX_DEPTH = 10
+MAX_NOTE = 500                    # src/knowledge/store.py
+MAX_TOKEN_CHARS = 4096            # sanity bound on a token read here; MCP tokens run to ~400
+TOKEN_PREFIX = "cpk_"
+SKILL_FILE = "SKILL.md"
+TEXT_EXTENSIONS = frozenset("""
+.md .markdown .txt .rst .yaml .yml .json .toml .ini .cfg .conf .sh .bash .zsh .ps1
+.py .js .mjs .cjs .ts .tsx .jsx .go .rs .java .kt .kts .rb .php .cs .sql .http .rest
+.graphql .gql .proto .xml .html .css .scss .tf .hcl .env.example .properties .gradle .csv
+""".split())  # noqa: SIM905 - a word list reads better than a tuple
+
+#: Room for the multipart framing around the zip inside the request body cap.
+BODY_OVERHEAD = 4096
+TIMEOUT = 30
+MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_PULL_BYTES = 32 * 1024 * 1024
+LISTED = 20                       # paths shown per list before "… +N more"
+TOKEN_CHARS = re.compile(r"[A-Za-z0-9._~+/=-]+")
+_SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_DRIVE = re.compile(r"^[A-Za-z]:")
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+#: Every secret in play; anything printed passes through `_scrub` first.
+_SECRETS: list[str] = []
+
+
+class Stop(Exception):
+    """End the command with a message and an exit code."""
+
+    def __init__(self, code: int, message: str, lines: list[str] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.lines = lines or []
+
+
+# ─── Output: never a token ───────────────────────────────────────────
+
+
+def _scrub(text: str) -> str:
+    for secret in _SECRETS:
+        if secret:
+            text = text.replace(secret, "***")
+    return text
+
+
+def say(text: str = "") -> None:
+    print(_scrub(text))
+
+
+def warn(text: str) -> None:
+    print(_scrub(f"{PROG}: {text}"), file=sys.stderr)
+
+
+def _clip(text: object, limit: int = 200) -> str:
+    """One printable line of at most `limit` characters."""
+    s = "".join(c if c.isprintable() else "?" for c in str(text))
+    return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def _listing(title: str, items: list[str]) -> None:
+    if not items:
+        return
+    say(f"{title} ({len(items)}):")
+    for item in items[:LISTED]:
+        say(f"  {_clip(item, MAX_PATH_CHARS)}")
+    if len(items) > LISTED:
+        say(f"  … +{len(items) - LISTED} more")
+
+
+def _allowed(data: dict) -> list[str]:
+    """``path:line rule`` for each line the server accepted only because it carries
+    the allow marker (the server never sends the text)."""
+    out = []
+    for item in data.get("allowed") or []:
+        if isinstance(item, dict):
+            where = _clip(item.get("path"), MAX_PATH_CHARS)
+            if isinstance(item.get("line"), int) and item["line"] > 0:
+                where += f":{item['line']}"
+            out.append(f"{where} {_clip(item.get('rule'), 80)}".rstrip())
+    return out
+
+
+# ─── Configuration ───────────────────────────────────────────────────
+
+
+def server_url() -> str:
+    raw = os.environ.get("CELMIS_URL", "").strip()
+    if not raw:
+        raise Stop(EXIT_USAGE, "CELMIS_URL is not set (the address of your Celmis server)")
+    try:
+        parts = urllib.parse.urlsplit(raw)
+        host = (parts.hostname or "").lower()
+        _ = parts.port                    # raises on a bad port
+    except ValueError:
+        raise Stop(EXIT_USAGE, "CELMIS_URL is not a valid address") from None
+    if parts.scheme not in ("http", "https") or not host:
+        raise Stop(EXIT_USAGE, "CELMIS_URL must start with https://")
+    if parts.scheme == "http" and host not in LOCAL_HOSTS:
+        raise Stop(EXIT_USAGE, "CELMIS_URL is not https (only localhost may use http); nothing was sent")
+    if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
+        raise Stop(EXIT_USAGE, "CELMIS_URL must be an address only: no login, query or fragment")
+    return raw.rstrip("/")
+
+
+def _keychain(service: str) -> str:
+    """The secret stored under `service` in the OS keychain, or "". Nothing is
+    printed; any failure is "not found"."""
+    if sys.platform == "darwin":
+        cmd = ["security", "find-generic-password", "-s", service, "-w"]
+    elif sys.platform.startswith("linux"):
+        cmd = ["secret-tool", "lookup", "service", service]
+    else:
+        return ""
+    try:
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def _checked(token: str, what: str) -> str:
+    if len(token) > MAX_TOKEN_CHARS:
+        raise Stop(EXIT_USAGE, f"the {what} is too long to be a token (over {MAX_TOKEN_CHARS} "
+                               "characters); it was not used")
+    if not TOKEN_CHARS.fullmatch(token):
+        raise Stop(EXIT_USAGE, f"the {what} has characters a token never has; it was not used")
+    _SECRETS.append(token)
+    return token
+
+
+def pack_token() -> str:
+    token = os.environ.get("CELMIS_PACK_TOKEN", "").strip() or _keychain("celmis-pack-token")
+    if not token:
+        raise Stop(EXIT_USAGE, "no pack token: set CELMIS_PACK_TOKEN, or store it in the "
+                               "keychain as celmis-pack-token")
+    token = _checked(token, "pack token")
+    if not token.startswith(TOKEN_PREFIX):
+        raise Stop(EXIT_USAGE, f"that is not a pack token (they start with {TOKEN_PREFIX}); "
+                               "create one in the pack's Sharing tab")
+    return token
+
+
+def consumer_token() -> str:
+    # The order of bin/celmis-auth-header: the keychain first, then the environment.
+    token = _keychain("celmis-token") or os.environ.get("CELMIS_TOKEN", "").strip()
+    if not token:
+        raise Stop(EXIT_USAGE, "no token of yours to check visibility with: store it in the "
+                               "keychain as celmis-token, or set CELMIS_TOKEN")
+    return _checked(token, "token")
+
+
+# ─── HTTP ────────────────────────────────────────────────────────────
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would carry the Authorization header to wherever it points."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+class Reply:
+    def __init__(self, status: int, headers, body: bytes):
+        self.status = status
+        self.headers = headers
+        self.body = body
+
+    def json(self) -> dict:
+        try:
+            data = json.loads(self.body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+
+def request(method: str, url: str, headers: dict[str, str], data: bytes | None = None,
+            limit: int = MAX_JSON_BYTES) -> Reply:
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with _OPENER.open(req, timeout=TIMEOUT) as resp:
+            return Reply(resp.status, resp.headers, _read(resp, limit))
+    except urllib.error.HTTPError as err:
+        try:
+            body = _read(err, 64 * 1024)
+        except OSError:
+            body = b""
+        return Reply(err.code, err.headers, body)
+    except urllib.error.URLError as err:
+        reason = err.reason
+        if isinstance(reason, TimeoutError):
+            raise Stop(EXIT_FAILED, "the server did not answer in time") from None
+        if "CERTIFICATE" in str(reason).upper():
+            raise Stop(EXIT_FAILED, "the server's TLS certificate could not be verified") from None
+        raise Stop(EXIT_FAILED, f"could not reach the server ({_clip(type(reason).__name__)})") from None
+    except (TimeoutError, OSError) as err:
+        raise Stop(EXIT_FAILED, f"could not reach the server ({_clip(type(err).__name__)})") from None
+
+
+def _read(resp, limit: int) -> bytes:  # noqa: ANN001
+    data = resp.read(limit + 1)
+    if len(data) > limit:
+        raise Stop(EXIT_FAILED, "the server's answer is larger than this tool accepts")
+    return data
+
+
+def _auth(token: str) -> dict[str, str]:
+    return {"Authorization": "Bearer " + token, "Accept": "application/json"}
+
+
+def _retry_after(reply: Reply) -> int:
+    """The seconds the server asked us to wait (Retry-After), or 0 when it named none we can read."""
+    raw = (reply.headers.get("Retry-After") if reply.headers else None) or ""
+    return int(raw) if raw.isdigit() and 0 < int(raw) <= 3600 else 0
+
+
+def _fail(reply: Reply, doing: str) -> Stop:
+    """The exit for a reply that is not a success. Never shows a body unless it
+    is the server's structured refusal of an upload."""
+    status = reply.status
+    detail = reply.json().get("detail")
+    if status == 401:
+        return Stop(EXIT_FAILED, "the server did not accept the pack token: it may be revoked or "
+                                 "expired, or its creator can no longer maintain the pack")
+    if status == 422 and isinstance(detail, dict):
+        lines = [f"  {_clip(h.get('path', '?'), MAX_PATH_CHARS)}"
+                 + (f":{h['line']}" if isinstance(h.get("line"), int) and h["line"] > 0 else "")
+                 + (f" {_clip(h.get('label', ''), 80)}" if h.get("label") else "")
+                 for h in (detail.get("hits") or []) if isinstance(h, dict)]
+        return Stop(EXIT_REFUSED, f"the server refused the files ({_clip(detail.get('code', 'refused'), 40)}): "
+                                  f"{_clip(detail.get('message', ''), 300)}", lines)
+    if status == 404:
+        return Stop(EXIT_FAILED, f"{doing}: not found (was the pack deleted, or has it no version yet?)")
+    if status in (411, 413):
+        return Stop(EXIT_REFUSED, f"{doing}: the upload is larger than the server accepts")
+    if status == 429:
+        wait = _retry_after(reply)
+        return Stop(EXIT_FAILED, f"{doing}: too many requests; try again in "
+                                 + (f"{wait} second{'s' if wait != 1 else ''}" if wait else "a minute"))
+    if 300 <= status < 400:
+        return Stop(EXIT_FAILED, f"{doing}: the server redirected the request; the token is only "
+                                 "sent to CELMIS_URL as written")
+    if isinstance(detail, str) and detail.strip():
+        return Stop(EXIT_FAILED, f"{doing}: HTTP {status}: {_clip(detail, 200)}")
+    return Stop(EXIT_FAILED, f"{doing}: HTTP {status}")
+
+
+# ─── Reading a folder the way the server does ────────────────────────
+
+
+class Refused(Stop):
+    def __init__(self, code: str, message: str):
+        super().__init__(EXIT_REFUSED, f"refused here ({code}): {message}")
+        self.refusal = code
+
+
+def _clean_path(raw: str) -> str:
+    shown = raw[:MAX_PATH_CHARS]
+
+    def refuse(why: str) -> Refused:
+        return Refused("unsafe_path", f"{shown!r}: {why}")
+
+    if "\\" in raw:
+        raise refuse("backslashes are not allowed in a path")
+    if any(ord(c) < 32 or ord(c) == 127 for c in raw):
+        raise refuse("control characters are not allowed in a path")
+    if raw.startswith("/"):
+        raise refuse("absolute paths are not allowed")
+    if _DRIVE.match(raw):
+        raise refuse("drive letters are not allowed")
+    path = unicodedata.normalize("NFC", raw)
+    if path.startswith("./"):
+        path = path[2:]
+    path = path.rstrip("/")
+    segments = path.split("/") if path else []
+    if not segments:
+        raise refuse("empty path")
+    for seg in segments:
+        if seg == "..":
+            raise refuse("`..` is not allowed in a path")
+        if seg in ("", "."):
+            raise refuse("empty or `.` segments are not allowed in a path")
+    return path
+
+
+def _is_hidden(path: str) -> bool:
+    return any(seg.startswith(".") or seg == "__MACOSX" for seg in path.split("/"))
+
+
+def _extension_allowed(path: str) -> bool:
+    low = path.lower()
+    return low.endswith(".env.example") or PurePosixPath(low).suffix in TEXT_EXTENSIONS
+
+
+def _common_top_dir(paths: list[str]) -> str:
+    if not paths or SKILL_FILE in paths:
+        return ""
+    firsts = {p.split("/", 1)[0] for p in paths}
+    if len(firsts) == 1 and all("/" in p for p in paths):
+        return next(iter(firsts))
+    return ""
+
+
+def slugify(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9._-]+", "-", unicodedata.normalize("NFKD", text).lower())
+    return slug.strip("-._")[:64].strip("-._")
+
+
+class Folder:
+    """What `push` would send: the kept files, what was left out, and the zip."""
+
+    def __init__(self, raw: dict[str, bytes], ignored: list[str], top_dir: str):
+        self.raw = raw                  # sent path (before the top folder is stripped) -> bytes
+        self.ignored = ignored
+        self.top_dir = top_dir
+        self.paths = {p: (p[len(top_dir) + 1:] if top_dir else p) for p in raw}   # sent -> stored
+
+    def shas(self) -> dict[str, str]:
+        """stored path -> sha256 of the UTF-8 text without a BOM: the server's per-file sha."""
+        out = {}
+        for sent, data in self.raw.items():
+            text = data.decode("utf-8")
+            text = text[1:] if text.startswith("﻿") else text
+            out[self.paths[sent]] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return out
+
+    def version_sha(self) -> str:
+        digest = hashlib.sha256()
+        for path, sha in sorted(self.shas().items()):
+            digest.update(f"{path}\0{sha}\n".encode())
+        return digest.hexdigest()
+
+    def skills(self) -> list[str]:
+        """Skill names as the server will derive them (name: in the front matter,
+        else the folder). Used only when the server's own list is not at hand."""
+        names = []
+        for sent, data in sorted(self.raw.items()):
+            stored = self.paths[sent]
+            if stored.rsplit("/", 1)[-1] != SKILL_FILE:
+                continue
+            text = data.decode("utf-8").lstrip("﻿")
+            name = ""
+            block = re.match(r"---\r?\n(.*?)\r?\n---", text, re.S)
+            if block:
+                m = re.search(r"^name:\s*(.+?)\s*$", block.group(1), re.M)
+                if m:
+                    name = m.group(1).strip("'\"")
+            if not name:
+                directory = stored.rsplit("/", 1)[0] if "/" in stored else ""
+                name = slugify(directory.rsplit("/", 1)[-1] if directory else self.top_dir)
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def zip(self) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for sent in sorted(self.raw):
+                info = zipfile.ZipInfo(sent, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = (stat.S_IFREG | 0o644) << 16
+                zf.writestr(info, self.raw[sent])
+        data = buf.getvalue()
+        if len(data) > MAX_ARCHIVE_BYTES - BODY_OVERHEAD:
+            raise Refused("archive_too_large",
+                          f"the compressed folder is over {MAX_ARCHIVE_BYTES // (1024 * 1024)} MB "
+                          "(the whole request is capped there)")
+        return data
+
+
+def read_folder(root: str) -> Folder:
+    base = Path(root)
+    if not base.is_dir() or base.is_symlink():
+        raise Stop(EXIT_USAGE, "DIR must be an existing folder (not a symbolic link)")
+    ignored: list[str] = []
+    candidates: list[tuple[str, Path, int]] = []
+    seen: dict[str, str] = {}
+    entries = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+            rel_dir = Path(dirpath).relative_to(base).as_posix()
+            keep = []
+            for d in sorted(dirnames):
+                rel = d if rel_dir == "." else f"{rel_dir}/{d}"
+                if _is_hidden(rel):
+                    ignored.append(unicodedata.normalize("NFC", rel) + "/")
+                    continue
+                if (Path(dirpath) / d).is_symlink():
+                    raise Refused("symlink", f"{rel[:MAX_PATH_CHARS]!r}: symbolic links are not allowed.")
+                keep.append(d)
+            dirnames[:] = keep
+            for fname in sorted(filenames):
+                entries += 1
+                if entries > MAX_ENTRIES:
+                    raise Refused("too_many_files", f"The folder has over {MAX_ENTRIES} files.")
+                rel = fname if rel_dir == "." else f"{rel_dir}/{fname}"
+                path = _clean_path(rel)
+                full = Path(dirpath) / fname
+                st = full.lstat()
+                if _is_hidden(path):
+                    ignored.append(path)
+                    continue
+                if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                    raise Refused("symlink", f"{path[:MAX_PATH_CHARS]!r}: links and special files are not allowed.")
+                if not _extension_allowed(path):
+                    ignored.append(path)
+                    continue
+                folded = path.casefold()
+                if folded in seen:
+                    raise Refused("duplicate_path", f"{path[:MAX_PATH_CHARS]!r} appears twice.")
+                seen[folded] = path
+                candidates.append((path, full, st.st_size))
+    except OSError:
+        raise Stop(EXIT_USAGE, "the folder could not be read") from None
+    if not candidates:
+        raise Refused("no_files", "No usable text files were found in the folder.")
+    if len(candidates) > MAX_FILES:
+        raise Refused("too_many_files", f"More than {MAX_FILES} files; split the pack.")
+    for path, _full, size in candidates:
+        if size > MAX_FILE_BYTES:
+            raise Refused("file_too_large", f"{path[:80]!r} is over {MAX_FILE_BYTES // 1024} KB.")
+    if sum(size for _p, _f, size in candidates) > MAX_TOTAL_BYTES:
+        raise Refused("total_too_large", f"The files add up to over {MAX_TOTAL_BYTES // (1024 * 1024)} MB.")
+    top_dir = _common_top_dir([p for p, _f, _s in candidates])
+    for path, _f, _s in candidates:
+        stored = path[len(top_dir) + 1:] if top_dir else path
+        if len(stored) > MAX_PATH_CHARS:
+            raise Refused("path_too_long", f"{stored[:80]!r}…: over {MAX_PATH_CHARS} characters.")
+        if stored.count("/") + 1 > MAX_DEPTH:
+            raise Refused("too_deep", f"{stored[:80]!r}: nested over {MAX_DEPTH} levels.")
+    raw: dict[str, bytes] = {}
+    total = 0
+    for path, full, _size in candidates:
+        try:
+            with full.open("rb") as fh:
+                data = fh.read(MAX_FILE_BYTES + 1)
+        except OSError:
+            raise Stop(EXIT_USAGE, f"{path[:80]!r} could not be read") from None
+        if len(data) > MAX_FILE_BYTES:
+            raise Refused("file_too_large", f"{path[:80]!r} is over {MAX_FILE_BYTES // 1024} KB.")
+        total += len(data)
+        if total > MAX_TOTAL_BYTES:
+            raise Refused("total_too_large",
+                          f"The files add up to over {MAX_TOTAL_BYTES // (1024 * 1024)} MB.")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise Refused("binary_file", f"{path[:80]!r} is not UTF-8 text.") from None
+        if "\x00" in text:
+            raise Refused("binary_file", f"{path[:80]!r} is not UTF-8 text.")
+        raw[path] = data
+    return Folder(raw, sorted(ignored), top_dir)
+
+
+# ─── Commands ────────────────────────────────────────────────────────
+
+
+def _multipart(fields: dict[str, str], name: str, filename: str, ctype: str,
+               data: bytes) -> tuple[bytes, str]:
+    boundary = "celmispack" + secrets.token_hex(16)
+    out = io.BytesIO()
+    for key, value in fields.items():
+        out.write(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n'
+                  f"{value}\r\n".encode())
+    out.write(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; '
+              f'filename="{filename}"\r\nContent-Type: {ctype}\r\n\r\n'.encode())
+    out.write(data)
+    out.write(f"\r\n--{boundary}--\r\n".encode())
+    return out.getvalue(), f"multipart/form-data; boundary={boundary}"
+
+
+def _pack_status(base: str, token: str) -> dict:
+    reply = request("GET", base + "/api/codebase/publish", _auth(token))
+    if reply.status != 200:
+        raise _fail(reply, "status")
+    data = reply.json()
+    if not isinstance(data.get("pack"), dict):
+        raise Stop(EXIT_FAILED, "the server's answer is not a Celmis pack status; is CELMIS_URL right?")
+    return data
+
+
+def cmd_push(args: argparse.Namespace) -> int:
+    base = server_url()
+    token = pack_token()
+    note = (args.note or "").strip()
+    if len(note) > MAX_NOTE:
+        raise Stop(EXIT_USAGE, f"--note is over {MAX_NOTE} characters")
+    folder = read_folder(args.dir)
+    archive = folder.zip()
+    status = _pack_status(base, token)
+    fields = {"note": note}
+    if args.dry_run:
+        fields["dry_run"] = "true"
+    body, ctype = _multipart(fields, "archive", "pack.zip", "application/zip", archive)
+    reply = request("POST", base + "/api/codebase/publish",
+                    {**_auth(token), "Content-Type": ctype, "Content-Length": str(len(body))}, body)
+    if reply.status not in (200, 201):
+        raise _fail(reply, "push")
+    data = reply.json()
+    pack = status["pack"]
+    say(f"pack: {_clip(pack.get('slug'), 80)} ({_clip(pack.get('title'), 120)})")
+    if data.get("dry_run") is True:
+        say("dry run: nothing was stored")
+        say(f"files: {len(data.get('files') or [])}")
+        for item in (data.get("files") or [])[:LISTED]:
+            if isinstance(item, dict):
+                say(f"  {_clip(item.get('path'), MAX_PATH_CHARS)}")
+        extra = len(data.get("files") or []) - LISTED
+        if extra > 0:
+            say(f"  … +{extra} more")
+        say(f"skills: {_clip(', '.join(str(s) for s in data.get('skills') or []) or '-', 400)}")
+        say(f"ignored: {len(folder.ignored) + len(data.get('ignored') or [])}")
+        _listing("ignored paths", folder.ignored + [str(p) for p in data.get("ignored") or []])
+        _listing("allowed by celmis:allow-secret", _allowed(data))
+        say(f"sha: {_clip(data.get('sha'), 64)}")
+        return EXIT_OK
+    version = data.get("version") if isinstance(data.get("version"), dict) else {}
+    if data.get("unchanged") is True:
+        say(f"unchanged: version {version.get('number')} already holds exactly these files; "
+            "no new version was made")
+    else:
+        say(f"version: {version.get('number')}")
+    say(f"files: {version.get('file_count', len(folder.raw))}")
+    say(f"skills: {_clip(', '.join(str(s) for s in data.get('skills') or []) or '-', 400)}")
+    say(f"ignored: {len(folder.ignored) + len(data.get('ignored') or [])}")
+    _listing("ignored paths", folder.ignored + [str(p) for p in data.get("ignored") or []])
+    _listing("allowed by celmis:allow-secret", _allowed(data))
+    say(f"sha: {_clip(version.get('sha'), 64)}")
+    return EXIT_OK
+
+
+def _compare(data: dict, folder: Folder) -> tuple[list[str], list[str], list[str]]:
+    server = {f["path"]: f.get("sha") for f in data.get("files") or [] if isinstance(f, dict) and "path" in f}
+    local = folder.shas()
+    changed = sorted(p for p in local if p in server and server[p] != local[p])
+    new = sorted(p for p in local if p not in server)
+    removed = sorted(p for p in server if p not in local)
+    return changed, new, removed
+
+
+def _show_status(data: dict) -> None:
+    pack = data["pack"]
+    version = data.get("current_version") if isinstance(data.get("current_version"), dict) else None
+    say(f"pack: {_clip(pack.get('slug'), 80)} ({_clip(pack.get('title'), 120)}), "
+        f"audience: {_clip(pack.get('audience'), 20)}")
+    if version:
+        say(f"version: {version.get('number')}, {version.get('file_count')} files")
+        say(f"sha: {_clip(version.get('sha'), 64)}")
+    else:
+        say("version: none yet (nothing is published)")
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    say(f"usage, last 30 days: {usage.get('calls_30d', 0)} calls"
+        + (f", last used {_clip(usage.get('last_used_at'), 40)}" if usage.get("last_used_at") else ""))
+    for item in (usage.get("skills") or [])[:LISTED]:
+        if isinstance(item, dict):
+            say(f"  {_clip(item.get('skill'), 80)}: {item.get('opens_30d', 0)} opens"
+                + (f", last {_clip(item.get('last_used_at'), 40)}" if item.get("last_used_at") else ""))
+
+
+def _compare_and_report(data: dict, folder: Folder) -> bool:
+    changed, new, removed = _compare(data, folder)
+    version = data.get("current_version") if isinstance(data.get("current_version"), dict) else None
+    if not (changed or new or removed):
+        say(f"in sync: {len(folder.raw)} files match version {version.get('number') if version else '?'}")
+        return True
+    say("not in sync" + (f" with version {version.get('number')}" if version else " (nothing is published)"))
+    _listing("changed", changed)
+    _listing("new", new)
+    _listing("removed", removed)
+    return False
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    base = server_url()
+    token = pack_token()
+    folder = read_folder(args.dir) if args.dir else None
+    data = _pack_status(base, token)
+    _show_status(data)
+    if folder is None:
+        return EXIT_OK
+    return EXIT_OK if _compare_and_report(data, folder) else EXIT_DIFFERENT
+
+
+# A minimal streamable-HTTP MCP client: initialize, notifications/initialized,
+# tools/call. The reply to a POST is JSON or a server-sent-event stream.
+
+_MORE = re.compile(r"^… \+\d+ more · cursor=(\S+)", re.M)
+_SKILL_LINE = re.compile(r"^([a-z0-9][a-z0-9._-]*)/([a-z0-9][a-z0-9._-]*)(?: — .*)?$")
+MAX_PAGES = 50
+
+
+class McpClient:
+    def __init__(self, base: str, token: str):
+        self.url = base + "/mcp/dev/"
+        self.token = token
+        self.session = ""
+        self.version = "2025-03-26"
+        self._id = 0
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Authorization": "Bearer " + self.token, "Content-Type": "application/json",
+                   "Accept": "application/json, text/event-stream", "MCP-Protocol-Version": self.version}
+        if self.session:
+            headers["Mcp-Session-Id"] = self.session
+        return headers
+
+    def _post(self, message: dict) -> Reply:
+        reply = request("POST", self.url, self._headers(), json.dumps(message).encode("utf-8"))
+        sid = reply.headers.get("Mcp-Session-Id")
+        if sid:
+            self.session = sid.strip()
+        return reply
+
+    @staticmethod
+    def _message(reply: Reply, wanted: int) -> dict:
+        ctype = (reply.headers.get_content_type() if reply.headers else "") or ""
+        text = reply.body.decode("utf-8", "replace")
+        if ctype == "text/event-stream":
+            for event in re.split(r"\r?\n\r?\n", text):
+                data = "\n".join(line[5:].lstrip() for line in event.splitlines() if line.startswith("data:"))
+                if not data:
+                    continue
+                try:
+                    msg = json.loads(data)
+                except ValueError:
+                    continue
+                if isinstance(msg, dict) and msg.get("id") == wanted:
+                    return msg
+            raise Stop(EXIT_FAILED, "the server's MCP stream held no answer")
+        try:
+            msg = json.loads(text)
+        except ValueError:
+            raise Stop(EXIT_FAILED, "the server's MCP answer is not JSON") from None
+        if isinstance(msg, list):
+            msg = next((m for m in msg if isinstance(m, dict) and m.get("id") == wanted), {})
+        if not isinstance(msg, dict):
+            raise Stop(EXIT_FAILED, "the server's MCP answer is not understood")
+        return msg
+
+    def _call(self, method: str, params: dict) -> dict:
+        self._id += 1
+        reply = self._post({"jsonrpc": "2.0", "id": self._id, "method": method, "params": params})
+        if reply.status in (401, 403):
+            raise Stop(EXIT_FAILED, "the server did not accept your Celmis token for the MCP endpoint "
+                                    "(expired, revoked, or without the dev scope)")
+        if reply.status != 200:
+            raise Stop(EXIT_FAILED, f"the MCP endpoint answered HTTP {reply.status}")
+        msg = self._message(reply, self._id)
+        if "error" in msg:
+            raise Stop(EXIT_FAILED, "the MCP endpoint refused the request")
+        result = msg.get("result")
+        return result if isinstance(result, dict) else {}
+
+    def open(self) -> None:
+        result = self._call("initialize", {
+            "protocolVersion": self.version, "capabilities": {},
+            "clientInfo": {"name": PROG, "version": "1"}})
+        negotiated = result.get("protocolVersion")
+        if isinstance(negotiated, str) and re.fullmatch(r"[0-9-]{10}", negotiated):
+            self.version = negotiated
+        reply = self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        if reply.status not in (200, 202, 204):
+            raise Stop(EXIT_FAILED, f"the MCP endpoint answered HTTP {reply.status}")
+
+    def close(self) -> None:
+        if self.session:
+            with contextlib.suppress(Stop):
+                request("DELETE", self.url, self._headers())
+
+    def tool(self, name: str, arguments: dict) -> str:
+        result = self._call("tools/call", {"name": name, "arguments": arguments})
+        text = "\n".join(str(c.get("text", "")) for c in result.get("content") or []
+                         if isinstance(c, dict) and c.get("type") == "text")
+        if result.get("isError"):
+            raise Stop(EXIT_FAILED, "the MCP tool reported an error")
+        return text
+
+
+def visible_skills(base: str, token: str) -> set[tuple[str, str]]:
+    """(pack slug, skill) for every skill the token's owner can see."""
+    client = McpClient(base, token)
+    client.open()
+    seen: set[tuple[str, str]] = set()
+    try:
+        cursor = ""
+        for _ in range(MAX_PAGES):
+            text = client.tool("skills", {"cursor": cursor} if cursor else {})
+            for line in text.splitlines():
+                m = _SKILL_LINE.match(line.strip())
+                if m:
+                    seen.add((m.group(1), m.group(2)))
+            more = _MORE.search(text)
+            if not more:
+                break
+            cursor = more.group(1)
+    finally:
+        client.close()
+    return seen
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    base = server_url()
+    token = pack_token()
+    folder = read_folder(args.dir)
+    data = _pack_status(base, token)
+    _show_status(data)
+    in_sync = _compare_and_report(data, folder)
+    # In sync, the server's own skill list is exact; otherwise ask the folder.
+    wanted = sorted({f["skill"] for f in data.get("files") or []
+                     if isinstance(f, dict) and f.get("kind") == "skill" and f.get("skill")}
+                    if in_sync else set(folder.skills()))
+    slug = str(data["pack"].get("slug"))
+    mine = visible_skills(base, consumer_token())
+    missing = [s for s in wanted if (slug, s) not in mine]
+    say(f"visible to you: {len(wanted) - len(missing)}/{len(wanted)}")
+    _listing("not visible to you", missing)
+    return EXIT_OK if in_sync and not missing else EXIT_DIFFERENT
+
+
+# ─── pull ────────────────────────────────────────────────────────────
+
+
+def _safe_member(name: str) -> str:
+    try:
+        return _clean_path(name)
+    except Refused as err:
+        raise Stop(EXIT_REFUSED, f"the archive holds an unsafe path and was not extracted: "
+                                 f"{err.message.split(': ', 1)[-1]}") from None
+
+
+def extract(data: bytes, dest: Path) -> dict[str, str]:
+    """Write the zip into `dest` (an empty or missing folder); path -> sha256."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise Stop(EXIT_FAILED, "the archive from the server is damaged") from None
+    with zf:
+        infos = [i for i in zf.infolist() if not i.is_dir()]
+        if len(infos) > MAX_FILES:
+            raise Stop(EXIT_REFUSED, "the archive holds more files than a pack may; nothing was extracted")
+        names: dict[str, zipfile.ZipInfo] = {}
+        total = 0
+        for info in infos:
+            name = _safe_member(info.filename)
+            if (info.external_attr >> 16) & 0o170000 not in (0, stat.S_IFREG):
+                raise Stop(EXIT_REFUSED, f"{_clip(name, 80)!r} is a link or special file; nothing was extracted")
+            if info.flag_bits & 0x1:
+                raise Stop(EXIT_REFUSED, "the archive is encrypted; nothing was extracted")
+            if info.file_size > MAX_FILE_BYTES:
+                raise Stop(EXIT_REFUSED, f"{_clip(name, 80)!r} is larger than a pack file may be")
+            total += info.file_size
+            if total > MAX_TOTAL_BYTES:
+                raise Stop(EXIT_REFUSED, "the archive expands to more than a pack may hold")
+            if name.casefold() in {n.casefold() for n in names}:
+                raise Stop(EXIT_REFUSED, f"{_clip(name, 80)!r} appears twice in the archive")
+            names[name] = info
+        lowered = {n.casefold(): n for n in names}
+        for name in names:                    # `a.md` and `a.md/b.md` cannot both be written
+            parts = name.casefold().split("/")
+            for depth in range(1, len(parts)):
+                clash = lowered.get("/".join(parts[:depth]))
+                if clash is not None:
+                    raise Stop(EXIT_REFUSED, f"{_clip(clash, 80)!r} is both a file and a folder in "
+                                             "the archive; nothing was extracted")
+        parent = dest.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=".celmis-pack-", dir=parent))
+        shas: dict[str, str] = {}
+        try:
+            root = staging.resolve()
+            for name, info in sorted(names.items()):
+                target = (root / name).resolve()
+                if root not in target.parents:
+                    raise Stop(EXIT_REFUSED, "the archive would write outside the folder; nothing was extracted")
+                content = zf.open(info).read(MAX_FILE_BYTES + 1)
+                if len(content) != info.file_size or len(content) > MAX_FILE_BYTES:
+                    raise Stop(EXIT_REFUSED, f"{_clip(name, 80)!r} is not the size the archive says")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(content)
+                text = content.decode("utf-8", "replace")
+                text = text[1:] if text.startswith("﻿") else text
+                shas[name] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            os.chmod(staging, 0o755)
+            if dest.exists():
+                dest.rmdir()
+            os.replace(staging, dest)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+    return shas
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    base = server_url()
+    token = pack_token()
+    dest = Path(args.dir)
+    if dest.is_symlink() or (dest.exists() and not dest.is_dir()):
+        raise Stop(EXIT_USAGE, "DIR must be a new or empty folder (not a file or a link)")
+    if dest.exists() and any(dest.iterdir()):
+        raise Stop(EXIT_USAGE, "DIR is not empty; pull only fills an empty or new folder")
+    data = _pack_status(base, token)
+    version = data.get("current_version")
+    if not isinstance(version, dict):
+        raise Stop(EXIT_FAILED, "nothing is published yet; there is nothing to pull")
+    reply = request("GET", base + "/api/codebase/publish/archive",
+                    {**_auth(token), "Accept": "application/zip"}, limit=MAX_PULL_BYTES)
+    if reply.status != 200:
+        raise _fail(reply, "pull")
+    shas = extract(reply.body, dest)
+    server = {f["path"]: f.get("sha") for f in data.get("files") or [] if isinstance(f, dict) and "path" in f}
+    if shas != server:
+        warn("the files pulled do not match the version the server lists; the folder was still written")
+        return EXIT_DIFFERENT
+    pack = data["pack"]
+    say(f"pack: {_clip(pack.get('slug'), 80)} ({_clip(pack.get('title'), 120)})")
+    say(f"pulled: version {version.get('number')}, {len(shas)} files into {_clip(args.dir, 200)}")
+    say(f"sha: {_clip(version.get('sha'), 64)}")
+    return EXIT_OK
+
+
+# ─── Entry ───────────────────────────────────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=PROG, description=__doc__, epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    push = sub.add_parser("push", help="upload DIR as a new version",
+                          epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+    push.add_argument("dir", metavar="DIR")
+    push.add_argument("--note", default="", help=f"a note for the version (up to {MAX_NOTE} characters)")
+    push.add_argument("--dry-run", action="store_true", help="check on the server and store nothing")
+    push.set_defaults(run=cmd_push)
+    status = sub.add_parser("status", help="show the pack; with DIR, compare it with the server",
+                            epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+    status.add_argument("dir", nargs="?", metavar="DIR")
+    status.set_defaults(run=cmd_status)
+    verify = sub.add_parser("verify", help="status DIR, then check every skill is visible to you",
+                            epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+    verify.add_argument("dir", metavar="DIR")
+    verify.set_defaults(run=cmd_verify)
+    pull = sub.add_parser("pull", help="download the current version into an empty or new DIR",
+                          epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+    pull.add_argument("dir", metavar="DIR")
+    pull.set_defaults(run=cmd_pull)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.run(args)
+    except Stop as stop:
+        warn(stop.message)
+        for line in stop.lines:
+            print(_scrub(line), file=sys.stderr)
+        return stop.code
+    except KeyboardInterrupt:
+        warn("interrupted")
+        return 130
+    except Exception as exc:  # noqa: BLE001 - a traceback could show a header; say only what failed
+        warn(f"unexpected error ({type(exc).__name__})")
+        return EXIT_FAILED
+
+
+if __name__ == "__main__":
+    sys.exit(main())

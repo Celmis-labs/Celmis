@@ -242,6 +242,7 @@ FEATURES: tuple[Feature, ...] = (
     Feature("dependencies", ("/api/deps",), ("/dependencies",)),
     Feature("intel", ("/api/intel",), ("/admin/intel",)),
     Feature("agent", ("/api/claude", "/api/agent-sessions"), ("/claude",)),
+    Feature("codebase", ("/api/codebase",), ("/codebase", "/codebase/search", "/codebase/connect")),
     Feature("automation", ("/api/automation",), ("/automation",)),
     Feature("monitoring", ("/api/alerts", "/api/notifications"),
             ("/alerts", "/admin/notifications")),

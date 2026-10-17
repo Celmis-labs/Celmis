@@ -159,6 +159,11 @@ async def delete_team(
     ws_id: str = Depends(current_workspace_id),
 ) -> None:
     row = await _team_in_workspace(session, team_id, ws_id)
+    # The team's pack grants go with it: no FK is relied on, and a grant to a
+    # team that no longer exists must not linger to be matched by a recycled id.
+    from src.knowledge import store as pack_store
+
+    await pack_store.delete_team_grants(session, row.id)
     await session.delete(row)
     await session.commit()
     logger.info("team_deleted id=%s by=%s", team_id, user.email)

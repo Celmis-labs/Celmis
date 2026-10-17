@@ -45,7 +45,7 @@ import tempfile
 
 # --- copies of src/mcp_server/dev_contract.py (checked by tests/plugin) -----
 DEV_TOOLS = ("repos", "find", "outline", "read_symbol", "refs", "grep", "map",
-             "ask", "howto")
+             "ask", "howto", "skills", "brief")
 IDX_LINE_RE = r"^idx: (?P<entries>.+)$"
 IDX_ENTRY_RE = (r"(?P<slug>[A-Za-z0-9._/-]+) (?P<branch>\S+)@(?P<sha>[0-9a-f]{7,40}) "
                 r"(?P<age>\S+) (?P<state>fresh|STALE|unknown)")
@@ -233,7 +233,9 @@ def cmd_session(event: dict) -> str:
     elif configured:
         lines.append("Celmis is connected (tools mcp__plugin_celmis-code_celmis__*): for "
                      "definitions, callers and other repositories use repos -> find -> "
-                     "outline -> read_symbol -> refs; keep Grep for uncommitted code here.")
+                     "outline -> read_symbol -> refs; keep Grep for uncommitted code here. "
+                     "On a new task, brief (paste the task) names the workspace's skills "
+                     "and checklists for it.")
     else:
         lines.append("Celmis plugin installed but CELMIS_URL / CELMIS_TOKEN are not set in "
                      "this shell, so its tools will not connect: use Grep/Read as usual, or "

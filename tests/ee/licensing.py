@@ -39,9 +39,11 @@ def mint_test_license(
     now: datetime | None = None,
     not_before: datetime | None = None,
     key: Ed25519PrivateKey = TEST_KEY,
+    seats: int | None = None,
+    sso_seats: int | None = None,
 ) -> str:
     return mint(key, customer=customer, features=features, days=days,
-                now=now, not_before=not_before)
+                now=now, not_before=not_before, seats=seats, sso_seats=sso_seats)
 
 
 def trust_test_key(mp) -> None:

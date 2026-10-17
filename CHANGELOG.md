@@ -20,6 +20,217 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-10-17
+
+### Upgrade notes
+
+- **An installation without a licence admits at most five people.** Nobody is
+  switched off: installations already above five keep every account working,
+  only adding a sixth person is refused (sign-up, first Google or single sign-on
+  login, `analyzer auth google`). A licence lifts the limit; a licence without a
+  `seats` claim is unlimited, so existing licences keep working unchanged.
+- **Single sign-on no longer needs a licence for up to five people.** Beyond five,
+  a licence granting `sso` is required (claim `sso_seats`, unlimited when absent).
+- **New database tables** for Codebase knowledge packs arrive with the migration
+  `e5b8c2d9a1f6`; no new environment variable is required.
+
+### Added
+
+- **Codebase: versioned knowledge packs for a workspace's skills, API examples,
+  checklists and notes.** A pack is uploaded as a folder or one zip, checked
+  whole (archive limits, path and symlink rules, secret files, secrets inside
+  files, front matter, duplicate and nested skills) and stored as a numbered
+  version that can be rolled back, compared and downloaded. Each pack has an
+  audience (`workspace`, `teams`, `restricted`), team grants, named people and
+  invite links; a pack someone may not see is answered exactly like one that does
+  not exist, a `restricted` pack is hidden even from workspace admins, and a
+  secret found in an upload is reported by file and line, never by value. Search
+  and a "paste the task" brief read the current version of the visible packs
+  only and quote a note's repository pointers only to people who may read that
+  repository. New REST routes under `/api/codebase`, an upload request class
+  (5 MB, a declared length, rate limited), `analyzer codebase import|list`, an
+  MCP call-log column for the packs a call read, cleanup when a team, a
+  workspace or an account is deleted, and `knowledge_pack_memberships` in the
+  personal data export. Leaving a workspace ends what the person held on its
+  packs (their names on packs go and the publish tokens they made are revoked,
+  so adding them back, even as an admin, restores nothing); a `restricted` pack
+  that only they could maintain is left as it is, visible to the superadmin
+  alone, and reported as `codebase.pack_orphaned`. The audit page, its facets,
+  statistics and export show a pack's `codebase.*` rows only to people who may
+  see that pack, and the `mcp.call` row no longer carries pack ids. Search and
+  the brief read in batches up to 200,000 items and say `"truncated": true`
+  when they stopped; text fields refuse control and bidirectional characters.
+  See [docs/CODEBASE.md](docs/CODEBASE.md).
+- **Developer MCP profile: `brief` and `skills`.** Two more read-only tools on
+  `/mcp/dev` (eleven now, the tool list under 6,500 characters) put a
+  workspace's knowledge packs in front of a coding agent: `brief` takes the
+  pasted task and answers with the skills, checklists, API examples and notes that
+  fit, each tagged `pack@vN`; `skills` lists, searches and opens them a page at a
+  time. What a caller reads is decided on every call from live rows (a person who
+  left the workspace loses their packs at once; project, internal, refused and
+  unauthenticated callers read none), a hidden skill is answered exactly like a
+  missing one and logged as denied, pack text is redacted like code, and
+  repository pointers are shown only for repositories the caller may read. The call
+  log records the pack ids and `<pack>/<skill>` for a skill opened, never the task
+  or the query. A brief opens with one line saying the text is reference material,
+  not instructions, and quotes a pack paragraph that imitates one of its own
+  labels; past the 200,000-item limit it says `index limit reached` instead of
+  answering from a part. The Claude Code plugin teaches "brief first, then the
+  skills it names". See [docs/MCP_DEV.md](docs/MCP_DEV.md).
+- **Codebase: private packs, publish tokens, `celmis-pack` and usage.** A
+  `restricted` pack with no team granted is shown as **Private**: visible to its
+  creator, the people named on it and the superadmin, and answered as missing to
+  everyone else, workspace owners, admins and global admins included. A
+  maintainer can make **publish tokens** (`cpk_...`, shown once, stored as a hash,
+  at most 10 per pack, 1-365 days) in the pack's Sharing tab; a token reaches
+  `GET`/`POST /api/codebase/publish` and `GET /api/codebase/publish/archive` for
+  its own pack only, is not a login and is refused everywhere else (including
+  MCP), and is re-checked against its creator's standing on every call. The
+  Claude Code plugin gains `bin/celmis-pack` (Python standard library only):
+  `push` (with `--dry-run`; the same files make no new version), `status`,
+  `verify` (which skills your own token can see) and `pull`, which checks the
+  folder with the server's limits first, refuses non-https addresses and never
+  prints a token. The pack's `usage` object (calls, last use, and opens per skill
+  over the last 30 days, no person in it) replaces `usage_30d` and has its own
+  Usage tab. The publish routes share the upload request class. See
+  [docs/CODEBASE.md](docs/CODEBASE.md).
+- **Seats: how many people one Celmis holds.** Without a licence an installation
+  holds up to five people, and a licence lifts the limit with two optional
+  claims, `seats` and `sso_seats` (positive integers up to 1,000,000; a licence
+  without `seats` is unlimited, so licences issued before this keep working
+  unchanged, and `scripts/ee_mint_license.py` takes `--seats` and
+  `--sso-seats`). A seat is an active account that is not platform-owned; the
+  master account and the seeded local user take none, and deactivating an
+  account frees its seat. Only *adding* a person is refused (a sign-up, a first
+  Google or single sign-on sign-in, a new address in `analyzer auth google`)
+  with a `403` carrying `seat_limit_reached` or `sso_seat_limit_reached`, an
+  `auth.seat_limit_refused` audit row with the counts and no address, and a
+  message on the sign-in page in every language; nobody who already has an
+  account is refused or switched off, even over the limit. **Admin / Health**
+  shows used and limit for seats and single sign-on (`GET /api/admin/seats`),
+  and the workspace invite form warns when no seat is free
+  (`GET /api/invites/seats`, a yes or no). See [LICENSING.md](LICENSING.md) and
+  [docs/ROLES_AND_ACCESS.md](docs/ROLES_AND_ACCESS.md).
+- **Switch an account off and on.** **Admin / Users** (the master account only)
+  gains a Deactivate / Reactivate button that asks first, backed by
+  `POST /api/admin/users/{id}/deactivate` and `/reactivate`, and the command
+  line gains `analyzer auth deactivate|reactivate EMAIL`. A deactivated account
+  holds no seat and is refused on every way in at once (session and refresh,
+  password, Google, single sign-on, MCP tokens of both profiles, pack tokens);
+  nothing is deleted. Reactivating needs a free seat, exactly as a sign-up does.
+  The master, the local default account and the account holding the master
+  address cannot be switched off. Each change writes an `auth.user_deactivated`
+  / `auth.user_reactivated` audit row that names the person by id only.
+
+- **Codebase: an upload no longer fails on placeholders, and a line can be allowed
+  on purpose.** The secret scan of an upload now looks a second time at each line
+  it would refuse: an obvious placeholder where a value stands (`<token>`,
+  `<paste your key here>`, `{{VARIABLE}}`, `${VAR}`, `****`), the format of a date
+  command (`+%Y-%m-%dT%H:%M:%SZ`), a regular expression in place of a value
+  (`password=.*`) and a Markdown heading that reads as a title are accepted, while
+  a real value on the same line, a private key or a vendor token is still refused.
+  A line that ends in `celmis:allow-secret` is accepted as a conscious exception
+  and reported, never hidden: the upload answer lists `{path, line, rule}` under
+  `allowed`, the audit row counts them as `allowed_count`, the pack page lists
+  them, and `celmis-pack` and `codebase import` print them (`allowed=N`). The MCP
+  output redaction is as aggressive as before.
+
+### Changed
+
+- **Single sign-on works without a licence for up to five people.** The OIDC
+  endpoint (`POST /api/auth/oidc`) is now always mounted and
+  `/api/capabilities` reports `sso` as available; a sixth person is refused with
+  `sso_seat_limit_reached`, people who already signed in keep working, and a
+  licence that grants `sso` lifts the limit (`sso_seats`, or none). The
+  exception is written into section 2 of [`LICENSE_EE`](LICENSE_EE) and the
+  count is a licence check within the meaning of that section. Binding an
+  existing local account to single sign-on takes one of the five, not a new
+  seat. The test suite now starts every test on the community limits, and the
+  audit-coverage tests sign up in a throwaway user store instead of the
+  developer's real one.
+- **Seats: stricter licence claims, no head-count in a refusal, one allowance
+  check.** A `seats` or `sso_seats` claim that is present but malformed (a
+  fraction, text, a boolean, zero, negative, null, above 1,000,000) is read as
+  the community limit of five and logged at error level, never as "unlimited";
+  a claim that is absent stays unlimited, and a licence never gives fewer than
+  five (the limit in force is the larger of the claim and five).
+  `scripts/ee_mint_license.py` refuses a value that is not a whole number from 1
+  to 1,000,000. A refusal shown to somebody who is not signed in names the limit
+  ("reached its limit of 5 people") and not how many accounts there are; the
+  exact counts stay on `/api/admin/seats` and in the audit row. The single
+  sign-on allowance is now counted and enforced in a covered file,
+  `src/ee/sso/allowance.py`, which every way of adding or switching on a person
+  asks (so reactivating a deactivated single sign-on account can no longer slip
+  past it), and the exception in `LICENSE_EE` says so. `analyzer auth ...` reads
+  the configured licence before it adds a person, so a licensed installation is
+  not held to five on the command line. `GET /api/invites/seats` answers only
+  people who may invite into a team workspace (it is a 403 in somebody's
+  personal workspace), the seat counts are `COUNT` queries, and binding or
+  reactivating an account re-reads the row under the lock and writes only the
+  column it changes, so a stale copy is never written back. The admin card shows
+  the single sign-on line only in a build that has single sign-on.
+- **Codebase: a viewer never maintains a pack.** A `maintain` grant (a name on
+  the pack or a team grant) gives nothing to someone whose workspace role is
+  viewer: demoting a maintainer to viewer ends their right to change the pack
+  and the publish tokens they made (the pack stays readable and nothing is
+  deleted, so promoting them back restores it). Naming a viewer as a maintainer is
+  a 422, and a viewer does not count as "another maintainer" when the last real
+  one steps down or leaves.
+- **Codebase: the brief quotes plain documents and names repositories in a fixed
+  order.** A file that sits in no skill and no `notes`, `checklists` or `api`
+  folder (a knowledge-base page) has the kind `doc`; the brief now quotes the best
+  two under *Documents* instead of one line in *Also relevant*. The repositories
+  it cites, and so the `idx:` line of the MCP brief, are sorted by slug instead of
+  following the order equally good items happened to rank in.
+- **Codebase: the rate limit no longer counts `celmis-pack status` and `verify`.**
+  Only the publish `POST` is in the upload class (10 a minute); the publish `GET`s
+  are ordinary reads. A refusal carries `Retry-After`, and `celmis-pack` says how
+  many seconds to wait. `celmis-pack` also accepts a consumer's MCP token of any
+  real length (up to 4096 characters, not 200) and says "too long" when it is.
+- **Codebase: every moment the API answers with is ISO-8601 in UTC with its
+  offset** (`2026-10-17T09:30:00+00:00`), whether the database returns aware or
+  naive values; a string without an offset was read as local time by a browser.
+- **Codebase: the audit trail covers what a departure ends and what the command
+  line does.** Naming a person who is already named is `member_changed` (a new
+  name stays `member_added`). Removing someone from a workspace, or erasing their
+  account, writes `member_removed`, `token_revoked` and `invite_revoked` rows for
+  the names, publish tokens and invite links it ended. `codebase import` writes
+  `pack_created` as well as `version_uploaded`, under the person named by `--as`
+  (it was always `cli`), and prints no audit JSON on stderr unless `-v`. A test
+  holds every changing route of the router to writing a row.
+- **Codebase: `search.document` is public** and the streaming pack ranker uses it.
+
+### Fixed
+
+- **Codebase: a skill whose `description` holds `: ` unquoted is accepted** and
+  read as one line of text, the way Claude Code reads it; a front matter that is
+  still not YAML names the line of the file, the key and the fix. A Markdown
+  heading such as `# Secrets: how we keep them` reads as a title in any script.
+
+- **A deactivated account could still sign in with Google.** The Google
+  callback issued a session token, provisioned a workspace and redeemed invites
+  for an account that had been switched off; it now answers 403 "Account is
+  disabled" and records the failed sign-in, like the password login.
+- **Codebase: a secret inside one very long unbroken run is found.** The upload
+  scan now reads a line with a run of 2048 characters or more in overlapping
+  windows, so a password, connection string or token inside minified JSON is
+  refused instead of accepted.
+- **Codebase: removing someone from a workspace also takes them out of its
+  teams and revokes the pack invite links they made there.** Erasing an account
+  revokes the invite links it made, and a failure while removing its names from
+  packs no longer stops the rest of the erasure (the answer reports
+  `packs_cleaned`). Deleting your own account (`DELETE /api/auth/me`) now follows
+  the same rules as a removal: you leave the teams of every workspace and the
+  invites made out to your address are revoked.
+- **The OAuth refresh grant no longer renews a switched-off or deleted account.**
+  The refresh token chain ends with the same words as a withdrawn grant
+  (`invalid_grant: access was withdrawn`); the MCP verifier already refused the
+  token it would have issued, this ends it a step earlier.
+- **`codebase import --as` no longer tells which slugs exist.** A person who may
+  neither create packs nor see a pack gets `pack not found or not accessible`
+  whether the slug is taken by a hidden pack or is free (a free slug used to
+  answer "Requires the editor role").
+
 ## [2.3.21] — 2026-10-16
 
 ### Added

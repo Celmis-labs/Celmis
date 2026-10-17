@@ -14,6 +14,7 @@ import { ActivitySquareIcon, DownloadIcon, GaugeIcon } from "lucide-react";
 import { downloadWithAuth, integrationsHealthApi, opsApi, type IntegrationCard, type ResourceSampleOut } from "@/lib/api";
 import { AdminGate } from "@/components/admin-gate";
 import { EditionCard } from "@/components/edition-card";
+import { SeatsCard } from "@/components/seats-card";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { useToken } from "@/lib/use-token";
@@ -79,6 +80,7 @@ export default function HealthPage() {
       />
 
       <EditionCard />
+      <SeatsCard />
 
       <QueryState query={q}>
         {(data) => {

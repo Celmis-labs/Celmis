@@ -569,6 +569,14 @@ async def _refresh_grant(
     if row.expires_at < now:
         raise HTTPException(status_code=400, detail="refresh_token expired")
 
+    # An account that was switched off (or deleted) since the last refresh gets
+    # nothing new: the session ends here, in the words of a withdrawn grant, so
+    # the answer does not say which it was. (The MCP verifier refuses the token
+    # it would have issued at use anyway; this ends the chain a step earlier.)
+    if not _account_is_usable(row.user_id):
+        await _revoke_family(session, row.family_id)
+        raise HTTPException(status_code=400, detail="invalid_grant: access was withdrawn")
+
     # The grant behind this session may have been revoked or have expired since
     # the last refresh: then the session ends here, not at the next 30 s check.
     workspace_id = _bound_workspace(row.family_id)
@@ -649,6 +657,19 @@ async def _mint_refresh(
     session.add(row)
     await session.commit()
     return raw
+
+
+def _account_is_usable(user_id: str) -> bool:
+    """True when the person exists and is switched on. A lookup that cannot be
+    made says no (fail closed)."""
+    try:
+        from src.users import get_user_store
+
+        user = get_user_store().get_by_id(user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("oauth_user_lookup_failed err=%s", type(exc).__name__)
+        return False
+    return user is not None and bool(getattr(user, "is_active", True))
 
 
 async def _revoke_family(session: AsyncSession, family_id: str) -> None:

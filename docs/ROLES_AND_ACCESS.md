@@ -13,6 +13,8 @@ admin (the instance operator) passes every workspace check.
 | Review settings, prompts, rules, per-repository policies | no | no | yes | yes | yes |
 | Review analytics (cost, outcomes) | no | no | yes | yes | yes |
 | Team memories and the Learning view (`/memories`) | no | no | yes | yes | yes |
+| Read the Codebase packs the audience lets you see ([Codebase](CODEBASE.md)) | yes | yes | yes | yes | yes |
+| Create a Codebase knowledge pack (changing one is the pack's own rule: its maintainers) | no | no | yes | yes | yes |
 | Productivity metrics (`/productivity`) | no | no | no | yes | yes |
 | Jira connection and the Jira helper pages | no | no | no | yes | yes |
 | Git connections, LLM keys, webhooks (create, repair) | no | no | no | yes | yes |
@@ -34,6 +36,22 @@ audit work: [MCP access](mcp-access.md).
 
 ## Rules worth knowing
 
+- Codebase packs have two layers. The role decides who may read the section at
+  all (any role) and who may create a pack (editor and above). What a person
+  sees and changes in a given pack is the pack's audience (`workspace`, `teams`
+  or `restricted`), its team grants and the people named on it: an owner or
+  admin maintains `workspace` and `teams` packs, but a `restricted` pack is
+  opened only by the teams and people it names, and a pack the person may not
+  see is answered like one that does not exist (404). See [Codebase](CODEBASE.md).
+- A **viewer** only reads a pack: a `maintain` grant (a name on the pack or a
+  team grant) gives nothing to someone whose workspace role is viewer, naming a
+  viewer as a maintainer is refused, and demoting a maintainer to viewer ends
+  their right to change the pack and the publish tokens they made, while the
+  pack stays readable to them.
+- Removing someone from a workspace also takes them out of that workspace's teams
+  (their teams in other workspaces are untouched) and revokes the pack publish
+  tokens and invite links they made there; adding them back restores none of it.
+  Deleting your own account follows the same rules for every workspace you were in.
 - Memories are for editors and above, reads included, and a repository's
   memories are listed, counted, previewed and attributed only to somebody who may
   read that repository. A memory taught on a repository the person cannot read
@@ -48,6 +66,40 @@ audit work: [MCP access](mcp-access.md).
   404, as for a pull request that does not exist.
 - Webhooks are verified (HMAC or token) before anything is read, and a delivery
   is bound to the workspace of the registered repository.
+
+## Seats
+
+Roles say what a person may do; seats say how many people the installation
+holds. Without a licence a Celmis holds **up to five people**, and at most five
+of them sign in through single sign-on; a licence lifts both limits, and never
+gives fewer than five ([Licensing](../LICENSING.md)).
+
+- A seat is an active account. The master (break-glass) account and the seeded
+  local user take none, and deactivating or erasing an account frees its seat.
+- The limit only stops **adding a person**: signing up, a first Google or single
+  sign-on sign-in, a new address in `analyzer auth google`, switching a
+  deactivated account on again. A person who already has an account is never
+  refused. They sign in, accept invites and are added to workspaces and teams
+  as before, even when the installation has more people than the limit allows
+  (it did when the limit arrived, or a licence ran out).
+- The refusal tells a person who is not signed in the limit and nothing about
+  how many people the installation holds.
+- Inviting someone who has no account yet issues the link as usual, but the
+  invite form warns when no seat is free: the newcomer cannot sign up until a
+  seat is freed or a licence lifts the limit. Only people who already have an
+  account can join.
+- A global admin sees the numbers on **Admin → Health → Seats**. People who may
+  invite into a team workspace learn only whether a seat is free (a yes or no),
+  never how many people the rest of the installation holds; in a personal
+  workspace nobody is invited, so the question is refused.
+- **Switching an account off and on** is the master account's, from
+  **Admin → Users** or `analyzer auth deactivate|reactivate EMAIL`. A
+  deactivated account is refused on every way in at once (a session and its
+  refresh, the password, Google, single sign-on, MCP tokens, OAuth refresh
+  tokens, pack tokens) and keeps its data; switching it on needs a free seat. The master account, the
+  local default account and the account holding the master address cannot be
+  switched off. A project token belongs to no account, so there is nothing to
+  switch off.
 
 ## Who may command the reviewer in a pull request
 

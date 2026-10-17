@@ -46,7 +46,7 @@ from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import urlencode
 
-from src.users.roles import PROMPT_EDITOR_ROLES, WORKSPACE_ADMIN_ROLES
+from src.users.roles import PACK_AUTHOR_ROLES, PROMPT_EDITOR_ROLES, WORKSPACE_ADMIN_ROLES
 
 SETTINGS_ROUTE = "/review-settings"
 
@@ -169,6 +169,15 @@ DESTINATIONS: dict[str, Destination] = {d.id: d for d in (
                 "disable. Use for something to REMEMBER, not for how to "
                 "write reviews (that is the prompts).",
                 anchor="page-memories", edit_workspace=PROMPT_EDITOR_ROLES),
+    Destination("codebase", "/codebase", "Codebase > Packs",
+                "Knowledge packs for coding agents: skills, API examples, "
+                "checklists and notes the workspace curated, each shown to "
+                "everybody, to chosen teams or to named people. Create a "
+                "pack and upload a folder or a zip, share it, roll back a "
+                "version. Use for something an AGENT should follow or read "
+                "while it codes, not for a fact the reviewers should know "
+                "(that is a memory).",
+                anchor="page-codebase", edit_workspace=PACK_AUTHOR_ROLES),
     Destination("review_rules", "/admin/review-rules",
                 "Code review > Review rules",
                 "The rules library: add a rule, generate from the code, "
@@ -415,6 +424,9 @@ FIELDS: tuple[UiField, ...] = (
             "needs, with the ones a Verify found missing highlighted."),
     UiField("memories_add", "memories", "memories-add",
             "The Add memory button: a short fact about how the team works."),
+    UiField("codebase_new_pack", "codebase", "codebase-new-pack",
+            "The New pack button: name a knowledge pack for coding agents "
+            "and choose who sees it."),
     UiField("review_rules_list", "review_rules", "page-review-rules",
             "The review rules library."),
     UiField("alerts_webhook", "alerts", "alerts-webhook",

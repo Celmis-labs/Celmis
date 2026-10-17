@@ -43,6 +43,13 @@ SURFACES: dict[str, set[str]] = {
     "/api/admin/mcp-": {"_require_issuer"},
     "/oauth/clients": {"require_workspace_admin"},
     "/oauth/register": {"require_workspace_admin"},
+    # knowledge packs: a workspace role first (reader / author), or a login for
+    # the invite-link routes; what a person may do to a PACK is its audience
+    # and grants (tests/api/test_the_codebase_routes_answer_by_role_and_audience.py).
+    # The /publish routes answer to a pack publish token and nothing else
+    # (tests/api/test_a_pack_token_publishes_one_pack_and_nothing_else.py)
+    "/api/codebase": {"require_codebase_reader", "require_pack_author", "require_signed_in",
+                      "require_pack_token"},
 }
 
 #: words that make a path "about" a restricted surface even if its prefix is new.
@@ -132,7 +139,8 @@ def test_the_walk_finds_the_surfaces_it_guards() -> None:
     """Guards the guard: an empty walk would make every test below pass."""
     paths = {path for _, path, _ in ROUTES}
     for prefix in ("/api/memories", "/api/task-context", "/api/connections", "/api/learning",
-                   "/api/access/", "/api/admin/mcp-tokens", "/api/admin/mcp-calls"):
+                   "/api/access/", "/api/admin/mcp-tokens", "/api/admin/mcp-calls",
+                   "/api/codebase/packs", "/api/codebase/invites"):
         assert any(p.startswith(prefix) for p in paths), prefix
     assert len(ROUTES) > 150
 

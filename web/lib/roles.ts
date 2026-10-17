@@ -23,6 +23,10 @@ export const DELEGABLE_ROLES: readonly string[] = ["member", "viewer"];
 export const WORKSPACE_ADMIN_ROLES: readonly string[] = ["owner", "admin"];
 /** Roles that may edit agent prompts and review policies. */
 export const PROMPT_EDITOR_ROLES: readonly string[] = ["owner", "admin", "editor"];
+/** Roles that may create knowledge packs (Codebase) — `PACK_AUTHOR_ROLES` in
+ *  src/users/roles.py. Who sees or maintains a given pack is the pack's own
+ *  audience and the API decides it; this one only names who gets the button. */
+export const PACK_AUTHOR_ROLES: readonly string[] = ["owner", "admin", "editor"];
 
 /** Team labels — `TEAM_ROLES` in src/users/roles.py: the workspace ladder
  *  plus the team-only `reviewer`, highest first. */

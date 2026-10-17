@@ -58,6 +58,34 @@ per call, for everybody in the workspace. That is more than a colleague needs
 in order to work here, and the page says so in as many words; an API looser
 than its own copy is a promise the product does not keep.
 
+Knowledge packs (`codebase.*` rows)
+-----------------------------------
+A workspace owner sees their workspace's rows, and a row about a RESTRICTED
+knowledge pack is a fact about that pack: that it exists, what its id is, who
+uploaded to it, who was named on it. The pack page hides such a pack from
+owners and admins (src/knowledge/visibility.py), so this page must not hand
+them what that page withholds. Every `codebase.*` row therefore passes a second
+gate, `_PackGate`, on top of the tenant scope above:
+
+    superadmin             every `codebase.*` row, including those of a deleted pack
+    everyone else          a row whose `target` is a pack that person may see in
+                           the row's workspace RIGHT NOW (a fresh principal built
+                           from live rows, not whatever the row was written under)
+
+A pack that was deleted is in nobody's visible set, so its rows are shown to the
+superadmin alone — the audit page is not a way to learn that a pack the caller
+cannot open once existed. A row with no pack target, or no workspace, is the
+superadmin's too. Any error while asking is "not visible".
+
+The gate runs inside `_iter_records`, before a record is counted, listed,
+faceted or exported, and a refused row is not added to `hidden_unattributed`:
+a count of rows about packs you cannot see is itself a fact about those packs.
+
+The `mcp.call` row used to carry the ids of the packs a call read (and
+`<id>/<skill>` for a skill it opened). It no longer does — `mcp_call_log` keeps
+them — and rows written before that are scrubbed on the way out: for anyone but
+the superadmin, `extra.packs` keeps only the entries of packs they may see.
+
 What deliberately stays installation-level
 ------------------------------------------
 Retention (`purge_expired_audit`), file rotation (`AuditLogger`) and the
@@ -80,7 +108,7 @@ import json
 import logging
 import os
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -91,10 +119,71 @@ from fastapi.responses import StreamingResponse
 from src.api.deps import current_workspace_id, require_workspace_admin
 from src.security.audit import AuditRecord, normalize_workspace_id
 from src.users import User
+from src.users.roles import is_superadmin
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/audit", tags=["audit"])
+
+
+# ─── Knowledge-pack gate ─────────────────────────────────────────────
+
+#: The action prefix of every knowledge-pack row (src/api/routers/codebase.py,
+#: src/knowledge/store.py, the CLI importer). Their `target` is a pack id.
+_PACK_PREFIX = "codebase."
+
+
+def _is_pack_row(rec: dict[str, Any]) -> bool:
+    return str(rec.get("operation") or "").startswith(_PACK_PREFIX)
+
+
+@dataclass
+class _PackGate:
+    """May this reader see the pack a `codebase.*` row is about? See the module
+    docstring. The default gate belongs to nobody and refuses every such row, so
+    a `_Scope` built without one cannot read a pack's history.
+
+    The visible packs of a workspace are read once per request and kept: the
+    gate lives as long as its `_Scope`, which is one request.
+    """
+
+    user_id: str | None = None
+    superadmin: bool = False
+    _seen: dict[str, frozenset[str]] = field(default_factory=dict, repr=False)
+
+    def _visible(self, ws_id: str) -> frozenset[str]:
+        if ws_id not in self._seen:
+            from src.knowledge import store, visibility
+
+            principal = visibility.principal_for_sync(self.user_id or "", ws_id)
+            self._seen[ws_id] = store.visible_pack_ids_sync(principal, ws_id)
+        return self._seen[ws_id]
+
+    def allows(self, rec: dict[str, Any]) -> bool:
+        if self.superadmin:
+            return True
+        ws = normalize_workspace_id(rec.get("workspace_id"))
+        target = rec.get("target")
+        if not self.user_id or ws is None or not isinstance(target, str) or not target:
+            return False
+        return target in self._visible(ws)
+
+    def scrub(self, rec: dict[str, Any]) -> dict[str, Any]:
+        """``rec`` with the packs this reader may not see taken out of an old
+        `mcp.call` row's `extra.packs`. The record itself is never changed."""
+        extra = rec.get("extra")
+        if self.superadmin or rec.get("operation") != "mcp.call" \
+                or not isinstance(extra, dict) or "packs" not in extra:
+            return rec
+        ws = normalize_workspace_id(rec.get("workspace_id"))
+        visible = self._visible(ws) if ws is not None and self.user_id else frozenset()
+        listed = extra.get("packs")
+        kept = [e for e in (listed if isinstance(listed, list) else [])
+                if isinstance(e, str) and e.split("/", 1)[0] in visible]
+        scrubbed = {k: v for k, v in extra.items() if k != "packs"}
+        if kept:
+            scrubbed["packs"] = kept
+        return {**rec, "extra": scrubbed}
 
 
 # ─── Tenant scope ────────────────────────────────────────────────────
@@ -129,8 +218,16 @@ class _Scope:
     # belong to some OTHER workspace are refused silently and never counted:
     # a count of another tenant's calls is itself a fact about that tenant.
     hidden_unattributed: int = 0
+    #: The second gate, for `codebase.*` rows (see the module docstring). The
+    #: default gate refuses all of them.
+    packs: _PackGate = field(default_factory=_PackGate)
 
     def allows(self, rec: dict[str, Any]) -> bool:
+        # The pack gate comes FIRST and applies to everyone but the superadmin:
+        # a global admin, and the person who did the thing, included. A row it
+        # refuses is neither shown nor counted.
+        if _is_pack_row(rec) and not self.packs.allows(rec):
+            return False
         if self.global_:
             return True
         if self.actor_id and rec.get("actor_id") == self.actor_id:
@@ -141,17 +238,23 @@ class _Scope:
             return False
         return ws == self.workspace_id
 
+    def view(self, rec: dict[str, Any]) -> dict[str, Any]:
+        """The record as this reader may read it (see `_PackGate.scrub`)."""
+        return self.packs.scrub(rec)
+
 
 def _scope(user: User, workspace_id: str) -> _Scope:
     """The read scope for this caller. Global admins see the installation;
     everyone else sees their own active workspace, plus their own actions
     wherever those were recorded."""
+    gate = _PackGate(user_id=user.id, superadmin=is_superadmin(user))
     if user.is_admin:
-        return _Scope(global_=True, workspace_id=None)
+        return _Scope(global_=True, workspace_id=None, packs=gate)
     return _Scope(
         global_=False,
         workspace_id=normalize_workspace_id(workspace_id),
         actor_id=user.id,
+        packs=gate,
     )
 
 
@@ -250,7 +353,7 @@ def _iter_records(
                 continue
             if not scope.allows(rec):
                 continue
-            yield rec
+            yield scope.view(rec)
 
 
 @router.get("")

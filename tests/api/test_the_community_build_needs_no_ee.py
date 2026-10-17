@@ -4,10 +4,12 @@ LICENSING.md promises that a deployment using no `ee/` file needs no
 commercial licence. That promise is only true while the AGPL code does not
 depend on the enterprise code, so it is pinned two ways:
 
-1. **By import graph.** Exactly one AGPL module may import `src.ee` —
-   `src/api/main.py` — and only inside a `try` that handles ImportError. Read
-   with `ast`, not grep: a comment saying "this file does not import src.ee"
-   must not count as an import, and an import must not hide from a regex.
+1. **By import graph.** Exactly two AGPL modules may import `src.ee` —
+   `src/api/main.py`, which mounts it, and `src/cli.py`, which only asks it
+   for the licence's seat limits (the command line adds people without an
+   app) — and only inside a `try` that handles ImportError. Read with `ast`,
+   not grep: a comment saying "this file does not import src.ee" must not
+   count as an import, and an import must not hide from a regex.
 2. **By running it.** The app is built with `src.ee` made unimportable, as in
    a build that ships without the package, and the community edition comes up
    with the enterprise routes absent and the AGPL ones present.
@@ -31,6 +33,9 @@ SRC = ROOT / "src"
 WEB = ROOT / "web"
 
 MOUNT_POINT = SRC / "api" / "main.py"
+#: The command line reads the licence's seat limits (`src.ee.publish_seat_limits`)
+#: so that adding a person there is held to the same limit as in the API.
+LICENCE_READERS = (MOUNT_POINT, SRC / "cli.py")
 
 
 def _is_ee(path: Path, base: Path) -> bool:
@@ -54,21 +59,22 @@ def _ee_imports(tree: ast.AST) -> list[ast.AST]:
     return found
 
 
-def test_only_the_mount_point_imports_the_enterprise_package():
+def test_only_the_mount_point_and_the_command_line_import_the_enterprise_package():
     offenders = []
     for path in SRC.rglob("*.py"):
         if _is_ee(path, ROOT):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        if _ee_imports(tree) and path != MOUNT_POINT:
+        if _ee_imports(tree) and path not in LICENCE_READERS:
             offenders.append(path.relative_to(ROOT).as_posix())
     assert not offenders, f"AGPL modules importing src.ee: {offenders}"
 
 
-def test_the_mount_point_survives_the_package_being_absent():
-    tree = ast.parse(MOUNT_POINT.read_text(encoding="utf-8"))
+@pytest.mark.parametrize("module", LICENCE_READERS, ids=lambda p: p.relative_to(ROOT).as_posix())
+def test_the_mount_point_survives_the_package_being_absent(module):
+    tree = ast.parse(module.read_text(encoding="utf-8"))
     imports = _ee_imports(tree)
-    assert imports, "main.py no longer mounts the enterprise package at all"
+    assert imports, f"{module.name} no longer reaches the enterprise package at all"
 
     guarded = set()
     for node in ast.walk(tree):
@@ -83,6 +89,22 @@ def test_the_mount_point_survives_the_package_being_absent():
                 guarded |= {id(n) for n in ast.walk(inner)}
     unguarded = [n.lineno for n in imports if id(n) not in guarded]
     assert not unguarded, f"src.ee imported outside a try/except ImportError at lines {unguarded}"
+
+
+def test_the_command_line_adds_people_under_the_community_limit_without_the_package(
+        monkeypatch):
+    """As in a build that ships without src/ee: the helper does nothing, and
+    the limit in force is the community one."""
+    from src import cli
+    from src.users import seats
+
+    for name in [m for m in sys.modules if m == "src.ee" or m.startswith("src.ee.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.setitem(sys.modules, "src.ee", None)
+
+    cli._publish_licence_limits()
+
+    assert seats.current_limits() == seats.COMMUNITY_LIMITS
 
 
 def test_the_app_builds_as_the_community_edition_without_the_package(monkeypatch, caplog):

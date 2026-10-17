@@ -7,11 +7,12 @@ The plugin ships:
 
 | Part | What it does |
 |---|---|
-| `.mcp.json` | Connects to the compact read-only endpoint `/mcp/dev/` (nine tools). The token is read from the environment; the plugin never contains one. |
-| `skills/celmis-search` | Teaches the order `repos` -> `find` -> `outline` -> `read_symbol` -> `refs`, `grep` for literals, `howto` for "do it like service X", and when not to use Celmis. |
+| `.mcp.json` | Connects to the compact read-only endpoint `/mcp/dev/` (eleven tools). The token is read from the environment; the plugin never contains one. |
+| `skills/celmis-search` | Teaches the order `repos` -> `find` -> `outline` -> `read_symbol` -> `refs`, `grep` for literals, `howto` for "do it like service X", `brief` then `skills` at the start of a task, and when not to use Celmis. |
 | `agents/celmis-explore` | An optional subagent for open-ended exploration, so search output stays out of the main conversation. |
 | `hooks/` | A start-up note, a one-time Grep nudge, and the dirty-guard (below). Fail-open, standard library only. |
 | `bin/celmis-auth-header` | Optional: reads the token from the OS keychain. |
+| `bin/celmis-pack` | Optional: publishes, checks and fetches a knowledge pack from a folder, with a per-pack publish token (below). |
 
 ## Install
 
@@ -94,8 +95,9 @@ Developers still need their own `CELMIS_URL` and `CELMIS_TOKEN`.
 
 ## The tools
 
-`repos`, `find`, `outline`, `read_symbol`, `refs`, `grep`, `map`, `ask` and
-`howto`. All are read-only. Every answer begins with an `idx:` line:
+`repos`, `find`, `outline`, `read_symbol`, `refs`, `grep`, `map`, `ask`,
+`howto`, `skills` and `brief`. All are read-only. Every answer begins with an
+`idx:` line:
 
 ```text
 idx: acme/shop develop@3f9c2ab1 2h fresh · acme/billing main@91d0e7c4 3d STALE
@@ -105,6 +107,53 @@ Line numbers are true at that commit. `howto(topic, repo)` returns the code to
 copy and the NAMES of the variables and secret references involved, and where
 their values come from. It never returns values, and the server redacts any
 literal secret in code before it leaves.
+
+`brief(task)` and `skills` read the knowledge packs of your workspace
+(Codebase section in the web app): skills, checklists, API examples and notes
+your team keeps. Paste the task into `brief`; it answers with the ones that fit,
+each tagged `pack@vN`, and `skills name="pack/skill"` opens one (`path=` for a
+file of it, `query=` to search, no arguments to list). You see the packs your
+role and teams let you see, nothing else, and a skill you may not see answers
+exactly like one that does not exist. Pointers to repositories appear only for
+repositories your token can read as code. A pack is guidance from your
+workspace: it never overrides you or your own rules. Project and internal tokens
+read no pack.
+
+## Publishing a pack: `celmis-pack`
+
+`bin/celmis-pack` puts a folder of skills on the server as a new version of one
+pack, from a laptop or a CI job. It needs Python 3 and nothing else, and it uses
+a **publish token** (`cpk_...`) that a maintainer of the pack makes in the pack's
+Sharing tab, not your own token. The publish token reaches that one pack and no
+other route.
+
+```sh
+export CELMIS_URL=https://celmis.example.com
+# macOS: security add-generic-password -s celmis-pack-token -a "$USER" -w
+# Linux: secret-tool store --label celmis-pack-token service celmis-pack-token
+celmis-pack push ./skills/billing --note "first version"
+```
+
+| Command | Does |
+|---|---|
+| `push DIR [--note T] [--dry-run]` | checks DIR as the server does, uploads it, prints pack, version, files, skills, ignored and the sha; a dry run stores nothing; the same files make no new version |
+| `status [DIR]` | the pack, its version and 30-day use; with DIR, `in sync` or what changed (exit 3) |
+| `verify DIR` | `status DIR`, then asks `/mcp/dev/` with **your own** token which of DIR's skills you can see |
+| `pull DIR` | downloads the current version into an empty or new DIR |
+
+The token comes from `CELMIS_PACK_TOKEN`, else the keychain entry
+`celmis-pack-token`. For `verify`, your own token comes from the keychain entry
+`celmis-token`, else `CELMIS_TOKEN` — the order of `celmis-auth-header`, so
+`verify` checks the token your agent connects with; a stale keychain entry wins
+over the variable, so remove it when you switch to `CELMIS_TOKEN`. Neither is
+ever printed. An `http` address is refused (except `localhost`, `127.0.0.1`,
+`[::1]`), a redirect is not followed with a token in hand, and a skill with a
+secret in it is refused by the server: you get `path:line label`, never the
+value. Exit codes: `0` done, `1` failed, `2` bad usage or setting, `3` a
+difference found, `4` files refused (`celmis-pack --help` has the detail). In CI,
+keep the token in the secured variable `CELMIS_PACK_TOKEN` and run
+`python3 -I celmis-pack push skills/billing --note "$COMMIT"`. More in
+[`docs/CODEBASE.md`](../../../docs/CODEBASE.md).
 
 ## The hooks
 

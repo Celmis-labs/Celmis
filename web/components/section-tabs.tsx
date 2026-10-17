@@ -59,6 +59,10 @@ export type TabDef = {
    *  of its own: still part of the section (sidebar highlight, breadcrumb),
    *  just not worth a permanent slot. */
   more?: boolean;
+  /** Routes outside `href` that still belong to this tab: a detail page with
+   *  no tab of its own (`/codebase/packs/<id>` keeps "Packs" lit and the
+   *  sidebar on Codebase). Prefix-matched, like `href`. */
+  alsoUnder?: readonly string[];
 };
 
 export const SECTION_TABS = {
@@ -164,6 +168,18 @@ export const SECTION_TABS = {
   usage: [
     { href: "/admin/usage", labelKey: "nav.usage" },
   ],
+  // Codebase: knowledge packs (skills, API examples, checklists, notes) a
+  // workspace curates for its coding agents. Every member may open it — what
+  // a pack's audience lets them see is the API's decision, so no tab here is
+  // role-gated — and only a build that mounts the routes shows it.
+  // The pack page and the invite landing page are reached from these, not
+  // listed: /codebase/packs/<id> belongs to "Packs" (alsoUnder), and
+  // /codebase/join/<token> is named by the breadcrumb (UNLISTED_PAGES).
+  codebase: [
+    { href: "/codebase", labelKey: "codebase.tab.packs", exact: true, requiresFeature: "codebase", alsoUnder: ["/codebase/packs"] },
+    { href: "/codebase/search", labelKey: "codebase.tab.search", requiresFeature: "codebase" },
+    { href: "/codebase/connect", labelKey: "codebase.tab.connect", requiresFeature: "codebase" },
+  ],
   // What is left is the global-infrastructure section proper — every /admin
   // route that no workspace-scoped section claims. Sanity check for anyone
   // adding a page here: /admin/{access,teams,workspaces} are Team,
@@ -183,17 +199,24 @@ export const SECTION_TABS = {
 
 export type SectionKey = keyof typeof SECTION_TABS;
 
-export type SectionTab = { href: string; label: string; exact?: boolean; more?: boolean };
+export type SectionTab = {
+  href: string; label: string; exact?: boolean; more?: boolean; alsoUnder?: readonly string[];
+};
 
 /** Widened view of the same object. Indexing SECTION_TABS with a `SectionKey`
  * variable yields a union of readonly tuples, and calling `.some()` on such a
  * union is a type error even though every member has the method. */
 const TAB_SETS: Record<SectionKey, readonly TabDef[]> = SECTION_TABS;
 
-function matchesTab(pathname: string, tab: { href: string; exact?: boolean }) {
-  return tab.exact
-    ? pathname === tab.href
-    : pathname === tab.href || pathname.startsWith(`${tab.href}/`);
+/** Does this route belong to the tab? Shared with the sidebar, which lights a
+ * section from the same lists. */
+export function matchesTab(
+  pathname: string,
+  tab: { href: string; exact?: boolean; alsoUnder?: readonly string[] },
+) {
+  const under = (base: string) => pathname === base || pathname.startsWith(`${base}/`);
+  return (tab.exact ? pathname === tab.href : under(tab.href))
+    || (tab.alsoUnder ?? []).some(under);
 }
 
 /** Which section this route actually belongs to.
@@ -256,6 +279,7 @@ export function SectionTabs({
             label: t(d.labelKey),
             exact: d.exact,
             more: d.more,
+            alsoUnder: d.alsoUnder,
           }))
       : []);
   if (tabs.length === 0) return null;

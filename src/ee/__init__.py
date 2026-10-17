@@ -1,6 +1,7 @@
 # Celmis Enterprise Edition. Licensed under LICENSE_EE, not the AGPL —
 # see LICENSING.md and ee/README.md in the repository root.
-"""Enterprise features, mounted only under a valid licence.
+"""Enterprise features, mounted under a valid licence (single sign-on also
+within its free allowance, below).
 
 The AGPL application knows exactly one thing about this package: the guarded
 call in ``src/api/main.py``::
@@ -29,7 +30,8 @@ do. Each call makes the route table match the licence in force:
 * a feature the licence grants and that is not mounted is mounted, once;
 * a feature that is mounted and no longer granted (the licence was removed,
   or replaced by one that drops it) is UNMOUNTED — its routes are taken out of
-  the table, so ``/api/capabilities`` reports it off on the next request;
+  the table, so ``/api/capabilities`` reports it off on the next request
+  (except an allowance feature, below);
 * ``app.state.celmis_license`` is replaced, so the edition follows at once.
 
 And behind the route table, every enterprise route still asks the licence in
@@ -39,6 +41,29 @@ answered 403 rather than served.
 
 The licence router itself is mounted always, licensed or not — it is how a
 community installation becomes an enterprise one.
+
+THE SSO ALLOWANCE
+-----------------
+Single sign-on is the one feature mounted WITHOUT a licence that grants it
+(:data:`ALLOWANCE_FEATURES`): LICENSE_EE lets an installation use it in
+production or for internal use while no more than five people sign in through
+it. So ``sso`` is mounted whatever the licence says, and what the licence
+changes is the limit — not whether the route exists. The limit is checked by
+``src/ee/sso/allowance.py`` (the sign-in route calls it, and it hooks into
+``src/users/seats.py`` so that reactivating a single-sign-on account asks it
+too), and :func:`apply_license` is what tells it, and the seat count, what the
+licence in force allows: ``seats`` and ``sso_seats``, or the community limits
+when there is no licence. Existing SSO people always sign in; only a sixth NEW
+one is refused. For this feature :func:`_still_licensed` therefore refuses
+nothing — a licence that lapses returns the installation to the allowance, it
+does not unmount SSO and it does not switch anybody off.
+
+OUTSIDE THE API PROCESS
+-----------------------
+A seat limit is also enforced by the command line (``analyzer auth google``
+adds a person), which has no app to mount a licence on. :func:`publish_seat_limits`
+reads the configured licence and tells the seat code what it allows, nothing
+more; the CLI calls it through the same guarded import the API uses.
 """
 
 from __future__ import annotations
@@ -54,6 +79,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from src.ee import license_store
 from src.ee.license import License, Loaded, load
+from src.ee.sso import allowance
+from src.users import seats
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +89,10 @@ logger = logging.getLogger(__name__)
 STATE_ATTR = "celmis_license"
 #: Where the runtime licensing state lives on `app.state`. Private to src/ee.
 RUNTIME_ATTR = "celmis_ee"
+#: Features that are mounted without a licence that grants them, because
+#: LICENSE_EE gives them an allowance (see the module docstring). Their limit
+#: is enforced per person (src/ee/sso/allowance.py), not by the route table.
+ALLOWANCE_FEATURES: tuple[str, ...] = ("sso",)
 
 
 @dataclass
@@ -121,6 +152,11 @@ def _still_licensed(feature: str) -> Callable[..., None]:
 
     def dependency(request: Request) -> None:
         lic = runtime(request.app).license
+        if feature in ALLOWANCE_FEATURES:
+            # Allowance mode: no licence, an expired one, or one for other
+            # features still leaves the feature running for the free allowance
+            # of people. How many is the check in src/ee/sso/allowance.py.
+            return
         if lic is None or not lic.grants(feature):
             logger.warning("license_feature_not_in_force feature=%s", feature)
             raise HTTPException(
@@ -160,6 +196,22 @@ def _mount_license_router(app: Any, rt: Runtime) -> None:
     rt.license_router_mounted = True
 
 
+def _publish_seat_limits(lic: License | None) -> None:
+    """Tell the seat code and the single sign-on check what the licence in
+    force allows. None: back to the community limits. The registration lapses
+    with the licence, so a process that outlives it falls back by itself —
+    and, as always, nobody who already has an account is switched off by it."""
+    if lic is None:
+        seats.clear_licence_limits()
+        allowance.clear()
+        return
+    seats.set_licence_limits(lic.seats, True, expires_at=lic.expires_at)
+    allowance.publish(
+        lic.sso_allowance(allowance.FREE_SSO_SEATS),
+        from_licence=lic.grants("sso"), expires_at=lic.expires_at,
+    )
+
+
 def apply_license(app: Any, loaded: Loaded) -> Runtime:
     """Make the app match `loaded`: mount what it grants, unmount what it no
     longer grants, publish the summary. Idempotent — applying the same
@@ -169,7 +221,8 @@ def apply_license(app: Any, loaded: Loaded) -> Runtime:
         _mount_license_router(app, rt)
         lic = loaded.license
         rt.license, rt.source, rt.problem = lic, loaded.source, loaded.problem
-        wanted = set(lic.features) if lic is not None else set()
+        wanted = (set(lic.features) if lic is not None else set()) | set(ALLOWANCE_FEATURES)
+        _publish_seat_limits(lic)
         changed = False
         for feature in sorted(set(rt.mounted) - wanted):
             _unmount(app, rt.mounted.pop(feature))
@@ -195,6 +248,17 @@ def reload_license(app: Any) -> Runtime:
     return apply_license(app, load(rt.env, stored=license_store.read_token))
 
 
+def publish_seat_limits(env: dict[str, str] | None = None) -> License | None:
+    """Read the configured licence (the environment, then the one saved from
+    the UI) and publish the limits it allows — for a process that adds people
+    but has no app to mount a licence on, such as the command line. Mounts
+    nothing. Never raises for a licence problem: no valid licence is the
+    community limits. Returns the licence, or None."""
+    lic = load(env, stored=license_store.read_token).license
+    _publish_seat_limits(lic)
+    return lic
+
+
 def mount_enterprise(app: Any, *, env: dict[str, str] | None = None) -> License | None:
     """Mount every enterprise feature the configured licence grants, and the
     licence router (always).
@@ -207,5 +271,5 @@ def mount_enterprise(app: Any, *, env: dict[str, str] | None = None) -> License 
     return reload_license(app).license
 
 
-__all__ = ["RUNTIME_ATTR", "STATE_ATTR", "Runtime", "apply_license",
-           "mount_enterprise", "reload_license", "runtime"]
+__all__ = ["ALLOWANCE_FEATURES", "RUNTIME_ATTR", "STATE_ATTR", "Runtime", "apply_license",
+           "mount_enterprise", "publish_seat_limits", "reload_license", "runtime"]

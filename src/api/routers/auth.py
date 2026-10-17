@@ -1,10 +1,13 @@
 """Auth routes — login, signup, Google OAuth callback, /me.
 
 The company SSO (OIDC / Keycloak) callback, ``POST /api/auth/oidc``, is an
-enterprise feature and lives in ``src/ee/sso/router.py``; it is mounted only
-under a licence that grants ``sso``. What stays here is everything an SSO
-user's account needs from the AGPL side: the store columns, the
-master-account guard it calls, and the refusal to renew an SSO-only session.
+enterprise feature and lives in ``src/ee/sso/router.py``. It is always
+mounted: without a licence it serves up to five people (the single sign-on
+allowance, LICENSE_EE section 2) and a licence that grants ``sso`` lifts that.
+What stays here is everything an SSO user's account needs from the AGPL side:
+the store columns, the master-account guard it calls, the refusal to renew an
+SSO-only session, and :func:`seat_limit_refusal`, the 403 a sign-in gets when
+it would add a person beyond a seat limit (``src/users/seats.py``).
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from src.users import (
     UserExistsError,
     UserStore,
     hash_password,
+    seats,
     verify_password,
 )
 from src.users.roles import MASTER_ADMIN_ID, is_master_email, is_superadmin, master_email
@@ -235,8 +239,27 @@ def _master_login(req, users: UserStore,
     return TokenResponse(access_token=token, expires_at=exp)
 
 
+def seat_limit_refusal(exc: seats.SeatLimitReached, request: Request | None,
+                       *, flow: str, actor: str = "(new account)",
+                       actor_id: str | None = None) -> HTTPException:
+    """The 403 for a sign-in that would add a person beyond a seat limit
+    (src/users/seats.py), after leaving a row for the operator.
+
+    `{"code": "seat_limit_reached" | "sso_seat_limit_reached", "message": ...}`
+    — the web shows the message from the code. The row carries the counts and
+    the flow, never the address of the person turned away.
+    """
+    record_action(
+        action="auth.seat_limit_refused", actor=actor, actor_id=actor_id, target=flow,
+        ip=client_ip(request) if request else None,
+        detail={"kind": exc.kind, "used": exc.used, "limit": exc.limit},
+        error=exc.code,
+    )
+    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.detail)
+
+
 def _record_login_failure(email: str, request: Request | None, reason: str,
-                          *, actor_id: str | None = None) -> None:
+                          *, actor_id: str | None = None, target: str = "password") -> None:
     """A refused sign-in, in the file an auditor reads.
 
     Only successes were recorded. "Who logged in" without "who tried and
@@ -252,7 +275,7 @@ def _record_login_failure(email: str, request: Request | None, reason: str,
         action="auth.login_failed",
         actor=(email or "").strip()[:200] or "(no email)",
         actor_id=actor_id,
-        target="password",
+        target=target,
         ip=client_ip(request) if request else None,
         error=reason,
     )
@@ -290,7 +313,9 @@ def signup(req: SignupRequest, request: Request,
         scopes=list(STANDARD_SCOPES),
     )
     try:
-        users.create(user)
+        seats.create_person(users, user)
+    except seats.SeatLimitReached as exc:
+        raise seat_limit_refusal(exc, request, flow="signup") from exc
     except UserExistsError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     users.update_last_login(user.id)
@@ -444,6 +469,16 @@ def google_callback(
                 detail="Google has not verified this email address",
             )
         user = existing
+    if user is not None and not user.is_active:
+        # Deactivated (or erased): no token, no Google link, no personal
+        # workspace, no invites redeemed. A session token for it would be
+        # refused everywhere anyway (`get_current_user`), but every step this
+        # route takes before that point would still happen.
+        _record_login_failure(email, request, "inactive-account", actor_id=user.id,
+                              target="google")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled",
+        )
     if user is None:
         user = User(
             id=str(uuid.uuid4()),
@@ -454,7 +489,10 @@ def google_callback(
             is_admin=False,
             scopes=list(STANDARD_SCOPES),
         )
-        users.create(user)
+        try:
+            seats.create_person(users, user)
+        except seats.SeatLimitReached as exc:
+            raise seat_limit_refusal(exc, request, flow="google") from exc
     elif not user.has_google:
         user.google_sub = sub
         user.auth_method = (
@@ -500,9 +538,11 @@ def delete_account(
 ) -> None:
     """Permanently delete the caller's OWN account.
 
-    Revokes refresh tokens, drops every workspace membership, deletes the user's
-    personal workspace and its per-workspace credential rows, then removes the
-    user record. Self-service — the caller can only delete themselves. Other
+    Revokes refresh tokens, leaves every workspace by the same rules as a removal
+    (their teams there, the invites made out to their address, their names,
+    publish tokens and invite links on its packs), deletes the user's personal
+    workspace and its per-workspace credential rows, then removes the user
+    record. Self-service — the caller can only delete themselves. Other
     workspaces the user happened to own are left intact (may be re-assigned).
     """
     from sqlalchemy import delete as _delete
@@ -510,6 +550,7 @@ def delete_account(
     from sqlalchemy import update as _update
     from sqlalchemy.orm import Session
 
+    from src.api.memberships import release_account_sync
     from src.api.workspace_provision import personal_slug
     from src.db.models import OAuthRefreshToken, Workspace, WorkspaceMember
     from src.llm.budget import _engine
@@ -520,14 +561,29 @@ def delete_account(
             .where(OAuthRefreshToken.user_id == user.id, OAuthRefreshToken.revoked.is_(False))
             .values(revoked=True)
         )
+        # BEFORE the membership rows go: the teams and invites to end are found through them.
+        revoked_invites = release_account_sync(s, user_id=user.id, email=user.email)
         s.execute(_delete(WorkspaceMember).where(WorkspaceMember.user_id == user.id))
         ws = s.execute(
             _select(Workspace).where(Workspace.slug == personal_slug(user.id))
         ).scalar_one_or_none()
         personal_ws_id = ws.id if ws is not None else None
+        from src.knowledge import store as pack_store
+
+        # The packs named on this person go, and so do the ids that recorded who
+        # made them; the personal workspace's own packs go with the workspace.
+        pack_store.erase_user_sync(s, user.id)
         if ws is not None:
+            pack_store.delete_workspace_packs_sync(s, ws.id)
             s.delete(ws)
         s.commit()
+
+    for ws_id, invite_ids in revoked_invites.items():
+        record_action(
+            action="invite.revoked_on_removal", actor=user.email, actor_id=user.id,
+            workspace_id=ws_id, target=user.id, ip=client_ip(request),
+            detail={"invite_ids": invite_ids, "via": "account_deleted"},
+        )
 
     # Best-effort: purge the personal workspace's encrypted credential rows.
     if personal_ws_id is not None:

@@ -231,6 +231,10 @@ async def delete_workspace(
         return
     if ws.slug == "default":
         raise HTTPException(status_code=400, detail="cannot delete default workspace")
+    # Its knowledge packs, versions, files, invites and grants go with it.
+    from src.knowledge import store as pack_store
+
+    await pack_store.delete_workspace_packs(session, ws_id)
     await session.delete(ws)
     await session.commit()
     logger.info("workspace_deleted id=%s by=%s", ws_id, user.email)

@@ -292,7 +292,9 @@ def test_removing_it_takes_the_features_away_at_once(store, audit):
     doc = _capabilities(app)
     assert doc.edition == "community"
     assert doc.features["review_analytics"].available is False
-    assert doc.features["sso"].available is False
+    # Single sign-on is the licence-free allowance (LICENSE_EE): removing the
+    # licence returns it to the five people, it does not take the route away.
+    assert doc.features["sso"].available is True
     assert doc.pages["/analytics"] is False
     # Unmounted: the route table is back to the community one, and the
     # schema FastAPI memoised was dropped with it.
@@ -387,7 +389,7 @@ def test_a_restart_comes_back_as_the_enterprise_edition(store, monkeypatch):
     doc = caps.build_capabilities(app)
     assert doc.edition == "enterprise"
     assert doc.features["review_analytics"].available is True
-    assert doc.features["sso"].available is False
+    assert doc.features["sso"].available is True, "the free allowance, licence or not"
     assert doc.features["license"].available is True
     assert runtime(app).source == "ui"
 

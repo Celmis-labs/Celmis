@@ -18,7 +18,11 @@ name cleared, credentials rows hard-deleted (they're the user's own
 secrets), refresh tokens revoked. Review history and audit records stay
 — they are the workspace's legitimate business records; the identity
 link is severed via the anonymised email. A JSON audit line records the
-erasure itself.
+erasure itself. The person's names on knowledge packs, their publish tokens and
+their invite links are removed or revoked in a savepoint (`packs_cleaned` in the
+answer): the account row and the credentials are changed by stores that commit
+on their own, so a failure there must not stop the rest, and the call can be
+repeated.
 
 Why this stays GLOBAL admin
 ---------------------------
@@ -184,6 +188,10 @@ async def export_user_data(
         select(FindingSignal).where(FindingSignal.actor.in_(me)).limit(5000)
     )).all() if me else []
 
+    from src.knowledge import store as pack_store
+
+    pack_memberships = await pack_store.memberships_of(session, user_id)
+
     logger.info("gdpr_export user=%s by=%s", user_id, caller.email)
     return {
         "exported_at": datetime.now(UTC).isoformat(),
@@ -198,6 +206,7 @@ async def export_user_data(
         "team_memberships": [
             {"team_id": m.team_id, "role": m.role} for m in team_members
         ],
+        "knowledge_pack_memberships": pack_memberships,
         "feedback_signals": [
             {"id": x.id, "workspace_id": x.workspace_id, "repo_slug": x.repo_slug,
              "signal": x.signal, "source": x.source, "title": x.title,
@@ -213,6 +222,28 @@ async def export_user_data(
             for m in memories
         ],
     }
+
+
+async def _erase_pack_names(session: AsyncSession, user_id: str) -> bool:
+    """Remove the person's names from the knowledge packs, inside a SAVEPOINT.
+
+    By now the account row is anonymised and the credentials are gone (their
+    stores commit on their own), and the e-mail the memories and signals were
+    matched by cannot be found again, so a failure here must not abort the rest
+    of the erasure. Without the savepoint a failed statement would poison the
+    whole transaction. The leftovers are inert: the account is inactive, so a
+    name on a pack opens nothing and a publish token stops at the identity
+    check. The answer says so (``packs_cleaned: false``) and the same call can be
+    repeated, because the cleanup is keyed by the user id."""
+    from src.knowledge import store as pack_store
+
+    try:
+        async with session.begin_nested():
+            await pack_store.erase_user(session, user_id)
+    except Exception as exc:  # noqa: BLE001 — the rest of the erasure still has to commit
+        logger.warning("gdpr_packs_erase_failed user=%s err=%s", user_id, type(exc).__name__)
+        return False
+    return True
 
 
 @router.delete("/user/{user_id}")
@@ -316,6 +347,10 @@ async def erase_user(
             .values(actor=anon_actor))
         signals_unlinked += res.rowcount or 0
 
+    # The knowledge packs they were named on, and the ids that recorded who
+    # made or granted what (the packs themselves are the workspace's).
+    packs_cleaned = await _erase_pack_names(session, user_id)
+
     # MCP tokens too: they are signed for a person and valid until their own
     # expiry, so without this an erased account kept its code-search access.
     mcp_revoked = 0
@@ -343,6 +378,7 @@ async def erase_user(
         "signals_unlinked": signals_unlinked,
 
         "mcp_tokens_revoked": mcp_revoked,
+        "packs_cleaned": packs_cleaned,
     }
 
 

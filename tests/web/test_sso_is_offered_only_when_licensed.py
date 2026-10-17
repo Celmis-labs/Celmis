@@ -2,8 +2,9 @@
 
 Two independent halves have to be present: the web side configured for OIDC
 (AUTH_OIDC_*, read by NextAuth) and the API's `sso` capability — the
-endpoint the provider's callback posts to, mounted only under a licence that
-grants "sso" (src/ee/sso). Either alone is a button that dead-ends.
+endpoint the provider's callback posts to (src/ee/sso), which an enterprise
+build mounts with or without a licence (the free allowance of five people) and
+a build without src/ee does not have. Either alone is a button that dead-ends.
 
 The decision is made on the server (web/app/login/page.tsx and the invite
 landing page, through web/lib/sso-offer.ts), so it is read
@@ -68,6 +69,10 @@ def test_the_provider_and_the_exchange_live_behind_the_boundary() -> None:
 
 
 def test_the_exchange_path_is_the_one_the_api_mounts() -> None:
+    # The app first, as in production: the API mounts single sign-on when it is
+    # built (the free allowance needs no licence), and the router imports the
+    # API back, so a process that started from the router would loop.
+    import src.api  # noqa: F401
     from src.ee.sso.router import router
 
     paths = {getattr(r, "path", "") for r in router.routes}

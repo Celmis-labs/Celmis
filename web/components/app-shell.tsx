@@ -6,11 +6,11 @@ import { usePathname } from "next/navigation";
 import { signOut, useSession } from "next-auth/react";
 import { AnimatePresence, useReducedMotion } from "motion/react";
 import * as m from "motion/react-m";
-import { ActivityIcon, BotIcon, BuildingIcon, GaugeIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, FolderGit2Icon, GitPullRequestIcon, LayoutDashboardIcon, LogOutIcon, MessagesSquareIcon, PanelLeftIcon, PlusIcon, SettingsIcon, ShieldIcon, UsersIcon } from "lucide-react";
+import { ActivityIcon, BotIcon, BookMarkedIcon, BuildingIcon, GaugeIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, FolderGit2Icon, GitPullRequestIcon, LayoutDashboardIcon, LogOutIcon, MessagesSquareIcon, PanelLeftIcon, PlusIcon, SettingsIcon, ShieldIcon, UsersIcon } from "lucide-react";
 import { toast } from "sonner";
 import { AgentWidget } from "@/components/agent-widget";
 import { BrandMark, BrandWord } from "@/components/brand-mark";
-import { SECTION_TABS, type TabDef } from "@/components/section-tabs";
+import { matchesTab, SECTION_TABS, type TabDef } from "@/components/section-tabs";
 import { Button } from "@/components/ui/button";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -24,6 +24,7 @@ import { API_BASE, WORKSPACES_CHANGED_EVENT } from "@/lib/api";
 import { forgetAgentSession } from "@/lib/agent-session";
 import { LEGACY_SIDEBAR_KEY, writeSidebarCookie } from "@/lib/sidebar";
 import { useT } from "@/lib/i18n";
+import { featureOff, useCapabilities } from "@/lib/use-capabilities";
 import { useCanManageWorkspace } from "@/lib/use-workspace-role";
 import { startMainTour, TOUR_DONE_KEY } from "@/lib/tour";
 import { cn } from "@/lib/utils";
@@ -42,6 +43,10 @@ type NavSection = {
   adminOnly?: boolean;
   /** Owner or admin of the ACTIVE workspace (or a global admin). */
   workspaceAdminOnly?: boolean;
+  /** Hidden when /api/capabilities explicitly reports this feature off — a
+   *  build that does not mount the section's routes (same contract as the
+   *  tabs: no answer keeps the row). */
+  requiresFeature?: string;
   /** All routes that belong to this section (prefix-matched unless exact). */
   pages: readonly TabDef[];
 };
@@ -78,6 +83,10 @@ const NAV_SECTIONS: NavSection[] = [
   // `usage` key in SECTION_TABS.
   { href: "/admin/usage", labelKey: "nav.usage", icon: GaugeIcon, workspaceAdminOnly: true, pages: SECTION_TABS.usage },
   { href: "/admin/workspaces", labelKey: "nav.team", icon: UsersIcon, pages: SECTION_TABS.team },
+  // Knowledge packs the workspace curates for its coding agents. Before
+  // Settings and Administration, which stay the last rows; every member may
+  // open it, so there is no role flag — only the build can switch it off.
+  { href: "/codebase", labelKey: "nav.codebase", icon: BookMarkedIcon, requiresFeature: "codebase", pages: SECTION_TABS.codebase },
   { href: "/settings", labelKey: "nav.settings", icon: SettingsIcon, pages: SECTION_TABS.settings },
   { href: "/admin/health", labelKey: "nav.adminSection", icon: ShieldIcon, adminOnly: true, pages: SECTION_TABS.admin },
 ];
@@ -526,9 +535,7 @@ function RailAccount() {
 }
 
 function matchesPage(pathname: string, page: TabDef) {
-  return page.exact
-    ? pathname === page.href
-    : pathname === page.href || pathname.startsWith(`${page.href}/`);
+  return matchesTab(pathname, page);
 }
 
 /** A section is active when the current route belongs to any of its pages. */
@@ -544,6 +551,9 @@ const UNLISTED_PAGES: readonly TabDef[] = [
   { href: "/automation", labelKey: "nav.automation" },
   // Reached from the dashboard banner and the decision toast, not the sidebar.
   { href: "/access-request", labelKey: "nav.accessRequest" },
+  // The landing page of a pack invite link: reached from the link, never from
+  // the sidebar.
+  { href: "/codebase/join", labelKey: "codebase.join.crumb" },
 ];
 
 /** Breadcrumb «Section > Page» derived from the section map — orients the
@@ -589,12 +599,14 @@ export function AppShell({
   // Global-admin-only sections stay out of sight for regular members.
   const isAdmin = Boolean(data?.isAdmin);
   const canManageWorkspace = useCanManageWorkspace() === true;
+  const capabilities = useCapabilities().data;
   const navSections = useMemo(
     () =>
       NAV_SECTIONS.filter(
-        (s) => (!s.adminOnly || isAdmin) && (!s.workspaceAdminOnly || canManageWorkspace),
+        (s) => (!s.adminOnly || isAdmin) && (!s.workspaceAdminOnly || canManageWorkspace)
+          && (!s.requiresFeature || !featureOff(capabilities, s.requiresFeature)),
       ),
-    [isAdmin, canManageWorkspace],
+    [isAdmin, canManageWorkspace, capabilities],
   );
 
   // Sidebar collapse — persisted so it survives navigation and reloads, and

@@ -2413,6 +2413,9 @@ class McpCallLog(Base):
     result_items: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     args_hash: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    #: Ids of the knowledge packs the call read from (NULL before packs existed
+    #: and for calls that touched none). Ids only — never a pack's name or text.
+    packs: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         Index("ix_mcp_call_log_ts", "ts"),
@@ -2449,4 +2452,198 @@ class McpProjectToken(Base):
 
     __table_args__ = (
         Index("ix_mcp_project_tokens_project", "project_id"),
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
+# Codebase — knowledge packs (skills, API examples, checklists, notes)
+# ════════════════════════════════════════════════════════════════════
+#
+# Who may SEE a pack is `src/knowledge/visibility.py`; every query in
+# `src/knowledge/store.py` applies it in SQL. The children of a pack carry the
+# same foreign keys, `ON DELETE CASCADE`, as the migration, so the two describe
+# one schema (a test compares them); nothing relies on the cascade, the store
+# deletes children explicitly.
+
+
+class KnowledgePack(Base, TimestampMixin):
+    """A named, versioned bundle of files in ONE workspace.
+
+    ``audience`` is ``workspace`` (every member), ``teams`` (workspace
+    owners/admins, granted teams and explicit members) or ``restricted``
+    (only granted teams and explicit members). ``current_version_id`` points
+    at the active snapshot; rolling back is activating an older one.
+    """
+
+    __tablename__ = "knowledge_packs"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid_pk)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    audience: Mapped[str] = mapped_column(Text, nullable=False, server_default="teams")
+    current_version_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
+    created_by_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "slug", name="uq_knowledge_packs_workspace_slug"),
+        Index("ix_knowledge_packs_workspace", "workspace_id"),
+    )
+
+
+class KnowledgePackTeam(Base):
+    """A team granted a pack (``read`` or ``maintain``). The team must belong to
+    the pack's workspace; a row whose team is gone grants nothing."""
+
+    __tablename__ = "knowledge_pack_teams"
+
+    pack_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("knowledge_packs.id", ondelete="CASCADE"), primary_key=True)
+    team_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    permission: Mapped[str] = mapped_column(Text, nullable=False, server_default="read")
+    granted_by_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+    __table_args__ = (
+        Index("ix_knowledge_pack_teams_team", "team_id"),
+    )
+
+
+class KnowledgePackMember(Base):
+    """A person named on a pack (``read`` or ``maintain``), by user id. Counts
+    only while the person is a CURRENT member of the pack's workspace."""
+
+    __tablename__ = "knowledge_pack_members"
+
+    pack_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("knowledge_packs.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    permission: Mapped[str] = mapped_column(Text, nullable=False, server_default="read")
+    granted_by_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The invite link this membership came from, if it did.
+    invite_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+    __table_args__ = (
+        Index("ix_knowledge_pack_members_user", "user_id"),
+    )
+
+
+class KnowledgePackVersion(Base):
+    """An immutable snapshot of a pack (numbered 1, 2, 3 … per pack)."""
+
+    __tablename__ = "knowledge_pack_versions"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid_pk)
+    pack_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("knowledge_packs.id", ondelete="CASCADE"), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    created_by_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    file_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    total_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    #: sha256 over the sorted ``path\0sha\n`` lines of the version's files.
+    sha: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+
+    __table_args__ = (
+        UniqueConstraint("pack_id", "number", name="uq_knowledge_pack_versions_pack_number"),
+        Index("ix_knowledge_pack_versions_pack", "pack_id"),
+    )
+
+
+class KnowledgeItem(Base):
+    """One file of a pack version, with what search and the brief rank on."""
+
+    __tablename__ = "knowledge_items"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid_pk)
+    version_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("knowledge_pack_versions.id", ondelete="CASCADE"),
+        nullable=False)
+    pack_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("knowledge_packs.id", ondelete="CASCADE"), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    #: skill | file | api | checklist | note | doc
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The skill this file belongs to (the SKILL.md itself and its siblings).
+    skill: Mapped[str | None] = mapped_column(Text, nullable=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sha: Mapped[str] = mapped_column(Text, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    repos: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    tags: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    #: term → count, the 400 most frequent terms of the file (for ranking).
+    terms: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+
+    __table_args__ = (
+        Index("ix_knowledge_items_version", "version_id"),
+        Index("ix_knowledge_items_pack", "pack_id"),
+    )
+
+
+class KnowledgePackInvite(Base):
+    """A link that adds whoever redeems it to one pack. The raw token is shown
+    once at creation; only its sha256 is stored."""
+
+    __tablename__ = "knowledge_pack_invites"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid_pk)
+    pack_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("knowledge_packs.id", ondelete="CASCADE"), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    permission: Mapped[str] = mapped_column(Text, nullable=False, server_default="read")
+    created_by_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    max_uses: Mapped[int] = mapped_column(Integer, nullable=False, server_default="25")
+    used_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_knowledge_pack_invites_pack", "pack_id"),
+    )
+
+
+class KnowledgePackToken(Base):
+    """A bearer token that publishes ONE pack from a laptop or a pipeline
+    (``cpk_`` + random). Shown once at creation; only its sha256 is stored.
+
+    It carries no rights of its own: every call asks whether ``created_by_id``
+    can maintain the pack RIGHT NOW, so losing the right ends the token too.
+    Accepted by ``/api/codebase/publish*`` and nothing else.
+    """
+
+    __tablename__ = "knowledge_pack_tokens"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid_pk)
+    pack_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("knowledge_packs.id", ondelete="CASCADE"), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    created_by_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_knowledge_pack_tokens_pack", "pack_id"),
     )

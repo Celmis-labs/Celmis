@@ -74,7 +74,9 @@ def test_a_refused_exchange_redirects_with_an_error() -> None:
 
     sign_in = _block(code, "signIn: async")
     assert "exchangeIdToken(" in sign_in
-    assert re.search(r"catch\s*\{\s*return SSO_REJECTED_URL;\s*\}", sign_in)
+    # Any other refusal is the generic one; a full installation has its own
+    # message (tests/web/test_a_full_installation_says_so.py).
+    assert re.search(r"catch\s*(\(\w+\))?\s*\{[^}]*:\s*SSO_REJECTED_URL;\s*\}", sign_in)
     # No id_token at all is a refusal too, not a silent success.
     assert re.search(r"if \(!account\?\.id_token\) return SSO_REJECTED_URL;", sign_in)
 

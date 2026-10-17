@@ -10,12 +10,14 @@ Append-only by design: other modules add helpers here, nobody changes the
 meaning of an existing one.
 
 The record never holds argument values, results or secrets — only the tool
-name, the repos touched, sizes and counters.
+name, the repos and knowledge packs touched (by id), sizes and counters.
 """
 
 from __future__ import annotations
 
+import re
 import time
+import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
@@ -26,6 +28,10 @@ class CallRecord:
     profile: str = "full"
     started: float = field(default_factory=time.monotonic)
     repos: set[str] = field(default_factory=set)
+    #: Knowledge packs the call read from: ``<pack uuid>`` for a pack touched and
+    #: ``<pack uuid>/<skill name>`` for a skill whose body was returned. Ids and
+    #: validated skill names only, never a title, a path or a query.
+    packs: set[str] = field(default_factory=set)
     #: ok | denied | error
     status: str = "ok"
     result_bytes: int = 0
@@ -53,6 +59,48 @@ def note_repos(*slugs: str) -> None:
     rec = _CURRENT.get()
     if rec is not None:
         rec.repos.update(s for s in slugs if s)
+
+
+#: A skill name as ingest accepts it (``src/knowledge/ingest.py``).
+_SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+
+
+def pack_entry(value: object) -> str | None:
+    """The canonical form of ``<pack uuid>`` or ``<pack uuid>/<skill name>``, or
+    None for anything else. This is the whole vocabulary of ``mcp_call_log.packs``:
+    a caller that passes the wrong thing (a title, a path, a query) logs nothing."""
+    if not isinstance(value, str):
+        return None
+    head, slash, skill = value.partition("/")
+    try:
+        ident = str(uuid.UUID(head))
+    except ValueError:
+        return None
+    if not slash:
+        return ident
+    return f"{ident}/{skill}" if _SKILL_NAME.fullmatch(skill) else None
+
+
+def note_packs(*ids: object) -> None:
+    """Record the knowledge packs a call read from. Accepts pack ids (or
+    ``<pack id>/<skill>`` entries) or one iterable of them; anything that is not
+    one is ignored, so a caller cannot put a title, a path or a query into the
+    log by passing the wrong thing."""
+    rec = _CURRENT.get()
+    if rec is None:
+        return
+    for item in ids:
+        for one in (item if isinstance(item, list | tuple | set | frozenset) else (item,)):
+            entry = pack_entry(one)
+            if entry is not None:
+                rec.packs.add(entry)
+
+
+def note_skill(pack_id: object, skill: object) -> None:
+    """Record that the body of ``skill`` of pack ``pack_id`` was returned: both
+    the pack and the ``<pack id>/<skill>`` entry."""
+    if isinstance(pack_id, str) and isinstance(skill, str):
+        note_packs(pack_id, f"{pack_id}/{skill}")
 
 
 def note_redactions(stats) -> None:  # noqa: ANN001 — a RedactionStats or a plain mapping

@@ -45,7 +45,17 @@ from __future__ import annotations
 
 import pytest
 
-from tests.api.rbac_world import A_REPO, B_REPO, B_SECRET, world
+from tests.api.rbac_world import (
+    A_REPO,
+    B_PACK_ID,
+    B_PACK_INVITE_ID,
+    B_PACK_ITEM_ID,
+    B_PACK_TOKEN,
+    B_PACK_TOKEN_ID,
+    B_REPO,
+    B_SECRET,
+    world,
+)
 
 A_ROLES = ["admin_a", "editor_a", "member_a", "both_in_a"]
 
@@ -143,6 +153,30 @@ PROBES: list[tuple[str, str, dict | None, str]] = [
     ("GET", "/api/automation/sessions", None, "no_leak"),
     ("GET", "/api/automation/runs/run-b", None, "deny"),
     ("POST", "/api/automation/runs/run-b/stop", None, "deny"),
+    # Codebase: B's knowledge pack, by id and by search
+    ("GET", "/api/codebase/packs", None, "no_leak"),
+    ("GET", f"/api/codebase/packs/{B_PACK_ID}", None, "deny"),
+    ("PATCH", f"/api/codebase/packs/{B_PACK_ID}", {"title": "mine now"}, "deny"),
+    ("DELETE", f"/api/codebase/packs/{B_PACK_ID}", None, "deny"),
+    ("PUT", f"/api/codebase/packs/{B_PACK_ID}/teams", {"teams": []}, "deny"),
+    ("POST", f"/api/codebase/packs/{B_PACK_ID}/members",
+     {"email": "{me_email}", "permission": "maintain"}, "deny"),
+    ("DELETE", f"/api/codebase/packs/{B_PACK_ID}/members/u-admin_b", None, "deny"),
+    ("GET", f"/api/codebase/packs/{B_PACK_ID}/versions", None, "deny"),
+    ("POST", f"/api/codebase/packs/{B_PACK_ID}/versions/1/activate", None, "deny"),
+    ("GET", f"/api/codebase/packs/{B_PACK_ID}/versions/1/diff", None, "deny"),
+    ("GET", f"/api/codebase/packs/{B_PACK_ID}/versions/1/archive", None, "deny"),
+    ("GET", f"/api/codebase/packs/{B_PACK_ID}/items/{B_PACK_ITEM_ID}", None, "deny"),
+    ("GET", f"/api/codebase/packs/{B_PACK_ID}/invites", None, "deny"),
+    ("POST", f"/api/codebase/packs/{B_PACK_ID}/invites", {}, "deny"),
+    ("DELETE", f"/api/codebase/packs/{B_PACK_ID}/invites/{B_PACK_INVITE_ID}", None, "deny"),
+    ("GET", f"/api/codebase/packs/{B_PACK_ID}/tokens", None, "deny"),
+    ("POST", f"/api/codebase/packs/{B_PACK_ID}/tokens", {"label": "probe"}, "deny"),
+    ("DELETE", f"/api/codebase/packs/{B_PACK_ID}/tokens/{B_PACK_TOKEN_ID}", None, "deny"),
+    ("POST", "/api/codebase/invites/preview", {"token": B_PACK_TOKEN}, "deny"),
+    ("POST", "/api/codebase/invites/redeem", {"token": B_PACK_TOKEN}, "deny"),
+    ("GET", "/api/codebase/search?q=b_secret+ledger+reconcile", None, "no_leak"),
+    ("POST", "/api/codebase/brief", {"task": "b_secret ledger reconcile procedure"}, "no_leak"),
 ]
 
 
@@ -151,6 +185,40 @@ def _actor(name: str) -> str:
     # must not do is carry B into A: it is probed with A as its active
     # workspace (`both_in_a`), where the B-registered repo is not A's.
     return "both" if name == "both_in_a" else name
+
+
+async def _b_pack_untouched(w) -> None:
+    """B's knowledge pack is exactly as seeded: no rename, no new version, member,
+    team grant, invite or publish token, the link not used, the token neither
+    revoked nor used, nobody of A named on it."""
+    from sqlalchemy import func, select
+
+    from src.db.models import (
+        KnowledgeItem,
+        KnowledgePack,
+        KnowledgePackInvite,
+        KnowledgePackMember,
+        KnowledgePackTeam,
+        KnowledgePackToken,
+        KnowledgePackVersion,
+    )
+
+    pack = await w.scalar(KnowledgePack, B_PACK_ID)
+    assert pack is not None and pack.title == f"{B_SECRET} pack"
+    assert pack.audience == "workspace" and pack.current_version_id is not None
+    invite = await w.scalar(KnowledgePackInvite, B_PACK_INVITE_ID)
+    assert (invite.used_count, invite.revoked_at) == (0, None)
+    token = await w.scalar(KnowledgePackToken, B_PACK_TOKEN_ID)
+    assert (token.revoked_at, token.last_used_at) == (None, None)
+    async with w.factory() as s:
+        for model, expected in ((KnowledgePackVersion, 1), (KnowledgeItem, 1),
+                                (KnowledgePackMember, 1), (KnowledgePackTeam, 0),
+                                (KnowledgePackInvite, 1), (KnowledgePackToken, 1)):
+            n = await s.scalar(select(func.count()).select_from(model).where(
+                model.pack_id == B_PACK_ID))
+            assert n == expected, f"{model.__tablename__}: {n}"
+        assert await s.scalar(select(func.count()).select_from(KnowledgePack)) == 1, \
+            "a pack was created"
 
 
 async def _b_untouched(w) -> None:
@@ -188,6 +256,7 @@ async def _b_untouched(w) -> None:
     assert policy.base_instruction is None and policy.approve_when_clean is None
     assert (await w.scalar(ReviewIssue, "issue-b")).status == "open"
     assert (await w.scalar(IncomingAlert, "alert-b")).status == "new"
+    await _b_pack_untouched(w)
     assert await w.scalar(AutomationRun, "run-b") is not None
     assert _load_override("defect", w.ws["ws-b"]) == f"{B_SECRET} agent system prompt"
     from src.db.models import ReviewRule, ReviewRuleJob
@@ -218,12 +287,16 @@ async def test_a_roles_cannot_reach_workspace_b(tmp_path, monkeypatch, actor, vi
         failures: list[str] = []
         for method, path, body, verdict in PROBES:
             if who == "both" and (path.startswith("/api/workspaces/wsid-b")
-                                  or path == "/api/workspaces"):
+                                  or path == "/api/workspaces"
+                                  or path.startswith("/api/codebase/invites/")):
                 # Addressed to B by id, these answer about a workspace `both`
-                # really belongs to — legitimately. What `both` is probed for
-                # is carrying B's repository into A.
+                # really belongs to — legitimately (an invite link to B's pack
+                # is theirs to use: they hold a role in B). What `both` is
+                # probed for is carrying B's repository into A.
                 continue
             path = path.replace("{me}", w.uid(who))
+            if body and "{me_email}" in str(body):
+                body = {**body, "email": w.users[who].email}
             headers = {"X-Test-User": who}
             if actor == "both_in_a":
                 headers["X-Workspace"] = "ws-a"

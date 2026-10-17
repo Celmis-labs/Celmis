@@ -21,6 +21,8 @@ import tests.api.rbac_world  # noqa: F401 — registers JSONB → JSON for SQLit
 VERSIONS = Path(__file__).resolve().parents[2] / "alembic" / "versions"
 TOKENS = ("a7c41e9b2d10", "mcp_tokens", "c1f6b8d0e256", "mcp_tokens")
 LOG = ("a7c41e9b2d11", "mcp_call_log", "a7c41e9b2d10", "mcp_call_log")
+#: Adds `mcp_call_log.packs` (and the knowledge-pack tables).
+CODEBASE = "e5b8c2d9a1f6"
 
 
 def _module(revision: str):
@@ -73,6 +75,9 @@ def test_the_tables_hold_the_columns_the_models_read(engine):
 
     _run(engine, TOKENS[0], "upgrade")
     _run(engine, LOG[0], "upgrade")
+    # `mcp_call_log.packs` (the packs a call read) arrives with the Codebase
+    # revision, which also creates its own tables; the models read it.
+    _run(engine, CODEBASE, "upgrade")
     for model in (McpToken, McpCallLog):
         have = {c["name"] for c in sa.inspect(engine).get_columns(model.__tablename__)}
         assert {c.name for c in model.__table__.columns} <= have, model.__tablename__

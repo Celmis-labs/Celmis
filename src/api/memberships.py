@@ -13,12 +13,16 @@ Now every one of them calls `change_membership`, which asks the single rule
 in src/users/roles.py (`can_change`), writes the row, and records the change
 in the audit log (actor, user, workspace, old → new).
 
-Two pieces of state hang off a membership and are kept true here, in the
+Three pieces of state hang off a membership and are kept true here, in the
 same transaction, so no route can forget them:
 
   * a REMOVAL revokes the live email-bound invites addressed to that person
     for that workspace. Otherwise a stale invite would put them straight back
     — silently, at their next verified Google/SSO sign-in.
+  * a REMOVAL also takes the person out of the teams OF THAT WORKSPACE and ends
+    what they held on its knowledge packs (their names on packs, the publish
+    tokens and the invite links they made). Otherwise the rights would lie
+    dormant and come back, unasked, the day the person is added again.
   * a GRANT to a team workspace (not the person's own personal one) closes
     their pending access request as approved, listing what was granted.
     Otherwise an admin who adds somebody from /admin/users leaves the request
@@ -30,13 +34,22 @@ same transaction, so no route can forget them:
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
-from src.db.models import AccessRequest, Workspace, WorkspaceInvite, WorkspaceMember
+from src.db.models import (
+    AccessRequest,
+    Team,
+    TeamMember,
+    Workspace,
+    WorkspaceInvite,
+    WorkspaceMember,
+)
 from src.users import User
 from src.users.roles import VALID_WORKSPACE_ROLES, can_change
 
@@ -144,6 +157,8 @@ async def change_memberships(
         else:
             row.role = new_role
     revoked = await _revoke_invites_on_removal(session, user_id=user_id, planned=planned)
+    await _leave_teams_on_removal(session, user_id=user_id, planned=planned)
+    await _release_packs_on_removal(session, actor=actor, user_id=user_id, planned=planned)
     resolved = None
     if via != "access_request":
         resolved = await _resolve_pending_request(
@@ -188,6 +203,23 @@ async def change_memberships(
     return [(ws_id, old, new_role) for ws_id, _row, old, new_role in planned]
 
 
+def _live_invites_query(email: str, ws_ids: Sequence[str]):
+    """The email-bound invites of ``ws_ids`` that could still be used."""
+    return select(WorkspaceInvite).where(
+        WorkspaceInvite.workspace_id.in_(list(ws_ids)),
+        func.lower(WorkspaceInvite.email) == email,
+        WorkspaceInvite.revoked.is_(False),
+        WorkspaceInvite.used_count < WorkspaceInvite.max_uses,
+    )
+
+
+def _team_rows_statement(user_id: str, ws_ids: Sequence[str]):
+    """Delete a person's rows in the teams OF ``ws_ids`` (and of no other workspace)."""
+    return delete(TeamMember).where(
+        TeamMember.user_id == user_id,
+        TeamMember.team_id.in_(select(Team.id).where(Team.workspace_id.in_(list(ws_ids)))))
+
+
 async def _revoke_invites_on_removal(
     session: AsyncSession, *, user_id: str,
     planned: list[tuple[str, WorkspaceMember | None, str | None, str | None]],
@@ -207,19 +239,68 @@ async def _revoke_invites_on_removal(
     email = ((target.email if target else "") or "").strip().lower()
     if not email:
         return {}
-    rows = (await session.scalars(
-        select(WorkspaceInvite).where(
-            WorkspaceInvite.workspace_id.in_(removed),
-            func.lower(WorkspaceInvite.email) == email,
-            WorkspaceInvite.revoked.is_(False),
-            WorkspaceInvite.used_count < WorkspaceInvite.max_uses,
-        )
-    )).all()
+    rows = (await session.scalars(_live_invites_query(email, removed))).all()
     out: dict[str, list[str]] = {}
     for inv in rows:
         inv.revoked = True
         out.setdefault(inv.workspace_id, []).append(inv.id)
     return out
+
+
+async def _leave_teams_on_removal(
+    session: AsyncSession, *, user_id: str,
+    planned: list[tuple[str, WorkspaceMember | None, str | None, str | None]],
+) -> None:
+    """Take a removed member out of the teams of the workspaces they left, and
+    out of those only. A team is a subset of its workspace's people; a row left
+    behind would hand the team's grants (repositories, packs) back to the person
+    the day they are added to the workspace again."""
+    removed = [ws_id for ws_id, _row, old, new in planned if old is not None and new is None]
+    if not removed:
+        return
+    await session.execute(_team_rows_statement(user_id, removed))
+
+
+def release_account_sync(session: Session, *, user_id: str, email: str) -> dict[str, list[str]]:
+    """What a person holds in every workspace they belong to, ended - for the
+    deletion of their account, which has a synchronous session and no actor to
+    ask. It is the removal rules of :func:`change_memberships` applied to every
+    workspace at once: they leave the teams of those workspaces and the live invites
+    made out to their address are revoked, so nothing outlives the account that a
+    person added later under the same address would pick up. The membership rows
+    themselves, and the packs (see ``pack_store.erase_user_sync``), are the
+    caller's. Returns ``{workspace_id: [invite ids]}`` for the audit."""
+    ws_ids = list(session.scalars(
+        select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == user_id)).all())
+    if not ws_ids:
+        return {}
+    session.execute(_team_rows_statement(user_id, ws_ids))
+    address = (email or "").strip().lower()
+    revoked: dict[str, list[str]] = {}
+    if address:
+        for inv in session.scalars(_live_invites_query(address, ws_ids)).all():
+            inv.revoked = True
+            revoked.setdefault(inv.workspace_id, []).append(inv.id)
+    return revoked
+
+
+async def _release_packs_on_removal(
+    session: AsyncSession, *, actor: User, user_id: str,
+    planned: list[tuple[str, WorkspaceMember | None, str | None, str | None]],
+) -> None:
+    """End what a removed member holds on the knowledge packs of the workspaces
+    they left: their names on packs go and the publish tokens and invite links
+    they made are revoked, so that adding them back later — even as a viewer — does not bring any of it
+    back to life. A restricted pack left without a maintainer is kept as it is
+    and reported in the audit log (`codebase.pack_orphaned`); see
+    `src.knowledge.store.release_person`."""
+    removed = [ws_id for ws_id, _row, old, new in planned if old is not None and new is None]
+    if not removed:
+        return
+    from src.knowledge import store as pack_store
+
+    await pack_store.release_person(
+        session, user_id, removed, actor=actor.email, actor_id=actor.id)
 
 
 async def _resolve_pending_request(
@@ -263,4 +344,5 @@ async def _resolve_pending_request(
 
 __all__ = [
     "actor_role", "change_membership", "change_memberships", "refuse_unless_can_change",
+    "release_account_sync",
 ]

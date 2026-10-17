@@ -157,6 +157,22 @@ def test_the_web_copy_states_the_same_split():
     assert array("TEAM_ROLES") == set(TEAM_ROLES)
 
 
+def test_the_web_copy_states_who_may_create_a_knowledge_pack():
+    """web/lib/roles.ts decides whether the Codebase page offers "New pack" to a
+    role it already knows (the empty state names the roles that can); the API
+    answers `can_create` for the person, so a disagreement here is a sentence
+    that names the wrong roles, not a hole. Read off the array literal."""
+    import re
+    from pathlib import Path
+
+    from src.users.roles import PACK_AUTHOR_ROLES
+
+    ts = (Path(__file__).resolve().parents[2] / "web" / "lib" / "roles.ts").read_text()
+    m = re.search(r"export const PACK_AUTHOR_ROLES[^=]*=\s*\[([^\]]*)\]", ts)
+    assert m is not None, "PACK_AUTHOR_ROLES is not exported from web/lib/roles.ts"
+    assert set(re.findall(r'"([a-z]+)"', m.group(1))) == set(PACK_AUTHOR_ROLES)
+
+
 def test_nobody_can_sign_up_as_the_master_address(tmp_path):
     """The master login adopts an existing PASSWORD account holding the master
     address. A signup under it before the operator's first master login would

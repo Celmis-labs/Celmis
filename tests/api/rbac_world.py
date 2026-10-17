@@ -25,6 +25,7 @@ response body", for every route, without a per-route parser.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -52,6 +53,18 @@ def _sqlite_booleans(dbapi_conn, _record) -> None:
 
 
 B_SECRET = "B_SECRET"
+
+#: B's knowledge pack (audience `workspace`: every member of B sees it, nobody
+#: else may), its only item and version, and an open invite link with a known
+#: token. Fixed ids: the isolation probes name them.
+B_PACK_ID = "bbbbbbbb-0000-4000-8000-000000000001"
+B_PACK_VERSION_ID = "bbbbbbbb-0000-4000-8000-000000000002"
+B_PACK_ITEM_ID = "bbbbbbbb-0000-4000-8000-000000000003"
+B_PACK_INVITE_ID = "bbbbbbbb-0000-4000-8000-000000000004"
+B_PACK_TOKEN = "b-pack-invite-token-" + "z" * 24
+#: B's pack publish token (row id and the raw value) — made by B's admin.
+B_PACK_TOKEN_ID = "bbbbbbbb-0000-4000-8000-000000000005"
+B_PUBLISH_TOKEN = "cpk_" + "y" * 43
 MASTER_EMAIL = "root@acme-corp.io"
 
 A_REPO = "github_aco-app"
@@ -86,6 +99,8 @@ class World:
     ids: dict[str, str]                     # named seeded rows
     audit: list[dict] = field(default_factory=list)
     factory: Any = None
+    #: The ASGI app the routers are mounted on (a test may serve it over a socket).
+    app: Any = None
 
     def h(self, who: str, ws_slug: str | None = None) -> dict[str, str]:
         headers = {"X-Test-User": who}
@@ -115,6 +130,7 @@ def _routers():
         agents,
         alerts,
         automation,
+        codebase,
         connections,
         invites,
         issues,
@@ -136,11 +152,23 @@ def _routers():
             review_settings.router,
             review_rules.router, repos.router, reviews.router,
             issues.router, pull_requests.router, alerts.router, automation.router,
-            llm.router, connections.router, analytics.router, access_requests.router]
+            llm.router, connections.router, analytics.router, access_requests.router,
+            codebase.router]
 
 
 @contextlib.asynccontextmanager
-async def world(tmp_path: Path, monkeypatch, extra_routers: tuple = ()):
+async def world(tmp_path: Path, monkeypatch, extra_routers: tuple = (), *,
+                licensed: bool = True):
+    # The cast is eleven people, over the community limit of five seats
+    # (src/users/seats.py), so a flow that ADDS a person — a sign-up, an SSO
+    # first sign-in — would be refused. `licensed` registers a licence with no
+    # seat limit for the test (the suite's conftest clears it afterwards); a
+    # test of the limit itself passes `licensed=False`.
+    if licensed:
+        from src.users import seats
+
+        seats.set_licence_limits(None, True)
+
     # ── environment: tenancy mode, master identity, data dir ──────────
     monkeypatch.setenv("CELMIS_DEPLOYMENT_MODE", "multi_tenant")
     monkeypatch.setenv("CELMIS_MASTER_EMAIL", MASTER_EMAIL)
@@ -223,7 +251,7 @@ async def world(tmp_path: Path, monkeypatch, extra_routers: tuple = ()):
     async with AsyncClient(transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://t") as c:
         try:
             yield World(client=c, users=users, ws=ws_ids, ids=ids,
-                        audit=audit_rows, factory=factory)
+                        audit=audit_rows, factory=factory, app=app)
         finally:
             await engine.dispose()
             get_settings.cache_clear()
@@ -236,6 +264,12 @@ async def _seed(factory, users, ws_ids) -> dict[str, str]:
     from src.db.models import (
         AutomationRun,
         IncomingAlert,
+        KnowledgeItem,
+        KnowledgePack,
+        KnowledgePackInvite,
+        KnowledgePackMember,
+        KnowledgePackToken,
+        KnowledgePackVersion,
         RepoReviewPolicy,
         RepoTeamAccess,
         ReviewIssue,
@@ -313,6 +347,32 @@ async def _seed(factory, users, ws_ids) -> dict[str, str]:
         s.add(ReviewRuleJob(id="rjob-b", workspace_id=b, repo_slug=B_REPO,
                             kind="generate", status="completed",
                             progress=f"{B_SECRET} done", result={}))
+        s.add(KnowledgePack(
+            id=B_PACK_ID, workspace_id=b, slug="b-secret-pack", title=f"{B_SECRET} pack",
+            description=f"{B_SECRET} description", audience="workspace",
+            current_version_id=B_PACK_VERSION_ID, created_by_id=users["admin_b"].id))
+        s.add(KnowledgePackVersion(
+            id=B_PACK_VERSION_ID, pack_id=B_PACK_ID, workspace_id=b, number=1,
+            note=f"{B_SECRET} note", created_by_id=users["admin_b"].id, file_count=1,
+            total_bytes=40, sha="0" * 64))
+        s.add(KnowledgeItem(
+            id=B_PACK_ITEM_ID, version_id=B_PACK_VERSION_ID, pack_id=B_PACK_ID,
+            workspace_id=b, path="notes/b_secret.md", kind="note", skill=None,
+            name=f"{B_SECRET} note", description=f"{B_SECRET} item",
+            content=f"# {B_SECRET}\n\nb_secret ledger reconcile procedure.\n",
+            sha="1" * 64, size_bytes=40, repos=[], tags=[],
+            terms={"b_secret": 3, "ledger": 1, "reconcile": 1, "procedure": 1}))
+        s.add(KnowledgePackMember(pack_id=B_PACK_ID, user_id=users["admin_b"].id,
+                                  permission="maintain"))
+        s.add(KnowledgePackInvite(
+            id=B_PACK_INVITE_ID, pack_id=B_PACK_ID, workspace_id=b,
+            token_hash=hashlib.sha256(B_PACK_TOKEN.encode()).hexdigest(), permission="read",
+            created_by_id=users["admin_b"].id, expires_at=now + timedelta(days=3),
+            max_uses=5))
+        s.add(KnowledgePackToken(
+            id=B_PACK_TOKEN_ID, pack_id=B_PACK_ID, workspace_id=b, label=f"{B_SECRET} ci",
+            token_hash=hashlib.sha256(B_PUBLISH_TOKEN.encode()).hexdigest(),
+            created_by_id=users["admin_b"].id, expires_at=now + timedelta(days=30)))
         await s.commit()
 
     store = get_auto_review_store()

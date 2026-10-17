@@ -33,6 +33,13 @@ row of tabs at the top of the page.
   "More": [Compliance](/admin/compliance), [Deprecations](/admin/deprecations).
 - "Ask the code": [Projects](/projects) (ask questions over a group of
   repositories), [Chats](/chats), [Search](/search) (code search).
+- "Codebase" (only on installs that include it): "Packs" =
+  [knowledge packs for coding agents](/codebase) (skills, API examples,
+  checklists, notes; each pack is shown to the whole workspace, to chosen
+  teams, or to named people only), "Search & brief" =
+  [search the packs and preview an agent's brief](/codebase/search),
+  "Connect an agent" = [plug a coding agent into the packs](/codebase/connect).
+  Owners, admins and editors create packs.
 - "Agent": "Sessions" = [Claude Code sessions](/claude) that edit a
   repository and open a pull request.
 - "Monitoring": "Incoming alerts" = [alerts](/alerts), "Notification channels" = [notifications](/admin/notifications), "Job queue" =

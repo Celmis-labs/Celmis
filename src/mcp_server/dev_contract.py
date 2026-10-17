@@ -16,7 +16,10 @@ from __future__ import annotations
 from src.mcp_server.scopes import SCOPE_DEV  # one definition of the scope string
 
 DEV_PATH = "/mcp/dev"
-DEV_TOOLS = ("repos", "find", "outline", "read_symbol", "refs", "grep", "map", "ask", "howto")
+DEV_TOOLS = (
+    "repos", "find", "outline", "read_symbol", "refs", "grep", "map", "ask", "howto",
+    "skills", "brief",
+)
 HOWTO_TOPICS = ("db", "auth", "config", "http_client", "logging", "messaging", "cache")
 
 IDX_LINE_RE = r"^idx: (?P<entries>.+)$"

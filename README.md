@@ -396,9 +396,10 @@ Beyond the first review, the reviewer works inside the pull request:
   one of these features reads a repository only for people who may read it, by
   the same rule as MCP ([MCP access](docs/mcp-access.md)); chat replies and the
   Jira check never quote code the asker cannot open.
-- **A compact MCP profile for coding assistants.** `/mcp/dev` serves nine
+- **A compact MCP profile for coding assistants.** `/mcp/dev` serves eleven
   read-only tools sized for an editor, with `howto` for "how does this service
-  do auth" and a Claude Code plugin ([The developer profile](docs/MCP_DEV.md),
+  do auth", `brief` and `skills` for the workspace's own knowledge packs, and a
+  Claude Code plugin ([The developer profile](docs/MCP_DEV.md),
   [howto](docs/mcp-howto.md)).
 
 Every finding the benchmark scored false was opened in the source and published

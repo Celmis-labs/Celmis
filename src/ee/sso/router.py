@@ -2,9 +2,21 @@
 # see LICENSING.md and ee/README.md in the repository root.
 """``POST /api/auth/oidc`` — company single sign-on (Keycloak / any OIDC IdP).
 
-Mounted by ``src.ee.mount_enterprise`` only when the licence grants ``sso``.
-Without it the path does not exist (404), ``/api/capabilities`` reports
-``sso`` unavailable, and the login page does not offer the button.
+Mounted by ``src.ee.mount_enterprise`` always (see ``ALLOWANCE_FEATURES``):
+LICENSE_EE lets an installation without a licence use single sign-on while no
+more than five people sign in through it, and a licence that grants ``sso``
+lifts that to its ``sso_seats`` claim (or to no limit). The limit is applied
+HERE, per person, by ``src/ee/sso/allowance.py``:
+
+  * a person who is already bound to the identity provider signs in as always,
+    however many there are — a limit never switches anybody off;
+  * a NEW person, or an existing local account being bound to the provider for
+    the first time, takes one place in the allowance, and is refused with 403
+    ``{"code": "sso_seat_limit_reached", ...}`` when none is free. A brand-new
+    account also needs a free seat (``seat_limit_reached``).
+
+This check is a licence check in the sense of LICENSE_EE section 2: removing or
+bypassing it is not permitted.
 
 The path stays under ``/api/auth`` so a web build and an API build of the same
 release agree on it whichever edition each is running.
@@ -30,11 +42,16 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from src.api.deps import client_ip, get_users
 from src.api.jwt_auth import issue_token
-from src.api.routers.auth import _MASTER_ADMIN_ID, _is_master_account, _is_master_email
+from src.api.routers.auth import (
+    _MASTER_ADMIN_ID,
+    _is_master_account,
+    _is_master_email,
+    seat_limit_refusal,
+)
 from src.api.schemas import OidcCallbackRequest, TokenResponse
-from src.ee.sso import oidc
+from src.ee.sso import allowance, oidc
 from src.security.audit import record_action
-from src.users import User, UserAuthMethod, UserExistsError, UserStore
+from src.users import User, UserAuthMethod, UserExistsError, UserStore, seats
 from src.users.scopes import STANDARD_SCOPES, held_scopes
 
 logger = logging.getLogger(__name__)
@@ -98,7 +115,8 @@ def oidc_callback(
         )
     if user is None:
         existing = users.get_by_email(email)
-        if existing is not None and _is_master_account(existing):
+        if existing is not None and (_is_master_account(existing)
+                                     or seats.is_platform_account(existing)):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="This account cannot use single sign-on",
@@ -132,10 +150,22 @@ def oidc_callback(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="Account is linked to a different single sign-on identity",
                 )
-            existing.oidc_iss = config.issuer
-            existing.oidc_sub = sub
-            users.update(existing)
-            user = existing
+            # The account keeps its seat and takes a place in the allowance.
+            # The row is read again inside the check: an account erased or
+            # switched off since the lookup above is not put back.
+            try:
+                user = allowance.bind(users, existing.id, issuer=config.issuer, subject=sub)
+            except seats.SeatLimitReached as exc:
+                raise seat_limit_refusal(exc, request, flow="sso") from exc
+            except allowance.AccountUnavailable as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled",
+                ) from exc
+            except (allowance.AlreadyBound, UserExistsError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Account is linked to a different single sign-on identity",
+                ) from exc
         else:
             user = User(
                 id=str(uuid.uuid4()),
@@ -148,7 +178,9 @@ def oidc_callback(
                 scopes=list(STANDARD_SCOPES),
             )
             try:
-                users.create(user)
+                allowance.create_person(users, user)
+            except seats.SeatLimitReached as exc:
+                raise seat_limit_refusal(exc, request, flow="sso") from exc
             except UserExistsError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT, detail=str(exc),

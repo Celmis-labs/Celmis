@@ -57,6 +57,7 @@ ARGS: dict[str, dict] = {
     "grep": {"pattern": "x"},
     "map": {"repo": "r"},
     "ask": {"question": "q"},
+    "brief": {"task": "x"},
     # the project-token tools (only a project token reaches them)
     "search_project": {"query": "qq"},
     "ask_project": {"question": "q"},
@@ -68,6 +69,7 @@ NO_REQUIRED = {
     "get_budget", "list_alerts", "list_jobs", "audit_delta", "export_sbom", "list_members",
     "get_review_settings", "cancel_dep_audit", "list_projects", "list_accessible_repos",
     "list_deprecations", "generate_docs", "set_auto_review", "list_workspace_repos", "repos",
+    "skills",
 }
 
 

@@ -1,11 +1,18 @@
 """The MCP call log: who asked what of which repositories, and how much came back.
 
-One row per tool call in ``mcp_call_log`` and the same facts mirrored to the
-action audit (``mcp.call``). A row holds the tool name, the repositories the
-call touched, the token and person behind it, the outcome, the size of the
-answer and a one-way digest of the arguments. It never holds argument values,
-the answer or a secret: an audit trail that stored the query would be the
-largest copy of the code anybody could read.
+One row per tool call in ``mcp_call_log`` and the same facts, less the packs,
+mirrored to the action audit (``mcp.call``). A log row holds the tool name, the
+repositories and knowledge packs (by id, and ``<id>/<skill>`` for a skill
+opened) the call touched, the token and person behind it, the outcome, the size
+of the answer and a one-way digest of the arguments. It never holds argument
+values, the answer or a secret: an audit trail that stored the query would be
+the largest copy of the code anybody could read.
+
+The packs stay in ``mcp_call_log`` and are NOT mirrored to the action audit. That
+page is read by workspace owners and admins, who are not allowed to learn that a
+restricted pack exists, let alone which skill of it somebody opened; the pack
+page hides it from them and the mirror would have said it anyway. Whoever may
+see a pack reads its usage through the pack (src/knowledge/usage.py).
 
 The write is off the request path (a bounded queue and one worker thread) and
 every failure is swallowed — an audit problem must not break the call it
@@ -37,6 +44,10 @@ _LOCK = threading.Lock()
 _LAST_PURGE = 0.0
 _PURGE_EVERY_SECONDS = 3600.0
 _MAX_REPOS = 50
+_MAX_PACKS = 50
+#: Of those, how many may be ``<pack id>/<skill>`` entries: a call that touched
+#: many packs must not push the skills it opened out of the row.
+_MAX_PACK_SKILLS = 10
 #: Rows dropped because the queue was full, since the last warning.
 _DROPPED = 0
 #: A denied attempt is logged at most once per token and reason in this window,
@@ -83,6 +94,13 @@ def _caller_facts() -> dict[str, Any]:
     return facts
 
 
+def _pack_entries(packs) -> list[str]:  # noqa: ANN001
+    """The pack ids and ``<pack id>/<skill>`` entries of a call, sorted, bounded."""
+    plain = sorted(p for p in packs if "/" not in p)[:_MAX_PACKS]
+    skills = sorted(p for p in packs if "/" in p)[:_MAX_PACK_SKILLS]
+    return sorted(plain + skills)
+
+
 def record_call(rec) -> None:  # noqa: ANN001 — a callctx.CallRecord
     """Queue the audit row for ``rec``. Never raises, never blocks."""
     try:
@@ -91,6 +109,7 @@ def record_call(rec) -> None:  # noqa: ANN001 — a callctx.CallRecord
             "tool": rec.tool,
             "profile": rec.profile,
             "repos": sorted(rec.repos)[:_MAX_REPOS],
+            "packs": _pack_entries(getattr(rec, "packs", ())),
             "status": rec.status,
             "result_bytes": int(rec.result_bytes),
             "result_items": int(rec.result_items),
@@ -167,7 +186,7 @@ def record_denied(payload: dict | None, reason: str, *, client_id: str = "") -> 
                 _DENIED_SEEN.clear()
         _enqueue({
             "ts": datetime.now(UTC), "tool": f"(refused:{code})", "profile": "",
-            "repos": [], "status": "denied", "result_bytes": 0, "result_items": 0,
+            "repos": [], "packs": [], "status": "denied", "result_bytes": 0, "result_items": 0,
             "duration_ms": 0, "args_hash": "",
             "workspace_id": token_workspace(payload) or "", "user_id": user_id,
             "token_id": token_id, "kind": str((payload or {}).get("typ") or ""),
@@ -209,6 +228,7 @@ def write_row(row: dict[str, Any]) -> None:
             ts=row["ts"], workspace_id=row["workspace_id"], user_id=row["user_id"],
             token_id=row["token_id"], kind=row["kind"], client_id=row["client_id"],
             tool=row["tool"], profile=row["profile"], repos=list(row["repos"]),
+            packs=list(row.get("packs") or []) or None,
             status=row["status"], result_bytes=row["result_bytes"],
             result_items=row["result_items"], duration_ms=row["duration_ms"],
             args_hash=row["args_hash"],
@@ -218,12 +238,13 @@ def write_row(row: dict[str, Any]) -> None:
     try:
         from src.security.audit import record_action
 
+        detail = {k: row[k] for k in (
+            "token_id", "kind", "profile", "repos", "status",
+            "result_bytes", "result_items", "duration_ms", "args_hash")}
         record_action(
             action="mcp.call", actor_id=row["user_id"] or None,
             workspace_id=row["workspace_id"] or None, target=row["tool"],
-            detail={k: row[k] for k in (
-                "token_id", "kind", "profile", "repos", "status",
-                "result_bytes", "result_items", "duration_ms", "args_hash")},
+            detail=detail,
         )
     except Exception:  # noqa: BLE001
         pass

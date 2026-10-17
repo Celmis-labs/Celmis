@@ -214,19 +214,22 @@ def _mounted(env: dict[str, str]) -> FastAPI:
     return app
 
 
-def test_nothing_is_mounted_without_a_licence(trusted):
+def test_without_a_licence_only_the_sso_allowance_is_mounted(trusted):
+    """Single sign-on is the one feature LICENSE_EE lets an installation use
+    without a licence (up to five people — src/users/seats.py holds the
+    count), so its route is there; everything else enterprise is not."""
     app = _mounted({})
     assert app.state.celmis_license is None
     paths = _paths(app)
     assert not any(p.startswith("/api/analytics") for p in paths)
-    assert "/api/auth/oidc" not in paths
+    assert "/api/auth/oidc" in paths
 
 
-def test_only_the_licensed_feature_is_mounted(trusted):
+def test_a_licensed_feature_is_mounted_and_an_unlicensed_one_is_not(trusted):
     app = _mounted({lic.ENV_KEY: mint_test_license(["analytics"])})
     paths = _paths(app)
     assert "/api/analytics/summary" in paths
-    assert "/api/auth/oidc" not in paths
+    assert "/api/auth/oidc" in paths, "the SSO allowance does not need the sso feature"
 
     app = _mounted({lic.ENV_KEY: mint_test_license(["sso"])})
     paths = _paths(app)
@@ -234,11 +237,13 @@ def test_only_the_licensed_feature_is_mounted(trusted):
     assert not any(p.startswith("/api/analytics") for p in paths)
 
 
-def test_an_expired_licence_mounts_nothing(trusted):
+def test_an_expired_licence_mounts_no_licensed_feature(trusted):
     expired = mint_test_license(days=1, now=datetime.now(UTC) - timedelta(days=3))
     app = _mounted({lic.ENV_KEY: expired})
     assert app.state.celmis_license is None
-    assert "/api/auth/oidc" not in _paths(app)
+    paths = _paths(app)
+    assert not any(p.startswith("/api/analytics") for p in paths)
+    assert "/api/auth/oidc" in paths, "back to the free allowance, not to nothing"
 
 
 def test_the_app_is_told_the_summary_and_never_the_token(trusted):

@@ -38,6 +38,7 @@ from src.api.routers import auth as auth_router
 from src.api.routers import capabilities as capabilities_router
 from src.api.routers import chats as chats_router
 from src.api.routers import claude_code as claude_code_router
+from src.api.routers import codebase as codebase_router
 from src.api.routers import compliance as compliance_router
 from src.api.routers import connections as connections_router
 from src.api.routers import deps as deps_router
@@ -69,6 +70,7 @@ from src.api.routers import review_rules as review_rules_router
 from src.api.routers import review_settings as review_settings_router
 from src.api.routers import reviews as reviews_router
 from src.api.routers import search as search_router_mod
+from src.api.routers import seats as seats_router
 from src.api.routers import spend as spend_router
 from src.api.routers import task_context as task_context_router
 from src.api.routers import teams as teams_router
@@ -530,6 +532,7 @@ def build_app() -> FastAPI:
     # Stage 14
     app.include_router(compliance_router.router)
     app.include_router(teams_router.router)
+    app.include_router(codebase_router.router)
     app.include_router(apply_fix_router.router)
     # Stage 15 — intel + notifications
     app.include_router(intel_router_mod.intel_router)
@@ -565,6 +568,7 @@ def build_app() -> FastAPI:
     app.include_router(access_router.router)
     app.include_router(users_router.router)
     app.include_router(admin_users_router.router)
+    app.include_router(seats_router.router)
     # General access requests: no team workspace yet -> ask the superadmin.
     app.include_router(access_requests_router.router)
     # Stage 23 — LLM spend ledger + workspace budgets

@@ -4,6 +4,9 @@
         --features sso,analytics --days 365 \
         --key ~/.celmis-ee/license-signing-key.pem
 
+    # optional limits (people the installation may hold / sign in via SSO):
+        --seats 50 --sso-seats 25
+
 Prints the token on stdout and nothing else, so it can be piped straight into
 a secret store. The private key is read from `--key` and never printed; it
 belongs outside this repository (the public half is embedded in
@@ -11,7 +14,9 @@ src/ee/license.py, which is the only place a licence is verified).
 
 The claims are exactly what `src.ee.license.verify` requires: iss
 "celmis-licensing", sub (the customer), features, iat, exp, and nbf when
-`--not-before` is given.
+`--not-before` is given. `--seats` and `--sso-seats` add the optional `seats`
+and `sso_seats` claims; leave them out for "no limit" (what every licence
+minted before they existed means).
 
 This script is AGPL: minting is not the enterprise feature, and anybody can
 run it — a token signed with any key but the owner's does not verify.
@@ -34,6 +39,8 @@ ISSUER = "celmis-licensing"
 #: tests/ee/test_the_licence_gate.py, rather than imported: this script must
 #: run on a machine that has only the script and the key.
 KNOWN_FEATURES = ("sso", "analytics")
+#: Kept in step with src/ee/license.py MAX_SEATS by the same test.
+MAX_SEATS = 1_000_000
 
 
 def mint(
@@ -44,6 +51,8 @@ def mint(
     days: int,
     now: datetime | None = None,
     not_before: datetime | None = None,
+    seats: int | None = None,
+    sso_seats: int | None = None,
 ) -> str:
     """Sign a licence. Raises ValueError on input that could not verify."""
     customer = customer.strip()
@@ -68,6 +77,15 @@ def mint(
     }
     if not_before is not None:
         claims["nbf"] = int(not_before.timestamp())
+    for name, value in (("seats", seats), ("sso_seats", sso_seats)):
+        if value is None:
+            continue
+        # type(...) is int: a float or a string that compares like a number
+        # would be signed, and the verifier would then read the claim as
+        # malformed.
+        if type(value) is not int or not 1 <= value <= MAX_SEATS:
+            raise ValueError(f"--{name.replace('_', '-')} must be a whole number between 1 and {MAX_SEATS}")
+        claims[name] = value
     return jwt.encode(claims, private_key, algorithm="EdDSA")
 
 
@@ -86,6 +104,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--days", type=int, default=365)
     ap.add_argument("--key", required=True, help="path to the Ed25519 private key (PEM)")
     ap.add_argument("--not-before", help="ISO date the licence starts (optional)")
+    ap.add_argument("--seats", type=int,
+                    help="people the installation may hold (omit: unlimited)")
+    ap.add_argument("--sso-seats", type=int, dest="sso_seats",
+                    help="people who may sign in through SSO (omit: unlimited)")
     args = ap.parse_args(argv)
     try:
         nbf = datetime.fromisoformat(args.not_before) if args.not_before else None
@@ -93,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
             nbf = nbf.replace(tzinfo=UTC)
         token = mint(_load_key(args.key), customer=args.customer,
                      features=args.features.split(","), days=args.days,
-                     not_before=nbf)
+                     not_before=nbf, seats=args.seats, sso_seats=args.sso_seats)
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

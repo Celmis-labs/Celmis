@@ -43,6 +43,11 @@ SECRET = "test-capabilities-secret-0123456789abcdef"
 
 EDITIONS = ("community", "enterprise")
 LICENSED = {"sso", "analytics"}
+#: Enterprise features that are mounted WITHOUT a licence granting them,
+#: because LICENSE_EE gives them an allowance (src/ee/__init__.py
+#: ALLOWANCE_FEATURES): single sign-on for up to five people. What a licence
+#: changes for them is the limit, which the route table cannot show.
+ALLOWANCE = {"sso"}
 
 
 @pytest.fixture(scope="module", params=EDITIONS)
@@ -89,6 +94,12 @@ def _enterprise(app) -> bool:
 
 def _granted(app) -> set[str]:
     return LICENSED if _enterprise(app) else set()
+
+
+def _mounted_features(app) -> set[str]:
+    """Licence features whose routes are in the table: the granted ones and
+    the allowance ones."""
+    return _granted(app) | ALLOWANCE
 
 
 @pytest.fixture(scope="module")
@@ -140,7 +151,7 @@ def test_no_feature_claims_a_prefix_that_is_not_mounted(app):
     for f in caps.FEATURES:
         for p in f.prefixes:
             on = caps.prefix_is_mounted(p, prefixes, paths)
-            expected = f.license_feature is None or f.license_feature in _granted(app)
+            expected = f.license_feature is None or f.license_feature in _mounted_features(app)
             if expected and not on:
                 phantom.append(p)
             if not expected and on:
@@ -163,7 +174,7 @@ def test_the_real_installation_reports_every_feature_available(app):
     off = sorted(k for k, v in doc.features.items() if not v.available)
     expected_off = sorted(
         f.key for f in caps.FEATURES
-        if f.license_feature is not None and f.license_feature not in _granted(app)
+        if f.license_feature is not None and f.license_feature not in _mounted_features(app)
     )
     assert off == expected_off, f"reported off on a complete build: {off}"
     assert doc.edition == ("enterprise" if _enterprise(app) else "community")
@@ -178,13 +189,16 @@ def test_the_real_installation_reports_every_feature_available(app):
 
 
 def test_the_enterprise_features_follow_the_licence(app):
-    """The community build reports both off and still calls itself complete;
-    the licensed one reports both on. Nothing here is a list of what was
-    sold — it is the route table, which is what `mount_enterprise` changed."""
+    """The community build reports analytics off and still calls itself
+    complete; the licensed one reports it on. Single sign-on is on in both:
+    it is the licence-free allowance (five people), and what the licence
+    changes there is the limit, not the route. Nothing here is a list of what
+    was sold — it is the route table, which is what `mount_enterprise`
+    changed."""
     doc = caps.build_capabilities(app)
     on = _enterprise(app)
 
-    assert doc.features["sso"].available is on
+    assert doc.features["sso"].available is True
     assert doc.features["review_analytics"].available is on
     assert doc.pages["/analytics"] is on
     # Productivity metrics are the same licence line, found by their own routes.

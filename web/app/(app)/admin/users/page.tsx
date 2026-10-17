@@ -13,6 +13,10 @@
  * personal one — however they sign in — newest first, so the superadmin can
  * add them somewhere without waiting for an access request.
  * `?filter=no-team-access` opens the page with it on.
+ *
+ * Deactivate / reactivate is the switch for an account (src/api/routers/
+ * admin_users.py): off, it signs in nowhere and holds no seat; nothing is
+ * deleted, and switching it on again needs a free seat. Both ask first.
  */
 
 import { Suspense, useState } from "react";
@@ -22,7 +26,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { PlusIcon, SearchIcon, Trash2Icon, UserCogIcon } from "lucide-react";
 
-import { adminUsersApi, type AdminUser } from "@/lib/api";
+import { adminUsersApi, ApiError, type AdminUser } from "@/lib/api";
+import { SEATS_KEY } from "@/components/seats-card";
+import { seatLimitCodeOf } from "@/lib/seats";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { roleOptions } from "@/lib/roles";
@@ -149,7 +155,11 @@ function AdminUsersInner() {
         </Card>
 
         {selected ? (
-          <MembershipsCard key={selected.id} user={selected} />
+          // The list is refetched after a switch; show the row as it is now.
+          <MembershipsCard
+            key={selected.id}
+            user={(users.data ?? []).find((u) => u.id === selected.id) ?? selected}
+          />
         ) : (
           <Card>
             <CardContent className="py-10 text-center text-sm text-[var(--color-muted-foreground)]">
@@ -200,6 +210,22 @@ function MembershipsCard({ user }: { user: AdminUser }) {
     onError,
   });
 
+  const toggle = useMutation({
+    mutationFn: (active: boolean) =>
+      active ? adminUsersApi.reactivate(token!, user.id) : adminUsersApi.deactivate(token!, user.id),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["admin-users"], exact: false });
+      qc.invalidateQueries({ queryKey: SEATS_KEY });
+      toast.success(t(r.is_active ? "admin.users.reactivated" : "admin.users.deactivated"));
+    },
+    onError: (e: unknown) =>
+      toast.error(
+        e instanceof ApiError && seatLimitCodeOf(e.body)
+          ? t("admin.users.noFreeSeat")
+          : t("admin.users.error", { message: (e as Error).message }),
+      ),
+  });
+
   const mine = new Set((memberships.data ?? []).map((m) => m.workspace_id));
   const addable = (workspaces.data ?? []).filter((w) => !mine.has(w.id));
   const options = roleOptions(t);
@@ -211,6 +237,29 @@ function MembershipsCard({ user }: { user: AdminUser }) {
         <p className="text-xs text-[var(--color-muted-foreground)]">{t("admin.users.membershipsHint")}</p>
       </CardHeader>
       <CardContent className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[var(--color-border)] p-3 text-sm">
+          <p className="min-w-0 flex-1 text-xs text-[var(--color-muted-foreground)]">
+            {user.is_active ? t("admin.users.activeHint") : t("admin.users.inactiveHint")}
+          </p>
+          <Button
+            variant={user.is_active ? "outline" : "default"}
+            size="sm"
+            disabled={toggle.isPending}
+            onClick={async () => {
+              const ok = await confirm({
+                title: t(
+                  user.is_active ? "admin.users.deactivateConfirm" : "admin.users.reactivateConfirm",
+                  { email: user.email },
+                ),
+                confirmLabel: t(user.is_active ? "admin.users.deactivate" : "admin.users.reactivate"),
+                danger: user.is_active,
+              });
+              if (ok) toggle.mutate(!user.is_active);
+            }}
+          >
+            {user.is_active ? t("admin.users.deactivate") : t("admin.users.reactivate")}
+          </Button>
+        </div>
         {memberships.isLoading && (
           <p className="text-sm text-[var(--color-muted-foreground)]">{t("admin.users.loading")}</p>
         )}

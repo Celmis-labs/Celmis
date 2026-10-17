@@ -11,6 +11,28 @@ this repository. Its claims:
     sub       the customer, as it is shown to an administrator
     features  the enterprise features it grants, e.g. ["sso", "analytics"]
     iat, exp  required; nbf optional
+    seats     optional, a positive integer — how many people the installation
+              may hold. Absent: unlimited (a licence issued before seats
+              existed keeps working unchanged). Without a licence the limit is
+              FREE_SEATS (src/users/seats.py). A licence never gives LESS than
+              that: the limit in force is the larger of the claim and
+              FREE_SEATS.
+    sso_seats optional, a positive integer — how many people may sign in
+              through single sign-on. Absent on a licence that grants "sso":
+              unlimited. A licence that does not grant "sso" leaves the free
+              SSO allowance in force (FREE_SSO_SEATS), and a licence never
+              gives less than that either.
+
+Both limits only ever refuse ADDING a person (src/users/seats.py); nobody who
+already has an account is disabled by a limit or by the end of a licence.
+
+A claim that is PRESENT but not a positive integer up to MAX_SEATS (a float, a
+string, a boolean, zero, null, too large) fails CLOSED: it is read as the
+community limit, and logged at ERROR by claim name — never by token, never by
+value. A malformed limit must not be the way to unlimited seats; refusing the
+whole licence for it would instead take SSO and analytics away from somebody
+who paid for them, so the rest of the licence stays in force. A claim that is
+absent is the only unlimited.
 
 It is verified here, against :data:`PUBLIC_KEY_PEM`, and nowhere else. There
 is no call home and no revocation list: self-hosting has to work in a closed
@@ -56,6 +78,9 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
+from src.ee.sso.allowance import FREE_SSO_SEATS
+from src.users.seats import FREE_SEATS
+
 logger = logging.getLogger(__name__)
 
 #: The licensing public key. The matching private key is held by the owner,
@@ -74,6 +99,10 @@ ALGORITHM = "EdDSA"
 #: Enterprise features this build knows how to mount. A licence may name
 #: others (a newer licence on an older build); they are ignored, not refused.
 KNOWN_FEATURES: tuple[str, ...] = ("sso", "analytics")
+
+#: The largest `seats` / `sso_seats` a licence may carry. A bigger number is
+#: not a limit anybody meant, so the claim is ignored like any malformed one.
+MAX_SEATS = 1_000_000
 
 ENV_KEY = "CELMIS_LICENSE_KEY"
 ENV_FILE = "CELMIS_LICENSE_FILE"
@@ -96,6 +125,13 @@ class License:
     issued_at: datetime
     expires_at: datetime
     not_before: datetime | None = None
+    #: How many people the installation may hold under this licence — the
+    #: limit in force, never below FREE_SEATS; None = unlimited.
+    seats: int | None = None
+    #: How many may sign in through single sign-on — never below
+    #: FREE_SSO_SEATS; None = unlimited (only meaningful when the licence
+    #: grants "sso").
+    sso_seats: int | None = None
 
     def grants(self, feature: str) -> bool:
         return feature in self.features
@@ -111,7 +147,15 @@ class License:
             "issued_at": self.issued_at.isoformat(),
             "expires_at": self.expires_at.isoformat(),
             "features": sorted(self.features),
+            "seats": self.seats,
+            "sso_seats": self.sso_seats,
         }
+
+    def sso_allowance(self, free: int) -> int | None:
+        """The SSO limit this licence puts in force: its `sso_seats` claim
+        (None = unlimited) when it grants single sign-on, else the free
+        allowance `free` — a licence for other features lifts nothing here."""
+        return self.sso_seats if self.grants("sso") else free
 
 
 def _public_key() -> Ed25519PublicKey:
@@ -123,6 +167,24 @@ def _public_key() -> Ed25519PublicKey:
 
 def _ts(value: Any) -> datetime:
     return datetime.fromtimestamp(int(value), tz=UTC)
+
+
+def _seat_claim(claims: dict[str, Any], name: str, free: int) -> int | None:
+    """`seats` / `sso_seats`: the limit this claim puts in force.
+
+    ABSENT is unlimited (None). A positive integer up to MAX_SEATS is that
+    number, but never below ``free`` — a licence does not take away what the
+    community edition has. PRESENT and anything else (a float, a string, a
+    boolean, zero, a negative, null, a huge number) fails closed to ``free``,
+    logged at ERROR BY NAME: never the token, never the value."""
+    if name not in claims:
+        return None
+    raw = claims[name]
+    if type(raw) is not int or not 1 <= raw <= MAX_SEATS:
+        logger.error("license_claim_malformed claim=%s — not a positive integer up "
+                     "to %d; read as the community limit of %d", name, MAX_SEATS, free)
+        return free
+    return max(raw, free)
 
 
 def verify(token: str) -> License:
@@ -187,6 +249,8 @@ def verify(token: str) -> License:
         issued_at=issued_at,
         expires_at=expires_at,
         not_before=not_before,
+        seats=_seat_claim(claims, "seats", FREE_SEATS),
+        sso_seats=_seat_claim(claims, "sso_seats", FREE_SSO_SEATS),
     )
 
 
@@ -285,9 +349,12 @@ def load(
         )
         return Loaded(None, source, str(exc))
     logger.info(
-        "license_valid source=%s customer=%s features=%s expires_at=%s",
+        "license_valid source=%s customer=%s features=%s expires_at=%s seats=%s "
+        "sso_seats=%s",
         source, lic.customer, ",".join(sorted(lic.features)),
         lic.expires_at.isoformat(),
+        lic.seats if lic.seats is not None else "unlimited",
+        lic.sso_seats if lic.sso_seats is not None else "unlimited",
     )
     return Loaded(lic, source)
 
@@ -305,6 +372,7 @@ __all__ = [
     "ALGORITHM",
     "ISSUER",
     "KNOWN_FEATURES",
+    "MAX_SEATS",
     "PUBLIC_KEY_PEM",
     "SOURCE_ENV_FILE",
     "SOURCE_ENV_KEY",

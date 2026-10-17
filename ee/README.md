@@ -5,6 +5,9 @@ Everything under an `ee/` path — this directory, `src/ee/`, `web/ee/`,
 [`LICENSE_EE`](../LICENSE_EE) rather than by the AGPL that covers the rest of
 Celmis.
 
+The official build, run without a licence, admits up to five people; a licence
+lifts that (see [Seats and the community limits](#seats-and-the-community-limits)).
+
 **This directory itself holds documentation only.** The code lives next to the
 code it extends, because that is where each build looks for it: the API image
 copies `src/` and nothing else, and the web build resolves `@/ee/...` inside
@@ -27,7 +30,7 @@ buys because it is a company. Two today:
 
 | Feature | Licence name | API | Web | Tests |
 |---|---|---|---|---|
-| Single sign-on (OIDC / Keycloak) | `sso` | `src/ee/sso/` — `POST /api/auth/oidc` | `web/ee/sso/` — the NextAuth provider and the "Sign in with …" button | `tests/ee/test_oidc_sign_in.py` |
+| Single sign-on (OIDC / Keycloak); up to five people without a licence | `sso` | `src/ee/sso/` — `POST /api/auth/oidc` | `web/ee/sso/` — the NextAuth provider and the "Sign in with …" button | `tests/ee/test_oidc_sign_in.py` |
 | Review analytics ("extended reporting") | `analytics` | `src/ee/analytics/` — `GET /api/analytics/summary` | `web/ee/analytics/` — the `/analytics` dashboard and charts | `tests/ee/test_analytics_is_a_leads_view.py` |
 
 The licence check is `src/ee/license.py`; the mount point is
@@ -70,6 +73,18 @@ calls home. Its claims:
 | `sub` | the customer, as shown to an administrator |
 | `features` | list of licence names: `sso`, `analytics` |
 | `iat`, `exp` | required; `nbf` optional |
+| `seats` | optional whole number from 1 to 1,000,000: how many people the installation may hold. Absent = **unlimited**, which is what every licence issued before seats existed means |
+| `sso_seats` | optional whole number from 1 to 1,000,000: how many people may sign in through single sign-on, on a licence that grants `sso`. Absent = **unlimited** |
+
+A `seats` or `sso_seats` that is **present but malformed** (zero, negative,
+text, a fraction, a boolean, `null`, above the ceiling) is read as the
+**community limit** of five — it fails closed, never to "unlimited" — and the
+log names the claim at ERROR level (never the token or the value). The licence
+itself stays valid, so its features keep working: refusing it would take away
+what the customer paid for. A licence **never gives fewer than the free
+allowance**: the limit in force is the larger of the claim and five, so
+`--seats 3` is five. See
+[Seats and the community limits](#seats-and-the-community-limits).
 
 **How it is applied.** `src/api/main.py` makes one guarded call —
 `from src.ee import mount_enterprise` inside `try/except ImportError` — and
@@ -82,7 +97,8 @@ community installation becomes an enterprise one. It is the first call of
 `apply_license`, which is idempotent and runs again whenever the licence is
 changed from the UI. A missing, unreadable, forged,
 tampered, wrong-algorithm, wrong-issuer, not-yet-valid or expired licence
-mounts nothing: the process starts as the **community edition** and logs why —
+mounts no licensed feature: the process starts as the **community edition**
+and logs why —
 a `WARNING` naming the reason (never the token) for a licence that was given
 and failed, an `INFO` line when none was given at all.
 
@@ -90,12 +106,15 @@ A process can outlive its licence, so every enterprise route also re-checks the
 licence in force per request and answers 403 once it has expired, been removed
 or been replaced by one that does not grant the feature. Restarting after
 expiry unmounts them; removing or replacing it from the UI unmounts them at
-once.
+once. The one exception is single sign-on, which stays mounted without a
+licence for up to five people (the SSO allowance, below): what a missing or
+lapsed licence changes there is the *limit*, never who is signed in.
 
 **What the rest of the product sees.** `/api/capabilities` reads availability
 from the route table, so an unmounted feature reports `available: false` with
-no list to keep in step, and the frontend hides the Analytics tab and the SSO
-button by itself. The same document reports `edition` (`community` |
+no list to keep in step, and the frontend hides the Analytics tab by itself
+(the SSO button follows the web's own `AUTH_OIDC_*` configuration, because the
+endpoint is always there). The same document reports `edition` (`community` |
 `enterprise`) and a `license` summary — the granted features for everyone, the
 customer and expiry only to a signed-in caller; the token is never on it.
 `/admin/health` shows it as the Edition card.
@@ -119,8 +138,8 @@ nothing is stored. A valid one is stored encrypted in the credential store
 (`src/ee/license_store.py`: an installation-wide slot, not a workspace one, in
 the workspace volume — it survives restarts and container rebuilds) and
 applied **at once**: the features it grants are mounted, `/api/capabilities`
-reports `enterprise` on the next request, and the Analytics tab and the SSO
-button appear without a reload. **Remove licence** (`DELETE /api/license`)
+reports `enterprise` on the next request, and the Analytics tab appears (and
+the seat limits change) without a reload. **Remove licence** (`DELETE /api/license`)
 takes them away just as fast: their routes are unmounted, and every
 enterprise route re-checks the licence in force per request, so a request
 already in flight is refused with 403. A *new* request to an unmounted route
@@ -172,9 +191,79 @@ python scripts/ee_mint_license.py --customer "Acme Corp" \
     --key ~/.celmis-ee/license-signing-key.pem
 ```
 
-prints the token on stdout. The private key never enters this repository;
+Add `--seats 50` to limit the people the installation may hold and
+`--sso-seats 25` to limit those who sign in through single sign-on; leave a
+flag out for "no limit". The script refuses a value the verifier would read as
+malformed: anything but a whole number from 1 to 1,000,000 (a fraction or a
+boolean is refused, not rounded).
+
+The command prints the token on stdout. The private key never enters this repository;
 only its public half is in `src/ee/license.py`. The script is AGPL and anyone
 can run it — a token signed with any other key does not verify. Tests sign
 with a throwaway keypair (`tests/ee/licensing.py`) and point the embedded key
 at it for the duration of the test; one test asserts that such a token does
 **not** verify against the real key.
+
+## Seats and the community limits
+
+Without a licence an installation is the **community edition** and holds
+**up to five people**; a licence lifts that. The community rule and the count
+are `src/users/seats.py` (AGPL; it does not import `src/ee`, which only tells
+it what the licence in force allows). The single sign-on allowance is counted
+and enforced by `src/ee/sso/allowance.py`, a covered file, which registers
+itself with the AGPL module as an extension: every way of adding or switching on
+a person asks it, so it is the one check, not a second copy of it.
+
+| | Without a licence | With a licence |
+|---|---|---|
+| People (seats) | 5 | `seats` claim, at least 5; absent = unlimited |
+| People signing in through single sign-on | 5 (the SSO allowance) | `sso_seats` claim on a licence that grants `sso`, at least 5; absent = unlimited. A licence that does not grant `sso` leaves the allowance of 5 |
+
+- **A seat** is an active account that is not platform-owned (the master
+  break-glass account and the seeded local user take none). An *SSO seat* is a
+  seat bound to the identity provider.
+- **Only adding a person is refused**: a sign-up, a first Google sign-in, a
+  first single sign-on sign-in, binding an existing local account to single
+  sign-on (it takes an SSO seat, not a new seat), switching a deactivated
+  account on again, `analyzer auth google` for a new address. The answer is
+  `403` with
+  `{"code": "seat_limit_reached" | "sso_seat_limit_reached", "message": ...}`.
+  The message names the **limit** ("reached its limit of 5 people") and never
+  the head-count, because the caller is not signed in; the exact counts are on
+  `/api/admin/seats` and in the one `auth.seat_limit_refused` audit row, which
+  never carries the address. Nobody who already has an account is ever
+  refused or switched off by the software — not when the installation is above
+  the limit, not when a licence is removed or lapses.
+- **Switching an account off and on** frees and takes a seat. **Admin → Users**
+  (the master account only; `POST /api/admin/users/{id}/deactivate` and
+  `/reactivate`) and `analyzer auth deactivate|reactivate EMAIL`. A deactivated
+  account is refused on every way in at once — the session and its refresh, the
+  password, Google, single sign-on, MCP tokens (the `full` and `dev` profiles)
+  and pack tokens — and nothing is deleted. The master, the local default
+  account and the account holding the master address cannot be switched off.
+  Reactivating goes through the same seat check as a sign-up. Each change leaves
+  an `auth.user_deactivated` / `auth.user_reactivated` audit row naming the
+  person by id only.
+- **The command line reads the licence.** `analyzer auth ...` mounts no app, so
+  before it adds or switches on a person it loads the configured licence the
+  same guarded way `src/api/main.py` does (`src.ee.publish_seat_limits`, inside
+  `try/except ImportError`); a licensed installation is not held to five there.
+- **The SSO allowance** is the exception in section 2 of
+  [`LICENSE_EE`](../LICENSE_EE): single sign-on may be used in production or
+  for internal use without a commercial licence while no more than five people
+  are bound to it. The check that counts them is `src/ee/sso/allowance.py`, a
+  licence check; do not remove it. That the software switches nobody off when a
+  licence lapses does not remove the requirement of a commercial licence beyond
+  five people.
+- **Where to see it**: **Admin → Health → Seats** (`GET /api/admin/seats`):
+  used and limit for seats and, in a build that has single sign-on, for single
+  sign-on; "unlimited" when the licence sets none, and the community rule when
+  there is no licence. `GET /api/invites/seats` (a yes or no for the invite
+  dialog) answers only people who may invite into a team workspace; in
+  somebody's personal workspace, which everybody owns, it is a 403.
+- **Concurrency**: the check and the creation happen under one lock and the
+  people are counted again afterwards, so racing requests in one API process
+  cannot pass the limit. Several API processes sharing one users database could
+  each pass the check before either creates; the re-count undoes the overshoot
+  it sees, but this is not a distributed lock. The shipped compose runs one API
+  process.

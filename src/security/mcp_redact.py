@@ -1112,11 +1112,54 @@ def redact_for_mcp_floored(text: str, *, source_hint: str = "") -> tuple[str, Re
     return masked, stats
 
 
-def scan_lines(text: str, *, source_hint: str = "") -> list[tuple[int, str]]:
+# Reading INSIDE a long run (the upload scan only). A run of RUN_WINDOW + 1
+# characters is withheld whole by ``_rule_long_runs``, so a line that holds one is
+# read again in slices of RUN_WINDOW characters, one short of that. The slices are
+# cut from the LINE, not from the run, so a name at the end of a run and its value
+# after the next blank are still read together. Consecutive slices share
+# RUN_OVERLAP characters: a secret together with its name (``"password":"..."``,
+# ``scheme://user:pass@``) is found whenever the two sit within RUN_OVERLAP
+# characters of each other, which is far more than any credential. The cost is
+# linear in the length of the line and every rule only ever sees a slice no
+# longer than RUN_WINDOW, so a line costs what the same characters cost as
+# ordinary lines of that length. The rules that run before the long-run rule
+# (private key, vendor token formats) have already read the whole line and are
+# not repeated. The entropy rule stays out: it judges whether a token looks
+# random, which a slice cut out of a base64 image or a bundle cannot tell, and
+# the blob would be refused for looking like what it is.
+RUN_WINDOW = MAX_RUN - 1
+RUN_OVERLAP = 256
+_WINDOW_RULES = tuple(r for r in _RULES[_RULES.index(_rule_long_runs) + 1:] if r is not _rule_entropy)
+
+
+def _windowed_label(line: str, ctx: _Ctx) -> str | None:
+    """The label of the first secret literal found in ``line`` read in overlapping
+    slices (see :data:`RUN_WINDOW`)."""
+    step = RUN_WINDOW - RUN_OVERLAP
+    for start in range(0, len(line), step):
+        window = line[start:start + RUN_WINDOW]
+        hits: list[str] = []
+        for rule in _WINDOW_RULES:
+            window = rule(window, hits, ctx)
+        if hits:
+            return hits[0]
+        if start + RUN_WINDOW >= len(line):
+            break
+    return None
+
+
+def scan_lines(text: str, *, source_hint: str = "",
+               window_long_runs: bool = False) -> list[tuple[int, str]]:
     """``[(line_no, label)]`` of lines holding a secret literal (1-based).
 
     Used by ``howto`` to say *where* a hard-coded credential sits without
-    repeating it. Multi-line blocks (PEM) are located by their first line.
+    repeating it, and by the pack upload to refuse a file that holds one.
+    Multi-line blocks (PEM) are located by their first line.
+
+    A run of 2048 or more characters without whitespace is withheld whole by the
+    output redaction and is not looked into. The upload scan passes
+    ``window_long_runs=True`` so that a password, a DSN or a token inside
+    minified JSON is refused as well (see :data:`RUN_WINDOW`).
     """
     found: list[tuple[int, str]] = []
     lines = text.split("\n")
@@ -1125,11 +1168,20 @@ def scan_lines(text: str, *, source_hint: str = "") -> list[tuple[int, str]]:
         found.append((text.count("\n", 0, m.start()) + 1, "private-key"))
     for i, line in enumerate(lines, 1):
         hits: list[str] = []
-        redacted = bound_whitespace(line)
+        bounded = bound_whitespace(line)
+        redacted = bounded
         for rule in _RULES:
             redacted = rule(redacted, hits, ctx)
-        if hits and redacted != line and hits[0] != "long-literal":
-            found.append((i, hits[0]))
+        if redacted == line:
+            continue
+        # A long run earlier on the line fires first; the label that matters is
+        # the first rule that is not that one, so a password, DSN or token
+        # after a 2048-character blob is still located.
+        real = next((h for h in hits if h != "long-literal"), None)
+        if real is None and window_long_runs and "long-literal" in hits:
+            real = _windowed_label(bounded, ctx)
+        if real is not None:
+            found.append((i, real))
     return sorted(set(found))
 
 

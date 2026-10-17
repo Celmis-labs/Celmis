@@ -6,20 +6,28 @@
  *   - Google     → calls FastAPI /api/auth/google with the Google id_token
  *   - OIDC (Keycloak or any OpenID provider, id "oidc") → calls FastAPI
  *     /api/auth/oidc with the provider's id_token. Enterprise: the provider
- *     lives in web/ee/sso (LICENSE_EE) and the API endpoint in src/ee/sso,
- *     mounted only under a licence that grants "sso". Registered only when
- *     AUTH_OIDC_ISSUER + AUTH_OIDC_CLIENT_ID + AUTH_OIDC_CLIENT_SECRET are set.
+ *     lives in web/ee/sso (LICENSE_EE) and the API endpoint in src/ee/sso.
+ *     Without a licence it serves up to five people (the SSO allowance,
+ *     LICENSE_EE section 2); a licence that grants "sso" lifts that. Registered
+ *     only when AUTH_OIDC_ISSUER + AUTH_OIDC_CLIENT_ID +
+ *     AUTH_OIDC_CLIENT_SECRET are set.
+ *
+ * Seat limits (src/users/seats.py): a sign-in that would ADD a person beyond
+ * the limit is answered 403 {code: "seat_limit_reached" | "sso_seat_limit_reached"}.
+ * The code, not the API's sentence, travels to /login (a redirect cannot carry
+ * a sentence) where it is said in the viewer's language.
  *
  * The FastAPI backend is the source of truth for the user record. NextAuth
  * stores the backend-issued JWT inside the session so frontend pages can
  * forward it as Bearer to FastAPI.
  */
-import NextAuth from "next-auth";
+import NextAuth, { CredentialsSignin } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import Google from "next-auth/providers/google";
 
-import { api, type TokenResponse, type UserOut } from "@/lib/api";
+import { api, ApiError, type TokenResponse, type UserOut } from "@/lib/api";
 import { passwordLoginEnabled } from "@/lib/auth-options";
+import { seatLimitCodeOf, type SeatLimitCode } from "@/lib/seats";
 import { OIDC_EXCHANGE_PATH, OIDC_PROVIDER_ID, oidcProviders } from "@/ee/sso/oidc-provider";
 
 /** How often the jwt callback re-reads /api/auth/me (is_admin). */
@@ -29,6 +37,22 @@ const ME_RECHECK_MS = 5 * 60 * 1000;
  *  any ?error=. Without it the OAuth callback "succeeded" with no Celmis
  *  token and the proxy bounced the user to /login with no message. */
 const SSO_REJECTED_URL = "/login?error=SsoRejected";
+
+/** Where an OAuth/OIDC sign-in the API refused for want of a seat lands: the
+ *  same /login?error=, with the refusal code for the form to say in words. */
+function seatLimitUrl(code: SeatLimitCode): string {
+  return `/login?error=${code}`;
+}
+
+/** A password sign-up the API refused for want of a seat. Auth.js passes the
+ *  `code` of a CredentialsSignin to the client (`signIn(...).code`), which is
+ *  how the sign-up form tells this apart from a taken address. */
+class SeatLimitSignIn extends CredentialsSignin {
+  constructor(code: SeatLimitCode) {
+    super();
+    this.code = code;
+  }
+}
 
 /** The backend endpoint that exchanges this provider's id_token, if any. */
 function exchangePathFor(provider: string | undefined): string | null {
@@ -87,7 +111,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             isAdmin: me.is_admin,
             isSuperadmin: Boolean(me.is_superadmin),
           };
-        } catch {
+        } catch (err) {
+          // A full installation is not a wrong password: say which.
+          const full = err instanceof ApiError ? seatLimitCodeOf(err.body) : null;
+          if (full) throw new SeatLimitSignIn(full);
           return null;
         }
       },
@@ -133,8 +160,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           isSuperadmin: Boolean(me.is_superadmin),
         });
         return true;
-      } catch {
-        return SSO_REJECTED_URL;
+      } catch (err) {
+        const full = err instanceof ApiError ? seatLimitCodeOf(err.body) : null;
+        return full ? seatLimitUrl(full) : SSO_REJECTED_URL;
       }
     },
     jwt: async ({ token, user }) => {
