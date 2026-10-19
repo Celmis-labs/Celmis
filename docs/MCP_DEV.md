@@ -5,7 +5,7 @@ many small questions a day: eleven read-only tools, plain-text answers, a tool
 list under 6,500 characters.
 
 ```
-claude mcp add --transport http celmis https://celmis.example.com/mcp/dev \
+claude mcp add --transport http celmis https://celmis.example.com/backend/mcp/dev/ \
   --header "Authorization: Bearer $CELMIS_TOKEN"
 ```
 
@@ -76,9 +76,12 @@ and adds three small hooks. It holds no
 token: the endpoint and the token come from two environment variables.
 
 ```bash
-export CELMIS_URL=https://celmis.example.com     # no trailing slash, no /mcp
-export CELMIS_TOKEN=...                          # issued by your superadmin, shown once
+export CELMIS_URL=https://celmis.example.com/backend   # no trailing slash, no /mcp
+export CELMIS_TOKEN=...                                # issued by your superadmin, shown once
 ```
+
+`CELMIS_URL` is the address the web app's Connect page shows; on the bundled
+deployment it ends in `/backend`.
 
 ```text
 /plugin marketplace add Celmis-labs/Celmis

@@ -20,7 +20,9 @@ token instead of a login. Standard library only; safe to run as `python3 -I`.
       Download the current version into an empty or new DIR.
 
 Configuration (environment):
-  CELMIS_URL         address of the server, e.g. https://celmis.example.com
+  CELMIS_URL         address of the server, as the web app shows it: on the bundled
+                     deployment the API lives under /backend, e.g.
+                     https://celmis.example.com/backend
                      (http is accepted for localhost, 127.0.0.1 and [::1] only)
   CELMIS_PACK_TOKEN  the pack publish token (cpk_...), else the macOS keychain
                      entry "celmis-pack-token", else `secret-tool lookup service
@@ -29,8 +31,13 @@ Configuration (environment):
                      "celmis-token" first, else CELMIS_TOKEN. This is the order
                      of celmis-auth-header, so verify checks the token your
                      agent connects with
+  SSL_CERT_FILE      optional: a CA bundle to verify the server's certificate with,
+                     for a Python that has none (python.org's macOS build, until
+                     its "Install Certificates.command" has run). Without it the
+                     system bundle is used when Python has no certificates of its own
 
-The tokens are never printed, logged or written anywhere.
+The tokens are never printed, logged or written anywhere. Every request says
+"User-Agent: celmis-pack/<version>" so a firewall or CDN can tell it from a bot.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ import os
 import re
 import secrets
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -56,6 +64,9 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 PROG = "celmis-pack"
+#: Kept equal to `src.__version__` by tests/plugin; sent as the User-Agent.
+VERSION = "3.0.1"
+USER_AGENT = f"{PROG}/{VERSION}"
 
 EXIT_OK = 0
 EXIT_FAILED = 1      # the server or the network said no, or something broke
@@ -68,8 +79,9 @@ exit codes:
   0  done; in sync and visible
   1  failed: network error, token not accepted (revoked, expired, creator can no
      longer maintain the pack), server error, unexpected error
-  2  bad usage or setting: CELMIS_URL missing or not https, no token or a token
-     with characters a token never has, DIR missing or unusable
+  2  bad usage or setting: CELMIS_URL missing or not https, no token, a token
+     with characters a token never has or one that looks cut short, DIR missing
+     or unusable
   3  status / verify found a difference: files changed, new or removed on either
      side, or a skill that is not visible to you
   4  the files are refused: by the checks here (too many, too large, binary,
@@ -232,13 +244,32 @@ def pack_token() -> str:
     return token
 
 
+def _cut_short(token: str) -> str:
+    """Why `token` looks cut short, or "". An MCP token is a JWT: three non-empty
+    parts joined by dots. macOS keeps only the first 128 characters of a password
+    typed at the prompt of its `security` command, which cuts one of those. A pack
+    token (47 characters) is not affected, and is never a JWT."""
+    if not token.startswith("eyJ"):
+        return ""
+    parts = token.split(".")
+    if len(parts) == 3 and all(parts):
+        return ""
+    return f"{len(token)} characters, {len(parts)} of 3 parts"
+
+
 def consumer_token() -> str:
     # The order of bin/celmis-auth-header: the keychain first, then the environment.
     token = _keychain("celmis-token") or os.environ.get("CELMIS_TOKEN", "").strip()
     if not token:
         raise Stop(EXIT_USAGE, "no token of yours to check visibility with: store it in the "
                                "keychain as celmis-token, or set CELMIS_TOKEN")
-    return _checked(token, "token")
+    token = _checked(token, "token")
+    cut = _cut_short(token)
+    if cut:
+        raise Stop(EXIT_USAGE, f"your token looks cut short ({cut}). A password typed at the macOS "
+                               "`security ... -w` prompt is cut at 128 characters. Store it again "
+                               "the way the plugin README shows (nothing was sent)")
+    return token
 
 
 # ─── HTTP ────────────────────────────────────────────────────────────
@@ -251,7 +282,38 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect)
+#: System root-certificate bundles, tried in this order when Python itself has none.
+_CA_BUNDLES = (
+    "/etc/ssl/cert.pem",                    # macOS, Alpine, FreeBSD
+    "/etc/ssl/certs/ca-certificates.crt",   # Debian, Ubuntu
+    "/etc/pki/tls/certs/ca-bundle.crt",     # Fedora, RHEL
+    "/etc/ssl/ca-bundle.pem",               # openSUSE
+)
+
+
+def tls_context() -> ssl.SSLContext:
+    """The default verifying context, with the system's roots when Python has none.
+
+    python.org's macOS build ships without CA certificates until its "Install
+    Certificates.command" has run, so every https request fails verification. Only
+    then (no certificates loaded, and no SSL_CERT_FILE / SSL_CERT_DIR asking for
+    something else) is the first system bundle that exists added. Verification is
+    never switched off or relaxed: the mode stays CERT_REQUIRED, the host name is
+    still checked."""
+    ctx = ssl.create_default_context()
+    if ctx.cert_store_stats()["x509_ca"] == 0 and not (
+            os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR")):
+        for bundle in _CA_BUNDLES:
+            if os.path.isfile(bundle):
+                try:
+                    ctx.load_verify_locations(cafile=bundle)
+                except (ssl.SSLError, OSError):
+                    continue
+                break
+    return ctx
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=tls_context()))
 
 
 class Reply:
@@ -270,7 +332,8 @@ class Reply:
 
 def request(method: str, url: str, headers: dict[str, str], data: bytes | None = None,
             limit: int = MAX_JSON_BYTES) -> Reply:
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={**headers, "User-Agent": USER_AGENT})
     try:
         with _OPENER.open(req, timeout=TIMEOUT) as resp:
             return Reply(resp.status, resp.headers, _read(resp, limit))
@@ -285,7 +348,16 @@ def request(method: str, url: str, headers: dict[str, str], data: bytes | None =
         if isinstance(reason, TimeoutError):
             raise Stop(EXIT_FAILED, "the server did not answer in time") from None
         if "CERTIFICATE" in str(reason).upper():
-            raise Stop(EXIT_FAILED, "the server's TLS certificate could not be verified") from None
+            why = getattr(reason, "verify_message", "")
+            # The root-store hint fits only "the root is unknown here" (OpenSSL 18,
+            # 19, 20); an expired certificate or a wrong host name is the server's.
+            unknown_root = getattr(reason, "verify_code", None) in (None, 18, 19, 20)
+            raise Stop(EXIT_FAILED,
+                       "the server's TLS certificate could not be verified"
+                       + (f" ({_clip(why, 80)})" if why else "")
+                       + (". If this Python has no root certificates (python.org's macOS build has none "
+                          "until you run the \"Install Certificates.command\" that came with it), run "
+                          "that, or set SSL_CERT_FILE to a CA bundle" if unknown_root else "")) from None
         raise Stop(EXIT_FAILED, f"could not reach the server ({_clip(type(reason).__name__)})") from None
     except (TimeoutError, OSError) as err:
         raise Stop(EXIT_FAILED, f"could not reach the server ({_clip(type(err).__name__)})") from None
@@ -308,11 +380,30 @@ def _retry_after(reply: Reply) -> int:
     return int(raw) if raw.isdigit() and 0 < int(raw) <= 3600 else 0
 
 
+#: What CELMIS_URL must be when the reply came from something other than the API.
+CELMIS_URL_HINT = ("CELMIS_URL is the address the Connect page shows; on the bundled deployment "
+                   "it ends in /backend")
+
+
+def _blocked(reply: Reply, doing: str) -> Stop | None:
+    """A 403 whose body is not Celmis JSON did not come from Celmis: a CDN or
+    firewall in front of it refused the request (a Cloudflare bot check answers
+    plain text "error code: 1010"). Said as that, not as a token problem."""
+    if reply.status != 403 or reply.json():
+        return None
+    return Stop(EXIT_FAILED, f"{doing}: something in front of the server (a CDN or firewall) refused "
+                             "the request with HTTP 403; it is not Celmis and not your token. Ask whoever "
+                             f"runs the server to let {USER_AGENT} through")
+
+
 def _fail(reply: Reply, doing: str) -> Stop:
     """The exit for a reply that is not a success. Never shows a body unless it
     is the server's structured refusal of an upload."""
     status = reply.status
     detail = reply.json().get("detail")
+    blocked = _blocked(reply, doing)
+    if blocked:
+        return blocked
     if status == 401:
         return Stop(EXIT_FAILED, "the server did not accept the pack token: it may be revoked or "
                                  "expired, or its creator can no longer maintain the pack")
@@ -324,6 +415,10 @@ def _fail(reply: Reply, doing: str) -> Stop:
         return Stop(EXIT_REFUSED, f"the server refused the files ({_clip(detail.get('code', 'refused'), 40)}): "
                                   f"{_clip(detail.get('message', ''), 300)}", lines)
     if status == 404:
+        if not reply.json():
+            # The API always answers in JSON; this is the web app behind the same host.
+            return Stop(EXIT_FAILED, f"{doing}: not found, and the answer is not from the Celmis API. "
+                                     + CELMIS_URL_HINT)
         return Stop(EXIT_FAILED, f"{doing}: not found (was the pack deleted, or has it no version yet?)")
     if status in (411, 413):
         return Stop(EXIT_REFUSED, f"{doing}: the upload is larger than the server accepts")
@@ -569,7 +664,7 @@ def _pack_status(base: str, token: str) -> dict:
         raise _fail(reply, "status")
     data = reply.json()
     if not isinstance(data.get("pack"), dict):
-        raise Stop(EXIT_FAILED, "the server's answer is not a Celmis pack status; is CELMIS_URL right?")
+        raise Stop(EXIT_FAILED, "the server's answer is not a Celmis pack status. " + CELMIS_URL_HINT)
     return data
 
 
@@ -734,6 +829,9 @@ class McpClient:
     def _call(self, method: str, params: dict) -> dict:
         self._id += 1
         reply = self._post({"jsonrpc": "2.0", "id": self._id, "method": method, "params": params})
+        blocked = _blocked(reply, "MCP")
+        if blocked:
+            raise blocked
         if reply.status in (401, 403):
             raise Stop(EXIT_FAILED, "the server did not accept your Celmis token for the MCP endpoint "
                                     "(expired, revoked, or without the dev scope)")
@@ -748,7 +846,7 @@ class McpClient:
     def open(self) -> None:
         result = self._call("initialize", {
             "protocolVersion": self.version, "capabilities": {},
-            "clientInfo": {"name": PROG, "version": "1"}})
+            "clientInfo": {"name": PROG, "version": VERSION}})
         negotiated = result.get("protocolVersion")
         if isinstance(negotiated, str) and re.fullmatch(r"[0-9-]{10}", negotiated):
             self.version = negotiated
@@ -795,6 +893,7 @@ def visible_skills(base: str, token: str) -> set[tuple[str, str]]:
 def cmd_verify(args: argparse.Namespace) -> int:
     base = server_url()
     token = pack_token()
+    own_token = consumer_token()             # a missing or cut-short token ends it before any request
     folder = read_folder(args.dir)
     data = _pack_status(base, token)
     _show_status(data)
@@ -804,7 +903,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
                      if isinstance(f, dict) and f.get("kind") == "skill" and f.get("skill")}
                     if in_sync else set(folder.skills()))
     slug = str(data["pack"].get("slug"))
-    mine = visible_skills(base, consumer_token())
+    mine = visible_skills(base, own_token)
     missing = [s for s in wanted if (slug, s) not in mine]
     say(f"visible to you: {len(wanted) - len(missing)}/{len(wanted)}")
     _listing("not visible to you", missing)

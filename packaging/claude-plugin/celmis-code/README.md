@@ -22,9 +22,13 @@ The plugin ships:
 2. Export two variables in the shell that starts Claude Code:
 
    ```bash
-   export CELMIS_URL=https://celmis.example.com      # no trailing slash, no /mcp
-   export CELMIS_TOKEN=...                           # the issued token
+   export CELMIS_URL=https://celmis.example.com/backend   # no trailing slash, no /mcp
+   export CELMIS_TOKEN=...                                # the issued token
    ```
+
+   `CELMIS_URL` is the address the web app's Connect page shows; on the bundled
+   deployment it ends in `/backend`, because the API (and `/mcp/dev/`) is served
+   under that prefix.
 
 3. Add the marketplace and install the plugin:
 
@@ -53,7 +57,18 @@ crosses the network readable. The session start-up note warns about it, and the
 
 `bin/celmis-auth-header` prints the header Claude Code's `headersHelper`
 expects, reading the token from the macOS keychain (service `celmis-token`) or
-`secret-tool`, then from `CELMIS_TOKEN`.
+`secret-tool`, then from `CELMIS_TOKEN`. Store the token in the keychain once.
+On macOS copy the token, then run
+
+```sh
+printf 'add-generic-password -U -s celmis-token -a %s -w %s\n' "$USER" "$(pbpaste | tr -cd 'A-Za-z0-9._~+/=-')" | security -i && pbcopy </dev/null
+```
+
+On Linux, `secret-tool store --label celmis-token service celmis-token`. Do not
+type the value at the prompt of `security`: it keeps only the first 128
+characters, which cuts an MCP token. The helper and `celmis-pack verify` refuse a
+token that looks cut short (it starts with `eyJ` but is not three parts joined by
+dots) and say so, with its length and never its value.
 
 `${CLAUDE_PLUGIN_ROOT}` exists only inside the plugin, so a copy of `.mcp.json`
 in your own project settings must name the script by an absolute path. Install a
@@ -68,7 +83,7 @@ install -m 0755 "<plugin directory>/bin/celmis-auth-header" ~/.local/bin/celmis-
   "mcpServers": {
     "celmis": {
       "type": "http",
-      "url": "https://celmis.example.com/mcp/dev/",
+      "url": "https://celmis.example.com/backend/mcp/dev/",
       "headersHelper": "/home/you/.local/bin/celmis-auth-header"
     }
   }
@@ -128,11 +143,20 @@ Sharing tab, not your own token. The publish token reaches that one pack and no
 other route.
 
 ```sh
-export CELMIS_URL=https://celmis.example.com
-# macOS: security add-generic-password -s celmis-pack-token -a "$USER" -w
+export CELMIS_URL=https://celmis.example.com/backend
+# macOS: copy the token, then store it without the prompt of `security`
+printf 'add-generic-password -U -s celmis-pack-token -a %s -w %s\n' "$USER" "$(pbpaste | tr -cd 'A-Za-z0-9._~+/=-')" | security -i && pbcopy </dev/null
 # Linux: secret-tool store --label celmis-pack-token service celmis-pack-token
 celmis-pack push ./skills/billing --note "first version"
 ```
+
+`CELMIS_URL` is the address the web app shows; on the bundled deployment it ends
+in `/backend`. The prompt of `security` keeps only the first 128 characters, which
+cuts an MCP token; a publish token is short enough, but use the same command for
+both. Every request carries `User-Agent: celmis-pack/<version>`, and a Python
+without root certificates (python.org's macOS build, until its
+`Install Certificates.command` has run) falls back to the system bundle; set
+`SSL_CERT_FILE` to name another.
 
 | Command | Does |
 |---|---|

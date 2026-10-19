@@ -834,3 +834,20 @@ def test_a_folder_that_is_one_wrapper_directory_is_stripped_the_way_the_server_s
     ours = cli.read_folder(str(root))
     assert ours.top_dir == "inner" and sorted(ours.shas()) == ["a.md", "b/c.md"]
     assert {f.path for f in ingest.ingest_zip(ours.zip()).files} == {"a.md", "b/c.md"}
+
+
+def test_a_not_found_page_from_the_web_app_says_celmis_url_misses_the_api_path(tmp_path):
+    # CELMIS_URL without /backend on the bundled deployment reaches the web app,
+    # whose 404 is a page, not the API's JSON: the advice is the address, not the pack.
+    page = (404, {"Content-Type": "text/html"}, b"<!DOCTYPE html><html><body>404</body></html>")
+    with stub(lambda *a: page) as s:
+        code, out, err = run("status", url=s.url, token="cpk_" + "a" * 43)
+    assert (code, out) == (1, "")
+    assert "not from the Celmis API" in err and "/backend" in err
+    assert "was the pack deleted" not in err
+
+
+def test_an_answer_that_is_not_a_pack_status_names_the_address_to_use(tmp_path):
+    with stub(lambda *a: (200, {"Content-Type": "application/json"}, b'{"ok": true}')) as s:
+        code, out, err = run("status", url=s.url, token="cpk_" + "a" * 43)
+    assert code == 1 and "not a Celmis pack status" in err and "/backend" in err

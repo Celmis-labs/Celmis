@@ -20,6 +20,42 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.0.1] — 2026-10-19
+
+### Fixed
+
+- **`celmis-pack` introduces itself.** Every request, to the publish routes and
+  to the MCP endpoint `verify` uses, now sends `User-Agent: celmis-pack/<version>`.
+  Before, it sent Python's own `Python-urllib/3.x`, which a CDN bot check in front
+  of a real installation (Cloudflare Browser Integrity Check, answering
+  `403 error code: 1010`) refuses. A 403 whose body is not Celmis JSON is now
+  reported as "something in front of the server refused the request" instead of
+  "the server did not accept your token".
+- **`celmis-pack` verifies https on a Python without root certificates.** The
+  python.org build for macOS ships with none until its `Install Certificates.command`
+  has run, and every request then failed with a bare "TLS certificate could not be
+  verified". When Python has no certificates and `SSL_CERT_FILE` / `SSL_CERT_DIR`
+  name nothing, the system bundle (`/etc/ssl/cert.pem`, else the usual Linux
+  paths) is loaded. Verification is never relaxed, and when it still fails the
+  message names the reason, and when the root is unknown here, the two fixes: run
+  `Install Certificates.command`, or set `SSL_CERT_FILE` to a CA bundle.
+- **A token cut short at the macOS keychain prompt is recognised.** A password typed
+  at the prompt of the macOS `security` command keeps only its first 128
+  characters, which cuts an MCP token (a JWT, three parts) to two and made the
+  server answer `401 invalid_token`. `celmis-pack verify` (exit 2, before any
+  request) and `bin/celmis-auth-header` (exit 1) now refuse an `eyJ...` token that
+  is not three non-empty parts and say how long it was, never what it was. The
+  plugin README and `docs/CODEBASE.md` now store a token with
+  `printf 'add-generic-password ...' | security -i`, which keeps the whole value,
+  takes only token characters from the clipboard and clears it only once the
+  token is stored; a test fails if any document recommends the prompting form again.
+- **`CELMIS_URL` examples include `/backend`.** On the bundled deployment the API,
+  and with it `/mcp/dev/` and the publish routes, is served under `/backend`; the
+  examples in the plugin README, `docs/CODEBASE.md`, `docs/MCP_DEV.md` and
+  `docs/mcp-access.md` showed the bare host, which reaches the web app, not the
+  API. They now show the address the Connect page shows, and `celmis-pack` says
+  so when a 404 or a status answer comes from the web app instead of the API.
+
 ## [3.0.0] — 2026-10-17
 
 ### Upgrade notes

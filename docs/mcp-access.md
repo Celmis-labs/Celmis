@@ -103,7 +103,7 @@ an environment variable so the file can be committed:
   "mcpServers": {
     "celmis": {
       "type": "http",
-      "url": "https://celmis.example.com/mcp/dev/",
+      "url": "https://celmis.example.com/backend/mcp/dev/",
       "headers": { "Authorization": "Bearer ${CELMIS_MCP_TOKEN}" }
     }
   }

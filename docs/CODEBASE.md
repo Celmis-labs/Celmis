@@ -302,11 +302,17 @@ with the token's id; making and revoking a token as `token_created` and
 library only) does the packing and the calls:
 
 1. In the pack's **Sharing** tab, make a token and copy it. It is shown once.
-2. `export CELMIS_URL=https://celmis.example.com`
-3. Put the token in the keychain rather than in a file or a shell profile:
-   `security add-generic-password -s celmis-pack-token -a "$USER" -w` on macOS
-   (it asks for the value), `secret-tool store --label celmis-pack-token service
-   celmis-pack-token` on Linux. `CELMIS_PACK_TOKEN` in the environment also works.
+2. `export CELMIS_URL=https://celmis.example.com/backend`: the address the web
+   app shows; on the bundled deployment it ends in `/backend`, where the API lives.
+3. Put the token in the keychain rather than in a file or a shell profile. On
+   macOS copy the token, then run
+   ```sh
+   printf 'add-generic-password -U -s celmis-pack-token -a %s -w %s\n' "$USER" "$(pbpaste | tr -cd 'A-Za-z0-9._~+/=-')" | security -i && pbcopy </dev/null
+   ```
+   (the prompt of `security` keeps only the first 128 characters, which cuts an MCP
+   token, so the value is not typed there), on Linux `secret-tool store --label
+   celmis-pack-token service celmis-pack-token`. `CELMIS_PACK_TOKEN` in the
+   environment also works.
 4. `celmis-pack push ./skills/billing --note "first version"`
 
 `push` checks the folder the way the server does (count, size, text only, paths,
