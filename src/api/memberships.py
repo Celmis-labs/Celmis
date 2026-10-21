@@ -13,7 +13,7 @@ Now every one of them calls `change_membership`, which asks the single rule
 in src/users/roles.py (`can_change`), writes the row, and records the change
 in the audit log (actor, user, workspace, old → new).
 
-Three pieces of state hang off a membership and are kept true here, in the
+Four pieces of state hang off a membership and are kept true here, in the
 same transaction, so no route can forget them:
 
   * a REMOVAL revokes the live email-bound invites addressed to that person
@@ -23,6 +23,18 @@ same transaction, so no route can forget them:
     what they held on its knowledge packs (their names on packs, the publish
     tokens and the invite links they made). Otherwise the rights would lie
     dormant and come back, unasked, the day the person is added again.
+  * a REMOVAL also revokes the MCP tokens the person holds for THAT workspace
+    (every kind: issued by an admin, minted by themselves, an OAuth grant). The
+    membership check already refuses such a token while the person is out, but
+    the row stayed live, so adding them back, even as a viewer, would have
+    brought the very same token back to life. A role CHANGE revokes nothing:
+    a token never reads the role. The revoked row records why
+    (``revoked_by = membership_removed:<who>``) and the audit log gets one
+    ``mcp.token_revoked_on_removal`` row per workspace. This process forgets the
+    cached rows at once; another worker's cache catches up within
+    ``token_store.CACHE_TTL_SECONDS`` (30 s), and until then it is the
+    membership check that refuses the token, on every call and uncached, for
+    everybody but a global admin (who needs no membership).
   * a GRANT to a team workspace (not the person's own personal one) closes
     their pending access request as approved, listing what was granted.
     Otherwise an admin who adds somebody from /admin/users leaves the request
@@ -159,6 +171,8 @@ async def change_memberships(
     revoked = await _revoke_invites_on_removal(session, user_id=user_id, planned=planned)
     await _leave_teams_on_removal(session, user_id=user_id, planned=planned)
     await _release_packs_on_removal(session, actor=actor, user_id=user_id, planned=planned)
+    revoked_tokens = await _revoke_tokens_on_removal(
+        session, actor=actor, user_id=user_id, planned=planned)
     resolved = None
     if via != "access_request":
         resolved = await _resolve_pending_request(
@@ -174,6 +188,9 @@ async def change_memberships(
             workspace_id=ws_id, target=user_id, ip=ip,
             detail={"invite_ids": invite_ids, "via": via},
         )
+    record_token_revocations(
+        revoked_tokens, actor=actor.email, actor_id=actor.id, user_id=user_id,
+        via=via, ip=ip)
     if resolved is not None:
         record_action(
             action="access_request.resolved_by_grant", actor=actor.email,
@@ -284,6 +301,44 @@ def release_account_sync(session: Session, *, user_id: str, email: str) -> dict[
     return revoked
 
 
+def revoke_account_tokens_sync(session: Session, *, user_id: str) -> dict[str, list[str]]:
+    """Every MCP token a person holds, in every workspace, revoked in the
+    caller's transaction - for the deletion of their account (a synchronous
+    session, no actor), the counterpart of what a removal does for one
+    workspace. The rows are kept as a record (``revoked_by = account_deleted:<id>``).
+    Returns ``{workspace_id: [token ids]}`` for :func:`record_token_revocations`."""
+    from src.mcp_server import token_store
+
+    return token_store.revoke_held(session, by=f"account_deleted:{user_id}", user_id=user_id)
+
+
+def revoke_workspace_tokens_sync(
+    session: Session, *, by: str, workspace_ids: list[str],
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Every MCP token bound to workspaces that are about to be deleted, whoever
+    holds it, revoked in the caller's transaction: the person tokens (``pat``,
+    ``cli``, ``self``, ``oauth_grant``, internal) and the project tokens
+    (``cmcp_``), which have no person and so are ended by nothing else.
+    Returns ``(person tokens, project tokens)``, each ``{workspace_id: [token ids]}``,
+    for :func:`record_token_revocations`. Call it BEFORE the workspace row is deleted."""
+    from src.mcp_server import project_tokens, token_store
+
+    return (
+        token_store.revoke_held(session, by=by, workspace_ids=workspace_ids),
+        project_tokens.revoke_held(session, workspace_ids=workspace_ids),
+    )
+
+
+def merge_revocations(*parts: dict[str, list[str]]) -> dict[str, list[str]]:
+    """``{workspace_id: [token ids]}`` dicts joined, an id listed once."""
+    out: dict[str, list[str]] = {}
+    for part in parts:
+        for ws_id, ids in part.items():
+            merged = out.setdefault(ws_id, [])
+            merged.extend(i for i in ids if i not in merged)
+    return out
+
+
 async def _release_packs_on_removal(
     session: AsyncSession, *, actor: User, user_id: str,
     planned: list[tuple[str, WorkspaceMember | None, str | None, str | None]],
@@ -301,6 +356,53 @@ async def _release_packs_on_removal(
 
     await pack_store.release_person(
         session, user_id, removed, actor=actor.email, actor_id=actor.id)
+
+
+async def _revoke_tokens_on_removal(
+    session: AsyncSession, *, actor: User, user_id: str,
+    planned: list[tuple[str, WorkspaceMember | None, str | None, str | None]],
+) -> dict[str, list[str]]:
+    """Stage `revoked_at` on the MCP tokens a removed member holds for the
+    workspaces they left, and for those only. Returns ``{workspace_id: [token
+    ids]}``; :func:`record_token_revocations` audits them and forgets the cached
+    rows once the transaction has committed."""
+    removed = [ws_id for ws_id, _row, old, new in planned if old is not None and new is None]
+    if not removed:
+        return {}
+    from src.mcp_server import token_store
+
+    return await session.run_sync(lambda s: token_store.revoke_held(
+        s, by=f"membership_removed:{actor.id}", user_id=user_id, workspace_ids=removed))
+
+
+def record_token_revocations(
+    revoked: dict[str, list[str]], *, actor: str, actor_id: str, user_id: str | None,
+    via: str, ip: str | None = None, project_revoked: dict[str, list[str]] | None = None,
+) -> None:
+    """After the commit that revoked ``revoked`` (person tokens) and
+    ``project_revoked`` (project tokens): drop the person rows from this
+    process's token cache and write one audit row per workspace, with the
+    project token ids under their own key. Never raises."""
+    project_revoked = project_revoked or {}
+    if not revoked and not project_revoked:
+        return
+    try:
+        from src.mcp_server import token_store
+        from src.security.audit import record_action
+
+        for ws_id in dict.fromkeys([*revoked, *project_revoked]):
+            token_ids = revoked.get(ws_id, [])
+            for token_id in token_ids:
+                token_store.invalidate(token_id)
+            detail: dict = {"token_ids": token_ids, "via": via}
+            if project_revoked.get(ws_id):
+                detail["project_token_ids"] = project_revoked[ws_id]
+            record_action(
+                action="mcp.token_revoked_on_removal", actor=actor, actor_id=actor_id,
+                workspace_id=ws_id, target=user_id or ws_id, ip=ip, detail=detail,
+            )
+    except Exception as exc:  # noqa: BLE001 - the bookkeeping never undoes a removal
+        logger.warning("mcp_token_revoke_audit_failed err=%s", type(exc).__name__)
 
 
 async def _resolve_pending_request(
@@ -343,6 +445,7 @@ async def _resolve_pending_request(
 
 
 __all__ = [
-    "actor_role", "change_membership", "change_memberships", "refuse_unless_can_change",
-    "release_account_sync",
+    "actor_role", "change_membership", "change_memberships", "merge_revocations",
+    "record_token_revocations", "refuse_unless_can_change", "release_account_sync",
+    "revoke_account_tokens_sync", "revoke_workspace_tokens_sync",
 ]

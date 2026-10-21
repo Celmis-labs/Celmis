@@ -29,8 +29,10 @@ Configuration (environment):
                      celmis-pack-token`
   CELMIS_TOKEN       (verify only) your own Celmis token: the keychain entry
                      "celmis-token" first, else CELMIS_TOKEN. This is the order
-                     of celmis-auth-header, so verify checks the token your
-                     agent connects with
+                     of celmis-auth-header, the helper for a server entry you
+                     write yourself. The plugin's own token is kept by Claude
+                     Code (/plugin configure) and cannot be read from here: to
+                     verify with it, store the same token in one of these two
   SSL_CERT_FILE      optional: a CA bundle to verify the server's certificate with,
                      for a Python that has none (python.org's macOS build, until
                      its "Install Certificates.command" has run). Without it the
@@ -65,7 +67,7 @@ from pathlib import Path, PurePosixPath
 
 PROG = "celmis-pack"
 #: Kept equal to `src.__version__` by tests/plugin; sent as the User-Agent.
-VERSION = "3.0.1"
+VERSION = "3.0.2"
 USER_AGENT = f"{PROG}/{VERSION}"
 
 EXIT_OK = 0

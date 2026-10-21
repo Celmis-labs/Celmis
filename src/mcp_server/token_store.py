@@ -452,6 +452,51 @@ def revoke_all_for_user(session, user_id: str, by: str) -> int:  # noqa: ANN001
     return len(rows)
 
 
+def revoke_held(session, *, by: str, user_id: str | None = None,  # noqa: ANN001
+                workspace_ids: Iterable[str] | None = None) -> dict[str, list[str]]:
+    """Stage the revocation of every live grant a person holds in some
+    workspaces (``user_id`` and ``workspace_ids``), or that anybody holds in
+    them (``workspace_ids`` alone, for a workspace that is deleted). Returns
+    ``{workspace_id: [token ids]}`` for the audit.
+
+    For a caller that removes a membership (or a workspace) in ITS transaction:
+    this neither commits nor touches the cache. Call :func:`invalidate` for the
+    returned ids once the commit has gone through. Every kind of row goes
+    (``pat``, ``cli``, ``self``, ``oauth_grant`` and the short-lived internal
+    ones): they are all bound to one person and one workspace. Project tokens
+    live elsewhere and have no person. ``by`` is recorded in ``revoked_by`` as
+    ``<reason>:<who did it>``, the form the erasure of an account already uses.
+
+    Why a row is revoked and not just left to the membership check: the check
+    refuses the token while the person is out, but the row would stay live, and
+    adding the person back (even as a viewer) would bring the very same token
+    back to life until it expired.
+    """
+    from sqlalchemy import select
+
+    from src.db.models import McpToken
+
+    if user_id is None and workspace_ids is None:
+        raise ValueError("revoke_held needs a person, workspaces, or both")
+    wanted = None if workspace_ids is None else list(dict.fromkeys(workspace_ids))
+    if wanted is not None and not wanted:
+        return {}
+    stmt = select(McpToken).where(McpToken.revoked_at.is_(None))
+    if user_id is not None:
+        stmt = stmt.where(McpToken.user_id == user_id)
+    if wanted is not None:
+        stmt = stmt.where(McpToken.workspace_id.in_(wanted))
+    now = datetime.now(UTC)
+    out: dict[str, list[str]] = {}
+    for row in session.execute(stmt).scalars().all():
+        if _aware(row.expires_at) <= now:
+            continue  # already dead; revoking it would only add noise to the audit
+        row.revoked_at = now
+        row.revoked_by = by
+        out.setdefault(row.workspace_id, []).append(row.id)
+    return out
+
+
 def update_row(session, token_id: str, *, patterns: Iterable[str] | None = None,  # noqa: ANN001
                expires_in_days: int | None = None, allow_write: bool | None = None,
                label: str | None = None):
@@ -523,5 +568,5 @@ __all__ = [
     "CACHE_TTL_SECONDS", "INTERNAL_KIND", "TokenError", "TokenView", "active_grant", "clamp_days",
     "create_row", "invalidate", "legacy_tokens_accepted", "list_rows", "lookup",
     "max_days", "may_issue", "mint", "mint_internal", "normalise_patterns", "revoke",
-    "self_service_enabled", "sign", "touch", "update_row",
+    "revoke_held", "self_service_enabled", "sign", "touch", "update_row",
 ]

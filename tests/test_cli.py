@@ -96,6 +96,7 @@ def test_ask_raw_mode():
 # ─── index command (real graph якщо repo cloned) ────────────────────
 
 
+@pytest.mark.real_workspace
 @pytest.mark.skipif(
     not Path(f"~/code-analysis/repos/{REAL_REPO}").expanduser().exists(),
     reason=f"{REAL_REPO} not cloned",
@@ -109,6 +110,7 @@ def test_index_command_real_repo():
     assert "edges:" in result.stdout
 
 
+@pytest.mark.real_workspace
 @pytest.mark.skipif(
     not Path(f"~/code-analysis/data/{REAL_REPO}/graph.fdblite").expanduser().exists(),
     reason=f"graph not built — run `analyzer index {REAL_REPO}` first",
@@ -148,6 +150,7 @@ def test_graph_stats_no_graph(tmp_path, monkeypatch):
 # ─── DoD: повний ask на real graph + mocked Gemini ─────────────────
 
 
+@pytest.mark.real_workspace
 @pytest.mark.skipif(
     not Path(f"~/code-analysis/data/{REAL_REPO}/graph.fdblite").expanduser().exists(),
     reason="graph not built",

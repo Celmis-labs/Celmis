@@ -2,9 +2,9 @@
   "mcpServers": {
     "celmis": {
       "type": "http",
-      "url": "${CELMIS_URL}/mcp/dev/",
+      "url": "${user_config.celmis_url}/mcp/dev/",
       "headers": {
-        "Authorization": "Bearer ${CELMIS_TOKEN}"
+        "Authorization": "Bearer ${user_config.celmis_token}"
       }
     }
   }

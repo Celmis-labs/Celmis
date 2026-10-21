@@ -108,10 +108,41 @@ def expand(store: Any, symbol: str, direction: str, depth: int,
     return rows
 
 
+#: What the dev tools (`find`, `grep`) tell the caller to do about a cut: they take `repo=`.
+TARGET_ONE_REPO = "pass repo= to target one"
+#: What `search_symbols` tells them: it has no `repo` parameter, only `project_id`.
+#: Not "or a narrower query": the first 40 repositories are searched whatever the query.
+NARROW_THE_SYMBOL_SEARCH = "pass project_id= to narrow"
+
+
+def cut_note(searched: int, total: int, *, advice: str = TARGET_ONE_REPO) -> str:
+    """The one line that says a search covered `searched` of `total` repositories.
+
+    `advice` is the way out, and it must name parameters the tool really has:
+    `repo=` for the dev tools, not for `search_symbols`."""
+    return f"searched {searched} of {total} repos; {advice}"
+
+
+def cap_repos(slugs: list[str], *, advice: str = TARGET_ONE_REPO) -> tuple[list[str], str]:
+    """`slugs` cut to `MAX_REPOS_PER_CALL`, and the line that says so ("" if nothing was cut).
+
+    A tool that fans out over every repository the caller can read calls this
+    FIRST, on the repositories that are really readable, and prints the line:
+    a search that covered 40 of 90 repositories and said nothing reads as "no
+    other repository has it". `map_repos` still caps, as a backstop, but a tool
+    must not rely on it - its cut is only logged.
+    """
+    if len(slugs) <= MAX_REPOS_PER_CALL:
+        return slugs, ""
+    return slugs[:MAX_REPOS_PER_CALL], cut_note(MAX_REPOS_PER_CALL, len(slugs), advice=advice)
+
+
 def map_repos[T](slugs: list[str], fn: Callable[[str], T]) -> dict[str, T]:
     """Run `fn(slug)` per repository on a bounded pool. A failing repository
     is logged and left out: one broken graph must not blank the answer. The
-    fan-out is capped at `MAX_REPOS_PER_CALL`."""
+    fan-out is capped at `MAX_REPOS_PER_CALL` - silently, so a caller that can
+    reach more repositories than that cuts them itself with `cap_repos` and
+    says so."""
     if len(slugs) > MAX_REPOS_PER_CALL:
         logger.info("dev_fanout_capped asked=%d cap=%d", len(slugs), MAX_REPOS_PER_CALL)
         slugs = slugs[:MAX_REPOS_PER_CALL]

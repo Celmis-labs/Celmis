@@ -192,6 +192,7 @@ def _module_file_locations(
     discovery uses.
     """
     from src.config import get_settings
+    from src.security.secret_files import plain_file
 
     settings = get_settings()
     extensions = set(settings.supported_extensions)
@@ -200,18 +201,35 @@ def _module_file_locations(
 
     for raw in modules:
         name = str(raw).rsplit("/", 1)[-1].strip()
-        if not name:
+        # A module name is text a model produced: `..` would walk the folder of
+        # every other clone, so a name is one plain folder name or nothing.
+        if not name or name in (".", "..") or "\x00" in name or "\\" in name:
             continue
         for candidate in (repo_path / name, repo_path / "src" / name):
-            if not candidate.is_dir():
+            try:
+                # A name the operating system refuses (longer than a file name
+                # can be) raises OSError whose text carries the clone's path:
+                # it is a folder that is not there. A folder that IS a link is
+                # not walked either: its files would be listed a second time,
+                # under the link's name.
+                if candidate.is_symlink() or not candidate.is_dir():
+                    continue
+                paths = sorted(candidate.rglob("*"))
+            except OSError:
                 continue
-            for path in sorted(candidate.rglob("*")):
+            for path in paths:
                 if len(out) >= MAX_FALLBACK_FILES:
                     return out
-                if not path.is_file() or path.suffix not in extensions:
+                try:
+                    if not path.is_file() or path.suffix not in extensions:
+                        continue
+                except OSError:
                     continue
                 rel = str(path.relative_to(repo_path))
                 if rel in seen:
+                    continue
+                # A link out of the clone and a secret file are not a feature's source.
+                if plain_file(repo_path, rel) is None:
                     continue
                 seen.add(rel)
                 # (file, line, end_line) with line=1 and no end — the reader

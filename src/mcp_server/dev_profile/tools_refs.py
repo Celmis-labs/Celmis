@@ -32,7 +32,8 @@ def _imports(store, ids: list[str], limit: int) -> list[dict]:
 
 
 def _siblings(scope, slug: str) -> list[str]:
-    """Other repositories (readable ones) that share a group with `slug`."""
+    """Every other repository (a readable one) that shares a group with `slug`.
+    The caller looks in the first `MAX_SIBLINGS` and says how many it left out."""
     try:
         from src.groups import get_group_manager
         from src.mcp_server import tenancy
@@ -50,7 +51,7 @@ def _siblings(scope, slug: str) -> list[str]:
                     s = r
                 if s != slug and s in readable and s not in out:
                     out.append(s)
-        return out[:MAX_SIBLINGS]
+        return out
     except Exception as exc:  # noqa: BLE001
         logger.debug("dev_refs_siblings_failed repo=%s err=%s", slug, exc)
         return []
@@ -102,7 +103,8 @@ def run(repo: str, symbol: str, direction: str = "callers", depth: int = 1,
     head = [f"{direction} of {sym}: {len(rows)} in {slug}"]
     entries = list(fresh)
     if cross_repo and direction == "callers":
-        sibs = _siblings(scope, slug)
+        every_sibling = _siblings(scope, slug)
+        sibs = every_sibling[:MAX_SIBLINGS]
         sib_fresh = {e.slug: e for e in common.fresh_entries(sibs)}
         counts = []
         for sib in sibs:
@@ -123,6 +125,9 @@ def run(repo: str, symbol: str, direction: str = "callers", depth: int = 1,
                              for h in hits[:3])
         if counts:
             head.append("text refs in sibling repos (heuristic): " + ", ".join(counts))
+        if len(every_sibling) > len(sibs):
+            head.append(f"text refs looked for in {len(sibs)} of {len(every_sibling)} "
+                        "sibling repos; use grep with repo= for the rest")
 
     h = cursor.fingerprint(tool="refs", repo=slug, symbol=sym, direction=direction,
                            depth=depth, cross=cross_repo, limit=limit)

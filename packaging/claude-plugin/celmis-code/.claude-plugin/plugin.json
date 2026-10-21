@@ -8,5 +8,20 @@
   "homepage": "https://github.com/Celmis-labs/Celmis/tree/main/packaging/claude-plugin/celmis-code",
   "repository": "https://github.com/Celmis-labs/Celmis",
   "license": "AGPL-3.0-or-later",
-  "keywords": ["mcp", "code-search", "cross-repo", "code-intelligence"]
+  "keywords": ["mcp", "code-search", "cross-repo", "code-intelligence"],
+  "userConfig": {
+    "celmis_url": {
+      "type": "string",
+      "required": true,
+      "title": "Celmis server address",
+      "description": "The address the Connect page of your Celmis web app shows, for example https://celmis.example.com/backend: https, no trailing slash, no /mcp. Only localhost may use http."
+    },
+    "celmis_token": {
+      "type": "string",
+      "required": true,
+      "sensitive": true,
+      "title": "Celmis token",
+      "description": "The MCP token your Celmis administrator or the web app issued for you (shown once). Claude Code keeps it in secure storage (the macOS Keychain; elsewhere its own credentials file, readable only by you), never in a settings file."
+    }
+  }
 }

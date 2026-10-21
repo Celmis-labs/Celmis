@@ -1,5 +1,6 @@
-"""A bearer token over http crosses the network readable: the helper refuses,
-the hooks say so. A server on this machine is the one exception."""
+"""A bearer token over http crosses the network readable: the helper (for an entry
+you write yourself) refuses, the plugin's hooks say so for the plugin's own entry.
+A server on this machine is the one exception."""
 
 from __future__ import annotations
 
@@ -57,24 +58,47 @@ def test_the_hook_tells_secure_from_insecure_addresses(url, insecure):
     assert hook.insecure_url(url) is insecure
 
 
+def _configure(monkeypatch, url: str) -> None:
+    monkeypatch.setenv(C.URL_OPTION_ENV, url)
+    monkeypatch.setenv(C.TOKEN_OPTION_ENV, "tok.en-123")
+
+
 def test_a_session_on_a_plain_http_server_is_told_not_to_use_the_tools(monkeypatch, tmp_path):
-    monkeypatch.setenv("CELMIS_URL", "http://celmis.example.com")
-    monkeypatch.setenv("CELMIS_TOKEN", "tok.en-123")
+    _configure(monkeypatch, "http://celmis.example.com/backend")
     out = hook.cmd_session({"cwd": str(tmp_path)})
     assert "not https" in out and "tok.en-123" not in out
+    assert "/plugin configure celmis-code@celmis" in out, "and how to change the address"
     assert "Celmis is connected" not in out
 
 
+@pytest.mark.parametrize("url", ["http://localhost:8000", "http://127.0.0.1:8000/backend",
+                                 "http://[::1]:8000"])
+def test_a_server_on_this_machine_may_use_http(monkeypatch, tmp_path, url):
+    _configure(monkeypatch, url)
+    out = hook.cmd_session({"cwd": str(tmp_path)})
+    assert "Celmis is connected" in out and "not https" not in out
+
+
 def test_the_grep_nudge_is_silent_on_a_plain_http_server(monkeypatch):
-    monkeypatch.setenv("CELMIS_URL", "http://celmis.example.com")
-    monkeypatch.setenv("CELMIS_TOKEN", "tok.en-123")
+    _configure(monkeypatch, "http://celmis.example.com/backend")
     assert hook.cmd_pregrep({"tool_input": {"pattern": "load_config"}}) == ""
 
 
+def test_the_address_from_the_legacy_variable_is_not_what_the_hooks_check(monkeypatch, tmp_path):
+    """The plugin's address is its option. A plain-http CELMIS_URL left in the shell
+    from 3.0.1 neither blocks a configured https plugin nor counts as a warning."""
+    monkeypatch.setenv("CELMIS_URL", "http://celmis.example.com")
+    _configure(monkeypatch, "https://celmis.example.com/backend")
+    out = hook.cmd_session({"cwd": str(tmp_path)})
+    assert "Celmis is connected" in out and "not https" not in out
+
+
 def test_the_readme_says_the_shipped_entry_does_not_check_the_scheme():
-    """The default `.mcp.json` has no scheme guard (only the helper does), and
-    the README must not let a reader assume it has."""
-    text = (C.PLUGIN / "README.md").read_text(encoding="utf-8")
-    assert "must be `https://`" in text and "nothing in it checks the scheme" in text
+    """The plugin's `.mcp.json` substitutes the address as given: Claude Code has no
+    option type that validates a scheme. The README must not let a reader assume
+    otherwise, and must send them to the hook's warning and the helper recipe."""
+    text = " ".join((C.PLUGIN / "README.md").read_text(encoding="utf-8").split())
+    assert "must be `https://`" in text and "nothing in the plugin's entry checks the scheme" in text.lower()
     cfg = json.loads((C.PLUGIN / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["celmis"]
-    assert "headersHelper" not in cfg, "if the entry gains the helper, drop this warning"
+    assert "headersHelper" not in cfg, "if the entry gains a scheme guard, drop this warning"
+    assert cfg["headers"] == {"Authorization": "Bearer ${user_config.celmis_token}"}

@@ -5,7 +5,8 @@
  * add the MCP server by hand), then say how the agent is meant to use them.
  *
  * Nothing here issues or shows a secret. A token is made on the MCP settings
- * page; the commands below refer to it by variable name, and what an agent
+ * page; the plugin asks for it (and the address shown here) the first time it is
+ * enabled, the manual route refers to it by variable name, and what an agent
  * can read is what the person who owns the token can read.
  */
 
@@ -48,13 +49,16 @@ export default function CodebaseConnectPage() {
   const mcpUrl = typeof window !== "undefined" ? publicMcpUrl("/mcp/dev/") : "/mcp/dev/";
   const origin = typeof window !== "undefined" ? publicMcpUrl("") : "";
 
-  const pluginCommands = [
-    `export CELMIS_URL=${origin || "<server address>"}`,
-    `export CELMIS_TOKEN=<${t("codebase.connect.tokenPlaceholder")}>`,
-    "",
+  // The plugin asks Claude Code for two values, not the shell: the address (shown
+  // below, the same one this page's origin gives) and the token from step 1, which
+  // Claude Code keeps in the system keychain. Nothing here is exported or contains
+  // a token; `/plugin configure` changes either later.
+  const pluginInstall = [
     "/plugin marketplace add Celmis-labs/Celmis",
     "/plugin install celmis-code@celmis",
   ].join("\n");
+  const pluginAddress = origin || "<server address>";
+  const pluginConfigure = "/plugin configure celmis-code@celmis";
 
   // `Authorization` is held in a variable on purpose: the web tree must not
   // contain the literal header-with-bearer template (tests/security/
@@ -111,7 +115,18 @@ export default function CodebaseConnectPage() {
               <p className="text-xs text-[var(--color-muted-foreground)]">
                 {t("codebase.connect.plugin.note")}
               </p>
-              <CodeBlock text={pluginCommands} />
+              <CodeBlock text={pluginInstall} />
+              <p className="text-xs text-[var(--color-muted-foreground)]">
+                {t("codebase.connect.plugin.address")}
+              </p>
+              <CodeBlock text={pluginAddress} />
+              <p className="text-xs text-[var(--color-muted-foreground)]">
+                {t("codebase.connect.plugin.stored")}
+              </p>
+              <p className="text-xs text-[var(--color-muted-foreground)]">
+                {t("codebase.connect.plugin.change")}
+              </p>
+              <CodeBlock text={pluginConfigure} />
             </>
           ) : (
             <>

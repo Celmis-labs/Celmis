@@ -28,6 +28,8 @@ from typing import Any
 
 import frontmatter
 
+from src.vault.reader import vault_note_files
+
 logger = logging.getLogger(__name__)
 
 _INDEX_FILENAME = ".celmis_reverse_index.json"
@@ -54,7 +56,9 @@ def build_reverse_index(
             logger.warning("reverse_index_cache_corrupt path=%s", cache)
 
     reverse: dict[str, set[str]] = defaultdict(set)
-    for md in vault_root.rglob("*.md"):
+    # A link out of the vault, or a secret-named note, is not indexed (the same
+    # walk every listing of the vault uses, so the reader and the index agree).
+    for md in vault_note_files(vault_root):
         rel = str(md.relative_to(vault_root))
         try:
             post = frontmatter.load(md)

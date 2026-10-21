@@ -130,6 +130,7 @@ def test_detect_features_no_vault(tmp_path, monkeypatch):
 REAL_REPO = os.environ.get("CELMIS_REAL_REPO", "acme-frontend")
 
 
+@pytest.mark.real_workspace
 @pytest.mark.skipif(
     not Path(f"~/code-analysis/data/{REAL_REPO}/graph.fdblite").expanduser().exists(),
     reason=f"graph not indexed (run `analyzer index {REAL_REPO}`)",

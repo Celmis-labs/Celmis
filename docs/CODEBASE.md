@@ -353,8 +353,9 @@ labelled for it, so it can be revoked without touching the others.
   token.
 - **Can *I* see it?** Visibility is per person. `celmis-pack verify ./skills/billing`
   runs `status`, then asks `/mcp/dev/`, with **your own** token (the keychain entry
-  `celmis-token` first, then `CELMIS_TOKEN`: the order `celmis-auth-header` uses,
-  so the tool and the agent always speak as the same person), which
+  `celmis-token` first, then `CELMIS_TOKEN`: the order `celmis-auth-header` uses; the
+  Claude Code plugin's own token is kept by Claude Code and cannot be read here, so
+  keep the same token in one of those two places to ask as the same person), which
   skills you can see, and prints `visible to you: N/M` with the ones you cannot.
   It lists the catalogue only and opens no skill, so it adds nothing to the use
   figures. A teammate runs the same on their machine to answer the question for
@@ -496,13 +497,20 @@ see.
 
 - Deleting a **team** removes its grants on packs (the packs stay).
 - Deleting a **workspace** deletes its packs, versions, files, invites, grants and
-  named people, and nobody else's.
+  named people, and nobody else's, and revokes the MCP tokens bound to it, project
+  tokens (`cmcp_`) included (`revoked_by` is `workspace_deleted:<who>`, the user who
+  deleted it; the audit row
+  `mcp.token_revoked_on_removal` lists them under `detail.project_token_ids`).
 - Erasing or deleting an **account** removes the packs they were named on and the
   ids that recorded who made or granted what, and revokes the publish tokens and
-  invite links they made; the packs, versions and files stay, because they belong
-  to the workspace. Deleting your own account (`DELETE /api/auth/me`) also
-  takes you out of the teams of every workspace you were in and revokes the
-  workspace invites made out to your address, as a removal does. The person's
+  invite links they made, and every MCP token they hold; the packs, versions and
+  files stay, because they belong to the workspace. Deleting your own account
+  (`DELETE /api/auth/me`) also takes you out of the teams of every workspace you
+  were in, revokes the workspace invites made out to your address and your MCP
+  tokens (`account_deleted:<id>`), as a removal does; the personal workspace that goes
+  with the account takes with it the tokens other members hold for it and its project
+  tokens (`workspace_deleted:<who>`, the same audit row, ids in `detail.token_ids` and
+  `detail.project_token_ids`). The person's
   data export lists the packs they are named on (`knowledge_pack_memberships`). An erasure by an administrator (`DELETE
   /api/gdpr/user/{id}`) does the pack part in a savepoint: the account and the
   credentials are changed by stores that commit on their own, so if the pack part
@@ -512,8 +520,13 @@ see.
   same transaction, what the person held in that workspace: they leave its teams
   (their team rows in other workspaces stay), their names on its packs go, and the
   publish tokens and invite links they made there are revoked (the rows stay as a
-  record). Adding them back later, even as an admin, restores none of it; links
-  other people made, and links the person made in another workspace, keep working. A
+  record), and so are the MCP tokens they hold for that workspace (reason
+  `membership_removed:<who removed them>`, one `mcp.token_revoked_on_removal` audit
+  row per workspace with the token ids, never a value). Adding them back later,
+  even as an admin, restores none of it, MCP tokens included: they get a new token;
+  links other people made, and links the person made in another workspace, keep
+  working, and so do their MCP tokens for other workspaces. A change of role
+  revokes nothing. A
   `restricted` pack that only they could maintain is left as it is and reported as
   `codebase.pack_orphaned` (target: the pack; the reason is `member_left` or
   `account_erased`); the superadmin, who still sees it, names a new maintainer in

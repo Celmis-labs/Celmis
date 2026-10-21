@@ -160,6 +160,22 @@ def visible_slugs(text: str) -> set[str]:
     return {e["slug"] for e in e2e.parse_idx_entries(text)}
 
 
+_USER_CONFIG = re.compile(r"\$\{user_config\.(\w+)\}")
+
+
+def expand_user_config(text: str, values: dict[str, str]) -> str:
+    """What Claude Code does to the plugin's server entry: every ``${user_config.KEY}``
+    becomes the value the person saved for the option KEY (``/plugin configure``).
+    Here the values are the throwaway stack's address and a token issued for the run.
+    An option the entry names and ``values`` lacks is an error, as it is for Claude
+    Code (``claude plugin validate`` rejects an undeclared one)."""
+    def one(m: re.Match[str]) -> str:
+        if m.group(1) not in values:
+            raise KeyError(f"the plugin's .mcp.json uses ${{user_config.{m.group(1)}}}, not declared in plugin.json")
+        return values[m.group(1)]
+    return _USER_CONFIG.sub(one, text)
+
+
 def plain(text: str, typed: str) -> str:
     """An answer with the caller's spelling and the ranked ``similar:`` hint removed."""
     return "\n".join(ln for ln in text.replace(typed, "<R>").splitlines()
@@ -506,12 +522,17 @@ def run_matrix(st, m: Matrix, sink: list[Call], canaries, apis, acc, *, clients:
 
     # ---- the Claude Code plugin ---------------------------------------------------
     plugin = ROOT / "packaging" / "claude-plugin" / "celmis-code"
-    spec = json.loads((plugin / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["celmis"]
-    url = spec["url"].replace("${CELMIS_URL}", st.url)
-    auth = spec["headers"]["Authorization"].replace("${CELMIS_TOKEN}", c["tok_a_now"])
-    m.add("P1", "the plugin's .mcp.json points at /mcp/dev/ and reads the token from the environment",
-          url.endswith("/mcp/dev/") and "${CELMIS_TOKEN}" in spec["headers"]["Authorization"]
-          and c["tok_a_now"] not in (plugin / ".mcp.json").read_text(encoding="utf-8"))
+    raw_mcp = (plugin / ".mcp.json").read_text(encoding="utf-8")
+    spec = json.loads(raw_mcp)["mcpServers"]["celmis"]
+    declared = json.loads((plugin / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["userConfig"]
+    saved = {"celmis_url": st.url, "celmis_token": c["tok_a_now"]}  # what /plugin configure would store
+    url = expand_user_config(spec["url"], saved)
+    auth = expand_user_config(spec["headers"]["Authorization"], saved)
+    m.add("P1", "the plugin's .mcp.json points at /mcp/dev/ and takes its address and token from "
+                "options declared in plugin.json, with no token in the manifest",
+          url.endswith("/mcp/dev/") and set(_USER_CONFIG.findall(raw_mcp)) <= set(declared)
+          and auth.startswith("Bearer ") and len(auth) > len("Bearer ")
+          and "headersHelper" not in spec and c["tok_a_now"] not in raw_mcp)
     base, _, path = url.partition("/mcp/")
     via = Recorder(base, "/mcp/" + path, auth.split(" ", 1)[1], "plugin", sink)
     m.add("P2", "a client configured exactly as the plugin configures it connects and lists repos",

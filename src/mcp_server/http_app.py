@@ -28,6 +28,9 @@ from fastapi import FastAPI
 
 logger = logging.getLogger(__name__)
 
+#: Sibling repositories `generate_client` looks in for callers of an endpoint.
+SIBLING_REPOS_SEARCHED = 8
+
 
 def _transport_security():
     """Hosts the MCP transport will answer to.
@@ -1471,6 +1474,18 @@ def _search_symbols_impl(
         from src.mcp_server.dev_profile.access import indexed_slugs
         repo_slugs = indexed_slugs()
     _caller, access = caller_access(repo_slugs)
+    # Cut AFTER dropping what the caller cannot research: the cap is a cap on
+    # searches, and repositories that were never going to be searched must not
+    # use it up (a token that reaches two repositories of ninety would find
+    # nothing if the other eighty-eight came first). The count in the note is
+    # of repositories the caller can research, so it names nothing hidden.
+    searchable = [s for s in repo_slugs if (d := access.get(s)) is None or d.researchable]
+    repo_slugs, cut = common.cap_repos(searchable, advice=common.NARROW_THE_SYMBOL_SEARCH)
+    if cut and project_id:
+        # `project_id=` was already given: advising it again is no way out. The
+        # project itself has more repositories than one call searches.
+        cut = (f"searched {len(repo_slugs)} of {len(searchable)} repos in this project; "
+               "narrow the project")
 
     def one(slug: str) -> list[dict[str, Any]]:
         dec = access.get(slug)
@@ -1509,7 +1524,10 @@ def _search_symbols_impl(
             if depth < len(v) and len(matches) < limit:
                 matches.append(v[depth])
         depth += 1
-    return {"query": query, "matches": matches, "count": len(matches)}
+    out: dict[str, Any] = {"query": query, "matches": matches, "count": len(matches)}
+    if cut:
+        out["note"] = cut
+    return out
 
 
 def _find_consumers_impl(project_id: str, symbol: str) -> dict[str, Any]:
@@ -1946,12 +1964,18 @@ def _bootstrap_client_impl(
     sibling_repos = [s for s in slugs if s != target_repo_slug]
     from src.mcp_server.identity import caller_access
     _caller, sib_access = caller_access(sibling_repos)
+    # The eight-repository cut comes after dropping what the caller cannot
+    # research, so hidden siblings never use it up; the note counts only the
+    # ones the caller could have searched.
+    sibling_repos = [s for s in sibling_repos
+                     if (d := sib_access.get(s)) is None or d.researchable]
+    searched_siblings = sibling_repos[:SIBLING_REPOS_SEARCHED]
     usage_examples: list[dict[str, Any]] = []
     for e in endpoints[:5]:
         handler = e.get("handler") or ""
         if not handler:
             continue
-        for slug in sibling_repos[:8]:
+        for slug in searched_siblings:
             dec = sib_access.get(slug)
             if dec is not None and not dec.researchable:
                 continue
@@ -1997,6 +2021,9 @@ def _bootstrap_client_impl(
             "before shipping."
         ),
     }
+    if len(sibling_repos) > len(searched_siblings):
+        out["note"] += (f" Usage examples were searched in {len(searched_siblings)} of "
+                        f"{len(sibling_repos)} sibling repos of the project.")
     # A target or sibling the caller may not research contributes nothing and
     # is not mentioned: no name, no count, no "blocked" marker.
     if "error" in api:

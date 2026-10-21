@@ -71,11 +71,20 @@ def stand_ins(monkeypatch):
     return FakeRetriever
 
 
-def _vault():
-    """A's generated documentation: a note per source file plus an overview."""
+@pytest.fixture(autouse=True)
+def _vault_in_tmp(tmp_path, monkeypatch):
+    """The world sets WORKSPACE_DIR only, so the vault the docs routes read would be whatever
+    ``VAULT_DIR`` defaults to - once the developer's own ``~/ObsidianVaults``."""
+    monkeypatch.setenv("VAULT_DIR", str(tmp_path / "vault_of_this_test"))
+
+
+def _vault(tmp_path):
+    """A's generated documentation: a note per source file plus an overview, in the vault the
+    app is configured to read (``VAULT_DIR``, set by ``_vault_in_tmp``)."""
     from src.config import get_settings
 
     root = get_settings().repo_vault_path(A_REPO)
+    assert tmp_path.resolve() in root.parents, f"{root} is not the test's own vault"
     (root / "modules").mkdir(parents=True, exist_ok=True)
     (root / "modules" / "api.md").write_text(
         f"---\ntitle: API\npath: {OPEN_FILE}\n---\n# API\nPUBLIC_BODY\n")
@@ -242,7 +251,7 @@ def _zip_text(response) -> str:
 async def test_metadata_only_reads_docs_but_not_the_denied_notes(tmp_path, monkeypatch):
     async with world(tmp_path, monkeypatch, extra_routers=_extra()) as w:
         engine = await _rules(w, tmp_path, monkeypatch)
-        _vault()
+        _vault(tmp_path)
         listing, secret, export, everything = await _docs(w, "member_a")
         engine.dispose()
     assert listing.status_code == 200
@@ -260,7 +269,7 @@ async def test_metadata_only_reads_docs_but_not_the_denied_notes(tmp_path, monke
 async def test_a_team_without_a_rule_is_refused_the_docs(tmp_path, monkeypatch):
     async with world(tmp_path, monkeypatch, extra_routers=_extra()) as w:
         engine = await _rules(w, tmp_path, monkeypatch)
-        _vault()
+        _vault(tmp_path)
         responses = await _docs(w, "viewer_a")
         engine.dispose()
     for r in responses:
@@ -274,7 +283,7 @@ async def test_a_traversal_does_not_reach_a_denied_note_either(tmp_path, monkeyp
     is resolved, so spelling the path differently changes nothing."""
     async with world(tmp_path, monkeypatch, extra_routers=_extra()) as w:
         engine = await _rules(w, tmp_path, monkeypatch)
-        _vault()
+        _vault(tmp_path)
         r = await w.client.get(f"/api/docs/{A_REPO}/note",
                                params={"path": "modules/../modules/./keys.md"},
                                headers=w.h("member_a", "ws-a"))
@@ -285,7 +294,7 @@ async def test_a_traversal_does_not_reach_a_denied_note_either(tmp_path, monkeyp
 async def test_full_code_team_reads_every_note_but_the_denied_one(tmp_path, monkeypatch):
     async with world(tmp_path, monkeypatch, extra_routers=_extra()) as w:
         engine = await _rules(w, tmp_path, monkeypatch)
-        _vault()
+        _vault(tmp_path)
         listing, secret, export, _all = await _docs(w, "editor_a")
         engine.dispose()
     assert {n["path"] for n in listing.json()["notes"]} == {"modules/api.md", "overview.md"}
@@ -296,7 +305,7 @@ async def test_full_code_team_reads_every_note_but_the_denied_one(tmp_path, monk
 async def test_docs_single_tenant_without_rules_is_closed_by_default(tmp_path, monkeypatch):
     async with world(tmp_path, monkeypatch, extra_routers=_extra()) as w:
         engine = _single_tenant_no_rules(tmp_path, monkeypatch, unruled=None)
-        _vault()
+        _vault(tmp_path)
         listing, secret, export, everything = await _docs(w, "viewer_a")
         engine.dispose()
     assert listing.status_code in (403, 404) or listing.json().get("notes") == []
@@ -309,7 +318,7 @@ async def test_docs_single_tenant_without_rules_is_closed_by_default(tmp_path, m
 async def test_docs_single_tenant_without_rules_is_unchanged_when_opened(tmp_path, monkeypatch):
     async with world(tmp_path, monkeypatch, extra_routers=_extra()) as w:
         engine = _single_tenant_no_rules(tmp_path, monkeypatch)
-        _vault()
+        _vault(tmp_path)
         listing, secret, export, everything = await _docs(w, "viewer_a")
         engine.dispose()
     assert {n["path"] for n in listing.json()["notes"]} == {

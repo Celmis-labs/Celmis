@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "packaging" / "claude-plugin" / "celmis-code"
 MARKETPLACE = ROOT / ".claude-plugin" / "marketplace.json"
 HOOK = PLUGIN / "hooks" / "celmis_hook.py"
+HELPER = PLUGIN / "bin" / "celmis-auth-header"
 
 try:  # pragma: no cover - which branch runs depends on integration state
     from src.mcp_server import dev_contract as _c
@@ -40,6 +41,14 @@ except ImportError:  # pragma: no cover
     FROM_SERVER = False
 
 PLUGIN_PREFIX = "mcp__plugin_celmis-code_celmis__"
+
+#: The plugin's two settings: the `userConfig` keys of `plugin.json`, the
+#: placeholders `.mcp.json` expands them through, and the variables Claude Code sets
+#: for a hook (`CLAUDE_PLUGIN_OPTION_` plus the key in capitals).
+OPTION_URL = "celmis_url"
+OPTION_TOKEN = "celmis_token"
+URL_OPTION_ENV = "CLAUDE_PLUGIN_OPTION_" + OPTION_URL.upper()
+TOKEN_OPTION_ENV = "CLAUDE_PLUGIN_OPTION_" + OPTION_TOKEN.upper()
 
 #: Names that must never appear in the public repository. Assembled from
 #: fragments so that this file itself passes the guard it implements.

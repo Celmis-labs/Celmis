@@ -100,6 +100,15 @@ def _error_result(message: str):  # noqa: ANN202
         content=[types.TextContent(type="text", text=message)], isError=True))
 
 
+def _announce_deadline(seconds: float) -> None:
+    """Tell the call (through its record) when this envelope will stop waiting for it."""
+    from src.mcp_server import callctx
+
+    rec = callctx.current()
+    if rec is not None:
+        rec.deadline = time.monotonic() + seconds
+
+
 async def _within_limits(original, req):  # noqa: ANN001, ANN202
     """Run the handler under the token's rate, concurrency and time limits.
     Returns ``(result, refused_by_a_limit)``."""
@@ -113,6 +122,7 @@ async def _within_limits(original, req):  # noqa: ANN001, ANN202
     try:
         async with limits.slot(key):
             if seconds > 0:
+                _announce_deadline(seconds)
                 with anyio.fail_after(seconds):
                     return await original(req), False
             return await original(req), False

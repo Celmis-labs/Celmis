@@ -128,6 +128,41 @@ reaches). For those, revoke and issue a new token. An entry such as `acme/shop`
 matches the repository under both providers if both are registered; the issue
 response warns about it, and listing exact slugs avoids it.
 
+### When the holder leaves the workspace
+
+Removing a person from a workspace revokes, in the same transaction, every token
+they hold **for that workspace** (personal, self-service, CLI and OAuth grants),
+whoever removes them: a workspace admin, or the superadmin from the users page
+(every removal goes through one function, which does it). The row records why (`revoked_by` is
+`membership_removed:<who>`), and the audit log gets one `mcp.token_revoked_on_removal`
+entry per workspace with the token ids and never a value (`detail.token_ids`;
+`detail.via` names the route). Deleting an account
+revokes every token the person holds (`account_deleted:<id>`) and, for the personal
+workspace that goes with the account, the tokens other members hold for it and its
+project tokens (`workspace_deleted:<who>`). Deleting a workspace revokes every token
+bound to it, project tokens (`cmcp_`) included, which have no person and so are ended
+by no removal (`workspace_deleted:<who>`, `<who>` being the user who deleted it); the
+audit entry lists them under
+`detail.project_token_ids`. Their tokens for
+other workspaces are not touched, and a change of role revokes nothing, because a
+token never reads the role.
+
+Adding the person back, in any role, **does not bring a token back**: issue a new one.
+Before this release the membership check alone refused the token while the person
+was out, so the same token worked again the day they were re-added, until it expired.
+
+The server that handled the removal forgets the token at once. Other worker
+processes keep a token for up to 30 seconds (the cache described above), but every
+call also checks that the holder is still a member, and that check reads the
+database each time, so a removed person is refused on every worker immediately.
+The one exception is a global administrator, who needs no membership: for such a
+person the revocation reaches other workers within the 30 seconds.
+
+Tokens of people removed *before* 3.0.2 are not revoked after the fact: the
+membership check still refuses them while the person is out, but one would work
+again if the person were re-added. Revoke those on **Administration, MCP tokens**,
+or let them expire.
+
 ### The server's own calls
 
 The in-app agent, the claude-engine review and documentation generation call

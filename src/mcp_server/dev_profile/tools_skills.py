@@ -358,8 +358,23 @@ def _narrow(plan: brief_mod.BriefPlan, gate: pack_access.RepoGate) -> brief_mod.
     return plan._replace(chosen={**plan.chosen, "note": notes}, meta=meta)
 
 
+def _names(arg: str) -> list[str]:
+    return [s[:200] for s in re.split(r"[,\s]+", (arg or "")[:MAX_REPOS_ARG]) if s]
+
+
 def _slugs(arg: str) -> list[str]:
-    return [s[:200] for s in re.split(r"[,\s]+", (arg or "")[:MAX_REPOS_ARG]) if s][:MAX_REPOS]
+    return _names(arg)[:MAX_REPOS]
+
+
+def _repos_cut(arg: str) -> list[str]:
+    """The lines (none when nothing was left out) that say `repos=` was read only in part."""
+    names, out = _names(arg), []
+    if len(names) > MAX_REPOS:
+        out.append(f"repos= keeps the first {MAX_REPOS} of {len(names)} names; "
+                   "ask again with fewer to see pointers to the rest")
+    if len(arg or "") > MAX_REPOS_ARG:
+        out.append(f"repos= is read up to {MAX_REPOS_ARG} characters; the rest was ignored")
+    return out
 
 
 def run_brief(task: str = "", repos: str = "") -> str:
@@ -370,7 +385,7 @@ def run_brief(task: str = "", repos: str = "") -> str:
     principal, ws = pack_access.caller_principal()
     ranking = (store.rank_current_sync(principal, ws, task, limit=brief_mod.POOL,
                                        per_kind=brief_mod.LIMITS) if ws else store.NO_RANKING)
-    notice = [TRUNCATED] if ranking.truncated else []
+    notice = [*([TRUNCATED] if ranking.truncated else []), *_repos_cut(repos)]
     plan = brief_mod.plan_from_hits(task, ranking.hits, ranking.meta)
     if plan is None:
         return emit.render_text("brief", [], [brief_mod.NO_MATCH, *notice])

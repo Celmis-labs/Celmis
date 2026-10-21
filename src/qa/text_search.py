@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.access.file_scope import FileScope
+from src.security.secret_files import content_verdict, is_secret_path
 
 MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024
 DEFAULT_TIME_BUDGET_S = 12.0
@@ -75,7 +76,16 @@ def decode(data: bytes) -> str:
 
 def iter_text_files(root: Path, scope: FileScope | None = None) -> Iterator[tuple[str, Path]]:
     """``(repo-relative path, file)`` for every candidate text file under
-    ``root``, in a stable order, honouring the scope and skipping binaries."""
+    ``root``, in a stable order, honouring the scope and skipping binaries.
+
+    A secret file (``.env``, keys, credential stores: ``is_secret_path``) is
+    never a candidate, for every caller and whatever the access rules say: this
+    walk is the single door of the plain-text search and of the ranking that
+    picks files for a prompt, so a caller that forgets its own gate still cannot
+    open one. Nor is a data file whose CONTENT is a secret (a PEM in
+    ``data/notes.txt``, a ``kind: Secret`` manifest anywhere in a YAML, a data
+    file too large to be looked through): the name says nothing there. The scope
+    only narrows further."""
     root_s = str(root)
     for dirpath, dirnames, filenames in os.walk(root_s):
         dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
@@ -85,8 +95,12 @@ def iter_text_files(root: Path, scope: FileScope | None = None) -> Iterator[tupl
             full = Path(dirpath) / fn
             if full.is_symlink():
                 continue
-            rel = unicodedata.normalize("NFC", os.path.relpath(full, root_s)).replace(os.sep, "/")
+            on_disk = os.path.relpath(full, root_s)
+            rel = unicodedata.normalize("NFC", on_disk).replace(os.sep, "/")
             if scope is not None and not scope.allows(rel):
+                continue
+            # The content is read under the name the file has on disk, not the NFC spelling.
+            if is_secret_path(rel) or content_verdict(root, on_disk) != "ok":
                 continue
             yield rel, full
 

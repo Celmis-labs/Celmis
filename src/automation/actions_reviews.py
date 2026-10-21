@@ -62,6 +62,8 @@ MAX_INDEX_REPOS = 50
 MAX_ASK_REPOS = 8
 MAX_ANSWER_CHARS = 6000
 MAX_QUESTION_CHARS = 2000
+#: Longest `ask_code` waits for an answer when nothing else bounds it (the web
+#: assistant). Inside an MCP call it waits less: `limits.answer_deadline`.
 ASK_TIMEOUT_S = 150
 
 ISSUE_STATUSES = ("open", "fixed", "dismissed", "resolved")
@@ -815,6 +817,7 @@ async def ask_code(
     from src.api.routers import qa as qa_router
     from src.llm.budget import BudgetExceeded
     from src.llm.budget import enforce as enforce_budget
+    from src.mcp_server import limits
 
     text = str(question or "").strip()
     if not text:
@@ -836,6 +839,9 @@ async def ask_code(
     except BudgetExceeded as exc:
         raise ActionError(f"The workspace budget is used up: {exc}") from None
 
+    # Inside an MCP call this is what is left of the call's time, less a margin:
+    # the tool ends with the message below, not with the envelope's generic cut.
+    deadline = limits.answer_deadline(ASK_TIMEOUT_S)
     try:
         answer, meta = await asyncio.wait_for(
             qa_router._generate_full(
@@ -843,9 +849,9 @@ async def ask_code(
                 user_id=user.id, is_admin=bool(getattr(user, "is_admin", False)),
                 workspace_id=actor.workspace_id, include_code=bool(include_code),
                 token_filter=actor.token_filter, name_free_notice=True),
-            timeout=ASK_TIMEOUT_S)
+            timeout=deadline)
     except TimeoutError:
-        raise ActionError("The answer took too long — narrow the question or the repositories.") from None
+        raise ActionError(limits.answer_too_slow(deadline)) from None
     except ActionError:
         raise
     except Exception as exc:  # noqa: BLE001

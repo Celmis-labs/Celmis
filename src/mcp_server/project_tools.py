@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 MAX_QUERY_CHARS = 300
 MAX_LIMIT = 50
+#: Longest `ask_project` waits for an answer when no MCP call envelope applies;
+#: inside one it waits less: `limits.answer_deadline`.
 ASK_TIMEOUT_S = 150.0
 MAX_ANSWER_CHARS = 12_000
 NOT_A_PROJECT_TOKEN = "This tool needs a project token (cmcp_…)."
@@ -157,6 +159,7 @@ async def ask_project(view: pt.ProjectTokenView | None, question: str,
     from src.api.routers import qa as qa_router
     from src.llm.budget import BudgetExceeded
     from src.llm.budget import enforce as enforce_budget
+    from src.mcp_server import limits
 
     scope = await asyncio.to_thread(resolve_scope, view)
     text = str(question or "").strip()
@@ -169,6 +172,7 @@ async def ask_project(view: pt.ProjectTokenView | None, question: str,
         enforce_budget(scope.view.workspace_id)
     except BudgetExceeded as exc:
         raise ProjectToolError(f"The workspace budget is used up: {exc}") from None
+    deadline = limits.answer_deadline(ASK_TIMEOUT_S)
     try:
         answer, meta = await asyncio.wait_for(
             qa_router._generate_full(
@@ -177,9 +181,9 @@ async def ask_project(view: pt.ProjectTokenView | None, question: str,
                 workspace_id=scope.view.workspace_id, include_code=bool(include_code),
                 token_filter=tuple(scope.slugs), name_free_notice=True,
                 file_scopes=scope.file_scopes),
-            timeout=ASK_TIMEOUT_S)
+            timeout=deadline)
     except TimeoutError:
-        raise ProjectToolError("The answer took too long — narrow the question.") from None
+        raise ProjectToolError(limits.answer_too_slow(deadline)) from None
     except ProjectToolError:
         raise
     except Exception as exc:  # noqa: BLE001

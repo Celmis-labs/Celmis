@@ -290,7 +290,7 @@ def trace_sources(
             raw = fp.read_bytes()
         except OSError:
             continue
-        if classify(rel, raw[:8192]) == "deny":  # content sniff: kind: Secret, private keys
+        if classify(rel, raw) == "deny":  # content sniff over the whole file: kind: Secret, private keys
             continue
         text = raw.decode("utf-8", errors="replace")
         if kind == "k8s" and not _K8S_HINT.search(text):

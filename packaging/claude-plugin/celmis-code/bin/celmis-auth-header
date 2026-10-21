@@ -1,6 +1,15 @@
 #!/bin/sh
 # Prints {"Authorization": "Bearer <token>"} for Claude Code's `headersHelper`.
 #
+# The plugin's own server entry does NOT use this: it takes the address and the token
+# from the options Claude Code saved (`/plugin configure celmis-code@celmis`). Claude
+# Code removes every environment variable with TOKEN, SECRET, PASSWORD, KEY or AUTH in
+# its name from the helper of a plugin's or a project's server, so a helper cannot read
+# CELMIS_TOKEN there. This script is for a server entry YOU write at user or local scope,
+# whose helper gets your full environment (plugin README, "Using your own server entry").
+# Name it by an absolute path, quoted inside the JSON string because a shell runs it:
+#   "headersHelper": "\"/home/you/.local/bin/celmis-auth-header\""
+#
 # The token comes from the OS keychain when one is available, else from
 # $CELMIS_TOKEN. It is printed only inside that JSON object, on stdout, which
 # Claude Code reads and does not log. Nothing else is ever written to stdout.
@@ -16,8 +25,8 @@
 set -u
 
 # A bearer token over plain http crosses the network readable. Refuse unless the
-# server is on this machine; the check is on CELMIS_URL, the address the plugin's
-# MCP entry connects to.
+# server is on this machine. The check is on CELMIS_URL, the address of the entry
+# this helper serves; it cannot see the entry's own url, so set CELMIS_URL to it.
 url="${CELMIS_URL:-}"
 case "$url" in
   "" | https://* ) ;;

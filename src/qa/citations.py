@@ -20,8 +20,10 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from src.config import Settings, get_settings
+from src.security.secret_files import is_secret_path, plain_file
 
 logger = logging.getLogger(__name__)
 
@@ -151,19 +153,67 @@ class CitationReport:
         }
 
 
+def _normalise(path: str) -> str:
+    """``path`` without its ``.`` and empty segments (``./a//b`` becomes ``a/b``).
+
+    Two things are kept on purpose, because :func:`_citable_file` must see them
+    and refuse: a ``..`` segment, and a leading ``/`` (an absolute path).
+    """
+    lead = "/" if path.startswith("/") else ""
+    return lead + "/".join(seg for seg in path.split("/") if seg not in ("", "."))
+
+
 def _split_repo_path(target: str, known_repos: set[str]) -> tuple[str | None, str]:
     """Split ``repo_slug/rel/path.py`` into (repo, path).
 
     Falls back to (None, target) when the first segment isn't a known repo —
-    the model sometimes cites a bare repo-relative path.
+    the model sometimes cites a bare repo-relative path. The path is
+    normalised (see :func:`_normalise`): ``repo//./a.py`` is ``repo/a.py``
+    (after a repository name the doubled slash is only a separator, and the
+    path is then judged inside that clone), while ``..`` stays, and a path with
+    no repository in front keeps its leading ``/``, for :func:`_citable_file`
+    to refuse. (``lstrip("./")`` used to be here: it also ate the dot of
+    ``.env`` and ``.github``.)
     """
-    target = target.lstrip("./")
+    while target.startswith("./"):
+        target = target[2:]
     if "/" not in target:
-        return None, target
+        return None, _normalise(target)
     head, rest = target.split("/", 1)
     if head in known_repos:
-        return head, rest
-    return None, target
+        return head, _normalise(rest.lstrip("/"))
+    return None, _normalise(target)
+
+
+def _citable_file(root: Path, rel: str) -> Path | None:
+    """The real file ``rel`` names inside the repository at ``root``, or None.
+
+    The link target is text the MODEL wrote, so it is as untrusted as a grep
+    result: ``../../etc/passwd``, an absolute path or a symlink committed to a
+    repository must not reach the server's files, and a secret file (``.env``,
+    a key, a credentials store) must not be opened at all. This runs BEFORE any
+    open or ``is_file``, and every refusal returns the same None as a file that
+    is not there, so the verdict is not an oracle: ``missing_file`` for
+    ``.env`` (which exists) and for ``nothing.txt`` (which does not) read the
+    same, and neither says whether a line number was in range. A file that
+    exists but cannot be opened (permissions) is the same None.
+    """
+    if not rel or rel.startswith("/") or "\x00" in rel or ".." in rel.split("/"):
+        return None
+    if is_secret_path(rel):
+        return None
+    try:
+        fp = plain_file(root, rel)
+        if fp is None:
+            return None
+        # A file the server may not open is answered exactly like one that is not
+        # there: "could not be read" next to "does not exist" would tell the
+        # model which names exist behind a permission the clone does not grant.
+        with fp.open("rb"):
+            pass
+        return fp
+    except Exception:  # noqa: BLE001 - a path the checker cannot judge is not citable
+        return None
 
 
 def verify_citations(
@@ -207,7 +257,7 @@ def verify_citations(
             candidates = [r for r in known_repos]
             resolved = None
             for r in candidates:
-                if (settings.repo_path(r) / rel).is_file():
+                if _citable_file(settings.repo_path(r), rel) is not None:
                     resolved = r
                     break
             if resolved is None:
@@ -217,8 +267,8 @@ def verify_citations(
                 continue
             cit.repo = repo = resolved
 
-        fpath = settings.repo_path(repo) / rel
-        if not fpath.is_file():
+        fpath = _citable_file(settings.repo_path(repo), rel)
+        if fpath is None:
             cit.status = "missing_file"
             cit.detail = "file does not exist in the repo"
             report.citations.append(cit)
@@ -231,7 +281,12 @@ def verify_citations(
                     total = sum(1 for _ in fh)
             except OSError as exc:
                 cit.status = "missing_file"
-                cit.detail = f"unreadable: {exc}"
+                # Not `exc`: its text carries the absolute clone path. And the
+                # words of a missing file: a file that vanished between the
+                # check and the read must not read differently from one that
+                # never existed.
+                logger.debug("citation_unreadable file=%s err=%s", rel, type(exc).__name__)
+                cit.detail = "file does not exist in the repo"
                 report.citations.append(cit)
                 continue
             if line < 1 or line > total:

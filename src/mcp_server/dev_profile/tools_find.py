@@ -124,6 +124,7 @@ def run(query: str, repo: str = "", kind: str = "", mode: str = "auto",
     slugs, err = common.pick_repos(scope, repo)
     if err:
         return err
+    slugs, cut = common.cap_repos(slugs)
     detailed = common.norm_format(response_format)
     limit = common.clamp(limit, 1, MAX_LIMIT)
     fresh = {e.slug: e for e in common.fresh_entries(slugs)}
@@ -144,6 +145,7 @@ def run(query: str, repo: str = "", kind: str = "", mode: str = "auto",
     empty = f'no symbol matching "{q}"' + (f" of kind {kind}" if kind else "")
     return emit.render_list(
         "find", entries, lines, total=len(hits), offset=off, query_hash=h, note=note,
+        head=[cut] if cut else None,
         empty=empty + "; try mode=fuzzy, a shorter name, or grep for a literal",
         more_hint=MORE_HINT, detailed=detailed, raised=limit > DEFAULT_LIMIT, pin=pin,
     )

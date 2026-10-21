@@ -14,6 +14,10 @@ tokens has two budgets, a stolen token cannot spend anybody else's):
 * **time**: a call that runs longer than ``CELMIS_MCP_CALL_TIMEOUT_SECONDS``
   (default 60) is answered with a timeout; the work behind it stops being waited
   for (a thread cannot be killed, but it no longer holds the caller or a slot).
+  A tool that writes an answer with a model (``ask``) does not run to that
+  limit: :func:`answer_deadline` gives it the time the call has left minus a
+  margin, so it ends with its own "took too long, narrow it" message, a
+  finished answer, instead of being cut by this envelope with a generic one.
 
 The key is a digest of the bearer token, so nothing here stores a secret and no
 database is touched on the hot path. Counters are per process, which is the
@@ -39,6 +43,7 @@ MAX_KEYS = 4096
 
 RATE_LIMITED = "rate limit reached for this MCP token; retry in {wait}s"
 BUSY = "too many calls running for this MCP token; retry shortly"
+ANSWER_TOO_SLOW = "The answer took too long (more than {seconds}s) — narrow the question or the repositories."
 TIMED_OUT = "the call took longer than {seconds}s and was stopped; narrow it (repo=, path_glob=, a longer pattern)"
 
 
@@ -62,6 +67,51 @@ def call_timeout() -> float:
         return max(0.0, float(os.environ.get("CELMIS_MCP_CALL_TIMEOUT_SECONDS", TIMEOUT_DEFAULT)))
     except (TypeError, ValueError):
         return TIMEOUT_DEFAULT
+
+
+#: The longest a tool that writes an answer with a model may take when no call
+#: envelope applies (the web assistant, a direct caller). Inside an MCP call the
+#: answer gets less: see :func:`answer_deadline`.
+ANSWER_CEILING_S = 150.0
+#: What :func:`answer_deadline` leaves for everything after the answer is written:
+#: redacting it, framing it, sending it. A tenth of the budget would be too little
+#: on a slow link; a quarter of a long budget is more than it needs.
+ANSWER_MARGIN_MAX_S = 10.0
+ANSWER_MARGIN_SHARE = 0.25
+#: Never a deadline shorter than this: a model call cannot start and finish in less.
+ANSWER_MIN_S = 1.0
+
+
+def answer_deadline(ceiling: float = ANSWER_CEILING_S) -> float:
+    """Seconds a tool that writes an answer with a model may wait for it.
+
+    Outside an MCP call, or with the call timeout switched off (``0``): the
+    ``ceiling``. Inside one: what is left of the envelope's time, less a margin
+    (the smaller of ``ANSWER_MARGIN_MAX_S`` and a quarter of the call timeout),
+    never more than the ceiling and never less than ``ANSWER_MIN_S``. So with
+    the default 60 s the answer is given up on at about 50 s, the tool reports
+    "took too long, narrow it" itself, and the envelope's own cut (60 s) is the
+    backstop it should never be the one to use. Derived, not configured: the
+    two numbers cannot disagree because there is only one.
+    """
+    from src.mcp_server import callctx
+
+    rec = callctx.current()
+    due = getattr(rec, "deadline", None)
+    if due is None:
+        return float(ceiling)
+    margin = min(ANSWER_MARGIN_MAX_S, ANSWER_MARGIN_SHARE * call_timeout())
+    left = due - time.monotonic() - margin
+    return float(max(ANSWER_MIN_S, min(ceiling, left)))
+
+
+def answer_too_slow(deadline: float) -> str:
+    """The message of an answer that was given up on after ``deadline`` seconds.
+
+    The number is ROUNDED, not cut: the deadline is worked out a moment after
+    the call began (49.97 for a nominal 50), and ``int()`` of that said "more
+    than 49s" while the documentation says 50."""
+    return ANSWER_TOO_SLOW.format(seconds=max(1, round(deadline)))
 
 
 _LOCK = threading.Lock()

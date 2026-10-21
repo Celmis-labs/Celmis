@@ -312,11 +312,19 @@ def _ingest(entries: Sequence[_Entry]) -> IngestResult:
     secret_paths: list[dict[str, Any]] = []
     seen: dict[str, str] = {}
 
-    from src.security.secret_files import classify
+    from src.security.secret_files import classify, is_git_internal
 
     for entry in entries:
         path = _clean_path(entry.path)
         if entry.is_dir:
+            continue
+        # A `.git/` folder (its config can carry a remote URL with a token, its objects every
+        # secret ever committed) is not an upload: it is ignored and listed, never stored and
+        # never read, whatever it holds and however it is spelled (`.GIT`, `.git ` ...).
+        if is_git_internal(path):
+            ignored_total += 1
+            if len(ignored) < MAX_IGNORED_REPORTED:
+                ignored.append(path[:MAX_PATH_CHARS])
             continue
         # A secret by name is refused even where a dot would hide it (`.env`,
         # `.ssh/id_rsa`): a "no" is more useful than a file that quietly vanishes.
@@ -431,7 +439,9 @@ def _read_all(candidates: Sequence[tuple[str, _Entry]]) -> list[tuple[str, str]]
             raise IngestError(
                 "total_too_large",
                 f"The files add up to over {MAX_TOTAL_BYTES // (1024 * 1024)} MB.")
-        if classify(path, data[:8192]) == "deny":
+        # The whole file (at most MAX_FILE_BYTES), not its first 8 KiB: a key pasted at the end
+        # of a long note is as much a key.
+        if classify(path, data) == "deny":
             sniffed.append({"path": path, "line": 0, "label": "secret file"})
             continue
         try:

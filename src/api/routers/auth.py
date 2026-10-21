@@ -540,7 +540,7 @@ def delete_account(
 
     Revokes refresh tokens, leaves every workspace by the same rules as a removal
     (their teams there, the invites made out to their address, their names,
-    publish tokens and invite links on its packs), deletes the user's personal
+    publish tokens and invite links on its packs, and their MCP tokens), deletes the user's personal
     workspace and its per-workspace credential rows, then removes the user
     record. Self-service — the caller can only delete themselves. Other
     workspaces the user happened to own are left intact (may be re-assigned).
@@ -550,7 +550,12 @@ def delete_account(
     from sqlalchemy import update as _update
     from sqlalchemy.orm import Session
 
-    from src.api.memberships import release_account_sync
+    from src.api.memberships import (
+        merge_revocations,
+        release_account_sync,
+        revoke_account_tokens_sync,
+        revoke_workspace_tokens_sync,
+    )
     from src.api.workspace_provision import personal_slug
     from src.db.models import OAuthRefreshToken, Workspace, WorkspaceMember
     from src.llm.budget import _engine
@@ -563,6 +568,8 @@ def delete_account(
         )
         # BEFORE the membership rows go: the teams and invites to end are found through them.
         revoked_invites = release_account_sync(s, user_id=user.id, email=user.email)
+        revoked_tokens = revoke_account_tokens_sync(s, user_id=user.id)
+        revoked_project_tokens: dict[str, list[str]] = {}
         s.execute(_delete(WorkspaceMember).where(WorkspaceMember.user_id == user.id))
         ws = s.execute(
             _select(Workspace).where(Workspace.slug == personal_slug(user.id))
@@ -575,6 +582,12 @@ def delete_account(
         pack_store.erase_user_sync(s, user.id)
         if ws is not None:
             pack_store.delete_workspace_packs_sync(s, ws.id)
+            # The tokens of everybody else in that workspace (people added to it,
+            # and its project tokens) would outlive it as live rows: the person's
+            # own were revoked above, theirs are not. BEFORE the row goes.
+            workspace_tokens, revoked_project_tokens = revoke_workspace_tokens_sync(
+                s, by=f"workspace_deleted:{user.id}", workspace_ids=[ws.id])
+            revoked_tokens = merge_revocations(revoked_tokens, workspace_tokens)
             s.delete(ws)
         s.commit()
 
@@ -584,6 +597,12 @@ def delete_account(
             workspace_id=ws_id, target=user.id, ip=client_ip(request),
             detail={"invite_ids": invite_ids, "via": "account_deleted"},
         )
+    from src.api.memberships import record_token_revocations
+
+    record_token_revocations(
+        revoked_tokens, actor=user.email, actor_id=user.id, user_id=user.id,
+        via="account_deleted", ip=client_ip(request),
+        project_revoked=revoked_project_tokens)
 
     # Best-effort: purge the personal workspace's encrypted credential rows.
     if personal_ws_id is not None:

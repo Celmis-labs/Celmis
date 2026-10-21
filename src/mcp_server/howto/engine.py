@@ -33,7 +33,7 @@ from pathlib import Path
 from src.mcp_server.howto import detectors as D
 from src.mcp_server.howto import tracer as T
 from src.security.mcp_redact import redact_for_mcp_floored, scan_lines
-from src.security.secret_files import classify, classify_file, mask_env_values, plain_file
+from src.security.secret_files import classify, mask_env_values, plain_file, reading_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +206,9 @@ def _read(repo_path: Path, rel: str) -> str | None:
     fp = plain_file(repo_path, rel)  # no symlinks, nothing outside the clone, no secret file
     if fp is None:
         return None
-    verdict = classify_file(repo_path, rel)
+    # The verdict of the file it RESOLVED to, not of the name asked for: a name
+    # that is ordinary can still lead to an example env file (masked) or a secret.
+    verdict = reading_verdict(repo_path, rel, fp)
     if verdict == "deny":
         return None
     try:

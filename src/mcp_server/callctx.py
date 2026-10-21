@@ -40,6 +40,11 @@ class CallRecord:
     #: One-way digest of the arguments; lets two calls be told apart unread.
     args_hash: str = ""
     duration_ms: int = 0
+    #: The instant (``time.monotonic()``) at which the call envelope stops waiting
+    #: for this call; None when it has no time limit or the call is not in an
+    #: envelope. A tool that writes an answer with a model reads it through
+    #: ``limits.answer_deadline`` so that it finishes before the envelope cuts it.
+    deadline: float | None = None
 
 
 _CURRENT: ContextVar[CallRecord | None] = ContextVar("mcp_call_record", default=None)

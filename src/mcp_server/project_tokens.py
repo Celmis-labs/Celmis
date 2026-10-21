@@ -15,6 +15,7 @@ import hashlib
 import logging
 import secrets
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -188,6 +189,37 @@ def revoke(session, project_id: str, token_id: str) -> bool:  # noqa: ANN001
     if row.revoked_at is None:
         row.revoked_at = datetime.now(UTC)
     return True
+
+
+def revoke_held(session, *, workspace_ids: Iterable[str]) -> dict[str, list[str]]:  # noqa: ANN001
+    """Stage the revocation of every live project token bound to ``workspace_ids``,
+    for a workspace that is deleted. Returns ``{workspace_id: [token ids]}`` for
+    the audit.
+
+    A project token has no person behind it, so no membership change ends it;
+    only the workspace going does. Without this its row stays live (the
+    verifier judges the row, not the workspace) and looks like a working grant
+    in the project's token list. Like :func:`revoke`, this neither commits nor
+    touches a cache: there is none, the verifier reads the row on every call.
+    """
+    from sqlalchemy import select
+
+    from src.db.models import McpProjectToken
+
+    wanted = list(dict.fromkeys(workspace_ids))
+    if not wanted:
+        return {}
+    now = datetime.now(UTC)
+    out: dict[str, list[str]] = {}
+    rows = session.execute(select(McpProjectToken).where(
+        McpProjectToken.workspace_id.in_(wanted),
+        McpProjectToken.revoked_at.is_(None))).scalars().all()
+    for row in rows:
+        if _aware(row.expires_at) <= now:
+            continue  # already dead; revoking it would only add noise to the audit
+        row.revoked_at = now
+        out.setdefault(row.workspace_id, []).append(row.id)
+    return out
 
 
 def current_view() -> ProjectTokenView | None:

@@ -43,6 +43,7 @@ from src.api.auto_review import get_auto_review_store
 from src.api.deps import current_workspace_id, get_current_user
 from src.db.session import get_async_session
 from src.users import User
+from src.vault.reader import note_file, vault_note_files
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +131,9 @@ def _title_of(post: frontmatter.Post, path: Path) -> str:
 
 
 def _notes(directory: Path) -> list[Path]:
-    if not directory.exists():
-        return []
-    return sorted(p for p in directory.rglob("*.md") if p.is_file())
+    """The notes a reader may open: the vault's own walk (no link, no secret
+    name, nothing that resolves outside the folder), never a bare ``rglob``."""
+    return vault_note_files(directory)
 
 
 # Declared BEFORE /{slug}: FastAPI matches routes in declaration order,
@@ -234,7 +235,7 @@ def export_all_docs(
                 empty.append(cfg.repo_slug)
                 continue
             directory = _vault_dir(cfg.repo_slug, workspace_id)
-            notes = sorted(directory.rglob("*.md")) if directory.exists() else []
+            notes = _notes(directory)
             if not notes:
                 empty.append(cfg.repo_slug)
                 continue
@@ -321,15 +322,15 @@ def list_notes(
 def _resolve(directory: Path, rel: str) -> Path:
     """`rel` inside `directory`, or 404.
 
-    Compares resolved PATH PARTS, not string prefixes: `/vault/repo-evil`
-    starts with `/vault/repo` and is a different directory. resolve() follows
-    symlinks first, so a link planted in the vault is not a way out either.
+    The vault reader's own check (`note_file`: `confined_note` plus "is it a
+    file"): path PARTS, not string prefixes (`/vault/repo-evil` starts with
+    `/vault/repo` and is a different directory), links resolved first so one
+    planted in the vault is not a way out, the secret-file floor every other
+    reader applies, and every OS error read as "no such note" (an over-long name
+    is a 404, never a 500 that carries the vault's path).
     """
-    root = directory.resolve()
-    candidate = (root / rel).resolve()
-    if candidate != root and root not in candidate.parents:
-        raise HTTPException(status_code=404, detail="Note not found")
-    if not candidate.is_file() or candidate.suffix != ".md":
+    candidate = note_file(directory, rel)
+    if candidate is None or candidate.suffix != ".md":
         raise HTTPException(status_code=404, detail="Note not found")
     return candidate
 
@@ -343,7 +344,10 @@ def read_note(
 ) -> NoteOut:
     directory, dec = _readable_vault(slug, user, workspace_id)
     full = _resolve(directory, path)
-    post = frontmatter.load(full)
+    try:
+        post = frontmatter.load(full)
+    except Exception:  # noqa: BLE001 — an unreadable note is the answer for a missing one
+        raise HTTPException(status_code=404, detail="Note not found") from None
     if _concealed(post, dec):
         # Exactly the answer for a note that does not exist.
         raise HTTPException(status_code=404, detail="Note not found")

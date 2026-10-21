@@ -135,15 +135,16 @@ class CodeReader:
         redact_content: bool = True,
     ) -> CodeSnippet | None:
         """Read the file in full. Used with care — only for small/key files."""
-        fp = _safe_path(repo_path, file_rel)
-        if fp is None or not fp.exists() or not fp.is_file():
+        opened = _open(repo_path, file_rel)
+        if opened is None:
             return None
+        fp, verdict = opened
         try:
             text = fp.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            logger.warning("read_failed file=%s err=%s", file_rel, exc)
+            logger.warning("read_failed file=%s err=%s", file_rel, type(exc).__name__)
             return None
-        text = _mask_if_keys_only(file_rel, text)
+        text = _mask_if_keys_only(verdict, text)
         if redact_content:
             from src.security.redactor import redact
 
@@ -166,16 +167,17 @@ class CodeReader:
         end: int | None,
         context_lines: int,
     ) -> CodeSnippet | None:
-        fp = _safe_path(repo_path, file_rel)
-        if fp is None or not fp.exists() or not fp.is_file():
+        opened = _open(repo_path, file_rel)
+        if opened is None:
             logger.debug("file_not_found %s", file_rel)
             return None
+        fp, verdict = opened
         try:
             text = fp.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            logger.warning("read_failed file=%s err=%s", file_rel, exc)
+            logger.warning("read_failed file=%s err=%s", file_rel, type(exc).__name__)
             return None
-        lines = _mask_if_keys_only(file_rel, text).splitlines()
+        lines = _mask_if_keys_only(verdict, text).splitlines()
 
         # If end is not given — we look for the end of the function heuristically (brace/indent balance)
         if end is None:
@@ -196,22 +198,44 @@ class CodeReader:
 def _safe_path(repo_path: Path, file_rel: str) -> Path | None:
     """``repo_path / file_rel`` unless it leaves the repository or is a secret
     file (``.env``, keys, credential stores; see src/security/secret_files.py).
-    A refusal reads like a missing file: no oracle for what exists."""
+    A refusal reads like a missing file: no oracle for what exists.
+
+    Any failure to resolve the path (an over-long name, a link loop) is a refusal
+    too, never an exception: its text would carry the clone's path on the server."""
     from src.security.secret_files import SecretPathRefused, safe_join
 
     try:
         return safe_join(repo_path, file_rel)
-    except SecretPathRefused:
+    except (SecretPathRefused, OSError, ValueError, RuntimeError):
         logger.info("secret_path_refused")
         return None
 
 
-def _mask_if_keys_only(file_rel: str, text: str) -> str:
-    """``.env.example``-style files keep their names; values that are not an
-    obvious placeholder are withheld."""
-    from src.security.secret_files import classify, mask_env_values
+def _open(repo_path: Path, file_rel: str) -> tuple[Path, str] | None:
+    """The regular file to read and what to do with it (``ok`` / ``keys_only``),
+    or None when it must not be read (secret, missing, a directory).
 
-    return mask_env_values(text) if classify(file_rel) == "keys_only" else text
+    The verdict is that of the file the request RESOLVED to (and of the name it
+    was asked for, whichever is stricter): masking by the requested name alone
+    would hand a link called ``notes.txt`` to ``.env.example`` back unmasked."""
+    from src.security.secret_files import reading_verdict
+
+    fp = _safe_path(repo_path, file_rel)
+    try:
+        if fp is None or not fp.is_file():
+            return None
+        verdict = reading_verdict(repo_path, file_rel, fp)
+    except OSError:
+        return None
+    return None if verdict == "deny" else (fp, verdict)
+
+
+def _mask_if_keys_only(verdict: str, text: str) -> str:
+    """``.env.example``-style files keep their names; values that are not an
+    obvious placeholder are withheld (a value that spans lines, whole)."""
+    from src.security.secret_files import mask_env_values
+
+    return mask_env_values(text) if verdict == "keys_only" else text
 
 
 def _language_for_file(fp: Path) -> str:

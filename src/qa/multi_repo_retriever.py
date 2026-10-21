@@ -41,8 +41,20 @@ from src.config import Settings, get_settings
 from src.llm.prompts.technical_answer import TECHNICAL_ANSWER_PROMPT, TECHNICAL_ANSWER_SYSTEM
 from src.retrieval.tier1_vault import VaultRetriever
 from src.retrieval.vector_store import VectorScope
+from src.security.secret_files import SecretPathRefused, is_secret_path, safe_join
 
 logger = logging.getLogger(__name__)
+
+
+def _secret_prefixed(prefixed: str) -> bool:
+    """True for a repo-prefixed path (``slug/rel``) that is a secret file.
+
+    The floor under every tier of retrieval: ``.env``, keys and credential
+    stores never reach a prompt, whatever the access decision says (it applies
+    to an owner too), exactly as for the dev tools. See
+    :func:`src.security.secret_files.is_secret_path`.
+    """
+    return is_secret_path(prefixed.partition("/")[2])
 
 # Tier 2 (graph) budget — the graph is a structural *hint* next to the code
 # bundle, so it stays small and cheap (local FalkorDB files, no network).
@@ -298,7 +310,7 @@ class MultiRepoRetriever:
             symbol_files = self._text_search_files(
                 question, accessible, access, workspace_id) + symbol_files
             symbol_files = [f for f in dict.fromkeys(symbol_files)
-                            if self._in_scope(access, f)]
+                            if self._in_scope(access, f) and not _secret_prefixed(f)]
             # Both of the usual ways into Tier 3 can be empty at once: without a
             # vault there are no `hits` whose modules we could walk, and a
             # question phrased in prose ("що це за сервіси" — "what are these
@@ -432,6 +444,8 @@ class MultiRepoRetriever:
                     fpath = d.get("file") or ""
                     if dec is not None and fpath and not dec.path_visible(fpath):
                         continue
+                    if fpath and is_secret_path(fpath):
+                        continue
                     key = f"{repo}:{d.get('id') or name}"
                     if key in seen:
                         continue
@@ -473,6 +487,8 @@ class MultiRepoRetriever:
         for c in (res or {}).get("callers", [])[:_GRAPH_MAX_CALLERS]:
             cfile = c.get("file", "") or ""
             if dec is not None and cfile and not dec.path_visible(cfile):
+                continue
+            if cfile and is_secret_path(cfile):
                 continue
             out.append(f"`{c.get('name')}` ({cfile}:{c.get('start_line', 0)})")
         return out
@@ -561,8 +577,8 @@ class MultiRepoRetriever:
                 + self._graph_hub_files(graph_tools, repo)
             ):
                 prefixed = f"{repo}/{rel}"
-                if prefixed in picks:
-                    continue
+                if prefixed in picks or is_secret_path(rel):
+                    continue  # a secret file would only spend a slot the reader refuses
                 picks.append(prefixed)
                 if len(picks) >= _FALLBACK_MAX_FILES_PER_REPO:
                     break
@@ -798,6 +814,13 @@ class MultiRepoRetriever:
                 continue
             if h.path and dec.path_denied(h.path):
                 logger.info("vault_hit_hidden repo=%s path=%s", h.repo, h.path)
+                continue
+            if h.path and (is_secret_path(h.path) or is_secret_path(h.path.rstrip("/") + "/_")):
+                # A note about a secret file, or about a module that is a secret
+                # directory (`config/secrets`), is a copy of it in prose. The
+                # floor, not an access rule: it holds for an owner and for a repo
+                # with no deny glob at all.
+                logger.info("vault_hit_secret_path repo=%s", h.repo)
                 continue
             out.append(h)
         return out
@@ -1102,6 +1125,8 @@ class MultiRepoRetriever:
                     if any(part in {"node_modules", "dist", "build", ".next"}
                            for part in rel.parts):
                         continue
+                    if is_secret_path(rel_str):
+                        continue
                     prefixed = f"{repo}/{rel_str}"
                     if prefixed not in found:
                         found.append(prefixed)
@@ -1150,7 +1175,14 @@ class MultiRepoRetriever:
 
         def _allowed(repo_slug: str, rel: str) -> bool:
             """True if the file is code-visible for the caller. Records a
-            hidden file (once) when it is not."""
+            hidden file (once) when it is not.
+
+            A secret file is refused FIRST and for everyone, with no access
+            decision at all (``access is None`` included): it is neither read
+            nor listed as hidden, because the boundary notice reaches the prompt
+            and the name of a credentials file is not for the model either."""
+            if is_secret_path(rel):
+                return False
             if access is None:
                 return True
             dec = access.get(repo_slug)
@@ -1190,7 +1222,15 @@ class MultiRepoRetriever:
                     logger.warning("code_read_outside_repo repo=%s rel=%s",
                                    repo_slug, rel)
                     return False
-            except OSError:
+                # What the name does not give away: a link to a secret file, and
+                # a data file whose head is a private key or a Secret manifest.
+                safe_join(repo_root, rel)
+                if is_secret_path(p.resolve().relative_to(repo_root.resolve()).as_posix()):
+                    return False
+            except SecretPathRefused:
+                logger.info("code_read_secret_refused repo=%s", repo_slug)
+                return False
+            except (OSError, ValueError):
                 return False
             if not p.exists() or not p.is_file():
                 return False

@@ -606,6 +606,9 @@ class ExplorationAgent:
         if not note_path:
             return {"error": "note_path required"}
         rel = note_path if note_path.endswith(".md") else f"{note_path}.md"
+        # `note_path` is the model's. The reader confines it to this repo's
+        # vault folder (no `..`, no absolute path, no link out, no secret
+        # name) and answers a refusal exactly like a missing note.
         note = self.vault_reader.read(self.repo, rel)
         if not note:
             return {"error": f"not_found: {rel}"}

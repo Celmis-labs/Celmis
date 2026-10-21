@@ -246,6 +246,8 @@ class QAOrchestrator:
         """
         if not files:
             return []
+        from src.security.secret_files import SecretPathRefused, safe_join
+
         out: list[str] = []
         seen: set[str] = set()
         try:
@@ -256,8 +258,16 @@ class QAOrchestrator:
         for f in files:
             if not f:
                 continue
+            # `f` comes out of the question (the router echoes what the user
+            # typed), so it is never joined to the clone unchecked: `../..`,
+            # an absolute path, a link out of the repo and a secret file all
+            # read like a file that does not exist.
+            try:
+                direct = safe_join(repo_path, f)
+            except (SecretPathRefused, OSError, ValueError):
+                continue
             # A directly existing rel path?
-            if (repo_path / f).is_file():
+            if direct.is_file():
                 if f not in seen:
                     seen.add(f)
                     out.append(f)

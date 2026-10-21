@@ -50,8 +50,11 @@ audit work: [MCP access](mcp-access.md).
   pack stays readable to them.
 - Removing someone from a workspace also takes them out of that workspace's teams
   (their teams in other workspaces are untouched) and revokes the pack publish
-  tokens and invite links they made there; adding them back restores none of it.
-  Deleting your own account follows the same rules for every workspace you were in.
+  tokens and invite links they made there, and the MCP tokens they hold for it
+  (see [MCP access](mcp-access.md)); adding them back restores none of it. A change
+  of role revokes nothing. Deleting your own account follows the same rules for
+  every workspace you were in, and deleting a workspace revokes the MCP tokens
+  bound to it.
 - Memories are for editors and above, reads included, and a repository's
   memories are listed, counted, previewed and attributed only to somebody who may
   read that repository. A memory taught on a repository the person cannot read

@@ -39,6 +39,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from src.security.secret_files import is_secret_path, plain_file
+
 logger = logging.getLogger(__name__)
 
 #: The spend surface and ledger operation the model call is booked under —
@@ -158,8 +160,13 @@ def _sample_sources(root: Path, files: list[str], languages: Counter,
         low = f.lower()
         if any(h in low for h in _GENERATED_HINTS):
             continue
+        # A tracked link, a secret-named file and anything outside the clone
+        # are never a sample of the codebase.
+        fp = plain_file(root, f)
+        if fp is None:
+            continue
         try:
-            size = (root / f).stat().st_size
+            size = fp.stat().st_size
         except OSError:
             continue
         if size < 300 or size > 60_000:
@@ -184,14 +191,15 @@ def _vault_excerpt(repo_slug: str, budget: int = VAULT_CHARS) -> tuple[str, int]
     """The repository's generated documentation (vault notes), overview
     first — what indexing already learned about it. ("", 0) without one."""
     from src.config import get_settings
+    from src.vault.reader import vault_note_files
 
     try:
         vault = get_settings().repo_vault_path(repo_slug)
     except Exception:  # noqa: BLE001
         return "", 0
-    if not vault.is_dir():
-        return "", 0
-    notes = sorted(vault.rglob("*.md"))
+    # The vault's own walk: no link out of the folder (another tenant's notes,
+    # any `.md` on the server), no secret-named note.
+    notes = vault_note_files(vault)
     if not notes:
         return "", 0
 
@@ -222,7 +230,8 @@ def build_repo_digest(repo_slug: str, root: Path | None = None) -> tuple[str, di
     is nothing to read."""
     root = root or repo_root(repo_slug)
     vault_text, vault_notes = _vault_excerpt(repo_slug)
-    files = list_files(root) if root else []
+    # Names the secret floor hides from every other reader stay out of the tree.
+    files = [f for f in list_files(root) if not is_secret_path(f)] if root else []
     if not files and not vault_text:
         raise RulesJobError(
             "This repository has no clone and no documentation to read yet — "
@@ -244,8 +253,11 @@ def build_repo_digest(repo_slug: str, root: Path | None = None) -> tuple[str, di
         for f in _sample_sources(root, files, languages):
             if budget <= 500:
                 break
+            fp = plain_file(root, f)
+            if fp is None:
+                continue
             try:
-                text = (root / f).read_text(encoding="utf-8", errors="replace")
+                text = fp.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
             take = text[: min(PER_FILE_CHARS, budget)]
@@ -695,9 +707,13 @@ def scan_convention_files(root: Path) -> list[dict]:
     """Proposals read from the repository's convention files, in a stable
     order. Pure: reads files, writes nothing."""
     def read(rel: str) -> str | None:
-        path = root / rel
+        # By name from a clone anybody may have committed to: a link, a secret
+        # name or a path out of the clone is not a convention file.
+        path = plain_file(root, rel)
+        if path is None:
+            return None
         try:
-            if path.is_file() and path.stat().st_size <= 400_000:
+            if path.stat().st_size <= 400_000:
                 return path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None

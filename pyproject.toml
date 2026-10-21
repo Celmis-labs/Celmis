@@ -204,6 +204,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "integration: real network/git operations (skipped by default; run with -m integration)",
+    "real_workspace: reads the developer's own clones and graphs under ~/code-analysis (the vault stays scratch)",
 ]
 # Skip integration tests за замовчуванням; -m integration або --override-ini увімкне
 addopts = "-m 'not integration'"

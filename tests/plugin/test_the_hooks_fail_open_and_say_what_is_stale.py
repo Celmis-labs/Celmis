@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -24,6 +25,14 @@ hook = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hook)
 
 PLUGIN_TOOL = C.PLUGIN_PREFIX + "find"
+
+
+@pytest.fixture(autouse=True)
+def clean_plugin_environment(monkeypatch):
+    """Nothing this machine exports leaks into a test: the plugin's two options and
+    the legacy variables start unset, and each test sets what it is about."""
+    for name in (hook.URL_OPTION, hook.TOKEN_OPTION, "CELMIS_URL", "CELMIS_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -287,7 +296,10 @@ def test_the_process_prints_the_json_when_there_is_something_to_say(checkout) ->
 
 # ─── session start and the grep nudge ────────────────────────────────
 
-_CONFIGURED = {"CELMIS_URL": "https://celmis.example.com", "CELMIS_TOKEN": "x" * 24}
+#: What Claude Code puts in a hook's environment once /plugin configure has saved both
+#: options. A dummy token: its value must never reach any output (checked below).
+_TOKEN = "dummy.tok-" + "x" * 24
+_CONFIGURED = {C.URL_OPTION_ENV: "https://celmis.example.com/backend", C.TOKEN_OPTION_ENV: _TOKEN}
 
 
 def test_session_start_prints_at_most_three_lines(checkout, monkeypatch) -> None:
@@ -310,12 +322,72 @@ def test_session_start_points_at_brief_for_a_new_task(checkout, monkeypatch) -> 
     assert "brief" in ctx and len(ctx.splitlines()) <= 3
 
 
-def test_session_start_tells_an_unconfigured_user_how_to_configure(checkout, monkeypatch) -> None:
+def test_session_start_tells_an_unconfigured_user_how_to_configure(checkout) -> None:
     repo, _ = checkout
-    monkeypatch.delenv("CELMIS_URL", raising=False)
-    monkeypatch.delenv("CELMIS_TOKEN", raising=False)
     ctx = _context(hook.run("session", json.dumps({"cwd": str(repo)})))
-    assert "CELMIS_URL" in ctx and "CELMIS_TOKEN" in ctx and len(ctx.splitlines()) <= 3
+    assert "/plugin configure celmis-code@celmis" in ctx and len(ctx.splitlines()) <= 3
+    assert "Celmis is connected" not in ctx
+
+
+@pytest.mark.parametrize("missing", [C.URL_OPTION_ENV, C.TOKEN_OPTION_ENV])
+def test_one_option_alone_is_not_configured(checkout, monkeypatch, missing) -> None:
+    repo, _ = checkout
+    for k, v in _CONFIGURED.items():
+        if k != missing:
+            monkeypatch.setenv(k, v)
+    ctx = _context(hook.run("session", json.dumps({"cwd": str(repo)})))
+    assert "/plugin configure" in ctx and "Celmis is connected" not in ctx
+    assert _pre("OrderService", uuid.uuid4().hex) == ""
+
+
+@pytest.mark.parametrize("empty", ["", "   "])
+def test_an_option_that_is_empty_counts_as_not_set(checkout, monkeypatch, empty) -> None:
+    repo, _ = checkout
+    monkeypatch.setenv(C.URL_OPTION_ENV, "https://celmis.example.com/backend")
+    monkeypatch.setenv(C.TOKEN_OPTION_ENV, empty)
+    ctx = _context(hook.run("session", json.dumps({"cwd": str(repo)})))
+    assert "/plugin configure" in ctx and "Celmis is connected" not in ctx
+
+
+def test_the_legacy_variables_no_longer_configure_the_plugin(checkout, monkeypatch) -> None:
+    """3.0.1 read CELMIS_URL and CELMIS_TOKEN; the plugin's tools no longer do, so
+    the hooks must not call a shell with only those set "connected"."""
+    repo, _ = checkout
+    monkeypatch.setenv("CELMIS_URL", "https://celmis.example.com/backend")
+    monkeypatch.setenv("CELMIS_TOKEN", _TOKEN)
+    ctx = _context(hook.run("session", json.dumps({"cwd": str(repo)})))
+    assert "/plugin configure" in ctx and "Celmis is connected" not in ctx
+    assert _pre("OrderService", uuid.uuid4().hex) == ""
+
+
+def test_the_token_is_never_in_anything_a_hook_prints(checkout, monkeypatch) -> None:
+    repo, sha = checkout
+    for k, v in _CONFIGURED.items():
+        monkeypatch.setenv(k, v)
+    (repo / "app" / "orders.py").write_text("changed\n")
+    outputs = [
+        hook.run("session", json.dumps({"cwd": str(repo)})),
+        _pre("OrderService", uuid.uuid4().hex),
+        hook.run("postmcp", json.dumps({
+            "tool_name": PLUGIN_TOOL, "cwd": str(repo),
+            "tool_response": _answer(sha, ["app/orders.py:3"])})),
+        hook.run("postmcp", "not json"),
+    ]
+    # and the insecure-address warning, which reads the same variables
+    monkeypatch.setenv(C.URL_OPTION_ENV, "http://celmis.example.com/backend")
+    outputs.append(hook.run("session", json.dumps({"cwd": str(repo)})))
+    assert any(outputs), "the probe printed nothing at all, so it proves nothing"
+    for out in outputs:
+        assert _TOKEN not in out and "dummy.tok-" not in out
+
+
+def test_the_hook_source_never_prints_or_logs_the_token_option() -> None:
+    """The token is only ever tested for being non-empty (see `_option`)."""
+    src = C.HOOK.read_text(encoding="utf-8")
+    uses = [ln for ln in src.splitlines() if "TOKEN_OPTION" in ln and not ln.lstrip().startswith(("#", '"""'))]
+    assert uses, "the hook no longer looks at the token option"
+    for ln in uses:
+        assert not re.search(r"print|write|log|format|f\"|json\.dumps|_json_out", ln), ln
 
 
 def test_session_start_outside_a_repository_still_answers(tmp_path, monkeypatch) -> None:
@@ -368,7 +440,7 @@ def test_the_grep_nudge_ignores_things_that_are_not_identifiers(pattern, monkeyp
 
 
 def test_the_grep_nudge_is_silent_without_a_token(monkeypatch) -> None:
-    monkeypatch.delenv("CELMIS_TOKEN", raising=False)
+    monkeypatch.setenv(C.URL_OPTION_ENV, _CONFIGURED[C.URL_OPTION_ENV])
     assert _pre("OrderService", uuid.uuid4().hex) == ""
 
 
@@ -410,3 +482,27 @@ def test_the_dirty_guard_process_finishes_far_inside_the_hook_timeout(checkout) 
         assert done.returncode == 0
     samples.sort()
     assert samples[-2] < 1.0, samples  # the second slowest of eight: p~90, tolerant of one spike
+
+
+def test_git_run_by_the_hook_never_sees_the_plugin_options(checkout, monkeypatch) -> None:
+    """git runs whatever the checkout's own config names (fsmonitor, hooks, helpers),
+    and a copied repository can carry such config; the token stays with the hook."""
+    repo, sha = checkout
+    monkeypatch.setenv(hook.URL_OPTION, "https://celmis.example.com")
+    monkeypatch.setenv(hook.TOKEN_OPTION, "marker-token-value")
+    seen: list[dict] = []
+    real_run = subprocess.run
+
+    def recording_run(argv, *args, **kwargs):
+        if argv and argv[0] == "git":
+            seen.append(dict(kwargs.get("env") or os.environ))
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(hook.subprocess, "run", recording_run)
+    (repo / "app" / "orders.py").write_text("def create_order():\n    return 1\n")
+    _post(repo, _answer(sha, ["app/orders.py:1"]))
+    hook.run("session", json.dumps({"cwd": str(repo)}))
+    assert seen, "the hook ran git"
+    for env in seen:
+        assert not [k for k in env if k.startswith("CLAUDE_PLUGIN_OPTION_")]
+        assert "marker-token-value" not in env.values()

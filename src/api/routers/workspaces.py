@@ -35,7 +35,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import client_ip, get_current_user, require_superadmin
-from src.api.memberships import actor_role, change_membership, refuse_unless_can_change
+from src.api.memberships import (
+    actor_role,
+    change_membership,
+    record_token_revocations,
+    refuse_unless_can_change,
+    revoke_workspace_tokens_sync,
+)
 from src.db.models import Workspace, WorkspaceMember
 from src.db.session import get_async_session
 from src.users import User
@@ -218,6 +224,7 @@ async def create_workspace(
 @router.delete("/{ws_id}", status_code=204)
 async def delete_workspace(
     ws_id: str,
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(get_current_user),
 ) -> None:
@@ -235,8 +242,20 @@ async def delete_workspace(
     from src.knowledge import store as pack_store
 
     await pack_store.delete_workspace_packs(session, ws_id)
+    # The members go with the workspace (a cascade in the database), but the MCP
+    # tokens bound to it are rows of their own: left live, each would look like a
+    # working grant in Admin > MCP tokens for a workspace that no longer exists.
+    # Project tokens (`cmcp_`) have no person, so no membership change ends them
+    # either: they go in the same transaction.
+    revoked_tokens, revoked_project_tokens = await session.run_sync(
+        lambda s: revoke_workspace_tokens_sync(
+            s, by=f"workspace_deleted:{user.id}", workspace_ids=[ws_id]))
     await session.delete(ws)
     await session.commit()
+    record_token_revocations(
+        revoked_tokens, actor=user.email, actor_id=user.id, user_id=None,
+        via="workspace_deleted", ip=client_ip(request),
+        project_revoked=revoked_project_tokens)
     logger.info("workspace_deleted id=%s by=%s", ws_id, user.email)
 
 

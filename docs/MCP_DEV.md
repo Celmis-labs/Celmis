@@ -53,6 +53,17 @@ question, returns the first page with a note.
   a repository that does not exist.
 * Metadata-level access lists symbol locations but never bodies or grep lines.
 * Paths denied by a rule never appear in any tool.
+* `ask` hides secret files exactly as the other tools do. The answer is built
+  from files that passed the same check (the one the tools use, including
+  `.env*`, keys, `secrets/`, `.ssh/` and a data file whose content looks like a
+  credential): such a file is never read into the question sent to the model,
+  never named in the answer and never listed under `sources:`, whatever the
+  access rules say, owners included. The web chat shares the same path. Ask
+  about the pattern (`howto`) and read the names of the variables, not values.
+  The notes `ask` reads follow the same rule: the model can open only the notes of the
+  repository it is exploring. A path with `..`, an absolute path, a link out of that
+  repository's note folder or a secret file's name answers "not found", like a note
+  that is not there.
 * Secret files (`.env`, keys, `secrets/`) are excluded by git itself, and all
   body text passes one redaction step before it is printed, before it is cut to
   a line length. Besides tokens, keys and DSNs, that step masks a literal next to a
@@ -72,25 +83,29 @@ Bitbucket hook needs the event added once (reinstall or repair the webhook).
 The repository ships a plugin, `packaging/claude-plugin/celmis-code`, that connects
 `/mcp/dev/`, teaches the search order (`repos`, `find`, `outline`, `read_symbol`,
 `refs`; `howto` for "do it like service X"; `brief` then `skills` at the start of a task)
-and adds three small hooks. It holds no
-token: the endpoint and the token come from two environment variables.
-
-```bash
-export CELMIS_URL=https://celmis.example.com/backend   # no trailing slash, no /mcp
-export CELMIS_TOKEN=...                                # issued by your superadmin, shown once
-```
-
-`CELMIS_URL` is the address the web app's Connect page shows; on the bundled
-deployment it ends in `/backend`.
+and adds three small hooks. It holds no token: Claude Code asks for two values when the
+plugin is enabled, the server address and your token, and substitutes them into the
+plugin's server entry (`${user_config.celmis_url}/mcp/dev/`, `Authorization: Bearer
+${user_config.celmis_token}`).
 
 ```text
 /plugin marketplace add Celmis-labs/Celmis
 /plugin install celmis-code@celmis
 ```
 
+Give the address the web app's Connect page shows (`https://`, no trailing slash, no
+`/mcp`; on the bundled deployment it ends in `/backend`, for example
+`https://celmis.example.com/backend`) and the token your superadmin issued (shown once;
+the input is masked). The token is kept in the system keychain (`~/.claude/.credentials.json`
+where there is none), the address in your user settings; neither is a shell variable.
+Change either later with `/plugin configure celmis-code@celmis`, then restart Claude
+Code. `CELMIS_URL` and `CELMIS_TOKEN` in the environment are not read by the plugin
+(they were in 3.0.1: run the configure step once when you upgrade).
+
 From a checkout: `claude --plugin-dir packaging/claude-plugin/celmis-code`. Run `/mcp`
-and check that `celmis` is connected. The plugin's README covers the keychain helper,
-rolling it out to a team, and why there is no local proxy.
+and check that `celmis` is connected. The plugin's README covers changing the values
+from a script, rolling it out to a team, Windows, a server entry of your own
+(`headersHelper` with the keychain), troubleshooting, and why there is no local proxy.
 
 ## "Do it like service X" (`howto`)
 
@@ -176,8 +191,26 @@ budgets): `CELMIS_MCP_RATE_PER_MINUTE` calls per minute (default 120, `0` switch
 off), `CELMIS_MCP_MAX_CONCURRENT` calls at once (default 4) and
 `CELMIS_MCP_CALL_TIMEOUT_SECONDS` per call (default 60). A call over a limit is
 answered with a short message that says what to narrow or when to retry, and is
-audited as denied. One call searches at most 40 repositories; name one with `repo=` to
-go deeper.
+audited as denied. One call searches at most 40 repositories (`grep`: 10); when a
+token reaches more, the answer says so on its first lines (`searched 40 of 90 repos;
+pass repo= to target one`) and `repo=` goes deeper. `search_symbols` has no `repo=`;
+it says `searched 40 of 90 repos; pass project_id= to narrow`, or, when `project_id=` was
+already given and the project itself holds more than 40 repositories,
+`searched 40 of 90 repos in this project; narrow the project`. `refs` says how many
+sibling repositories it looked in for text mentions, and `brief` says when `repos=`
+named more than 20.
+
+`ask` is held to less than the call timeout, so that it ends with an answer or with
+its own message and not with the generic cut. It waits for the model until the call
+has 10 seconds left (a quarter of the timeout when that is smaller): 50 seconds at the
+default, and never more than 150. If the answer is not ready it says `The answer took
+too long (more than 50s) — narrow the question or the repositories.` and stops the
+model call. There is no setting of its own: raise `CELMIS_MCP_CALL_TIMEOUT_SECONDS`
+and `ask` waits longer, up to 150 seconds, which is also what the web assistant
+waits (it is not an MCP call). Every MCP answer is a server-sent event stream with a
+ping every 15 seconds, so a proxy or CDN with a 100-second idle limit does not close
+the connection while an answer is being written. The server sends no progress
+notifications while it waits.
 
 ## Checking an installation end to end
 

@@ -101,7 +101,7 @@ def tree(tmp_path) -> Path:
     files = {
         "Документи/РеалізаціяТоварів.bsl": "Процедура ПровестиДокумент(Відмова)\n  ЗаписатиЖурнал();\nКонецПроцедури\n",
         "Довідники/Контрагенти.bsl": "Функція ОтриматиКонтрагента(Код)\nКонецФункції\n",
-        "config/secrets/Ключ.bsl": "Пароль = \"x\"; // ПровестиДокумент\n",
+        "config/params/Ключ.bsl": "Пароль = \"x\"; // ПровестиДокумент\n",
         "Помилка.xml": "<Файл><Поле>ПровестиДокумент</Поле></Файл>",
         "img/logo.png": "ПровестиДокумент\x00\x01binary",
         "blob.bin": "ПровестиДокумент",
@@ -138,10 +138,10 @@ def test_a_file_name_match_alone_is_a_hit(tree):
 def test_the_scope_removes_files_from_search_and_ranking(tree):
     scope = scope_of([], ["config/**"])
     hits, _ = text_search.search_text(tree, "ПровестиДокумент", scope=scope)
-    assert "config/secrets/Ключ.bsl" not in {h.path for h in hits}
+    assert "config/params/Ключ.bsl" not in {h.path for h in hits}
     with_scope = text_search.rank_files(tree, "ПровестиДокумент", scope=scope)
-    assert "config/secrets/Ключ.bsl" not in with_scope
-    assert "config/secrets/Ключ.bsl" in text_search.rank_files(tree, "ПровестиДокумент")
+    assert "config/params/Ключ.bsl" not in with_scope
+    assert "config/params/Ключ.bsl" in text_search.rank_files(tree, "ПровестиДокумент")
 
 
 def test_the_time_budget_and_the_limits_bound_a_search(tree):

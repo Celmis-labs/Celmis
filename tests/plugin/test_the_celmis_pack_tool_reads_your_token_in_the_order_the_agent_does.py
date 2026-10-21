@@ -1,12 +1,14 @@
-"""`celmis-pack verify` asks the server with the token your agent connects with.
+"""``celmis-pack verify`` asks the server with the token your own server entry sends.
 
 The contract (bin/celmis-pack, bin/celmis-auth-header, the plugin README):
 
-  * the helper that gives Claude Code its header reads the keychain entry
+  * the helper for a server entry you write yourself reads the keychain entry
     `celmis-token` first and `CELMIS_TOKEN` only when the keychain has none;
   * `celmis-pack` looks for your own token in exactly that order, so `verify`
-    answers for the token the agent really uses (a stale keychain entry is not
+    answers for the token that entry really uses (a stale keychain entry is not
     quietly bypassed by the variable, and the other way round);
+  * the plugin's own token is kept by Claude Code (`/plugin configure`) and cannot be
+    read from here; the tool's documentation and the README say so;
   * the tool's own documentation and the README say that same order.
 """
 
@@ -79,3 +81,10 @@ def test_the_tools_documentation_and_the_readme_state_the_same_order():
     readme = " ".join((C.PLUGIN / "README.md").read_text(encoding="utf-8").split())
     assert "the keychain entry `celmis-token`, else `CELMIS_TOKEN`" in readme
     assert "the order of `celmis-auth-header`" in readme
+
+
+def test_the_tool_and_the_readme_say_the_plugins_own_token_is_not_read_here():
+    docstring = " ".join(CLI.read_text(encoding="utf-8").split('"""')[1].split())
+    assert "cannot be read from here" in docstring and "/plugin configure" in docstring
+    readme = " ".join((C.PLUGIN / "README.md").read_text(encoding="utf-8").split())
+    assert "cannot read it" in readme and "keep the same token in one of those two places" in readme

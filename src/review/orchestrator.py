@@ -3055,10 +3055,13 @@ class ReviewOrchestrator:
         try:
             from src.config import get_settings
             settings = get_settings()
-            overview_path = (
-                settings.repo_vault_path(pr.local_slug) / "_overview.md"
-            )
-            if overview_path.exists():
+            # Through the vault's confined reader: a link planted in the vault
+            # must not put another repository's note or a server file in the prompt.
+            from src.vault.reader import note_file
+
+            overview_path = note_file(
+                settings.repo_vault_path(pr.local_slug), "_overview.md")
+            if overview_path is not None:
                 content = overview_path.read_text(encoding="utf-8")
                 # Limit to ~3000 chars
                 return content[:3000]
@@ -3070,12 +3073,17 @@ class ReviewOrchestrator:
         """Load CLAUDE.md / .style or other repo conventions if they exist."""
         try:
             from src.config import get_settings
+            from src.security.secret_files import plain_file
             settings = get_settings()
             repo_path = settings.repo_path(pr.local_slug)
             for candidate in ("CLAUDE.md", ".cursorrules", "CONTRIBUTING.md"):
-                p = repo_path / candidate
-                if p.exists():
-                    return p.read_text(encoding="utf-8")[:3000]
+                # The clone is whatever the repository holds: a committed link
+                # must not turn a style guide into a server file, nor a secret
+                # name into prompt text.
+                p = plain_file(repo_path, candidate)
+                if p is not None:
+                    with p.open(encoding="utf-8", errors="replace") as fh:
+                        return fh.read(3000)
         except Exception:  # noqa: BLE001
             pass
         return ""

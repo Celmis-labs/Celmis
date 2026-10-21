@@ -129,11 +129,12 @@ def _collect_context(
     """Build a compact evidence blob: top-level file tree + first N bytes
     of the readmes / entry files."""
     from src.config import get_settings
+    from src.security.secret_files import is_secret_path, plain_file
     settings = get_settings()
     p = settings.repo_path(repo_slug)
     if not p.exists():
         return ""
-    files = _tracked_files(p)
+    files = [f for f in _tracked_files(p) if not is_secret_path(f)]
     if not files:
         return ""
     tree_preview = "\n".join(f"  - {f}" for f in files[:80])
@@ -143,8 +144,14 @@ def _collect_context(
     snippets: list[str] = []
     budget = max_bytes
     for f in picks:
+        # `f` comes from `git ls-files` of a clone anybody may have committed
+        # to: a tracked link, a secret-named file or a path out of the clone is
+        # not an entry file.
+        fp = plain_file(p, f)
+        if fp is None:
+            continue
         try:
-            data = (p / f).read_text(errors="replace")
+            data = fp.read_text(errors="replace")
         except OSError:
             continue
         take = min(1500, budget)

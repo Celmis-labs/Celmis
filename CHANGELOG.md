@@ -20,6 +20,283 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.0.2] — 2026-10-21
+
+The Claude Code plugin keeps its address and token as plugin options instead of
+environment variables, and the server reads files, notes and links more carefully:
+every reader withholds secret files, links and hard links, `ask` and the documentation
+pages stay inside their own repository, and removing a person revokes their MCP tokens.
+
+### Upgrade notes
+
+- **Plugin users run one command once.** The Claude Code plugin no longer reads
+  `CELMIS_URL` and `CELMIS_TOKEN` from the environment. After updating it, run
+  `/plugin configure celmis-code@celmis` in Claude Code, give the address the web
+  app's Connect page shows and your token, and restart Claude Code. Until then the
+  plugin's `celmis` server does not start (no `celmis` entry in `/mcp`, no Celmis
+  tools) and the start-up note says the plugin is not configured. Afterwards remove
+  the two `export` lines from your shell profile if nothing else reads them.
+- **`celmis-pack` is unchanged**: it still reads its own `CELMIS_URL`,
+  `CELMIS_PACK_TOKEN` and the keychain entries `celmis-pack-token` and
+  `celmis-token`. A server entry you wrote yourself, with `headersHelper` and
+  `bin/celmis-auth-header`, keeps working as before.
+- **The address must be `https://`, and the plugin's entry cannot enforce it.** Claude
+  Code has no option type that validates a scheme, so the entry sends the token to
+  whatever address was saved. The start-up note warns when it is not https (localhost
+  excepted) and the Grep nudge stays silent; the README says so.
+- **This release needs a server deploy.** Besides the plugin it carries fixes to the
+  server (see *Server* below): secret files, links and hard links are withheld by every
+  reader (`ask`, the dev tools, ingest, the documentation pages, the review's prompts),
+  `ask` and the documentation pages read only the notes of their own repository, removing
+  a person from a workspace revokes their MCP tokens, `find` and `search_symbols` say
+  when they cut the search, and `ask` gives up before the call timeout. There is no
+  migration and no new setting.
+- **Revoke by hand the MCP tokens of people removed from a workspace before 3.0.2.** The
+  release revokes at the removal, not after the fact, and such a token would work again
+  if its holder were re-added. Look through **Administration, MCP tokens** or let them
+  expire. A person removed from a workspace from now on loses their tokens for it, and
+  re-adding them does not bring a token back: issue a new one.
+- **Some files you could read before are now withheld.** A file with a second hard link (a
+  checkout made by `cp -al`, `rsync --link-dest` or a build cache) is refused under every
+  name; copy it without sharing files (`cp -a`, `git clone --no-hardlinks`). A data file
+  above 2 MiB is withheld (rename it to a source or prose extension, or accept the loss).
+  A glob in `SECRET_PATH_GLOBS_EXTRA` now follows `.gitignore` rules (`config` and
+  `**/secret.txt` reach the repository root, `config/` names a directory), so one that
+  matched less before hides more. An uploaded folder or zip that still carries its
+  `.git/` is ignored for that part instead of being refused.
+
+### Changed
+
+- **The Claude Code plugin keeps its address and token as plugin options.**
+  `plugin.json` declares `userConfig`: `celmis_url` (the address the Connect page
+  shows) and `celmis_token` (`sensitive`, so Claude Code stores it in the macOS
+  Keychain, or in `~/.claude/.credentials.json` where there is no keychain, and in no
+  settings file). `.mcp.json` expands them as `${user_config.celmis_url}/mcp/dev/` and
+  `Authorization: Bearer ${user_config.celmis_token}`. Claude Code asks for both when
+  the plugin is enabled; change them with `/plugin configure celmis-code@celmis` or,
+  from a script, `claude plugin configure celmis-code@celmis --values-stdin`, which
+  reads a JSON object on standard input so the token is not on a command line. The
+  server keeps the name `celmis`, so the tools stay `mcp__plugin_celmis-code_celmis__*`.
+  Before, the token had to be exported in the environment of the shell that starts
+  Claude Code. A helper script was tried in its place and does not work for a plugin:
+  Claude Code removes every variable with `TOKEN`, `SECRET`, `PASSWORD`, `KEY` or
+  `AUTH` in its name from the environment of a plugin's or a project's `headersHelper`.
+- **The plugin's hooks read the plugin's options.** Claude Code gives a hook every
+  option as `CLAUDE_PLUGIN_OPTION_<KEY>`; the start-up note, the Grep nudge and the
+  plain-http warning now look at `CLAUDE_PLUGIN_OPTION_CELMIS_URL` and
+  `CLAUDE_PLUGIN_OPTION_CELMIS_TOKEN`, and nothing else, so they agree with whether the
+  tools can connect. The token is only tested for being non-empty and is never printed
+  or logged. When the plugin is not configured the note says to run
+  `/plugin configure celmis-code@celmis`.
+- **The web app's Connect page** (Codebase, Connect) describes the same flow: install
+  the plugin, give Claude Code the address shown on the page and the token, change
+  them later with `/plugin configure`. It no longer asks you to `export` the token. All
+  sixteen languages are updated.
+- **`bin/celmis-auth-header` is documented for your own server entry only**, where
+  Claude Code runs the helper with your full environment. Its README example now quotes
+  the path inside the JSON string, because a shell runs the command and a path with a
+  space in it (`/Users/Ann Lee/...`) is otherwise two words. The plugin README,
+  `docs/MCP_DEV.md` and `docs/CODEBASE.md` describe the new setup, a team roll-out
+  (`pluginConfigs` is read from user and managed settings, not from a project) and
+  troubleshooting (no tools yet, HTTP 401).
+- **`scripts/dev_mcp_journey.py` follows the new manifest.** It expands the entry's
+  `${user_config.KEY}` placeholders from the throwaway stack's address and a token
+  issued for the run, instead of reading `headers.Authorization` as a literal.
+
+### Server
+
+- **`ask` hides secret files the way the other tools do.** The Q&A pipeline behind
+  `ask` (and the web chat, which shares it) read a file by its path alone, so a
+  `.env`, a key or a file under `secrets/` that the access rules did not name could
+  be put into the question sent to the model and quoted or listed as a source. One
+  check now decides, in one place (`src/security/secret_files.py`, `is_secret_path`),
+  and the dev tools and the Q&A pipeline both use it: every way a file enters the
+  pipeline (vault hits and notes, text search, the graph, the no-vault fallback, the
+  code reader that opens the file) drops a secret path, symbols and callers included,
+  and the reader also refuses a symlink or a data file whose content looks like a
+  credential. It applies to owners and to every access level, and a secret file is
+  absent from the answer, not reported as hidden. A directory named `secrets` is now
+  skipped by the text search too.
+- **Source code is no longer hidden for its name.** `credentials.*` now matches only
+  data extensions (`.json`, `.yml`, `.toml`, `.ini`, `.txt`, `.csv`, `.xml`, `.env`,
+  backup and template spellings, and the bare `credentials`); `src/auth/credentials.py`,
+  `Credentials.java`, `credentials.ts`, `docs/credentials.md` are ordinary files again
+  for the indexer, the code reader, `howto`, ingest, drift and `ask`. The directories
+  `secret/` and `private_keys/` hide only what is not source code or prose (Go's
+  `internal/secret/secret.go` is visible, `secret/prod.yml` is not); every name rule
+  still applies below them.
+- **Names are judged the way the disk reads them.** Case folding (`casefold`) plus NFKC
+  replaces `lower()` for built-in globs, directories and operator globs, so
+  `ſecrets.json`, `id_rſa`, `.pgpaß`, `Kubeconfig`, a fullwidth `.env` are all the
+  secret they alias. On macOS 15 of 15 aliases found by brute force are now recognised
+  (9 slipped through before).
+- **The content sniff reads the whole file.** A `kind: Secret` document after 8 KiB of
+  other manifests, a private key at the end of `notes.txt`, a PEM in `data/key.dat`, a
+  service-account JSON behind a long preamble are found; every extension that is not
+  source, prose, binary media or a lockfile is read (`.dat`, `.bak`, `.log`, `.cfg`, no
+  extension). A data file above 2 MiB (`SNIFF_MAX_BYTES`) cannot be inspected and is
+  withheld; lockfiles, source and media are exempt. Results are cached on path, size,
+  mtime, ctime and inode, so a second walk of an unchanged repository reads nothing. The
+  plain-text search and ranking behind `ask` (`text_search.iter_text_files`) ask the
+  same question, and so does the `howto` source tracer.
+- **A value that spans lines is withheld whole.** `mask_env_values` (used for
+  `.env.example`-style files by the code reader, `howto` and the exploration agent)
+  tracks quotes, PEM blocks, JSON/array blobs, `$( )`, heredocs, YAML block scalars and
+  backslash continuations; continuation lines come out empty so line numbers still
+  match. A value that never closes withholds the rest of the file; a line that is not an
+  assignment is withheld unless it is a bare upper-case variable name.
+- **Readers that mask look at the file they actually open.** The verdict is the
+  strictest of the requested name, the resolved name and the content, so a link called
+  `notes.txt` that reaches `.env.example` is no longer returned unmasked. A file that is
+  itself a symlink, and a regular file with a second hard link, are refused by
+  `safe_join` / `plain_file` (git never creates either).
+- **Operator globs (`SECRET_PATH_GLOBS_EXTRA`) also hide the example env files**
+  (`keys_only` names), and they reach `git grep` as case-insensitive pathspecs.
+- **A path the system cannot resolve is a generic refusal.** An over-long name, a
+  symlink loop or a NUL byte no longer raises an `OSError` whose message carries the
+  clone's path on the server; every reader answers as for a missing file.
+- **More credential stores are hidden:** the clone's own `.git/` (config with remote
+  tokens, every object), `.dockerconfigjson`, `*.jceks`, `*.bks`, `keystore`, `.boto`,
+  `.azure/accessTokens.json` (and the MSAL cache, service-principal file),
+  `.config/gh/hosts.yml`, `local.settings.json`, `sftp-config.json`, `.ftpconfig`,
+  `.yarnrc` / `.yarnrc.yml`, `settings-security.xml`, `.m2/settings.xml`,
+  `.composer/auth.json`, and `auth.json` at the repository root only (a translation file
+  `locales/en/auth.json` stays visible). Also Cloudflare Workers' `.dev.vars`, `rclone.conf`,
+  `.databrickscfg`, `kaggle.json`, `.mylogin.cnf`, `.pg_service.conf`, `.smbcredentials`,
+  Hugging Face's `token` (`.huggingface/token`, `.cache/huggingface/token`), an
+  extensionless `secrets` file, `credentials.cnf` / `.config` / `.hcl` / `.tfrc`, Android's
+  `keystore.properties` and `signing.properties`, Terraform's `.terraformrc`, an FTP
+  `.ftppass`, the user-level `~/.gradle/gradle.properties`, and the CLI tokens of hcloud,
+  doctl, ngrok, glab and gcloud. A project's `gradle.properties` and `.dev.vars.example`
+  are shown like an example env file: names kept, values withheld. A WireGuard config is
+  withheld by what it holds: a `PrivateKey` or `PresharedKey` line with a 44-character key
+  in any data file, whatever the file is called (`wg0.conf` and its siblings are also
+  denied by name).
+- **A Kubernetes `Secret` and a service-account key are found however the file is
+  written.** The sniff for `kind: Secret` was strict about spaces and line ends, so a
+  manifest saved with Windows (CRLF) or classic Mac (lone CR) line ends, with a byte order
+  mark, as UTF-16 or UTF-32 (with or without a BOM), indented (an item of a `List`, the
+  shape of `kubectl get -o yaml`, a list entry), with a quoted key or value, with a YAML
+  tag, in YAML flow style (`{kind: Secret}`), or `type: service_account` written as YAML,
+  was read like any file. Data files are now read in all those spellings. Source code and
+  prose are not read from disk for the sniff at all (they merely mention the words); the
+  strict shapes (a private key, a bare `kind: Secret` at the start of a line, the JSON
+  `"kind": "Secret"` and `"type": "service_account"`) hold them only where a caller passes
+  the content to `classify(rel, data)`: the knowledge ingest and the `howto` tracer. So a
+  TypeScript `kind: "Secret";`, `kind: SecretStore` or a commented line stay readable.
+- **`SECRET_PATH_GLOBS_EXTRA` reads like a `.gitignore` line.** `**/secret.txt` now hides
+  the file at the repository root too, and a directory can be named as `config`,
+  `config/`, `/config/*` or `./config/*`: each hides everything below it. A pattern with
+  no `/` applies at any depth; any other `/` ties it to the repository root; a trailing
+  `/` names a directory only; `a/**/b` also matches `a/b`. Matching stays case-blind, and
+  globs still only add to the built-in list. A path is read in one pass whatever the
+  globs say (no backtracking: `*a*a*a*.yaml` on a 4 KB path of `a`s costs milliseconds),
+  and with globs set a path over 8192 characters, which no filesystem holds, is withheld
+  unread.
+- **Example env files no longer show a value through a comment.** `# OLD_KEY=sk-live-...`
+  (a commented-out assignment, also several lines of a commented PEM block) is masked like
+  an assignment; a comment after a placeholder value is kept when it is plain words
+  (`PORT=8080  # default port`) and replaced by `# [comment withheld]` when it could hold a
+  token. A line now ends at any line terminator (`\r`, form feed, NEL, U+2028 ...), so
+  `KEY=changeme<U+2028>SECRET=...` is two lines to the masker too.
+- **An uploaded `.git/` is ignored and listed again, not refused.** Since `.git/` became a
+  secret directory for every reader, a folder or a zip that still carried its `.git/` was
+  rejected with "the upload contains files that look like secrets". A `.git` segment
+  (however spelled: `.GIT`, `.git `, a fullwidth dot) now puts the path in the ignored
+  list: it is never stored and never read, and it no longer turns the upload into a
+  refusal. A real secret next to it is still refused, and only the secret is named. The
+  content check of an upload also reads the file whole (at most 512 KiB) instead of its
+  first 8 KiB, so a private key or a `Secret` manifest after a long preamble in a note or
+  a YAML file is no longer kept.
+- **`ask` reads only the notes of the repository it is exploring.** The exploration
+  agent behind `ask` has a tool that opens a vault note by a path the model chooses,
+  and the vault reader joined that path to the repository's note folder unchecked:
+  `../other-repo/note`, an absolute path, or `../../../ws/repos/app/.env` (the tool
+  appends `.md`) opened another repository's note, or any markdown file the server
+  could read. The reader now answers "not found", the same as for a note that is not
+  there, to an absolute path, a `..` segment, a NUL, a backslash, a secret file's name
+  (`.env.md`, anything under `secrets/`) and a path that resolves outside the
+  repository's folder (a link planted in the vault). Listing the notes, the reverse
+  index and the docs API (`GET /api/docs/{slug}/note`) ask the same question. The same
+  rule now covers a file named in a question (`../../etc/hosts` or a link out of the
+  clone no longer resolves) and the module names a feature note is built from (`..`
+  walked the folder of every clone). A citation link `repo//./a.py` is read as
+  `repo/a.py`, and a cited file that exists but cannot be opened is answered exactly
+  like one that does not exist ("file does not exist in the repo"), with or without a
+  line number or a quoted snippet: the operating system's message carried the server's
+  path, and a different sentence would have told the model which names exist behind a
+  permission.
+- **Every walk of a vault asks what reading one note asks.** The documentation pages
+  (the list, `export`, the archive of every repository) and the rule generator's vault
+  excerpt walked `rglob("*.md")` and opened what they found, so a link planted in the
+  vault to another tenant's note or to any `.md` on the server, and a note with a secret
+  name (`.env.md`, anything under `secrets/`), were listed, exported and read although
+  reading one note by name refused them. They now share one walk (`vault_note_files`):
+  regular files only, a link is never followed or listed (one that stays inside the vault
+  would only appear twice), secret names are left out; the reverse index and
+  `list_notes` use it too. A note path longer than a file name can be (300 characters,
+  or 600 folders deep) was a 500 from the docs API and an error whose text, with the
+  vault's absolute path, reached the model in `ask`; it is now "not found". A module
+  name of that length made the feature note fail the same way and now selects nothing,
+  and a module name that is a link to a folder is not walked.
+- **Files the review reads by name come from the clone's own regular files.** The style
+  guide (`CLAUDE.md`, `.cursorrules`, `CONTRIBUTING.md`) and the vault overview of a
+  review, the rule importer's convention files, the source sample and file tree of the
+  rule generator, and the entry files of the architecture summary were opened with a
+  plain read, which follows a link: a repository anybody can push to could commit
+  `CLAUDE.md -> /etc/hosts` and have the server's file in the prompt. They now use the
+  check the other readers use (`plain_file`): no symlink, no file with a second hard
+  link, no secret name, nothing outside the clone, and a refused style guide does not
+  hide the next candidate. The two file trees leave secret names out.
+- **Removing a person from a workspace revokes their MCP tokens for it.** The check
+  that a token's holder is still a member refused the token while they were out, but
+  adding them back (even as a viewer) made the same token work again until it expired.
+  Every removal now revokes, in the same transaction, the tokens the person holds for
+  that workspace and no others: a workspace admin removing them, the superadmin on the
+  users page (every removal goes through one function, which does it), deleting their
+  account (all their tokens) and deleting the workspace (every token bound to it).
+  Deleting a workspace also revokes its project tokens (`cmcp_`), which have no person
+  and so are ended by no removal. Deleting an account also revokes, for the personal
+  workspace that goes with it, the tokens other members hold for it and its project
+  tokens. The row says why (`revoked_by`: `membership_removed:<who>`,
+  `account_deleted:<id>`, `workspace_deleted:<who>`, the user who deleted it), the
+  server forgets the cached copy at once, and the audit log gets one
+  `mcp.token_revoked_on_removal` entry per
+  workspace: `detail.token_ids` are the person tokens, `detail.project_token_ids` the
+  project tokens (only when there were some) and `detail.via` the route that did it
+  (`account_deleted`, `workspace_deleted`, ...); ids only, never a value. A change of
+  role revokes nothing. Other worker processes keep the cached copy for up to 30
+  seconds, but every call also checks membership against the database, so the removed
+  person is refused at once; a global administrator, who needs no membership, is
+  refused within the 30 seconds. Pack publish tokens (`cpk_`) were already revoked on
+  removal.
+- **`find` says when it cut the search.** One call searches at most 40 repositories;
+  past that it answered from the first 40 and said nothing, which read as "no other
+  repository has it". `find` now prints `searched 40 of 90 repos;
+  pass repo= to target one` (the line `grep` already printed for its limit of 10) and
+  `search_symbols`, which has no `repo=`, prints `searched 40 of 90 repos; pass
+  project_id= to narrow` (the first 40 are searched whatever the query; when
+  `project_id=` was already given and the project itself holds more than 40, it
+  prints `searched 40 of 90 repos in this project; narrow the project` instead of
+  advising the parameter again), the
+  cut is made after the repositories the caller may not search are dropped (before, they
+  could use up the 40), and the count is of repositories the caller may search. `refs`
+  says how many sibling repositories it looked in for text mentions, `brief` says when
+  `repos=` named more than 20 or was longer than it reads, and `generate_client` says
+  how many sibling repositories it looked in.
+- **`ask` and the call timeout agree.** `ask` waited up to 150 seconds while every MCP
+  call is stopped at `CELMIS_MCP_CALL_TIMEOUT_SECONDS` (60), so a slow answer was always
+  cut by the call limit with the generic "the call took longer than 60s". `ask` (and
+  `ask_code`, `ask_project`) now give up about 10 seconds before that cut (a quarter of
+  the timeout when that is smaller): after 50 seconds at the default, never more than
+  150, and answer with their own message, `The answer took too long (more than 50s) —
+  narrow the question or the repositories.`, which shows the nominal limit (50, not the
+  49.97 left at that moment). Outside an MCP call (the web assistant) the
+  ceiling stays 150 seconds. One number decides both, so there is no new setting;
+  raising `CELMIS_MCP_CALL_TIMEOUT_SECONDS` makes `ask` wait longer. Every MCP answer is
+  an event stream with a ping every 15 seconds, so a 100-second proxy idle limit is not
+  reached, and a test fails if an SDK upgrade changes that.
+
 ## [3.0.1] — 2026-10-19
 
 ### Fixed

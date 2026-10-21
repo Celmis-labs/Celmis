@@ -79,7 +79,7 @@ def run(pattern: str, repo: str = "", path_glob: str = "", regex: bool = False,
         slugs = scope.slugs(need="code")
     note_lines: list[str] = []
     if len(slugs) > MAX_REPOS:
-        note_lines.append(f"searched {MAX_REPOS} of {len(slugs)} repos; pass repo= to target one")
+        note_lines.append(common.cut_note(MAX_REPOS, len(slugs)))
         slugs = slugs[:MAX_REPOS]
     detailed = common.norm_format(response_format)
     limit = common.clamp(limit, 1, MAX_LIMIT)

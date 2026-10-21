@@ -6,7 +6,8 @@ One stdlib-only script, three subcommands, run as ``python3 -I celmis_hook.py``:
 ``session``
     SessionStart. At most three lines of context: that the Celmis tools exist,
     which repository and commit this checkout is, and, only when the plugin is
-    not configured, how to configure it. No network.
+    not configured (its server address or token option is empty), how to
+    configure it (``/plugin configure celmis-code@celmis``). No network.
 
 ``pregrep``
     PreToolUse for Grep/Glob. When the pattern looks like an identifier, adds
@@ -25,6 +26,13 @@ Contract
 * Fail open. Whatever goes wrong (garbage on stdin, no git, an unknown sha, a
   timeout) the script prints nothing and exits 0. A hook must never be the
   reason a session stops.
+* The plugin's two settings reach a hook as ``CLAUDE_PLUGIN_OPTION_CELMIS_URL``
+  and ``CLAUDE_PLUGIN_OPTION_CELMIS_TOKEN`` (the ``userConfig`` options of
+  ``plugin.json``; Claude Code gives a hook every option, sensitive ones too).
+  They are the only place the hook looks: the variables ``CELMIS_URL`` and
+  ``CELMIS_TOKEN`` and the keychain are not the plugin's settings, so a token
+  found there would not mean the tools connect. The token is only tested for
+  being non-empty; it is never printed, logged, or put in the output.
 * Tool output is data. It is parsed with the strict regexes below and never
   executed, never put through a shell. Paths from it reach git only as argv
   after ``--``, with ``--literal-pathspecs`` so ``*`` and ``:(...)`` stay
@@ -58,6 +66,11 @@ HOWTO_HEAD_RE = r"^howto (?P<topic>\S+) (?P<slug>[A-Za-z0-9._/-]+)"
 HOWTO_HIT_RE = r"^\s*\d+\) (?P<path>[^\s:]+):(?P<start>\d+)"
 
 GIT_TIMEOUT_S = 1.5
+#: The environment variables Claude Code sets for a hook from the plugin's
+#: ``userConfig`` options (``celmis_url``, ``celmis_token`` in ``plugin.json``):
+#: ``CLAUDE_PLUGIN_OPTION_`` plus the option's key in capitals.
+URL_OPTION = "CLAUDE_PLUGIN_OPTION_CELMIS_URL"
+TOKEN_OPTION = "CLAUDE_PLUGIN_OPTION_CELMIS_TOKEN"
 MAX_PATHS = 60
 MAX_TEXT = 200_000
 #: Identifier-shaped Grep/Glob patterns: ``getUserById``, ``load_config``,
@@ -74,13 +87,19 @@ def _json_out(event: str, text: str) -> str:
 # ---------------------------------------------------------------- git helpers
 
 
+def _git_environment() -> dict[str, str]:
+    """The hook's environment without the plugin options: git runs hooks and
+    helpers named by the checkout's own config, and none of them needs the token."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_PLUGIN_OPTION_")}
+
+
 def _git(cwd: str, *args: str) -> str | None:
     """Run git with an argv list (no shell). None on any failure."""
     try:
         done = subprocess.run(  # noqa: S603
             ["git", "--literal-pathspecs", "-C", cwd, *args],  # noqa: S607
             capture_output=True, timeout=GIT_TIMEOUT_S, check=False,
-            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"},
+            env={**_git_environment(), "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"},
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
@@ -221,15 +240,24 @@ def insecure_url(url: str) -> bool:
     return not (parts.scheme == "http" and (parts.hostname or "") in _LOCAL_HOSTS)
 
 
+def _option(name: str) -> str:
+    """The plugin option Claude Code put in this hook's environment; ``""`` when
+    unset. For the token this is only ever tested for being non-empty."""
+    return os.environ.get(name, "").strip()
+
+
 def cmd_session(event: dict) -> str:
     cwd = str(event.get("cwd") or os.getcwd())
-    configured = bool(os.environ.get("CELMIS_URL")) and bool(os.environ.get("CELMIS_TOKEN"))
+    url = _option(URL_OPTION)
+    configured = bool(url) and bool(_option(TOKEN_OPTION))
     lines: list[str] = []
-    if configured and insecure_url(os.environ.get("CELMIS_URL", "")):
+    if configured and insecure_url(url):
         configured = False
-        lines.append("CELMIS_URL is not https, so the Celmis token would travel unencrypted: "
-                     "its tools are not to be used until the URL is https (localhost is the "
-                     "only exception). Use Grep/Read as usual and tell your administrator.")
+        lines.append("The Celmis server address is not https, so the Celmis token would travel "
+                     "unencrypted: its tools are not to be used until the address is https "
+                     "(localhost is the only exception). Use Grep/Read as usual, change it with "
+                     "/plugin configure celmis-code@celmis (celmis-code@inline with --plugin-dir), "
+                     "and tell your administrator.")
     elif configured:
         lines.append("Celmis is connected (tools mcp__plugin_celmis-code_celmis__*): for "
                      "definitions, callers and other repositories use repos -> find -> "
@@ -237,9 +265,10 @@ def cmd_session(event: dict) -> str:
                      "On a new task, brief (paste the task) names the workspace's skills "
                      "and checklists for it.")
     else:
-        lines.append("Celmis plugin installed but CELMIS_URL / CELMIS_TOKEN are not set in "
-                     "this shell, so its tools will not connect: use Grep/Read as usual, or "
-                     "ask your Celmis administrator for a token.")
+        lines.append("Celmis plugin installed but its server address or token is not set, so "
+                     "its tools are not available: run /plugin configure celmis-code@celmis "
+                     "(celmis-code@inline with --plugin-dir; the token comes from your Celmis "
+                     "administrator), or use Grep/Read as usual.")
     co = _checkout(cwd)
     if co and co["head"]:
         name = next((s for s in sorted(co["slugs"]) if "/" in s),
@@ -252,9 +281,10 @@ def cmd_session(event: dict) -> str:
 
 
 def cmd_pregrep(event: dict) -> str:
-    if not os.environ.get("CELMIS_TOKEN"):
-        return ""
-    if insecure_url(os.environ.get("CELMIS_URL", "")):
+    url = _option(URL_OPTION)
+    if not url or not _option(TOKEN_OPTION):
+        return ""  # not configured: there are no Celmis tools to nudge towards
+    if insecure_url(url):
         return ""  # never nudge towards a server the token cannot safely reach
     tool_input = event.get("tool_input") or {}
     pattern = str(tool_input.get("pattern") or "").strip()
