@@ -16,10 +16,10 @@ from src.review.commands.parser import (
     REVIEW,
     START_REVIEW,
     ParsedCommand,
-    guide_lines,
     help_markdown,
     might_address_bot,
     parse_comment,
+    short_guide_line,
 )
 
 HANDLE = "@celmis"
@@ -159,5 +159,21 @@ def test_the_help_lists_only_the_commands_that_are_registered():
 
 
 def test_the_guide_and_the_help_speak_the_repository_language():
-    assert "Команди" in "\n".join(guide_lines(HANDLE, "uk", available=[HELP]))
+    assert "Команди" in short_guide_line(HANDLE, "uk", available=[HELP])
     assert "Як говорити" in help_markdown(HANDLE, "uk", available=[HELP])
+
+
+def test_the_short_guide_names_only_the_run_again_and_the_help_commands():
+    """The closing comment is read on every pull request, so it names the two
+    commands that matter and leaves the rest to `help`."""
+    everything = [START_REVIEW, REVIEW, HELP, REMEMBER, BUSINESS_LOGIC, CHAT]
+    line = short_guide_line(HANDLE, "en", available=everything)
+    assert line == "Commands: `@celmis start-review` · `@celmis help`"
+    assert "\n" not in line
+    for left_out in ("review --force", "remember", "business-logic"):
+        assert left_out not in line
+
+
+def test_the_short_guide_never_names_a_command_the_install_cannot_run():
+    assert short_guide_line(HANDLE, "en", available=[HELP]) == "Commands: `@celmis help`"
+    assert short_guide_line(HANDLE, "en", available=[REVIEW, CHAT]) == ""

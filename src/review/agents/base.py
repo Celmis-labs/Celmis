@@ -35,7 +35,12 @@ from src.llm.errors import (
 # this list drift, and a language offered for review comments but not for
 # documentation is a dropdown that means something different depending on
 # which page you opened.
-from src.llm.prompts.language import LANGUAGE_NAMES as _REVIEW_LANG_NAMES
+from src.llm.prompts.language import LANGUAGE_NAMES as _REVIEW_LANG_NAMES  # noqa: F401
+from src.review.language import (
+    effective_language,
+    finding_directive,
+    user_reminder,
+)
 from src.review.models import (
     Finding,
     FindingSeverity,
@@ -314,8 +319,9 @@ class AgentContext:
     # agent → the policy rules addressed to that agent by name. Appended after
     # `custom_rules` (the rules for every agent) in that agent's prompt only.
     agent_custom_rules: dict[str, str] = field(default_factory=dict)
-    # The repo policy's output language ("uk", "de", …). None = the
-    # workspace's `review_language`.
+    # The output language ("uk", "de", …): the repo policy's, else, once the
+    # orchestrator has resolved it, the workspace's. None = not resolved yet,
+    # and the prompt then reads the workspace's `review_language` itself.
     review_language: str | None = None
     #: How every suggestion is written — the policy's `base_instruction`
     #: (Kodus's "Base instruction"), already clamped to
@@ -639,9 +645,10 @@ def _usable_fallback_model(agent_llm: AgentLLMSettings) -> str | None:
 def _review_language_instruction(
     workspace_id: str, override: str | None = None,
 ) -> str:
-    """Language directive appended to every review prompt when the repo policy
+    """Language directive that ends every review prompt when the repo policy
     (`override`) or, failing that, the workspace picked a non-English output
-    language."""
+    language. The wording lives in `src.review.language`: it names every field
+    a person reads, `reasoning` included."""
     code = (override or "").strip()
     if not code:
         try:
@@ -651,12 +658,19 @@ def _review_language_instruction(
             return ""
     if code == "en":
         return ""
-    name = _REVIEW_LANG_NAMES.get(code, code)
-    return (
-        f"\n\nIMPORTANT: Write ALL review output — finding titles, bodies, "
-        f"summaries and suggestions' explanations — in {name}. Keep code, "
-        f"identifiers and file paths as-is."
-    )
+    return finding_directive(code)
+
+
+def _review_language_reminder(context: AgentContext) -> str:
+    """The language, said once more as the last line of the user turn.
+
+    The system prompt is long and its examples are English; what a model reads
+    last before it answers outweighs both, so the "why" sentence that opens each
+    finding comes out in the review language and not in the prompt's.
+    """
+    code = effective_language(
+        getattr(context, "review_language", None), context.workspace_id)
+    return user_reminder(code)
 
 
 @dataclass(frozen=True)
@@ -665,7 +679,7 @@ class PromptPart:
 
     `kind`: "base" (the agent's prompt — built-in or a replacement), then the
     appended blocks: "guidelines", "base_instruction", "workspace_rules",
-    "rules", "language", "output_format" and, for the verifier and the
+    "rules", "output_format", "language" and, for the verifier and the
     compliance auditor, "rider". `source` says which layer a block came from
     where that is a question ("builtin" | "workspace" | "repo" for the base,
     "workspace" | "repository" | "workspace+repository" for guidelines).
@@ -765,14 +779,6 @@ def compose_system_prompt_parts(
     if rules:
         parts.append(PromptPart("rules", rules))
 
-    repo_lang = getattr(context, "review_language", None)
-    lang = (
-        _review_language_instruction(context.workspace_id, repo_lang)
-        if repo_lang else _review_language_instruction(context.workspace_id)
-    )
-    if lang:
-        parts.append(PromptPart("language", lang.strip()))
-
     # The contract the parser enforces has to be in every prompt the parser
     # reads from. An override that replaced the default prompt wholesale —
     # per-repo or from /admin/agents — was written before `reasoning` was
@@ -783,6 +789,17 @@ def compose_system_prompt_parts(
     # after every block a team wrote, so the contract is the final word.
     if '"reasoning"' not in base:
         parts.append(PromptPart("output_format", FINDING_OUTPUT_FORMAT.strip()))
+
+    # The language is the very last block, after the contract: the contract's
+    # examples are English, and the instruction that says they set the shape
+    # and not the language has to come after them, not before.
+    repo_lang = getattr(context, "review_language", None)
+    lang = (
+        _review_language_instruction(context.workspace_id, repo_lang)
+        if repo_lang else _review_language_instruction(context.workspace_id)
+    )
+    if lang:
+        parts.append(PromptPart("language", lang.strip()))
 
     return parts
 
@@ -820,16 +837,17 @@ FINDING_OUTPUT_FORMAT = """Output: a JSON array of findings and nothing around i
     "file": "path/to/file.py",
     "line": <integer, 1-indexed, in the new file>,
     "severity": "critical" | "error" | "warning" | "info",
-    "title": "<one line>",
-    "body": "<markdown — the full explanation>",
+    "title": "<one line that states the problem itself — what is wrong — with no preamble>",
+    "body": "<markdown, at most two short sentences: what breaks and for whom, without repeating the reasoning>",
     "rule_id": "<agent>.<rule>",
-    "suggestion": "<optional fix hint — prose or a snippet>",
+    "suggestion": "<optional: the concrete fix in a few words, or the snippet>",
     "suggested_code": "<optional: ONLY when certain — the exact text that replaces lines line..suggested_end_line of the new file, whole lines with their indentation; omit otherwise>",
     "suggested_end_line": <optional integer, the last line suggested_code replaces; omit for one line>,
     "confidence": <0.0-1.0, your own estimate, written LAST>
 }
 
 The order is the point: the reasoning sentence you cannot finish is the finding you do not have — write it before the title, and if it will not come, write nothing. A finding with no "reasoning", or on a file this PR does not change, is discarded unread.
+Be brief: the reader wants the problem and the fix. Do not retell the code, open with a preamble, hedge ("might", "consider"), or give advice that fits any code; a doubt belongs in "confidence".
 If nothing is found, reply exactly []."""
 
 @dataclass(frozen=True)
@@ -1076,6 +1094,31 @@ _COVERAGE_CLAIM_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
         ("over-mocked",
          r"\b(?:mocked|stubbed|faked)\b(?:\W+out)?\W+"
          r"(?:in|across|throughout)\b[^.;]{0,60}?(?:tests?|specs?|suite)\b"),
+        # The same five shapes in Ukrainian, the one other language the bot
+        # speaks. A review written in it carries its reasoning in it, and a
+        # gate that only reads English would let the complaint through the
+        # moment the model obeys the language setting. Each alternative names
+        # a test noun in one of its case forms (never the bare stem, which
+        # would take "тестовий режим"), and the window is as narrow as above.
+        ("no-test-exists",
+         r"\b(?:немає|нема|відсутні\w*|відсутн\w+|без|бракує|не\s+вистачає)\b"
+         r"(?:\W+\w+){0,3}\W+"
+         r"(?:тест(?:ів|и|ам|ами|ах|у|ом|а|і)?|покритт(?:я|ю|ям|і))\b"),
+        ("not-tested",
+         r"\b(?:не|ніколи|жоден|жодн\w+)\b[^.;]{0,120}?"
+         r"\b(?:протестован\w+|тестується|тестуються|тестувал\w+)\b"
+         r"|\bнепротестован\w+"),
+        ("not-covered-by-a-test",
+         r"\b(?:не|ніколи|жоден|жодн\w+)\b[^.;]{0,120}?"
+         r"\bпокрит\w+\W+(?:\w+\W+){0,2}?"
+         r"(?:тест(?:ами|ом|ах|и)?|специфікаці\w+)\b"),
+        ("test-does-too-little",
+         r"\bтест\w*\b[^.;]{0,120}?"
+         r"\b(?:не\s+(?:перевіря\w+|покрива\w+|охоплю\w+|тестує\w*)|"
+         r"(?:лише|тільки)\s+перевіря\w+)"),
+        ("over-mocked",
+         r"\b(?:замокан\w+|заглушен\w+)\b[^.;]{0,60}?"
+         r"\b(?:у|в|по|усіх|всіх)\W+(?:\w+\W+){0,2}?тест(?:ах|ами|і)\b"),
     )
 )
 
@@ -1715,7 +1758,7 @@ class LLMReviewAgent(ReviewAgent):
 
     def review(self, context: AgentContext) -> AgentRunResult:
         t0 = time.time()
-        prompt = self._build_prompt(context)
+        prompt = self._build_prompt(context) + _review_language_reminder(context)
         effective_system = _compose_effective_system_prompt(
             agent_name=self.name,
             default_system=self.system_prompt,

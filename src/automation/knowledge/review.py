@@ -158,8 +158,9 @@ with section `general`, `categories`, `filters`, `prompts`, `summary`,
    inherits [LLM Setup](/settings/llm)). "Inherit every agent" drops this
    repository's agent choices.
 3. "Review filters" — "Minimum severity" (a four-step scale: Info, Warning,
-   Error, Critical; lower findings are not posted but still counted in the
-   summary and tracked on Issues), "Inline comments per review" (1–100,
+   Error, Critical; lower findings are neither posted nor mentioned in the
+   summary, only tracked on Issues, and a review with nothing at or over the
+   level can approve), "Inline comments per review" (1–100,
    default 20), "Apply these filters to rule findings", "Ignored paths" (one
    glob per line; no negation, at most 200) and "Suppressed rules" (rule ids
    dropped before posting).
@@ -372,7 +373,11 @@ What Celmis writes on a pull request (GitHub, GitLab and Bitbucket alike):
    "Append", "Complement" or "Replace".
 3. Inline comments: findings at or above "Minimum severity", worst first, at
    most "Inline comments per review" (install default 20). Lower ones are
-   still counted in the summary and tracked on [Issues](/issues).
+   not counted, listed or mentioned anywhere on the pull request — neither in
+   the summary nor in the description; they stay tracked on [Issues](/issues).
+   The verdict is computed from the findings at or above "Minimum severity"
+   only: when none reach it, the review is an approval (the pull request is
+   approved when the install lets reviews approve), not left as a comment.
 4. A review skipped (draft, too large, nothing to review) or failing after it
    started rewrites the same comment with the reason — never a new comment.
 

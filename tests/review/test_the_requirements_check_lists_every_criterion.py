@@ -373,3 +373,32 @@ def test_a_file_name_cannot_close_the_code_span_around_the_evidence():
     from src.review.task_context import on_demand
 
     assert on_demand._finding_line(nasty).count("`") == 2
+
+
+def test_a_gap_under_the_comment_threshold_does_not_reach_the_checklist():
+    from src.review.orchestrator import ReviewOrchestrator
+
+    class _Stages:
+        def begin(self, *a, **k): ...
+        def end(self, *a, **k): ...
+
+    pr = _pr()
+    minor = _finding("[PROJ-123 AC2] amounts are not rounded", severity=FindingSeverity.WARNING)
+    batch = ReviewBatch(pull_request=pr, findings=[minor], agents_run=["business_logic"])
+    batch.comment_min_severity = "error"
+    batch.task_context = _task()
+    ReviewOrchestrator.__new__(ReviewOrchestrator)._check_requirements(
+        batch, context=SimpleNamespace(pull_request=pr, llm_client=None),
+        policy={"requirements_check_mode": "findings"}, stages=_Stages())
+
+    verdicts = {row.id: row.verdict for row in batch.requirements}
+    # The warning is under the threshold: the criterion reads as having no gap
+    # and the text of the finding is nowhere in the comment section.
+    assert verdicts["AC2"] == "no_gap"
+    assert all("not rounded" not in section.markdown for section in batch.sections_for("comment"))
+
+    batch.comment_min_severity = "warning"
+    ReviewOrchestrator.__new__(ReviewOrchestrator)._check_requirements(
+        batch, context=SimpleNamespace(pull_request=pr, llm_client=None),
+        policy={"requirements_check_mode": "findings"}, stages=_Stages())
+    assert {row.id: row.verdict for row in batch.requirements}["AC2"] != "no_gap"

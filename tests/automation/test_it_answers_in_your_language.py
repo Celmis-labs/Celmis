@@ -70,6 +70,9 @@ CHAT_SRC = (SRC / "automation" / "chat.py").read_text(encoding="utf-8")
 HANDLERS_SRC = (SRC / "sync" / "handlers.py").read_text(encoding="utf-8")
 VERSIONS = ROOT / "alembic" / "versions"
 I18N = _code((WEB / "lib" / "i18n" / "index.tsx").read_text(encoding="utf-8"))
+#: The list of locales and what counts as one live here since the interface
+#: learned to start in the browser's language; the provider imports them.
+LOCALES_TS = _code((WEB / "lib" / "i18n" / "locales.ts").read_text(encoding="utf-8"))
 
 #: The canned prose `explain` stands in for. Both halves: the paragraphs the
 #: page lists, and the two strings around them.
@@ -176,9 +179,9 @@ def _adds_column(path: Path, table: str, column: str) -> bool:
 
 def _client_locales() -> list[str]:
     """The codes `asLocale` will accept, read out of the client's own list."""
-    at = I18N.index("const LOCALES")
-    begin, end = _pair(I18N, I18N.index("=", at), "[", "]")
-    return re.findall(r'"([a-z-]+)"', I18N[begin:end + 1])
+    at = LOCALES_TS.index("const LOCALES")
+    begin, end = _pair(LOCALES_TS, LOCALES_TS.index("=", at), "[", "]")
+    return re.findall(r'"([a-z-]+)"', LOCALES_TS[begin:end + 1])
 
 
 # ─── the planner reports it, and only a real code is accepted ────────
@@ -774,8 +777,16 @@ def test_a_language_with_no_dictionary_falls_back_instead_of_showing_keys():
         "active locale"
     )
     as_locale = _squash(_body(I18N, "asLocale"))
-    assert "LOCALES" in as_locale and "null" in as_locale, (
+    assert "localeOfTag(" in as_locale, (
+        "the named language is read by something other than the one rule for "
+        "what a language tag is"
+    )
+    of_tag = _squash(_body(LOCALES_TS, "localeOfTag"))
+    assert "isLocale(" in of_tag and "null" in of_tag, (
         "any two-letter string is treated as a locale"
+    )
+    assert "LOCALES" in _squash(_body(LOCALES_TS, "isLocale")), (
+        "a code is a locale without being in the list of dictionaries"
     )
 
 

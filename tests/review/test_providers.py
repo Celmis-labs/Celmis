@@ -101,7 +101,8 @@ class TestFormatting:
         body = _format_finding_body(f)
         # A hint is never a committable block (2.3.0): it is shown, not applied.
         assert "```suggestion" not in body
-        assert "**Suggestion:**" in body
+        # Alone, a hint is the fix: one label, not a second name for it.
+        assert "**Fix:**" in body
         assert "cursor.execute" in body
 
     def test_summary_includes_marker(self) -> None:

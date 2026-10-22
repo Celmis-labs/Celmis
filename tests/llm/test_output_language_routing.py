@@ -146,9 +146,25 @@ def test_english_adds_no_instruction():
 
 def test_the_claude_engine_gets_the_same_instruction():
     """Two review engines, one setting. The subscription path had to be wired
-    separately and can silently fall behind."""
+    separately and can silently fall behind.
+
+    This used to pin the name of the helper the engine called. The engine now
+    resolves the language itself (the repository's, else the workspace's: it
+    read the workspace alone, so a repository that chose Ukrainian got an
+    English review) and builds its directive from the one shared module, so it
+    is keyed on that: the engine takes the repository's language, and the
+    orchestrator hands it over.
+    """
+    import inspect
+
+    from src.review.claude_engine import run_claude_review
+
+    assert "language" in inspect.signature(run_claude_review).parameters
     engine = (SRC / "review" / "claude_engine.py").read_text(encoding="utf-8")
-    assert "_review_language_instruction" in engine
+    assert "effective_language" in engine and "finding_directive" in engine
+    orchestrator = (SRC / "review" / "orchestrator.py").read_text(encoding="utf-8")
+    call = orchestrator[orchestrator.index("cr = run_claude_review("):][:2500]
+    assert "language=" in call, "the repository's language never reaches the engine"
 
 
 def test_the_verifier_is_deliberately_left_out():
@@ -228,3 +244,274 @@ def test_the_question_patterns_are_exempt_and_still_ukrainian():
         "the Ukrainian stopwords are gone — common words like 'знаходиться' "
         "will be searched for as if they were symbol names"
     )
+
+
+# ─── review: the language reaches every prompt that writes review text ──
+#
+# A review has one language, and the cases below are the paths a person reads
+# a model's sentence on: the finders (title, the "why" sentence, body, fix),
+# the Claude Code engine, the overview and merged description, the audit
+# verdict, and the answer to a question. The bot's fixed words are the message
+# catalogue's business and are pinned in tests/review. Each case is run, not
+# read: the prompt a model receives is captured and looked at.
+
+
+def _finder_pr(description: str = "Adds the buyer name to every row of the totals report."):
+    from src.review.models import Hunk, PullRequest
+
+    diff = (
+        "@@ -10,3 +10,6 @@ def totals(orders):\n"
+        "     out = []\n"
+        "+    for order in orders:\n"
+        "+        user = db.query(User).get(order.user_id)\n"
+        "+        out.append((user.name, order.total))\n"
+        "     return out\n"
+    )
+    return PullRequest(
+        provider="github", repo="acme/shop", number=12, title="Show buyer names",
+        description=description, author="a", base_ref="main", base_sha="x",
+        head_ref="feat", head_sha="y", state="open",
+        hunks=[Hunk(file_path="app/report.py", old_file_path="app/report.py",
+                    old_start=10, old_count=3, new_start=10, new_count=6, content=diff)],
+    )
+
+
+def _finder_calls(agent, language: str | None):
+    """Every model call one finder makes on a small pull request."""
+    from unittest.mock import MagicMock
+
+    from src.review.agents.base import AgentContext
+    from src.review.settings import AgentLLMSettings
+
+    reply = MagicMock()
+    reply.text = "[]"
+    reply.input_tokens = reply.output_tokens = 10
+    reply.cost_usd = 0.0
+    reply.cost_source = "litellm_estimate"
+    reply.model = "m"
+    client = MagicMock()
+    client.generate.return_value = reply
+    context = AgentContext(
+        pull_request=_finder_pr(), llm_client=client, review_language=language,
+        workspace_id="ws-lang",
+        agent_llm={agent.name: AgentLLMSettings(
+            model="m", max_output_tokens=2000, reasoning=None)},
+    )
+    agent.review(context)
+    assert client.generate.call_count >= 1, f"{agent.name} never called the model"
+    return [c.kwargs for c in client.generate.call_args_list]
+
+
+def _finders():
+    from src.review.agents.business_logic import BusinessLogicAgent
+    from src.review.agents.contract import ContractAgent
+    from src.review.agents.defect import DefectAgent
+    from src.review.agents.performance import PerformanceAgent
+    from src.review.agents.security import SecurityAgent
+
+    return [DefectAgent, ContractAgent, SecurityAgent, PerformanceAgent, BusinessLogicAgent]
+
+
+@pytest.mark.parametrize("agent_cls", _finders(), ids=lambda c: c.name)
+def test_every_finder_is_told_the_language_in_both_turns(agent_cls):
+    """The system prompt names it, last; the user turn repeats it, last."""
+    from src.llm.prompts.language import NATIVE_PHRASES
+
+    calls = _finder_calls(agent_cls(), "uk")
+    for kw in calls:
+        system, prompt = kw["system_instruction"], kw["prompt"]
+        assert "Ukrainian" in system
+        assert system.rstrip().rindex("OUTPUT LANGUAGE") > system.rindex("written LAST"), (
+            "the language comes before the output format: the format's English "
+            "examples are then the last thing the model reads"
+        )
+        assert prompt.rstrip().endswith(f"Ukrainian ({NATIVE_PHRASES['uk']}).")
+
+
+@pytest.mark.parametrize("agent_cls", _finders(), ids=lambda c: c.name)
+def test_the_why_sentence_is_named_as_text_a_person_reads(agent_cls):
+    """The cause of the English "why": the instruction named titles, bodies and
+    suggestions, never the first-written `reasoning` field, which a model reads
+    as a scratchpad line and writes in the language of the examples."""
+    system = _finder_calls(agent_cls(), "uk")[0]["system_instruction"]
+    directive = system[system.rindex("OUTPUT LANGUAGE"):]
+    assert '"reasoning"' in directive
+    assert "not a scratchpad" in directive
+    assert "the examples" in directive and "not its language" in directive
+
+
+@pytest.mark.parametrize("agent_cls", _finders(), ids=lambda c: c.name)
+def test_the_fields_a_program_reads_stay_as_they_are(agent_cls):
+    """`input_size` is read by English patterns and `severity` is an enum."""
+    system = _finder_calls(agent_cls(), "uk")[0]["system_instruction"]
+    directive = system[system.rindex("OUTPUT LANGUAGE"):]
+    for key in ('"severity"', '"rule_id"', '"input_size"', '"confidence"'):
+        assert key in directive
+
+
+@pytest.mark.parametrize("agent_cls", _finders(), ids=lambda c: c.name)
+def test_english_adds_nothing_to_either_turn(agent_cls):
+    for kw in _finder_calls(agent_cls(), "en"):
+        assert "OUTPUT LANGUAGE" not in kw["system_instruction"]
+        assert "Write every sentence" not in kw["prompt"]
+
+
+def test_the_workspace_language_applies_when_the_repository_chose_none(monkeypatch):
+    import src.api.routers.llm as llm_router
+    from src.review.agents.defect import DefectAgent
+
+    monkeypatch.setattr(
+        llm_router, "_load_workspace_config", lambda ws: {"review_language": "de"})
+    kw = _finder_calls(DefectAgent(), None)[0]
+    assert "German" in kw["system_instruction"]
+    assert "in German" in kw["prompt"].rstrip().rsplit("Write every sentence", 1)[1]
+
+
+def test_a_language_without_a_catalogue_still_reaches_the_model():
+    """The bot's own words come in two languages; the model can write in 37."""
+    from src.review.agents.defect import DefectAgent
+
+    kw = _finder_calls(DefectAgent(), "bg")[0]
+    assert "Bulgarian" in kw["system_instruction"]
+    assert "Bulgarian" in kw["prompt"]
+
+
+def test_the_overview_and_the_merged_description_are_asked_in_the_language():
+    from src.llm.prompts.language import NATIVE_PHRASES
+    from src.review.pr_summary import build_prompt
+
+    prompt = build_prompt(_finder_pr(), language="uk")
+    assert f"Ukrainian ({NATIVE_PHRASES['uk']})" in prompt
+    # Not only the languages the summary used to know about.
+    assert "Bulgarian" in build_prompt(_finder_pr(), language="bg")
+    assert "English" in build_prompt(_finder_pr(), language=None)
+
+
+def test_the_merged_description_is_asked_in_the_language():
+    from types import SimpleNamespace
+
+    from src.review.pr_summary import complement_description
+
+    seen: dict = {}
+
+    def generate(**kw):
+        seen.update(kw)
+        return SimpleNamespace(text="merged", input_tokens=1, output_tokens=1, cost_usd=0.0)
+
+    complement_description(
+        _finder_pr(), "Author text.", "Our summary.",
+        llm_client=SimpleNamespace(generate=generate), language="pl")
+    assert "Polish" in seen["prompt"]
+
+
+def test_the_audit_verdict_is_asked_for_in_the_language():
+    """`reason` is the one sentence of a compliance verdict a person reads."""
+    from src.review.agents.base import AgentContext
+    from src.review.compliance import _SYSTEM, compliance_system_prompt
+
+    prompt = compliance_system_prompt(
+        AgentContext(pull_request=_finder_pr(), review_language="uk", workspace_id="ws-lang"))
+    assert prompt.startswith(_SYSTEM.rstrip())
+    rider = prompt.rstrip().rsplit("OUTPUT LANGUAGE", 1)[1]
+    assert 'Write "reason" in Ukrainian' in rider
+    assert '"reason"' in prompt and '"passes"' in prompt
+    plain = compliance_system_prompt(
+        AgentContext(pull_request=_finder_pr(), review_language="en", workspace_id="ws-lang"))
+    assert plain == _SYSTEM
+
+
+def test_the_answer_to_a_question_is_written_in_the_real_language(monkeypatch):
+    """The bot's own words have two catalogues, so the command context holds
+    "en" for German; the model is told German all the same."""
+    from types import SimpleNamespace
+
+    from src.review import memories
+    from src.review.commands import chat, handlers
+    from src.review.commands.handlers import CommandContext
+    from src.review.commands.parser import parse_comment
+    from tests.review.comment_support import FakeProvider, event
+
+    calls: list[dict] = []
+    fake = SimpleNamespace(generate=lambda **kw: calls.append(kw) or SimpleNamespace(text="ok"))
+    monkeypatch.setattr(chat, "_client", lambda _ctx: fake)
+    monkeypatch.setattr(chat, "enforce", lambda _ws: None)
+    monkeypatch.setattr(memories, "render_for_chat", lambda *a, **k: "")
+    body = "@celmis why is the total wrong?"
+    ctx = CommandContext(
+        ev=event(body=body), provider=FakeProvider(), command=parse_comment(body, "@celmis"),
+        settings={}, workspace_id="ws-a", user_id="u-1", language="en", prose_language="de")
+    handlers._REGISTRY["chat"](ctx)
+    assert "German" in calls[0]["system_instruction"]
+
+
+def test_the_claude_engine_prompt_carries_the_language(monkeypatch):
+    """Run through a stand-in for the SDK: the prompt the `claude` session is
+    sent ends with the directive and the reminder, in the repository's
+    language, and names the fields that reply has (no `reasoning`)."""
+    import sys
+    import types
+
+    import src.agent.connection as conn_mod
+    import src.agent.runner as runner_mod
+    from src.agent.connection import ClaudeConnection
+    from src.llm.prompts.language import NATIVE_PHRASES
+    from src.review import claude_engine as ce
+
+    queries: list[str] = []
+
+    class _Block:
+        def __init__(self, text):
+            self.text = text
+
+    class _Assistant:
+        def __init__(self, text):
+            self.content = [_Block(text)]
+
+    class _Result:
+        num_turns = 1
+        total_cost_usd = 0.1
+        is_error = False
+        result = ""
+        usage = {"input_tokens": 10, "output_tokens": 10}
+        model = "claude-sonnet-4-6"
+
+    class _Client:
+        def __init__(self, options=None):
+            self.options = options
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def query(self, prompt):
+            queries.append(prompt)
+
+        async def receive_response(self):
+            yield _Assistant('```json\n{"summary": "ok", "findings": []}\n```')
+            yield _Result()
+
+    module = types.ModuleType("claude_agent_sdk")
+    module.AssistantMessage, module.TextBlock = _Assistant, _Block
+    module.ResultMessage, module.ClaudeAgentOptions = _Result, lambda **kw: kw
+    module.ClaudeSDKClient = _Client
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", module)
+    monkeypatch.setattr(runner_mod, "_mint_mcp_token", lambda user_id, workspace_id="default": "t")
+    monkeypatch.setattr(
+        conn_mod, "resolve_connection",
+        lambda user_id, ws: ClaudeConnection(token="sk-ant-oat-placeholder", source="personal",
+                                             saved_by=None))
+    monkeypatch.setattr(ce, "record_claude_code_spend", lambda message, **kw: None)
+
+    pr = _finder_pr()
+    pr.raw_diff = "--- a/app/report.py\n+++ b/app/report.py\n@@ -1 +1,2 @@\n x\n+y\n"
+    result = ce.run_claude_review(
+        pr, user_id="u1", workspace_id="ws-lang", language="uk")
+
+    assert result.error is None
+    [prompt] = queries
+    assert "Ukrainian" in prompt[prompt.rindex("OUTPUT LANGUAGE"):]
+    directive = prompt[prompt.rindex("OUTPUT LANGUAGE"):]
+    assert '"summary"' in directive and '"reasoning"' not in directive
+    assert prompt.rstrip().endswith(f"Ukrainian ({NATIVE_PHRASES['uk']}).")

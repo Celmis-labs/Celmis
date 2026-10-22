@@ -55,13 +55,15 @@ conventions the team asked you to respect; use them when they bear on the \
 answer.
 
 How to answer:
-- Answer the question that was asked, directly, in the language it asks for: \
-{language}.
+- Answer the question that was asked, directly. Write the whole answer in \
+{language}, whatever language the pull request, the code or the thread is in; \
+keep code, identifiers and file paths as they are.
 - Ground the answer in the code and the thread you were given; name files and \
 lines. If what you need is not in front of you, say what is missing instead \
 of guessing.
-- Be brief: a short paragraph, or a few bullets, unless the question needs \
-more. Code goes in fenced blocks.
+- Be brief: the answer first, in a few short sentences or bullets, no \
+preamble and no restating the question, unless it needs more. Code goes in \
+fenced blocks.
 - If somebody disagrees with a finding and gives a good reason, say so \
 plainly. If the finding still stands, say why.
 - You have not run anything and you cannot change code or the pull request; \
@@ -434,7 +436,8 @@ def chat_command(ctx: CommandContext) -> str | None:
         prompt, code = build_prompt(inp, rs.chat_max_context_chars)
         result = client.generate(
             prompt=prompt, code_context=code,
-            system_instruction=SYSTEM_PROMPT.format(language=language_name(ctx.language)),
+            system_instruction=SYSTEM_PROMPT.format(
+                language=language_name(ctx.prose_language or ctx.language)),
             agent="chat", mode="review", operation=CHAT_OPERATION, repo=ctx.ev.repo,
             temperature=0.2, max_output_tokens=_MAX_OUTPUT_TOKENS, num_retries=0,
             timeout=rs.chat_timeout_seconds)

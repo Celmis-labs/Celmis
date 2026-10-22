@@ -91,15 +91,15 @@ When done, output ONLY a JSON object in a ```json code block:
 
 ```json
 {{
-  "summary": "2-5 sentence overall assessment (markdown ok)",
+  "summary": "at most 3 short sentences: the verdict on the change, only the substance",
   "findings": [
     {{
       "file": "path/in/new/tree.py",
       "line": 42,
       "severity": "info|warning|error|critical",
-      "title": "one-line issue",
-      "body": "explanation with reasoning (markdown)",
-      "suggestion": "optional fix hint or null",
+      "title": "one line that states the problem itself, with no preamble",
+      "body": "markdown, at most two short sentences: what breaks and for whom; do not retell the code, hedge or give generic advice",
+      "suggestion": "optional: the concrete fix in a few words, or null",
       "suggested_code": "exact replacement for lines line..suggested_end_line (whole lines, indentation kept) or null",
       "suggested_end_line": null,
       "rule": "optional: the exact title of a review rule this violates"
@@ -171,7 +171,7 @@ class ClaudeAuth:
 def run_claude_review(
     pr: PullRequest, *, user_id: str, workspace_id: str,
     custom_rules: str = "", graph_summary: str = "",
-    cross_repo_drift: str = "",
+    cross_repo_drift: str = "", language: str | None = None,
 ) -> ClaudeReviewResult:
     """Blocking wrapper — the orchestrator is sync; the SDK is async.
 
@@ -180,11 +180,15 @@ def run_claude_review(
     across the siblings in a repository's group, it costs no model call, and
     without it this engine reviews a change to a shared constant with no way
     to know the constant is shared.
+
+    `language` is the repository's `review_language`; without one the
+    workspace's applies. It used to be the workspace's alone, so a repository
+    that chose Ukrainian got an English review from this engine.
     """
     try:
         return asyncio.run(_run(pr, user_id=user_id, workspace_id=workspace_id,
                                 custom_rules=custom_rules, graph_summary=graph_summary,
-                                cross_repo_drift=cross_repo_drift))
+                                cross_repo_drift=cross_repo_drift, language=language))
     except RuntimeError as exc:
         if "asyncio.run() cannot be called" in str(exc):
             # Called from a thread with a running loop — run in a fresh thread.
@@ -194,7 +198,7 @@ def run_claude_review(
                     asyncio.run,
                     _run(pr, user_id=user_id, workspace_id=workspace_id,
                          custom_rules=custom_rules, graph_summary=graph_summary,
-                         cross_repo_drift=cross_repo_drift),
+                         cross_repo_drift=cross_repo_drift, language=language),
                 ).result()
         raise
 
@@ -313,6 +317,7 @@ def _resolve_env(user_id: str, workspace_id: str) -> dict | None:
 async def _run(
     pr: PullRequest, *, user_id: str, workspace_id: str,
     custom_rules: str, graph_summary: str, cross_repo_drift: str = "",
+    language: str | None = None,
 ) -> ClaudeReviewResult:
     import os
     import tempfile
@@ -345,14 +350,15 @@ async def _run(
         context_parts.append(cross_repo_drift[:6000])
     if custom_rules:
         context_parts.append(f"## Repo rules\n{custom_rules[:4000]}")
-    from src.review.agents.base import _review_language_instruction
-    lang_extra = _review_language_instruction(workspace_id)
+    from src.review.language import effective_language, finding_directive, user_reminder
+    code = effective_language(language, workspace_id)
+    fields = ("summary", "title", "body")
     prompt = _PROMPT.format(
         repo=pr.repo, number=pr.number, title=pr.title,
         base_ref=pr.base_ref or "?",
         context_block="\n\n".join(context_parts),
         diff=(pr.raw_diff or "")[:_MAX_DIFF_CHARS],
-    ) + lang_extra
+    ) + finding_directive(code, fields) + user_reminder(code, fields)
 
     api_port = os.environ.get("PORT", "8000")
     with tempfile.TemporaryDirectory(prefix="claude-review-") as home:

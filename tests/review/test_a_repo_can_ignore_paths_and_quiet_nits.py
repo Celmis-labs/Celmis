@@ -7,11 +7,11 @@ existed. What they drop joins `skipped_files`, so a PR the globs cover entirely
 still gets the "all changed files were filtered out" skip rather than a
 review of nothing.
 
-The comment threshold (`comment_min_severity`) keeps findings below it out of
-the PR's inline comments and NOTHING else: they are still in `batch.findings`,
-still counted in the summary, still stored. The summary says how many were
-shown and how many were held back, so the thread count and the severity counts
-never silently disagree.
+The comment threshold (`comment_min_severity`) keeps findings below it off the
+pull request: they are still in `batch.findings` and still stored, but no inline
+comment, no count in the summary and no part in the verdict. The summary counts
+only what is posted, so the thread count and the severity counts agree without
+a "N below the threshold" line to explain a gap that does not exist.
 
 And the fix that rides along: breaking-change and compliance findings were
 appended after the prefilter's severity sort, so with more findings than the
@@ -248,16 +248,18 @@ def test_only_findings_over_the_threshold_become_comments(cfg) -> None:
     discussions, summary = _post(_batch("error"))
     assert len(discussions) == 2
     assert all("finding 1" in d or "finding 2" in d for d in discussions)
-    # The counts stay honest: all five are counted, and the gap is explained.
-    assert "**Warning:** 2" in summary and "**Info:** 1" in summary
-    assert "up to **2** shown inline" in summary
-    assert "3 below the comment threshold (critical + error)" in summary
+    # The counts are of what the pull request shows: the two that were posted.
+    # The three below the threshold are stored, and neither counted nor named.
+    assert "**Critical:** 1" in summary and "**Error:** 1" in summary
+    assert "Warning" not in summary and "Info" not in summary
+    assert "below" not in summary and "shown inline" not in summary
 
 
 def test_with_no_threshold_everything_posts_and_nothing_is_explained(cfg) -> None:
     discussions, summary = _post(_batch(None))
     assert len(discussions) == 5
     assert "shown inline" not in summary
+    assert "**Warning:** 2" in summary and "**Info:** 1" in summary
 
 
 def test_the_inline_cap_is_said_too(cfg) -> None:
@@ -266,8 +268,10 @@ def test_the_inline_cap_is_said_too(cfg) -> None:
     assert len(b.inline_findings(cfg.max_inline_comments)) == 1
     summary = _format_summary(b, marker="<!-- m -->")
     assert "up to **1** shown inline" in summary
-    assert "1 below the comment threshold (warning and above)" in summary
     assert "3 over the 1-comment limit" in summary
+    # The info finding is below the threshold: said nowhere, counted nowhere.
+    assert "below" not in summary and "Info" not in summary
+    assert "**Warning:** 2" in summary
 
 
 def test_a_late_critical_is_sorted_ahead_of_the_cap() -> None:

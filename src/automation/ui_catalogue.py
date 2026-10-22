@@ -277,7 +277,7 @@ FIELDS: tuple[UiField, ...] = (
        "the reviewers also read.", default="0", advanced=True),
     # ── Filters ───────────────────────────────────────────────────────
     _f("comment_min_severity", _F, "The severity threshold: findings below "
-       "it are not posted. Steps: info, warning, error, critical.",
+       "it are neither posted nor mentioned. Steps: info, warning, error, critical.",
        default="info (everything)"),
     _f("max_inline_comments", _F, "At most this many inline comments per "
        "review; the most severe are kept.", default="20"),

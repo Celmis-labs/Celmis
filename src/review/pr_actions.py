@@ -47,10 +47,12 @@ def review_decision(batch: ReviewBatch) -> str | None:
 
     Approve: `approve_when_clean`, a review that COMPLETED (not skipped,
     failed or partial), nothing at or above the comment threshold, and a
-    verdict that is not itself a request for changes (blocking compliance,
-    three errors under a "critical only" threshold). Never both: a critical
-    finding is postable at every threshold, so the two arms cannot meet, and
-    the request arm is checked first regardless.
+    verdict that is not itself a request for changes (a blocking compliance
+    rule, which holds at every threshold). Findings below the threshold do
+    not stand in the way: the pull request is never told of them, so a clean
+    review at "errors only" is approved however many warnings it stored.
+    Never both: a critical finding is postable at every threshold, so the two
+    arms cannot meet, and the request arm is checked first regardless.
     """
     actions = getattr(batch, "pr_actions", None) or PRActions()
     status = batch.run_status
@@ -399,26 +401,29 @@ def description_insights(batch: ReviewBatch) -> str:
 def _findings_block(batch: ReviewBatch, language: str | None) -> str:
     """"### Found": how many, of what kind, the first few, and how many are
     comments in the code. "" for a review in which nothing ran — "no issues"
-    claims that something looked."""
+    claims that something looked.
+
+    Only the findings at or above the comment threshold are counted or
+    listed, the same set the summary comment and the verdict use: the
+    description must not say there is something to see when the pull request
+    shows nothing.
+    """
     from src.review.providers.base import (
-        _category_items,
         _severity_breakdown,
         _top_findings_lines,
     )
     from src.review.settings import get_review_settings
 
-    if not batch.findings and not batch.agents_run:
+    reported = batch.postable_findings
+    if not reported and not batch.agents_run:
         return ""
     lines = [messages.t("description.found", language), ""]
-    if not batch.findings:
+    if not reported:
         lines.append(messages.t("description.clean", language))
         return "\n".join(lines)
     lines.append(messages.t(
-        "description.counts", language, n=len(batch.findings),
+        "description.counts", language, n=len(reported),
         breakdown=_severity_breakdown(batch, language)))
-    lines.append("")
-    lines.append(messages.t(
-        "completed.by_category", language, items=_category_items(batch, language)))
     lines.append("")
     top = _top_findings_lines(batch, language)
     if top:

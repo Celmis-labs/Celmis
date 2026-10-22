@@ -5,7 +5,12 @@
  *
  * Both dictionaries are bundled, so switching language is instant (no reload,
  * no network). The chosen locale is persisted in a `locale` cookie and read
- * server-side in the root layout to avoid a flash of the wrong language.
+ * server-side in the root layout to avoid a flash of the wrong language. With
+ * no cookie the browser's own preference decides — `Accept-Language` on the
+ * server, `navigator.languages` as the fallback below — and that is never
+ * written back: only an explicit pick in the switcher is a saved choice. The
+ * list of locales and the matching live in `./locales`, a plain module the
+ * server can import.
  *
  * Usage:
  *   const t = useT();
@@ -19,23 +24,16 @@ import {
 
 import en from "./messages/en.json";
 import uk from "./messages/uk.json";
+import { DEFAULT_LOCALE, LOCALES, localeOfTag, pickLocale, type Locale } from "./locales";
 
-// en + uk бандляться (миттєве перемикання для основних мов); решта
-// довантажуються динамічно при виборі — інакше 17 словників роздули б
-// клієнтський бандл на ~1 МБ для кожного користувача.
-export type Locale =
-  | "en" | "uk" | "de" | "fr" | "es" | "it" | "pt" | "pl" | "nl"
-  | "cs" | "sk" | "ro" | "tr" | "ja" | "ko" | "zh";
-// Мови з ПОВНИМ словником у messages/ — лише вони в перемикачі. Додав
-// файл → додай сюди код; решта LOCALE_NAMES чекають на свій словник
-// (показувати мову без перекладу = мовчазний англійський фолбек).
-export const LOCALES: Locale[] = [
-  "en", "uk", "de", "es", "fr", "it", "nl", "pl", "pt",
-  "cs", "sk", "ro", "tr", "ja", "ko", "zh",
-];
-export const DEFAULT_LOCALE: Locale = "en";
+export { DEFAULT_LOCALE, LOCALES };
+export type { Locale };
 
-// Нативні назви для перемикача.
+// en + uk are bundled (instant switching for the main two); the rest are
+// loaded dynamically when chosen — otherwise sixteen dictionaries would add
+// ~1 MB to the client bundle of every user.
+
+// Native names for the switcher.
 export const LOCALE_NAMES: Record<Locale, string> = {
   en: "English", uk: "Українська", de: "Deutsch", fr: "Français",
   es: "Español", it: "Italiano", pt: "Português", pl: "Polski",
@@ -76,8 +74,7 @@ function loadNamedDict(locale: Locale): void {
  *  interface language stands.
  */
 function asLocale(code: string | null | undefined): Locale | null {
-  const base = String(code ?? "").trim().toLowerCase().split(/[-_]/)[0];
-  return (LOCALES as string[]).includes(base) ? (base as Locale) : null;
+  return localeOfTag(code);
 }
 
 type I18nCtx = {
@@ -95,9 +92,20 @@ function interpolate(str: string, vars?: Record<string, string | number>): strin
 
 export function I18nProvider({
   initialLocale = DEFAULT_LOCALE,
+  initialDict,
+  askBrowser = false,
   children,
 }: {
   initialLocale?: Locale;
+  /** The dictionary of `initialLocale` when the client bundle does not carry
+   *  it (anything but en/uk). The server loads it, so the first render — the
+   *  HTML — is in the visitor's language instead of English until a download
+   *  finishes. */
+  initialDict?: Record<string, string>;
+  /** The server had neither a saved choice nor an `Accept-Language` to go on
+   *  (see `LocaleSource` "none"), so `initialLocale` is only the fallback and
+   *  the browser is asked once, here. */
+  askBrowser?: boolean;
   children: React.ReactNode;
 }) {
   const [locale, setLocaleState] = useState<Locale>(
@@ -106,7 +114,11 @@ export function I18nProvider({
   // Динамічно довантажені словники (усі мови, крім en/uk).
   const [lazyDicts, setLazyDicts] = useState<
     Partial<Record<Locale, Record<string, string>>>
-  >({});
+  >(() => (
+    initialDict && LOCALES.includes(initialLocale) && !STATIC_DICTS[initialLocale]
+      ? { [initialLocale]: initialDict }
+      : {}
+  ));
 
   useEffect(() => {
     if (STATIC_DICTS[locale] || lazyDicts[locale]) return;
@@ -120,6 +132,17 @@ export function I18nProvider({
       .catch(() => { /* нема файлу — лишаємось на en-фолбеку */ });
     return () => { cancelled = true; };
   }, [locale, lazyDicts]);
+
+  // Not `setLocale`: nobody chose this language, the browser did, so it is
+  // neither saved nor sticky. The next visit asks the browser again.
+  useEffect(() => {
+    if (!askBrowser) return;
+    const preferred = navigator.languages?.length ? navigator.languages : [navigator.language];
+    const detected = pickLocale(preferred);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- a one-shot read of a value only the browser has
+    setLocaleState(detected);
+    document.documentElement.lang = detected;
+  }, [askBrowser]);
 
   const setLocale = useCallback((l: Locale) => {
     setLocaleState(l);

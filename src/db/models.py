@@ -379,7 +379,8 @@ class RepoReviewPolicy(Base, TimestampMixin):
 
     # The lowest severity posted as an inline PR comment: critical | error |
     # warning | info. NULL inherits the default, which posts everything.
-    # Findings under it are still counted in the summary and stored.
+    # Findings under it are stored and tracked, never posted or mentioned in
+    # the summary; a review with nothing at or over it can approve.
     comment_min_severity: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # ── Review output, per repository (Kodus-style customization) ──

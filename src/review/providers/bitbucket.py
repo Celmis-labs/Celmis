@@ -575,7 +575,7 @@ class BitbucketPRProvider(PullRequestProvider):
             raw_body = _format_finding_body(
                 finding, settings.comment_marker,
                 original=_original_lines(new_side, finding),
-                head_sha=pr.head_sha,
+                head_sha=pr.head_sha, language=batch.review_language,
             )
             inline: dict[str, Any] = {"path": finding.file_path}
             if finding.side == HunkSide.LEFT:

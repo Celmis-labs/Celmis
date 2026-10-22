@@ -27,10 +27,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from src.review import messages
 from src.review.agents.base import (
     AVOID_LIST_PROMPT,
     FINDING_OUTPUT_FORMAT,
     SECOND_DEFECT_PROMPT,
+    AgentContext,
     LLMReviewAgent,
 )
 from src.review.models import Finding, FindingSeverity
@@ -123,7 +125,7 @@ reasoning sentence here — write nothing."""
 
 _INPUT_SIZE_FIELD = """Performance findings carry ONE more field, "input_size", written right after "severity":
     "input_size": "<how big the repeated collection or input can get, and what sets that size — e.g. 'one row per upload, no LIMIT: grows with every user's uploads, 100k+ in production' or 'the ids array of a POST body, no max length checked' — or \"bounded\" / \"unknown\" when the shown code does not say>"
-It is what the severity is judged on (below), so fill it from the code and the context, never from a guess about production."""
+It is what the severity is judged on (below), so fill it from the code and the context, never from a guess about production. A program reads this field, so write it in English whatever the review language is."""
 
 _SEVERITY = """rule_id format: `perf.<rule>` (e.g. `perf.n-plus-one`, `perf.quadratic`,
 `perf.blocking-io`, `perf.redundant-work`, `perf.memory`, `perf.unbounded`,
@@ -218,11 +220,10 @@ _GROWS = re.compile(
 #: Severities that need the shown code to demonstrate a growing input.
 _NEEDS_A_BOUND = (FindingSeverity.ERROR, FindingSeverity.CRITICAL)
 
-DOWNGRADE_NOTE = (
-    "_Severity lowered to warning: the reply does not show an input that is "
-    "unbounded or user-controlled in size, which is what error/critical need "
-    "for this agent._"
-)
+#: The sentence appended to a lowered finding, in the English the review has
+#: when nothing says otherwise. The wording lives in the message catalogue
+#: (`perf.downgrade`), so a Ukrainian review does not end one comment in English.
+DOWNGRADE_NOTE = messages.t("perf.downgrade", "en")
 
 
 def states_a_growing_input(input_size: Any) -> bool:
@@ -251,8 +252,18 @@ class PerformanceAgent(LLMReviewAgent):
     system_prompt = _SYSTEM
     user_prompt_template = _USER_TEMPLATE
 
+    #: The language of the note a lowered finding gets. Set from the context
+    #: before each parse, because the shared parse hands `_dict_to_finding`
+    #: nothing but the reply's own item.
+    _language: str = "en"
+
     def __init__(self, model: str | None = None) -> None:
         self.model = model or get_review_settings().performance_model
+
+    def _parse_findings(self, llm_text: str, context: AgentContext) -> list[Finding]:
+        self._language = messages.resolve_language(
+            getattr(context, "review_language", None), context.workspace_id)
+        return super()._parse_findings(llm_text, context)
 
     def _dict_to_finding(
         self, data: dict[str, Any], changed_files: frozenset[str] | None = None,
@@ -276,5 +287,6 @@ class PerformanceAgent(LLMReviewAgent):
         if finding.evidence_kind == "proven" or states_a_growing_input(data.get("input_size")):
             return finding
         finding.severity = FindingSeverity.WARNING
-        finding.body = f"{finding.body}\n\n{DOWNGRADE_NOTE}" if finding.body else DOWNGRADE_NOTE
+        note = messages.t("perf.downgrade", self._language)
+        finding.body = f"{finding.body}\n\n{note}" if finding.body else note
         return finding

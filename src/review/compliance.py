@@ -19,6 +19,7 @@ import json
 import logging
 from dataclasses import dataclass
 
+from src.review import messages
 from src.review.agents.base import (
     AgentContext,
     AgentRunResult,
@@ -26,7 +27,8 @@ from src.review.agents.base import (
     agent_llm_settings,
     base_instruction_block,
 )
-from src.review.models import Finding, FindingSeverity, HunkSide
+from src.review.language import effective_language, is_english, language_name, target_phrase
+from src.review.models import Finding, FindingSeverity, HunkSide, TemplateText
 from src.review.settings import AgentLLMSettings
 
 logger = logging.getLogger(__name__)
@@ -61,13 +63,35 @@ _BASE_INSTRUCTION_RIDER = (
 )
 
 
+def _language_rider(code: str) -> str:
+    """The one sentence a person reads in this reply, asked for in the review
+    language. Empty for English, like every other prompt of the review."""
+    if is_english(code):
+        return ""
+    return (
+        f"OUTPUT LANGUAGE: {target_phrase(code)}. Write \"reason\" in "
+        f"{language_name(code)}. Keep file paths, identifiers, the JSON keys "
+        f"and the value of \"passes\" as they are."
+    )
+
+
 def compliance_system_prompt(context: AgentContext) -> str:
     """The compliance auditor's prompt, plus the policy's base instruction —
-    how every suggestion in the review is written — when there is one."""
+    how every suggestion in the review is written — when there is one, plus the
+    review language, last.
+
+    `reason` is the one sentence a person reads and used to come back in the
+    prompt's English whatever the review language was.
+    """
     block = base_instruction_block(getattr(context, "base_instruction", ""))
-    if not block:
-        return _SYSTEM
-    return f"{_SYSTEM.rstrip()}\n\n{block}\n\n{_BASE_INSTRUCTION_RIDER}\n"
+    prompt = (
+        _SYSTEM if not block
+        else f"{_SYSTEM.rstrip()}\n\n{block}\n\n{_BASE_INSTRUCTION_RIDER}\n"
+    )
+    rider = _language_rider(effective_language(
+        getattr(context, "review_language", None),
+        getattr(context, "workspace_id", None)))
+    return f"{prompt.rstrip()}\n\n{rider}\n" if rider else prompt
 
 
 def load_active_checks(repo_slug: str) -> list[ComplianceCheckSpec]:
@@ -125,6 +149,9 @@ def run_compliance(context: AgentContext) -> AgentRunResult:
     # multiplies by the rule count — the same arithmetic that made an inherited
     # retry budget expensive here.
     llm = agent_llm_settings(context, "compliance")
+    language = messages.resolve_language(
+        getattr(context, "review_language", None),
+        getattr(context, "workspace_id", None))
     for spec in specs:
         matching = [
             f for f in pr.changed_files
@@ -150,15 +177,27 @@ def run_compliance(context: AgentContext) -> AgentRunResult:
             side=HunkSide.RIGHT,
             severity=sev,
             title=f"Compliance: {spec.name}",
+            # The rule's own text and the reason, labelled in the review
+            # language. The scope and severity the old body listed are on the
+            # finding already, and the stored title stays English on purpose:
+            # it is part of the finding's fingerprint, and a title that
+            # changed with the language would make the same finding a new one.
             body=(
-                f"**Rule** ({spec.scope}, {spec.severity}"
-                f"{', BLOCKING' if spec.blocking else ''}):\n"
-                f"{spec.rule}\n\n"
-                f"**Reason:** {verdict['reason']}"
+                messages.t(
+                    "compliance.rule", language, rule=spec.rule,
+                    flag=messages.t("compliance.blocking", language)
+                    if spec.blocking else "")
+                + "\n\n"
+                + messages.t("compliance.reason", language, reason=verdict["reason"])
             ),
             agent="compliance",
             rule_id=f"compliance.{spec.id}",
             confidence=0.9,
+            # Only the title: the body is already in the review language, and
+            # the title is said in it where the comment is written.
+            template=TemplateText(
+                key="compliance.rule", title=f"Compliance: {spec.name}",
+                args={"name": spec.name}),
         ))
     return AgentRunResult(
         agent="compliance",

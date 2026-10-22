@@ -302,6 +302,17 @@ def curated_reason(code: str | None) -> str | None:
     return _REASON.get(code)
 
 
+def reason_sentences() -> dict[str, str]:
+    """Every sentence `curated_reason` can return, by code.
+
+    For a caller that has only the sentence (a run record keeps the text, not
+    the code) and wants to say the same thing in another language: it finds the
+    code here and looks the translation up under it. The generic sentence is
+    included, under `unmapped`.
+    """
+    return {**_REASON, "unmapped": _UNMAPPED_REASON}
+
+
 def _header_value(headers: object, name: str) -> str | None:
     """One header out of whatever header-shaped thing the exception carries.
 

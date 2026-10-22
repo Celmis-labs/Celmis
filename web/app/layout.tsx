@@ -1,10 +1,12 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import "./globals.css";
 import { Providers } from "@/components/providers";
-import { DEFAULT_LOCALE, type Locale } from "@/lib/i18n";
-import { THEME_INIT_SCRIPT } from "@/components/theme-toggle";
+import { ThemeSync } from "@/components/theme-sync";
+import { detectLocale } from "@/lib/i18n/locales";
+import { serverDictionary } from "@/lib/i18n/server-dict";
+import { THEME_INIT_SCRIPT } from "@/lib/theme";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -38,8 +40,17 @@ export const viewport: Viewport = {
 export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const cookieStore = await cookies();
-  const locale = (cookieStore.get("locale")?.value as Locale) || DEFAULT_LOCALE;
+  // A saved choice (the `locale` cookie) wins; without one the browser's
+  // Accept-Language decides, so a first visit is already in the visitor's
+  // language in the HTML itself, not after a client-side swap.
+  const [cookieStore, headerStore] = await Promise.all([cookies(), headers()]);
+  const { locale, source } = detectLocale(
+    cookieStore.get("locale")?.value,
+    headerStore.get("accept-language"),
+  );
+  // en and uk are in the client bundle; any other language is loaded here so
+  // the HTML is already in it rather than English until a download ends.
+  const dictionary = await serverDictionary(locale);
   return (
     <html
       lang={locale}
@@ -50,7 +61,10 @@ export default async function RootLayout({
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
       <body className="min-h-full">
-        <Providers initialLocale={locale}>{children}</Providers>
+        <ThemeSync />
+        <Providers initialLocale={locale} initialDict={dictionary} askBrowser={source === "none"}>
+          {children}
+        </Providers>
       </body>
     </html>
   );

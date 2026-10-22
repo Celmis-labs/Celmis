@@ -16,9 +16,44 @@ has not made its own choice. The settings live on the repository's review page
 | `ignore_globs` | none | Files never reviewed. |
 | `ignored_title_keywords` | none | A pull request whose title contains one of these (case-insensitive) is not reviewed automatically, for example `WIP` or `[skip review]`. |
 
-The review language is a workspace choice (`review_language` on the LLM
-configuration page, for example `en` or `uk`); it applies to the findings, the
-summary and the comments the reviewer posts.
+The review language is a repository choice (`review_language` in the policy),
+else the workspace's (`review_language` on the LLM configuration page, for
+example `en` or `uk`); it applies to every sentence a person reads: the
+findings (the title, the one-sentence reason, the body, the fix), the summary,
+the description, the answers to `@celmis` questions and the compliance verdicts.
+The model can write in any language the setting offers. The few words the bot
+adds itself ("Why", "Fix", "Also at lines ...") come from a message catalogue
+that exists in English and Ukrainian; any other language gets the English
+words around its own sentences.
+
+Models sometimes answer one sentence, usually the reason, in the prompt's
+language. After the findings are final, the comments about to be posted are
+checked with a cheap rule (a sentence in the wrong script, or made of English
+function words) and the ones that fail go back to the model once to be rewritten
+(the run shows a "Language check" stage when that happened). No finding is
+dropped for its language; one that cannot be fixed is posted as written. The
+check is best-effort: it cannot tell Ukrainian from Russian.
+
+### The shape of a comment
+
+An inline comment is the reason, the problem, the body and the fix, in that
+order, each only when there is something to say:
+
+````
+*Why:* line 42 dereferences cfg without a check
+**🟠 cfg can be nil**
+The call fails when the file is missing.
+**Fix:**
+```diff
+-    use(cfg)
++    if cfg:
++        use(cfg)
+```
+<sub>agent: `defect` · rule: `defect.null-deref` · confidence: 0.80</sub>
+````
+
+The title is one line stating the problem, the body at most two short sentences.
+The footer keys are fixed; the benchmark harness reads them.
 
 ### Incremental review
 
@@ -72,10 +107,10 @@ limit, or the check that the pull request has a diff to read.
 | `summary_target` | `comment` | `comment` posts the overview as a comment; `description` writes it into the pull request description inside a marked block. |
 | `summary_on_new_commits` | `replace` | What the next push does to an overview already there: `replace`, `append` or `nothing`. |
 | `summary_existing_description` | `append` | With `description`, what happens to text a person already wrote: `append` after it, `complement` the gaps, or `replace` it. |
-| `completed_comment` | `completed` | The layout of the closing comment: `completed` (verdict, count, breakdown, what was read) or `classic`. |
-| `commands_guide_enabled` | on | End the closing comment with a guide to the commands the repository allows. |
+| `completed_comment` | `completed` | The layout of the closing comment: `completed` (a verdict line, then only what the author must act on) or `classic` (the longer form, with scope and performance). |
+| `commands_guide_enabled` | on | When the closing comment has something to act on, end it with one line naming the two commands that matter (start a review, help), where the repository allows them. |
 | `started_comment_enabled` | on | Post a short "review started" comment. |
-| `comment_min_severity` | per workspace | Findings below this are kept off the pull request. |
+| `comment_min_severity` | per workspace | Findings below this are stored for the web app but never reach the pull request: not as inline comments, and not in the counts, the breakdown, the verdict or the description either. When nothing reaches the level, the review is an approval. |
 | `max_inline_comments` | per workspace | Inline comments per review. |
 | `approve_when_clean` / `request_changes_on_critical` | off | Let the review approve a clean pull request or request changes on a critical finding. |
 | `status_feedback` | on | Show the review as a commit status or check. |

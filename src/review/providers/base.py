@@ -9,12 +9,15 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 
 from src.review import messages
+from src.review.finding_text import shown
 from src.review.markers import has_marker
 from src.review.models import (
     Finding,
+    FindingSeverity,
     HunkSide,
     PullRequest,
     ReviewBatch,
+    ReviewRunStatus,
     ReviewVerdict,
 )
 from src.review.pr_summary import sanitize_prose
@@ -782,9 +785,14 @@ def _fence_for(*texts: str) -> str:
 
 def _suggestion_parts(
     finding: Finding, *, committable: str | None = None,
-    original: list[str] | None = None,
+    original: list[str] | None = None, language: str | None = None,
 ) -> list[str]:
     """The fix part of an inline comment.
+
+    One label, "Fix", in the review language: the replacement code carries it,
+    and so does a hint that stands alone. A hint that comes with code is the
+    second block and is called "Hint", so the two cannot be mistaken for each
+    other.
 
     `committable` is set by the provider only when the repository switched
     `committable_suggestions` on AND the anchor is exact (see
@@ -810,20 +818,21 @@ def _suggestion_parts(
         elif committable == SUGGESTION_GITLAB:
             parts += [f"{fence}suggestion:-0+{end - start}", code, fence]
         elif original:
-            parts.append("**Suggested change:**")
+            parts.append(f"**{messages.t('finding.fix', language)}:**")
             parts.append("")
             parts.append(f"{fence}diff")
             parts += [f"-{ln}" for ln in original]
             parts += [f"+{ln}" for ln in code.split("\n")]
             parts.append(fence)
         else:
-            parts.append("**Suggested change:**")
+            parts.append(f"**{messages.t('finding.fix', language)}:**")
             parts.append("")
             parts += [fence, code, fence]
     if hint and hint.strip() != (code or "").strip():
         fence = _fence_for(hint)
+        label = messages.t("finding.hint" if code is not None else "finding.fix", language)
         parts.append("")
-        parts.append("**Suggestion:**")
+        parts.append(f"**{label}:**")
         parts.append("")
         parts += [fence, hint, fence]
     return parts
@@ -899,8 +908,15 @@ def _committable_enabled(batch: ReviewBatch) -> bool:
 def _format_finding_body(
     finding: Finding, marker: str = "", *, committable: str | None = None,
     original: list[str] | None = None, head_sha: str | None = None,
+    language: str | None = None,
 ) -> str:
     """Markdown body for an inline comment — universal cross-provider.
+
+    `language` is the review language: the words the bot adds around the
+    model's own sentences ("Why", "Fix", "Hint") are written in it. The
+    footer keeps its English `agent:` / `rule:` / `confidence:` keys — the
+    benchmark harness parses them — and a body that is empty is left out, not
+    replaced by a placeholder sentence.
 
     `marker` is the same idempotency token the summary comment carries. Only
     the summary had one, so `replace_on_synchronize` deleted the summary and
@@ -908,6 +924,10 @@ def _format_finding_body(
     on every push, so a branch pushed five times collected five full sets of
     inline comments, up to max_inline_comments each.
     """
+    # The finding the reader is shown: a program's fixed text in the review
+    # language. The stored finding keeps its English, which is what the
+    # fingerprint in the marker below is made of.
+    stored, finding = finding, shown(finding, language)
     parts: list[str] = []
     if getattr(finding, "reasoning", ""):
         # The FIRST line, before the title: the evidence the agent wrote
@@ -917,17 +937,19 @@ def _format_finding_body(
         # The judge reads the whole comment and matches on the issue it
         # names, and a human decides in the first line whether to read the
         # second; both get the derivation before the conclusion.
-        parts.append(f"*Why:* {finding.reasoning}")
+        parts.append(f"*{messages.t('finding.why', language)}:* {finding.reasoning}")
         parts.append("")
     emoji = _severity_emoji(finding.severity.value)
     if finding.title:
         parts.append(f"**{emoji} {finding.title}**")
     else:
         parts.append(f"**{emoji} {finding.severity.value.upper()}**")
-    parts.append("")
-    parts.append(finding.body or "(no details)")
+    if (finding.body or "").strip():
+        parts.append("")
+        parts.append(finding.body)
 
-    parts.extend(_suggestion_parts(finding, committable=committable, original=original))
+    parts.extend(_suggestion_parts(
+        finding, committable=committable, original=original, language=language))
 
     # The footer always renders: confidence is the agent's own number and
     # belongs where telemetry belongs — visible, last, and never the thing
@@ -956,7 +978,7 @@ def _format_finding_body(
         # finding is already on the PR (and the learning loop to link a reply
         # back to it). Inside the same marked body, never alone: the
         # authorship check of the marker below still applies to it.
-        own = finding_marker_for(finding, head_sha)
+        own = finding_marker_for(stored, head_sha)
         if own:
             parts.append(own)
         parts.append(marker)
@@ -983,6 +1005,26 @@ _VERDICT_KEY = {
 }
 
 
+def _verdict_key(batch: ReviewBatch) -> str | None:
+    """The catalogue key of the verdict line.
+
+    A verdict that is not an approval and has no finding to point at is said
+    as what it is, an incomplete review: a critical stage did not finish, so
+    the review cannot vouch for the change. "Findings to consider" over an
+    empty list is the sentence a team read as "warnings, but which?". The same
+    goes for an approving verdict on a run that did not complete: the provider
+    never approves it (`pr_actions.review_decision`), so the line does not
+    claim it.
+    """
+    verdict = batch.verdict
+    if (verdict == ReviewVerdict.COMMENT and not batch.postable_findings) or (
+        verdict == ReviewVerdict.APPROVE
+        and batch.run_status == ReviewRunStatus.PARTIAL
+    ):
+        return "completed.verdict.incomplete"
+    return _VERDICT_KEY.get(verdict)
+
+
 def _verdict_line(batch: ReviewBatch, language: str | None = None) -> str:
     """One verdict line, rendered once for every surface that shows it.
 
@@ -992,8 +1034,9 @@ def _verdict_line(batch: ReviewBatch, language: str | None = None) -> str:
     could drift, a PR timeline could call a review APPROVED while the summary
     it points at says otherwise.
     """
-    emoji = _VERDICT_EMOJI.get(batch.verdict, "💬")
-    key = _VERDICT_KEY.get(batch.verdict)
+    key = _verdict_key(batch)
+    emoji = "⚠️" if key == "completed.verdict.incomplete" else _VERDICT_EMOJI.get(
+        batch.verdict, "💬")
     return f"{emoji} {messages.t(key, language) if key else ''}"
 
 
@@ -1006,7 +1049,8 @@ def _format_review_pointer(batch: ReviewBatch, summary_url: str | None = None) -
     copy onto the PR timeline — the one duplication no cleanup can reach. The
     full summary now lives ONLY in the persistent comment, which IS updated in
     place; the review body keeps just the verdict (so the timeline stays
-    readable at a glance) and one sentence saying where the rest is.
+    readable at a glance) and one short line saying where the rest is. A clean
+    approval has no rest to point at, so its body is the verdict alone.
 
     Trade-off, accepted by the product owner: GitHub's notification email
     quotes the review body, so the email now carries a pointer instead of the
@@ -1017,64 +1061,64 @@ def _format_review_pointer(batch: ReviewBatch, summary_url: str | None = None) -
     already known — every re-run, because the upsert rewrites the oldest
     comment in place and its id is stable. On the FIRST run the comment does
     not exist until after the review is submitted (a review that fails to post
-    must not update the summary first), so the sentence points without a link;
+    must not update the summary first), so the line points without a link;
     the comment lands right below the review in the timeline.
     """
+    language = batch.review_language
+    verdict = _verdict_line(batch, language)
+    if _verdict_key(batch) == "completed.verdict.approve" and not batch.postable_findings:
+        return verdict
     where = (
-        f"[the review summary]({summary_url})"
+        messages.t("review.pointer", language, url=summary_url)
         if summary_url
-        else "the review summary comment on this pull request"
+        else messages.t("review.pointer_nolink", language)
     )
-    return (
-        f"{_verdict_line(batch, batch.review_language)}\n\n"
-        f"Full findings and scope are in {where} — one persistent comment, "
-        f"updated in place on every run."
-    )
+    return f"{verdict}\n\n{where}"
 
 
-_THRESHOLD_KEY = {
-    "critical": "threshold.critical",
-    "error": "threshold.error",
-    "warning": "threshold.warning",
-}
-
-
-def _posting_line(batch: ReviewBatch, language: str | None = None) -> str:
-    """How many of the counted findings became inline comments, and why not
-    the rest.
-
-    The severity counts above are ALL findings. Once a repo raises its comment
-    threshold, or a review crosses the inline cap, fewer comments arrive than
-    the counts promise — and a reader who counts the threads and gets a
-    different number concludes the tool lost some. So the gap is said, with
-    its cause: "3 shown inline · 7 below the warning threshold (kept in
-    Celmis)". Empty when every finding was posted.
-    """
+def _inline_numbers(batch: ReviewBatch) -> tuple[int, int, int]:
+    """(shown inline, over the cap, the cap) for the findings the summary counts."""
     from src.review.settings import get_review_settings
 
-    total = len(batch.findings)
-    below = batch.below_threshold_count
-    postable = total - below
     cap = batch.inline_cap(int(get_review_settings().max_inline_comments))
     # Counted by the method the providers post with, so findings a review
     # rule exempts from the cap (`ReviewBatch.bypasses_filters`) are counted
     # as shown rather than as "over the limit".
     shown = len(batch.inline_findings(cap))
-    over_cap = postable - shown
-    if not below and not over_cap:
+    return shown, len(batch.postable_findings) - shown, cap
+
+
+def _over_cap_line(batch: ReviewBatch, language: str | None = None) -> str:
+    """"N over the K-comment limit" — "" when every counted finding is inline."""
+    _shown, over_cap, cap = _inline_numbers(batch)
+    if not over_cap:
+        return ""
+    return "_" + messages.t("completed.posting_over", language, n=over_cap, cap=cap) + "_"
+
+
+def _posting_line(batch: ReviewBatch, language: str | None = None) -> str:
+    """Why fewer inline comments arrived than the summary lists: the inline cap.
+
+    A reader who counts the threads and gets a different number from the
+    summary concludes the tool lost some, so the gap is said, with its cause:
+    "up to 3 shown inline · 7 over the 3-comment limit". Empty when every
+    finding the summary counts was posted.
+
+    The comment threshold is NOT a cause this line names. The summary counts
+    only what is at or above it (`ReviewBatch.postable_findings`), so there is
+    no gap to explain, and "N below the threshold" was a count of remarks the
+    reader could neither see nor act on.
+    """
+    shown, over_cap, cap = _inline_numbers(batch)
+    if not over_cap:
         return ""
     # "up to": this text is composed before the comments are sent, and a
     # provider can still refuse some of them one by one (GitLab, Bitbucket
     # post per finding). The number is what was SELECTED, said as such.
-    parts = [messages.t("completed.posting_shown", language, n=shown)]
-    if below:
-        label = messages.t(
-            _THRESHOLD_KEY.get(str(batch.comment_min_severity or "").lower(),
-                               "threshold.fallback"), language)
-        parts.append(messages.t("completed.posting_below", language, n=below, label=label))
-    if over_cap:
-        parts.append(messages.t("completed.posting_over", language, n=over_cap, cap=cap))
-    return "_" + " · ".join(parts) + "_"
+    return "_" + " · ".join([
+        messages.t("completed.posting_shown", language, n=shown),
+        messages.t("completed.posting_over", language, n=over_cap, cap=cap),
+    ]) + "_"
 
 
 def _files(n: int, language: str | None = None) -> str:
@@ -1121,8 +1165,9 @@ def _format_summary(batch: ReviewBatch, marker: str) -> str:
     lines.append(_verdict_line(batch, batch.review_language))
     lines.append("")
 
-    # Severity summary
-    if batch.findings:
+    # Severity summary — of what the pull request is told about, never of the
+    # findings under the comment threshold (see `_posting_line`).
+    if batch.postable_findings:
         lines.append("### Findings")
         lines.append("")
         lines.extend(_severity_count_lines(batch))
@@ -1181,14 +1226,15 @@ def _summary_header(batch: ReviewBatch) -> str:
 
 def _severity_count_lines(batch: ReviewBatch) -> list[str]:
     lines: list[str] = []
-    if batch.critical_count:
-        lines.append(f"- 🔴 **Critical:** {batch.critical_count}")
-    if batch.error_count:
-        lines.append(f"- 🟠 **Error:** {batch.error_count}")
-    if batch.warning_count:
-        lines.append(f"- 🟡 **Warning:** {batch.warning_count}")
-    if batch.info_count:
-        lines.append(f"- 💡 **Info:** {batch.info_count}")
+    for severity, emoji, label in (
+        (FindingSeverity.CRITICAL, "🔴", "Critical"),
+        (FindingSeverity.ERROR, "🟠", "Error"),
+        (FindingSeverity.WARNING, "🟡", "Warning"),
+        (FindingSeverity.INFO, "💡", "Info"),
+    ):
+        count = batch.reported_count(severity)
+        if count:
+            lines.append(f"- {emoji} **{label}:** {count}")
     return lines
 
 
@@ -1350,7 +1396,8 @@ def _walkthrough_lines(batch: ReviewBatch, language: str | None = None) -> list[
 def _rich_findings_lines(batch: ReviewBatch) -> list[str]:
     pr = batch.pull_request
     lines = ["### Findings", ""]
-    if not batch.findings:
+    postable = batch.postable_findings
+    if not postable:
         if batch.agents_run:
             lines.append("_No issues detected._")
             lines.append("")
@@ -1361,15 +1408,11 @@ def _rich_findings_lines(batch: ReviewBatch) -> list[str]:
 
     sev = [
         f"{_severity_emoji(level)} {_SEVERITY_LABEL[level]}: **{count}**"
-        for level, count in (
-            ("critical", batch.critical_count), ("error", batch.error_count),
-            ("warning", batch.warning_count), ("info", batch.info_count),
-        )
-        if count
+        for level, count in _reported_by_severity(batch)
     ]
     lines.append("**By severity:** " + " · ".join(sev))
     by_cat: dict[str, int] = {}
-    for f in batch.findings:
+    for f in postable:
         cat = _category_of(f)
         by_cat[cat] = by_cat.get(cat, 0) + 1
     lines.append("")
@@ -1379,7 +1422,6 @@ def _rich_findings_lines(batch: ReviewBatch) -> list[str]:
     ))
     lines.append("")
 
-    postable = batch.postable_findings
     top = postable[:TOP_FINDINGS_MAX]
     if top:
         lines.append("**Top findings:**")
@@ -1393,7 +1435,7 @@ def _rich_findings_lines(batch: ReviewBatch) -> list[str]:
         rest = len(postable) - len(top)
         if rest > 0:
             lines.append("")
-            lines.append(f"_…and {rest} more in the inline comments._")
+            lines.append(f"_…and {rest} more._")
         lines.append("")
     posting = _posting_line(batch, batch.review_language)
     if posting:
@@ -1411,31 +1453,25 @@ def _section_lines(batch: ReviewBatch, target: str) -> list[str]:
     return lines
 
 
-def _category_label(category: str, language: str | None) -> str:
-    key = f"category.{category}"
-    return messages.t(key, language) if key in messages.EN else category
+def _reported_by_severity(batch: ReviewBatch) -> list[tuple[str, int]]:
+    """(severity word, count) for the levels the pull request is told about:
+    at or above the comment threshold, worst first, empty levels left out."""
+    return [
+        (severity.value, count)
+        for severity in (
+            FindingSeverity.CRITICAL, FindingSeverity.ERROR,
+            FindingSeverity.WARNING, FindingSeverity.INFO,
+        )
+        if (count := batch.reported_count(severity))
+    ]
 
 
 def _severity_breakdown(batch: ReviewBatch, language: str | None) -> str:
-    """'🔴 Critical 1 · 🟠 Error 2' — only the levels that have findings."""
+    """'🔴 Critical 1 · 🟠 Error 2' — only the levels that have findings at or
+    above the comment threshold."""
     return " · ".join(
         f"{_severity_emoji(level)} {messages.t(f'severity.{level}', language)} {count}"
-        for level, count in (
-            ("critical", batch.critical_count), ("error", batch.error_count),
-            ("warning", batch.warning_count), ("info", batch.info_count),
-        )
-        if count
-    )
-
-
-def _category_items(batch: ReviewBatch, language: str | None) -> str:
-    by_cat: dict[str, int] = {}
-    for f in batch.findings:
-        cat = _category_of(f)
-        by_cat[cat] = by_cat.get(cat, 0) + 1
-    return " · ".join(
-        f"{_category_label(cat, language)} **{n}**"
-        for cat, n in sorted(by_cat.items(), key=lambda kv: (-kv[1], kv[0]))
+        for level, count in _reported_by_severity(batch)
     )
 
 
@@ -1454,7 +1490,7 @@ def _top_findings_lines(batch: ReviewBatch, language: str | None) -> list[str]:
         # The title is model output written after reading the author's diff:
         # no marker comment, link, image or @-mention may ride in with it.
         title = _md_cell(
-            sanitize_prose(f.title or f.severity.value.upper(), 160), 160)
+            sanitize_prose(shown(f, language).title or f.severity.value.upper(), 160), 160)
         lines.append(
             f"{i}. {_severity_emoji(f.severity.value)} **{title}** — "
             f"{_finding_location(pr, f)}"
@@ -1484,18 +1520,34 @@ def _completed_header(batch: ReviewBatch, language: str | None) -> str:
     return custom or messages.t("completed.title", language)
 
 
-def _commands_guide_lines(language: str | None, off: tuple[str, ...] = ()) -> list[str]:
-    """What the bot can be told in a comment — only the commands this
-    installation can run and this repository has not switched off. Shown under
-    `commands_guide_enabled`."""
+def _commands_footer(batch: ReviewBatch, language: str | None) -> str:
+    """The one line under a review that has something to act on: the commands
+    that matter (run again, list the rest) and a link to this repository's
+    settings. "" when the repository switched the guide off and the install
+    has no public address for the link.
+
+    One line, because Bitbucket shows `<details>` as a bold heading with its
+    contents open, so "folding the list away" does not fold anything there.
+    The full list is the answer to `help`.
+    """
     from src.review.commands.handlers import available_commands
-    from src.review.commands.parser import guide_lines
+    from src.review.commands.parser import short_guide_line
     from src.review.settings import get_review_settings
 
-    return guide_lines(
-        get_review_settings().bot_handle, language,
-        available=[name for name in available_commands() if name not in off],
-    )
+    parts: list[str] = []
+    actions = getattr(batch, "pr_actions", None)
+    if getattr(actions, "commands_guide_enabled", False):
+        off = getattr(actions, "guide_commands_off", ())
+        guide = short_guide_line(
+            get_review_settings().bot_handle, language,
+            available=[name for name in available_commands() if name not in off],
+        )
+        if guide:
+            parts.append(guide)
+    link = _settings_link(batch, language)
+    if link:
+        parts.append(link)
+    return " · ".join(parts)
 
 
 def _settings_link(batch: ReviewBatch, language: str | None) -> str:
@@ -1516,21 +1568,58 @@ def _settings_link(batch: ReviewBatch, language: str | None) -> str:
     return messages.t("completed.settings", language, url=url)
 
 
+def _blocked_by_rule_line(batch: ReviewBatch, language: str | None) -> str:
+    """Why the verdict blocks when no listed finding says so.
+
+    A blocking compliance rule holds at every comment threshold, so its
+    finding can sit below it and not be listed — and "changes requested"
+    over a list that does not contain the reason is the remark nobody can
+    read. One line, the rule's title; "" when the reason is already listed.
+    """
+    if batch.verdict != ReviewVerdict.REQUEST_CHANGES:
+        return ""
+    listed = {id(f) for f in batch.postable_findings}
+    hidden = [f for f in batch.blocking_compliance_findings if id(f) not in listed]
+    if not hidden:
+        return ""
+    titles = "; ".join(
+        _md_cell(sanitize_prose(shown(f, language).title or f.severity.value.upper(), 160), 160)
+        for f in hidden[:3]
+    )
+    return messages.t("completed.blocked_by_rule", language, titles=titles)
+
+
+def _completed_verdict_line(batch: ReviewBatch, language: str | None) -> str:
+    """The verdict and the commit it was given for, on one line."""
+    sha = (batch.pull_request.head_sha or "")[:7] or "unknown"
+    return (f"{_verdict_line(batch, language)} · "
+            f"{messages.t('completed.at_commit', language, sha=sha)}")
+
+
 def _format_completed_comment(batch: ReviewBatch, marker: str) -> str:
     """The "Code Review Completed" comment (`completed_comment="completed"`).
 
     The same persistent comment the classic summary is, rewritten in place, so
-    there is no second thread and nothing for the review to answer to. What it
-    leads with is the answer: the verdict, how many findings and of what kind,
-    the first few by name. Then the change summary when it is not already in
-    the description, the blocks other stages added (`batch.summary_sections`),
-    the scope in one line, the technical details folded away, the commands
-    (when they exist) and a link to this repository's settings.
-    """
-    from src.review.models import ReviewRunStatus
+    there is no second thread and nothing for the review to answer to. It is
+    short on purpose — the team that reads it judges the bot by how little it
+    takes to say what is wrong — and says only what a reader can act on:
 
+      * one verdict line with the commit it was given for;
+      * the findings at or above the comment threshold, counted by severity
+        and listed one per line. Findings below the threshold are not in the
+        counts, the categories or a "N below the threshold" line: they are
+        kept in Celmis, and a pull request with none at or above it is
+        APPROVED (`ReviewBatch.compute_verdict`), at every threshold;
+      * the blocks other stages added (`batch.summary_sections`) and, when the
+        description does not hold it, the change summary;
+      * one line of commands and the settings link, which a clean approval
+        leaves out: there is nothing left to do.
+
+    No file or line totals (the pull request's own page shows them), no
+    analysis time, agent names or token counts (the run record has them).
+    """
     language = batch.review_language
-    pr = batch.pull_request
+    reported = batch.postable_findings
     lines: list[str] = [marker, _completed_header(batch, language), ""]
 
     if batch.run_status == ReviewRunStatus.FAILED:
@@ -1540,36 +1629,28 @@ def _format_completed_comment(batch: ReviewBatch, marker: str) -> str:
     if banner:
         lines.append(banner.strip())
         lines.append("")
-    lines.append(_verdict_line(batch, language))
+    lines.append(_completed_verdict_line(batch, language))
     lines.append("")
-
-    if batch.findings:
-        lines.append(messages.t(
-            "completed.found", language, n=len(batch.findings),
-            breakdown=_severity_breakdown(batch, language)))
+    blocked = _blocked_by_rule_line(batch, language)
+    if blocked:
+        lines.append(blocked)
         lines.append("")
+
+    if reported:
         lines.append(messages.t(
-            "completed.by_category", language, items=_category_items(batch, language)))
+            "completed.found", language, n=len(reported),
+            breakdown=_severity_breakdown(batch, language)))
         lines.append("")
         top = _top_findings_lines(batch, language)
         if top:
-            lines.append(messages.t("completed.top", language))
-            lines.append("")
             lines.extend(top)
             lines.append("")
-        posting = _posting_line(batch, language)
-        if posting:
-            lines.append(posting)
+        over_cap = _over_cap_line(batch, language)
+        if over_cap:
+            lines.append(over_cap)
             lines.append("")
-    elif batch.agents_run:
-        # Same rule as the classic form: "no issues" says something looked.
-        lines.append(messages.t("completed.clean", language))
-        lines.append("")
 
-    if getattr(batch, "summary_in_description", False):
-        lines.append(messages.t("completed.in_description", language))
-        lines.append("")
-    else:
+    if not getattr(batch, "summary_in_description", False):
         overview = (getattr(batch, "pr_overview", "") or "").strip()
         if overview:
             lines.append(messages.t("completed.summary", language))
@@ -1577,37 +1658,17 @@ def _format_completed_comment(batch: ReviewBatch, marker: str) -> str:
             lines.append(overview)
             lines.append("")
         lines.extend(_walkthrough_lines(batch, language))
-    lines.extend(_section_lines(batch, "comment"))
+    sections = _section_lines(batch, "comment")
+    lines.extend(sections)
 
-    lines.append(messages.t(
-        "completed.scope", language, files=len(pr.changed_files),
-        added=pr.total_added_lines, removed=pr.total_removed_lines,
-        sha=(pr.head_sha or "")[:7] or "unknown"))
-    lines.append("")
-    details = [*_scope_lines(batch, language)]
-    perf = _performance_line(batch, language)
-    if perf:
-        details += ["", perf]
-    lines.append("<details>")
-    lines.append(f"<summary>{messages.t('completed.details', language)}</summary>")
-    lines.append("")
-    lines.extend(details)
-    lines.append("")
-    lines.append("</details>")
-    lines.append("")
-
-    actions = getattr(batch, "pr_actions", None)
-    if getattr(actions, "commands_guide_enabled", False):
-        lines.extend(_commands_guide_lines(language, getattr(actions, "guide_commands_off", ())))
-    link = _settings_link(batch, language)
-    if link:
-        lines.append(link)
-        lines.append("")
-
-    lines.append("---")
-    powered = messages.t("completed.powered", language, provenance=_provenance(batch))
-    lines.append(f"<sub>{powered}</sub>")
-    return "\n".join(lines)
+    clean_approval = (
+        _verdict_key(batch) == "completed.verdict.approve"
+        and not reported and not sections
+    )
+    footer = "" if clean_approval else _commands_footer(batch, language)
+    if footer:
+        lines.append(footer)
+    return "\n".join(lines).rstrip()
 
 
 def _format_unanchored(
@@ -1621,7 +1682,8 @@ def _format_unanchored(
         return ""
     lines = [messages.t("unanchored.title", language), "",
              messages.t("unanchored.intro", language), ""]
-    for i, f in enumerate(findings, 1):
+    for i, stored in enumerate(findings, 1):
+        f = shown(stored, language)
         # The title is model output written after reading the author's diff:
         # no marker comment, link, image or @-mention may ride in with it.
         title = _md_cell(
@@ -1630,6 +1692,11 @@ def _format_unanchored(
             f"{i}. {_severity_emoji(f.severity.value)} **{title}** — "
             f"{_finding_location(pr, f)}"
         )
+        # The one-sentence reason a line-anchored comment opens with: a finding
+        # that could not be anchored loses its place, not its evidence.
+        why = sanitize_prose((f.reasoning or "").strip(), 300)
+        if why:
+            lines.append(f"   *{messages.t('finding.why', language)}:* {why}")
         body = (f.body or "").strip()
         if len(body) > UNANCHORED_BODY_MAX:
             body = _close_open_fence(
@@ -1664,14 +1731,16 @@ def _failure_headline(batch: ReviewBatch, language: str | None = None) -> str:
     (see the orchestrator: never a provider's raw message), so nothing secret
     can reach the pull request through it.
     """
-    reasons = sorted({r for a, r in batch.agent_errors.items()
+    reasons = sorted({messages.localise_reason(r, language)
+                      for a, r in batch.agent_errors.items()
                       if a in batch.agents_failed and r})
     if reasons:
         reason = "; ".join(reasons)
     elif batch.agents_failed:
-        reason = f"no review stage completed ({', '.join(batch.agents_failed)})"
+        reason = messages.t(
+            "status.failed_stages", language, stages=", ".join(batch.agents_failed))
     else:
-        reason = "no review stage completed"
+        reason = messages.t("status.failed_no_stage", language)
     return messages.t("status.failed", language, reason=_md_cell(reason, 300))
 
 

@@ -1082,7 +1082,7 @@ def plan_review_resolutions(
     out.unreadable = result.unreadable
     out.skipped_budget = result.skipped_budget
     out.resolved = [
-        {"id": c.id, "title": c.title, "file": c.file_path,
+        {"id": c.id, "title": c.title, "file": c.file_path, "severity": c.severity,
          "pr": r.fixed_by_pr_number, "sha": (r.fixed_in_sha or "")[:12] or None}
         for c, r in result.fixed
     ]
@@ -1122,11 +1122,17 @@ def earlier_issues_section(batch: Any, lang: str | None = None) -> str:
     from src.review import messages
 
     ei = getattr(batch, "earlier_issues", None)
-    if ei is None or not ei.resolved or not getattr(ei, "announce", True):
+    if ei is None or not getattr(ei, "announce", True):
+        return ""
+    # Only issues of a severity the repository comments on: a nit under the
+    # comment threshold was never shown to anybody, so announcing that it is
+    # fixed would be the first the team hears of it.
+    resolved = [item for item in ei.resolved if _worth_naming(batch, item)]
+    if not resolved:
         return ""
     lang = lang or getattr(batch, "review_language", None)
-    lines = [messages.tn("earlier_issues", len(ei.resolved), lang, count=len(ei.resolved))]
-    for item in ei.resolved[:MAX_LISTED]:
+    lines = [messages.tn("earlier_issues", len(resolved), lang, count=len(resolved))]
+    for item in resolved[:MAX_LISTED]:
         by = ""
         if item.get("pr"):
             by = messages.t("earlier_issues.by_pr", lang, pr=item["pr"])
@@ -1134,10 +1140,23 @@ def earlier_issues_section(batch: Any, lang: str | None = None) -> str:
             by = messages.t("earlier_issues.by_sha", lang, sha=item["sha"])
         title = _one_line(item.get("title") or "")
         lines.append(f"- {title} (`{item.get('file') or ''}`){by}")
-    extra = len(ei.resolved) - MAX_LISTED
+    extra = len(resolved) - MAX_LISTED
     if extra > 0:
         lines.append(messages.t("earlier_issues.more", lang, count=extra))
     return "\n".join(lines)
+
+
+def _worth_naming(batch: Any, item: dict) -> bool:
+    """Whether a fixed issue is severe enough for the batch's comment threshold.
+    An item without a severity (a row written before the field existed) is
+    named, as is anything when the threshold is unset or not a known word."""
+    from src.review.models import SEVERITY_RANK, severity_value
+
+    floor = SEVERITY_RANK.get(severity_value(getattr(batch, "comment_min_severity", None)))
+    word = severity_value(item.get("severity"))
+    if floor is None or word not in SEVERITY_RANK:
+        return True
+    return SEVERITY_RANK[word] >= floor
 
 
 #: The design's name for it.

@@ -87,9 +87,11 @@ repository.
 
 ## The guide in the review summary
 
-With `commands_guide_enabled` (on by default) the completed comment ends with a
-short guide to the commands. It lists only the commands this installation can
-run and this repository has not switched off.
+With `commands_guide_enabled` (on by default) a completed comment that has
+something to act on ends with a single line pointing at the commands that
+matter (start a review, help). A clean approval carries no such line. The line
+names only the commands this installation can run and this repository has not
+switched off, and is left out when there are none.
 
 ## Webhooks
 

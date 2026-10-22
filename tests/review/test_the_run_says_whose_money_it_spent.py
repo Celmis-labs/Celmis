@@ -126,10 +126,12 @@ def spend(monkeypatch) -> list:
     `record_claude_code_spend` call, which is how the run tells the ledger
     which credential it used."""
     import src.agent.runner as runner_mod
-    import src.review.agents.base as base_mod
+    import src.review.language as language_mod
 
     monkeypatch.setattr(runner_mod, "_mint_mcp_token", lambda user_id, workspace_id="default": "mcp-token")
-    monkeypatch.setattr(base_mod, "_review_language_instruction", lambda ws: "")
+    # The engine reads the review language through this one resolver (it asks
+    # the workspace config when the repository set none); English needs no store.
+    monkeypatch.setattr(language_mod, "effective_language", lambda override, workspace_id=None: "en")
     calls: list = []
     monkeypatch.setattr(
         ce, "record_claude_code_spend",

@@ -46,6 +46,7 @@ from src.review.branch_patterns import branch_targeted
 from src.review.branch_patterns import pass_sentence as branch_pass_sentence
 from src.review.branch_patterns import skip_sentence as branch_skip_sentence
 from src.review.graph_context import build_graph_context
+from src.review.language import effective_language
 from src.review.learning import signals as _learning_signals  # noqa: F401  (outcome listener)
 from src.review.models import (
     COMPLETED_COMMENTS,
@@ -53,6 +54,7 @@ from src.review.models import (
     SUMMARY_ON_NEW_COMMITS,
     SUMMARY_TARGETS,
     Finding,
+    FindingSeverity,
     PRActions,
     PullRequest,
     ReviewBatch,
@@ -1186,7 +1188,11 @@ class ReviewOrchestrator:
             stages.begin("summary", "Generate summary")
             summary_job = _PRSummaryJob.start(
                 self._summary_pr(pr, agent_pr, ignore_globs), context,
-                language=_policy_value(policy, "review_language", None),
+                # The repository's language, else the workspace's: this call
+                # used to read the policy alone, so a workspace that chose
+                # Ukrainian got the overview in English.
+                language=effective_language(
+                    _policy_value(policy, "review_language", None), workspace_id),
                 instructions=_policy_value(policy, "summary_instructions", None),
             )
             if summary_job is None:
@@ -1248,6 +1254,7 @@ class ReviewOrchestrator:
                 ) if p),
                 graph_summary=context.graph_summary,
                 cross_repo_drift=context.cross_repo_drift,
+                language=_policy_value(policy, "review_language", None),
             )
             if cr.error:
                 logger.warning("claude_engine_failed pr=%d err=%s", pr.number, cr.error)
@@ -1291,6 +1298,9 @@ class ReviewOrchestrator:
                 batch.cost_source = "claude_code"
             else:
                 batch.cost_source = cr.cost_source
+            self._keep_language(
+                batch, context=context, policy=policy, workspace_id=workspace_id,
+                stages=stages)
             batch.verdict = batch.compute_verdict()
             batch.mark_complete()
             logger.info(
@@ -1488,6 +1498,7 @@ class ReviewOrchestrator:
         pre = self.verifier.prefilter(
             all_findings,
             suppressed_rules=self._suppressed_rules(policy, self.settings),
+            language=language,
         )
         batch.dropped_by_rule = dict(pre.dropped_by_rule)
         batch.dropped_duplicates = pre.dropped_dedup
@@ -1682,6 +1693,11 @@ class ReviewOrchestrator:
             else "mixed"
         )
 
+        # ── The language of what a person will read, checked once more ──
+        self._keep_language(
+            batch, context=context, policy=policy, workspace_id=workspace_id,
+            stages=stages)
+
         # ── Verdict + completion ──
         batch.verdict = batch.compute_verdict()
         # The gap notice for the human reading the pull request. It used to be
@@ -1711,6 +1727,79 @@ class ReviewOrchestrator:
             context=context, policy=policy, stages=stages,
         )
 
+    @staticmethod
+    def _keep_language(
+        batch: ReviewBatch, *, context, policy, workspace_id: str,
+        stages: StageRecorder,
+    ) -> None:
+        """Send comments that came back in the wrong language back, once.
+
+        The prompts name the language, but a model can still write one
+        sentence, usually the "why", in the language of the prompt. This is the
+        cheap deterministic net under them: a finding whose text reads as the
+        wrong language (`src.review.language`) goes, with its siblings, to ONE
+        batched rewrite call. A finding that cannot be fixed is posted as it is,
+        and nothing is ever dropped because of its language. The stage appears
+        only when there was something to fix, so a review in the right language
+        pays nothing and shows nothing. Never raises.
+        """
+        from src.review import language as lang
+
+        code = effective_language(
+            _policy_value(policy, "review_language", None), workspace_id)
+        client = getattr(context, "llm_client", None)
+        if lang.is_english(code) or client is None:
+            return
+        findings = batch.postable_findings
+        if not any(not f.is_program_written and lang.stray_fields(f, code) for f in findings):
+            return
+        try:
+            from src.review.agents.base import agent_llm_settings
+
+            agent_llm = agent_llm_settings(context, "verifier")
+        except Exception:  # noqa: BLE001
+            agent_llm = None
+        spent = {"in": 0, "out": 0, "cost": 0.0, "unknown": False}
+
+        def ask(system: str, prompt: str) -> str | None:
+            result = client.generate(
+                prompt=prompt, system_instruction=system,
+                model=getattr(agent_llm, "model", None),
+                agent="verifier", mode="review", operation="review_language",
+                repo=batch.pull_request.repo_slug,
+                temperature=0.0,
+                max_output_tokens=getattr(agent_llm, "max_output_tokens", None) or 4096,
+                reasoning=getattr(agent_llm, "reasoning", None),
+                num_retries=0, timeout=90.0)
+            spent["in"] += int(getattr(result, "input_tokens", 0) or 0)
+            spent["out"] += int(getattr(result, "output_tokens", 0) or 0)
+            cost = getattr(result, "cost_usd", None)
+            if cost is None:
+                spent["unknown"] = True
+            else:
+                spent["cost"] += float(cost)
+            return getattr(result, "text", None)
+
+        stages.begin("language", "Language check")
+        try:
+            done = lang.restore_language(findings, code, ask)
+        except Exception as exc:  # noqa: BLE001 — a language check never fails a review
+            logger.warning("review_language_failed err_type=%s", type(exc).__name__)
+            stages.end("language", "failed", f"The check raised {type(exc).__name__}.")
+            return
+        batch.tokens_in += spent["in"]
+        batch.tokens_out += spent["out"]
+        if batch.cost_usd is not None and not spent["unknown"]:
+            batch.cost_usd = round(batch.cost_usd + spent["cost"], 6)
+        logger.info("review_language_restored language=%s asked=%d fixed=%d",
+                    code, done.asked, done.fixed)
+        stages.end(
+            "language", "success",
+            f"{done.fixed} of {done.asked} comment{'s' if done.asked != 1 else ''} "
+            f"rewritten into {lang.language_name(code)}"
+            + (f"; {done.still_foreign} left as written." if done.still_foreign else "."),
+            meta={"asked": done.asked, "fixed": done.fixed})
+
     def _check_requirements(
         self, batch: ReviewBatch, *, context, policy, stages: StageRecorder,
     ) -> None:
@@ -1734,7 +1823,11 @@ class ReviewOrchestrator:
                            "Skipped: the task lists no acceptance criteria, so the "
                            "change was held to its description.")
                 return
-            findings = list(batch.findings)
+            # What the pull request is told about, not everything the agents
+            # found: a gap under the comment threshold would otherwise be
+            # named in the checklist ("missing: <its title>") although the
+            # summary and the comments never mention it.
+            findings = list(batch.postable_findings)
             error = None
             pr = getattr(context, "pull_request", None) or batch.pull_request
             if mode == "findings":
@@ -1879,10 +1972,7 @@ class ReviewOrchestrator:
                 event="review_complete", repo_slug=pr.repo,
                 title=f"Review {batch.verdict.value.upper()} · PR #{pr.number}: {pr.title}",
                 body_md=(
-                    f"**{batch.critical_count}** critical · "
-                    f"**{batch.error_count}** error · "
-                    f"**{batch.warning_count}** warn · "
-                    f"**{batch.info_count}** info\n\n"
+                    _notification_counts(batch) + "\n\n"
                     + (batch.summary or "")[:1500]
                 ),
                 severity=sev, link_url=pr.url,
@@ -2020,7 +2110,9 @@ class ReviewOrchestrator:
             agent_llm = None
         res = complement_description(
             batch.pull_request, author, ours, llm_client=client, agent_llm=agent_llm,
-            language=_policy_value(policy, "review_language", None),
+            language=effective_language(
+                _policy_value(policy, "review_language", None),
+                getattr(context, "workspace_id", None)),
         )
         batch.tokens_in += res.tokens_in
         batch.tokens_out += res.tokens_out
@@ -2097,7 +2189,11 @@ class ReviewOrchestrator:
             repo_agent_guidelines=dict((policy or {}).get("agent_prompt_guidelines") or {}),
             repo_guidelines_extend=list((policy or {}).get("agent_guidelines_extend") or []),
             agent_custom_rules=agent_custom_rules,
-            review_language=((policy or {}).get("review_language") or None),
+            # Resolved here, once: the repository's language, else the
+            # workspace's. Left unset, every agent call would read the
+            # workspace config again to find the same answer.
+            review_language=effective_language(
+                (policy or {}).get("review_language"), workspace_id),
             # How every suggestion is written — the team's base instruction,
             # clamped to its 2000-character cap here so no prompt can carry
             # more whatever the settings layer let through.
@@ -3166,12 +3262,31 @@ class ReviewOrchestrator:
         return results
 
 
+def _notification_counts(batch) -> str:
+    """'**1** critical · **0** error · …' — the counts the pull request was told.
+
+    Not the run's own (`critical_count` and siblings): a channel that says
+    "3 warn" under a review that approved the change repeats the complaint
+    the comment threshold exists to end.
+    """
+    return " · ".join(
+        f"**{batch.reported_count(level)}** {word}"
+        for level, word in (
+            (FindingSeverity.CRITICAL, "critical"), (FindingSeverity.ERROR, "error"),
+            (FindingSeverity.WARNING, "warn"), (FindingSeverity.INFO, "info"),
+        )
+    )
+
+
 def _severity_for_verdict(batch) -> str:
     """Map review verdict → notifier severity string."""
     from src.review.models import ReviewVerdict
     v = getattr(batch, "verdict", None)
     if v == ReviewVerdict.REQUEST_CHANGES:
-        return "error" if batch.critical_count == 0 else "critical"
-    if v == ReviewVerdict.COMMENT and (batch.warning_count or batch.error_count):
+        return "error" if batch.reported_count(FindingSeverity.CRITICAL) == 0 else "critical"
+    if v == ReviewVerdict.COMMENT and (
+        batch.reported_count(FindingSeverity.WARNING)
+        or batch.reported_count(FindingSeverity.ERROR)
+    ):
         return "warn"
     return "info"

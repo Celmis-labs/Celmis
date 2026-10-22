@@ -4,11 +4,8 @@ import { useSyncExternalStore } from "react";
 import { MoonIcon, SunIcon } from "lucide-react";
 
 import { useT } from "@/lib/i18n";
+import { THEME_KEY, applyTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
-
-/** Inline script (injected in <head>) that applies the saved theme before
- * first paint to avoid a flash of the wrong theme. */
-export const THEME_INIT_SCRIPT = `(function(){try{var t=localStorage.getItem('theme');var d=t==='dark'||(t==null&&window.matchMedia&&window.matchMedia('(prefers-color-scheme:dark)').matches);document.documentElement.classList.toggle('dark',!!d);}catch(e){}})();`;
 
 /** The `dark` class on <html> is the store: the init script sets it before
  *  React exists, and the sidebar and the rail each render a toggle, so the
@@ -31,8 +28,10 @@ export function ThemeToggle({ compact = false }: { compact?: boolean }) {
   const dark = useSyncExternalStore(subscribeTheme, readDark, () => false);
   const toggle = () => {
     const next = !dark;
-    document.documentElement.classList.toggle("dark", next);
-    try { localStorage.setItem("theme", next ? "dark" : "light"); } catch {}
+    applyTheme(next ? "dark" : "light");
+    // The only place a choice is saved. Until it runs, the system decides
+    // (lib/theme.ts, ThemeSync), and once it has, the choice wins.
+    try { localStorage.setItem(THEME_KEY, next ? "dark" : "light"); } catch {}
   };
   return (
     <button

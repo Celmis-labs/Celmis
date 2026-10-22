@@ -326,7 +326,7 @@ class GitHubPRProvider(PullRequestProvider):
                     finding, settings.comment_marker,
                     committable=SUGGESTION_GITHUB if span else None,
                     original=_original_lines(new_side, finding),
-                    head_sha=pr.head_sha,
+                    head_sha=pr.head_sha, language=batch.review_language,
                 ),
             }
             if span and span[1] > span[0]:

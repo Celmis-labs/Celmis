@@ -45,6 +45,7 @@ from src.review.commands.parser import (
     help_markdown,
 )
 from src.review.commands.remember import remember_command
+from src.review.language import effective_language
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,10 @@ class CommandContext:
     workspace_id: str
     user_id: str
     language: str = "en"
+    #: The language a model writes in: the real code (`de`, `bg`, …) behind
+    #: `language`, which is only the catalogue the bot's own words come from.
+    #: Empty means "same as `language`".
+    prose_language: str = ""
     handle: str = "@celmis"
     row_id: str | None = None
     #: The comment the bot wrote to say it is working (providers without reactions).
@@ -185,14 +190,13 @@ def _event_of(raw: dict) -> CommentEvent:
     return CommentEvent(**data)
 
 
-def _language(provider: str, repo: str, workspace_id: str) -> str:
+def _language_override(provider: str, repo: str) -> str | None:
     from src.review.review_defaults import settings_for_repo
 
     try:
-        override = settings_for_repo(provider, repo, ("review_language",))["review_language"]
+        return settings_for_repo(provider, repo, ("review_language",))["review_language"]
     except Exception:  # noqa: BLE001
-        override = None
-    return messages.resolve_language(override, workspace_id)
+        return None
 
 
 def execute(p: dict, *, provider=None) -> None:
@@ -222,10 +226,12 @@ def execute(p: dict, *, provider=None) -> None:
         ledger.finish(row_id, ledger.FAILED, error="no usable provider connection")
         return
 
+    override = _language_override(ev.provider, ev.repo)
     ctx = CommandContext(
         ev=ev, provider=provider, command=command, settings=settings,
         workspace_id=workspace_id, user_id=user_id,
-        language=_language(ev.provider, ev.repo, workspace_id),
+        language=messages.resolve_language(override, workspace_id),
+        prose_language=effective_language(override, workspace_id),
         handle=get_review_settings().bot_handle, row_id=row_id,
     )
     status, error = ledger.DONE, None

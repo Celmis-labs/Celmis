@@ -345,6 +345,9 @@ def test_the_stage_finds_a_fix_on_the_files_the_pr_changes_and_writes_nothing(en
         verifier_factory=lambda: _FixAll(), engine=engine)
     assert isinstance(found, EarlierIssues)
     assert [r["title"] for r in found.resolved] == ["Total may overflow"]
+    # The severity travels with the item, so the comment can leave out what
+    # is under the repository's comment threshold.
+    assert found.resolved[0]["severity"]
     assert found.resolutions and _issues(engine)[0].status == "open"
 
 

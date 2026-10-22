@@ -355,7 +355,7 @@ class GitLabPRProvider(PullRequestProvider):
                     finding, settings.comment_marker,
                     committable=SUGGESTION_GITLAB if span else None,
                     original=_original_lines(new_side, finding),
-                    head_sha=pr.head_sha,
+                    head_sha=pr.head_sha, language=batch.review_language,
                 ),
                 "position[position_type]": "text",
                 "position[base_sha]": base_sha,

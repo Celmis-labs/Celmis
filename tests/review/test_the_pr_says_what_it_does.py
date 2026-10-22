@@ -401,7 +401,7 @@ class TestSuggestions:
     def test_a_hint_is_never_committable(self, settings) -> None:
         c = self._posted(settings, _finding(suggestion="=== / !=="))
         assert "```suggestion" not in c["body"]
-        assert "**Suggestion:**" in c["body"]
+        assert "**Fix:**" in c["body"]
 
     def test_gitlab_offsets(self) -> None:
         f = _finding(suggested_code="B2\nC2\nc2", suggested_end_line=13)
@@ -993,4 +993,4 @@ def _rich_off(batch: ReviewBatch) -> ReviewBatch:
 def test_a_left_side_finding_keeps_its_hint_readable() -> None:
     f = _finding(side=HunkSide.LEFT, suggested_code="x", suggestion="use x")
     body = _format_finding_body(f, committable=None)
-    assert "**Suggested change:**" in body and "**Suggestion:**" in body
+    assert "**Fix:**" in body and "**Hint:**" in body

@@ -5,7 +5,10 @@ to a comment the git provider would not place.
   * the greeting is for a PR's first review, a "new changes" line for a later
     push, the plain heading when nobody can say which;
   * the completed comment leads with the verdict and the counts, in the
-    repository's review language, and lists the commands only on request;
+    repository's review language, and is short: one verdict line with the
+    commit, the findings at or above the comment threshold, one line of
+    commands only on request, and none of the analysis time, agent names,
+    token counts or file and line totals;
   * `completed_comment=classic` keeps the layout of earlier releases;
   * stages add blocks through `batch.summary_sections`, shown in the comment
     and/or the description, and never edit the composers;
@@ -26,6 +29,8 @@ import httpx
 import pytest
 
 from src.review import issues, markers
+from src.review.commands.handlers import available_commands
+from src.review.commands.parser import help_markdown
 from src.review.models import (
     Finding,
     FindingSeverity,
@@ -107,10 +112,12 @@ def test_the_completed_comment_says_what_was_found_in_ukrainian() -> None:
     assert body.startswith(MARKER + "\n## Code Review завершено! 🔥")
     assert "**Знайдено: 3**" in body
     assert "🔴 Критичні 1" in body and "🟡 Попередження 2" in body
-    assert "**За категоріями:** Помилка **2** · Безпека **1**" in body
     assert "1. 🔴 **Token is logged** — `src/a.py:11`" in body
-    assert "Файлів: **1**" in body and "Коміт: `abcdef1`" in body
-    # The change summary has nowhere else to be: the comment holds it.
+    # The commit rides on the verdict line; the files and lines are the pull
+    # request's own header, and are not said twice.
+    verdict_line = body.splitlines()[3]
+    assert "ПОТРІБНІ ЗМІНИ" in verdict_line and "коміт `abcdef1`" in verdict_line
+    assert "Файлів" not in body and "Рядків" not in body
     assert "Code Review Completed" not in body
 
 
@@ -119,37 +126,72 @@ def test_the_completed_comment_speaks_english_by_default() -> None:
 
     assert "## Code Review Completed! 🔥" in body
     assert "**Found: 3**" in body and "🔴 Critical 1" in body
-    assert "**By category:** Bug **2** · Security **1**" in body
+    assert "commit `abcdef1`" in body.splitlines()[3]
+    assert "By category" not in body
 
 
-def test_a_clean_review_says_so_and_a_review_that_did_not_look_does_not() -> None:
+def test_a_clean_review_says_so_in_one_line_and_a_review_that_did_not_look_does_not() -> None:
     clean = _format_summary(_batch_with([], language="uk"), MARKER)
-    assert "_Зауважень не знайдено._" in clean
+    # The verdict line is the whole answer: the marker, the heading and one line.
+    assert clean.splitlines()[1:] == [
+        "## Code Review завершено! 🔥", "",
+        "✅ **СХВАЛЕНО** — блокуючих зауважень немає · коміт `abcdef1`",
+    ]
 
     nothing_ran = _batch(_pr("github", "o/r", 7), [], actions=COMPLETED, agents_run=())
-    assert "No issues detected" not in _format_summary(nothing_ran, MARKER)
+    assert "APPROVED" not in _format_summary(nothing_ran, MARKER)
 
 
 def test_the_top_findings_are_five_and_the_rest_are_counted() -> None:
     findings = [_finding(line=10 + i, title=f"Finding {i}") for i in range(8)]
     body = _format_summary(_batch_with(findings), MARKER)
     assert "5. " in body and "6. " not in body
-    assert "…and 3 more in the inline comments" in body
+    # Said without a place: whether the rest are inline depends on the cap.
+    assert "_…and 3 more._" in body
+    assert "inline comments" not in body
+
+
+def test_the_rest_line_never_claims_comments_the_inline_cap_did_not_allow(monkeypatch) -> None:
+    from src.review import settings as settings_module
+    from src.review.settings import ReviewSettings
+
+    cap = ReviewSettings(max_inline_comments=2)
+    monkeypatch.setattr(settings_module, "get_review_settings", lambda: cap)
+    findings = [
+        _finding(FindingSeverity.ERROR, line=10 + i, title=f"Finding {i}") for i in range(8)
+    ]
+    for language, over in (("en", "6 over the 2-comment limit"),
+                           ("uk", "6 понад ліміт у 2 коментарів")):
+        body = _format_summary(_batch_with(findings, language=language), MARKER)
+        assert over in body
+        # The old line promised "3 more in the inline comments" right above
+        # a line saying only 2 were posted: the two numbers disagreed.
+        assert "inline comments" not in body and "у коментарях до коду" not in body
 
 
 def test_the_commands_guide_follows_its_setting(settings) -> None:  # noqa: F811
     off = _format_summary(_batch_with(_three_findings()), MARKER)
-    assert "### Commands" not in off
+    assert "Commands:" not in off
 
     on = _format_summary(_batch_with(
         _three_findings(), actions=PRActions(completed_comment="completed",
                                              commands_guide_enabled=True)), MARKER)
-    assert "### Commands" in on
-    assert "`@celmis start-review`" in on and "`@celmis review --force`" in on
+    # One line with the two commands that matter, not the whole list: Bitbucket
+    # shows a folded block open, so a long list cannot be tucked away there.
+    [guide] = [ln for ln in on.splitlines() if ln.startswith("Commands:")]
+    assert guide == "Commands: `@celmis start-review` · `@celmis help`"
+    assert "review --force" not in on and "remember" not in on
 
     uk = _batch_with(_three_findings(), language="uk", actions=PRActions(
         completed_comment="completed", commands_guide_enabled=True))
-    assert "### Команди" in _format_summary(uk, MARKER)
+    assert "Команди: `@celmis start-review`" in _format_summary(uk, MARKER)
+
+
+def test_a_clean_approval_has_no_commands_line_because_nothing_is_left_to_do(settings) -> None:  # noqa: F811
+    on = PRActions(completed_comment="completed", commands_guide_enabled=True)
+    clean = _format_summary(_batch_with([], actions=on), MARKER)
+    assert "Commands:" not in clean
+    assert len(clean.splitlines()) == 4  # the marker, the heading, a blank, the verdict
 
 
 def test_the_commands_guide_does_not_offer_what_the_repository_switched_off(settings) -> None:  # noqa: F811
@@ -162,11 +204,15 @@ def test_the_commands_guide_does_not_offer_what_the_repository_switched_off(sett
     body = _format_summary(batch, MARKER)
     assert "`@celmis start-review`" in body
     assert "remember:" not in body and "to ask a question" not in body
+    help_reply = help_markdown("@celmis", "en", available=[
+        name for name in available_commands() if name not in batch.pr_actions.guide_commands_off])
+    assert "remember:" not in help_reply and "to ask a question" not in help_reply
 
 
-def test_the_guide_describes_a_review_the_way_the_incremental_scope_works(settings) -> None:  # noqa: F811
-    body = _format_summary(_batch_with(_three_findings(), actions=PRActions(
-        completed_comment="completed", commands_guide_enabled=True)), MARKER)
+def test_the_help_describes_a_review_the_way_the_incremental_scope_works() -> None:
+    """The full list left the closing comment for the answer to `help`; the
+    wording of what each command does has to stay right where it is read."""
+    body = help_markdown("@celmis", "en", available=available_commands())
     assert "since the last review" in body
     assert "ignoring what was already reviewed" in body
 
@@ -200,13 +246,15 @@ def test_a_repository_header_still_replaces_the_completed_title() -> None:
     assert "Done #7" in body and "Code Review Completed" not in body
 
 
-def test_the_change_summary_in_the_description_is_pointed_at_not_repeated() -> None:
+def test_the_change_summary_in_the_description_is_not_repeated_or_announced() -> None:
     batch = _batch_with(_three_findings(), language="uk")
     batch.pr_overview = "Додає кеш."
     batch.summary_in_description = True
     body = _format_summary(batch, MARKER)
-    assert "Підсумок змін — в описі pull request" in body
+    # Not repeated, and no "the summary is in the description" filler either:
+    # the description is on the same page and says it for itself.
     assert "Додає кеш." not in body
+    assert "опис" not in body.lower()
 
     batch.summary_in_description = False
     assert "Додає кеш." in _format_summary(batch, MARKER)
@@ -649,7 +697,7 @@ def test_a_review_writes_the_findings_into_the_description_and_points_at_them(en
     assert "### Знайдено" in fake.pr_body and "Cache never expires" in fake.pr_body
     [summary] = fake.issue
     assert "Code Review завершено!" in summary["body"]
-    assert "Підсумок змін — в описі pull request" in summary["body"]
+    assert "в описі pull request" not in summary["body"]
     assert "Cache never expires" in summary["body"]
 
 
@@ -723,19 +771,27 @@ def test_a_gitlab_summary_names_the_refused_findings_in_the_review_language(sett
     assert any("### Зауваження без місця в diff" in b for b in fake.bodies())
 
 
-def test_the_details_and_the_footer_of_the_completed_comment_follow_the_review_language() -> None:
-    batch = _batch_with(_three_findings(), language="uk")
-    batch.elapsed_seconds = 2.0
-    text = _format_summary(batch, MARKER)
-    assert "Змінено файлів: **1**" in text
-    assert "Час аналізу: **2.0s**" in text and "агенти: defect" in text
-    assert "Працює на Code Analyzer" in text
-    assert "Files changed" not in text and "Analysis time" not in text
-    assert "Powered by" not in text
+def test_the_completed_comment_carries_no_analysis_telemetry() -> None:
+    """The time, the agents' names, the tokens and the file and line totals are
+    in the run record; a reader of the pull request cannot act on any of them."""
+    for language in (None, "uk"):
+        batch = _batch_with(_three_findings(), language=language)
+        batch.elapsed_seconds = 2.0
+        batch.tokens_in, batch.tokens_out = 1234, 567
+        batch.agents_run = ["defect", "security"]
+        batch.skipped_files = ["yarn.lock"]
+        batch.skip_reasons = {"business_logic": "no stated intent"}
+        batch.cross_repo_callers = 3
+        text = _format_summary(batch, MARKER)
+        for noise in ("2.0s", "1,234", "567", "security", "yarn.lock", "business_logic",
+                      "<details>", "<sub>", "Powered by", "Працює на", "agents:", "агенти",
+                      "Analysis time", "Час аналізу", "Files", "Файлів", "Lines", "Рядків"):
+            assert noise not in text, f"{noise!r} is back in the completed comment"
 
 
-def test_the_details_and_the_footer_stay_english_by_default() -> None:
-    batch = _batch_with(_three_findings())
+def test_classic_still_carries_the_scope_and_the_telemetry() -> None:
+    """The earlier layout is opted into by name; it keeps what it always had."""
+    batch = _batch_with(_three_findings(), actions=PRActions(completed_comment="classic"))
     batch.elapsed_seconds = 2.0
     text = _format_summary(batch, MARKER)
     assert "- Files changed: **1**" in text and "Analysis time: **2.0s** · agents: defect" in text

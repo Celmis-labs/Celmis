@@ -76,15 +76,19 @@ EN: Final[dict[str, str]] = {
     "completed.verdict.comment": "**COMMENT** — findings to consider",
     "completed.verdict.request_changes": "**CHANGES REQUESTED** — blocking findings",
     "completed.verdict.skipped": "**SKIPPED** — nothing was reviewed",
+    # Not an approval and nothing to read: a stage that decides the verdict did
+    # not finish, so the review cannot vouch for the change.
+    "completed.verdict.incomplete": "**NOT APPROVED** — the review is incomplete",
+    "completed.at_commit": "commit `{sha}`",
     "completed.found": "**Found: {n}** ({breakdown})",
-    "completed.clean": "_No issues detected._",
-    "completed.by_category": "**By category:** {items}",
-    "completed.top": "**Top findings:**",
-    "completed.more": "_…and {n} more in the inline comments._",
-    "completed.in_description": "_The change summary is in the pull request description._",
+    "completed.more": "_…and {n} more._",
     "completed.summary": "### Summary",
-    "completed.scope": "Files: **{files}** · Lines: **+{added} / -{removed}** · Commit: `{sha}`",
-    "completed.details": "Scope and performance",
+    # The one line a blocking compliance rule gets when its finding sits below
+    # the comment threshold and so is not listed.
+    "completed.blocked_by_rule": "Blocked by a compliance rule: {titles}",
+    "completed.commands": "Commands: {items}",
+    "review.pointer": "Details: [review summary]({url})",
+    "review.pointer_nolink": "Details: the summary comment on this pull request",
     "scope.files": "- Files changed: **{n}**",
     "scope.lines": "- Lines: **+{added} / -{removed}**",
     "scope.callers": "- Cross-repo callers: **{n}** (blast radius via materialized edges)",
@@ -95,19 +99,16 @@ EN: Final[dict[str, str]] = {
     "perf.agents": "agents: {agents}",
     "perf.none": "none",
     "perf.tokens": "tokens: {tin}/{tout}",
-    "completed.powered": "Powered by Code Analyzer · {provenance}",
     "completed.posting_shown": "up to **{n}** shown inline",
-    "completed.posting_below": (
-        "{n} below the comment threshold ({label}) — recorded in Celmis, not posted"),
     "completed.posting_over": "{n} over the {cap}-comment limit",
-    "completed.settings": "[Review settings for this repository]({url})",
+    "completed.settings": "[Review settings]({url})",
     "completed.run": "[This review in Celmis]({url})",
-    "guide.title": "### Commands",
     "guide.start_review": "`{handle} start-review` — review the changes since the last review (the whole pull request the first time)",
     "guide.review_force": "`{handle} review --force` — review the whole pull request again, ignoring what was already reviewed",
     "guide.remember": "`{handle} remember: <rule>` — teach the reviewer a rule for this repository",
     "guide.ask": "Mention `{handle}` in a comment thread to ask a question about the change.",
     "guide.help": "`{handle} help` — list the commands",
+    "guide.short": "Commands: {items}",
     "guide.business_logic": "`{handle} -v business-logic <ticket>` — check the change against the ticket's business rules",
     "command.ack": "Working on it — `{command}` from @{actor}.",
     "command.ack_review": "Review requested by @{actor}. I will post the result here.",
@@ -146,20 +147,6 @@ EN: Final[dict[str, str]] = {
     "severity.error": "Error",
     "severity.warning": "Warning",
     "severity.info": "Info",
-    "threshold.critical": "critical only",
-    "threshold.error": "critical + error",
-    "threshold.warning": "warning and above",
-    "threshold.fallback": "the threshold",
-    "category.Bug": "Bug",
-    "category.Contract": "Contract",
-    "category.Security": "Security",
-    "category.Performance": "Performance",
-    "category.Business logic": "Business logic",
-    "category.Compliance": "Compliance",
-    "category.Breaking change": "Breaking change",
-    "category.Structure": "Structure",
-    "category.Dependencies": "Dependencies",
-    "category.Other": "Other",
     # The walkthrough table.
     "walk.title": "### Changes walkthrough",
     "walk.file": "File",
@@ -261,6 +248,72 @@ EN: Final[dict[str, str]] = {
         "_One-off check of commit `{sha}`. Nothing was added to the code and the "
         "review summary is unchanged._"),
     "business_logic.partial_note": "_Not every task could be read: {note}_",
+    # The labels of an inline comment. The fixed words stay few on purpose: the
+    # comment is the title, the why, the fix.
+    "finding.why": "Why",
+    "finding.fix": "Fix",
+    "finding.hint": "Hint",
+    "finding.rule": "Rule",
+    # What the merge of findings on one line adds to a body.
+    "merge.also_lines.one": "Also at line {lines}.",
+    "merge.also_lines.other": "Also at lines {lines}.",
+    "merge.same_defect": "The same defect is at {count} locations: {places}.",
+    "merge.several_agents": "Multiple agents flagged this line",
+    # A performance finding whose input size the code does not show growing.
+    "perf.downgrade": (
+        "_Severity lowered to warning: the code does not show the input growing "
+        "without bound._"),
+    # A compliance finding: the rule, then the model's one-sentence reason.
+    "compliance.rule": "**Rule**{flag}: {rule}",
+    "compliance.blocking": " (blocking)",
+    "compliance.reason": "**Reason:** {reason}",
+    # The gap notice (`ReviewBatch.partial_banner`): which stage did not run and
+    # what that means for the verdict. The wording is pinned by tests in English.
+    "banner.skipped": (
+        "⚠ REVIEW SKIPPED — no agent ran: every agent is disabled for this "
+        "repository (see /review-settings). This pull request has NOT been "
+        "reviewed. Re-enable at least one agent to resume reviews."),
+    "banner.failed": (
+        "⚠ REVIEW FAILED — {failed} did not run, and no other stage produced "
+        "an answer either. This pull request has NOT been reviewed."),
+    "banner.partial": "⚠ PARTIAL REVIEW — {failed} did not run. {tail}",
+    "banner.critical.one": "{names} is a critical stage, so this review cannot be an approval.",
+    "banner.critical.other": "{names} are critical stages, so this review cannot be an approval.",
+    # What the stages that did run produced. Two groups because English agrees
+    # the stage and the pronoun with one number and the comment with another.
+    "banner.answered_one.one": "{ran} other stage completed; its {found} comment is below.",
+    "banner.answered_one.other": "{ran} other stage completed; its {found} comments are below.",
+    "banner.answered_many.one": "{ran} other stages completed; their {found} comment is below.",
+    "banner.answered_many.other": "{ran} other stages completed; their {found} comments are below.",
+    "banner.nothing.one": "The {ran} other stage that ran found nothing to comment on.",
+    "banner.nothing.other": "The {ran} other stages that ran found nothing to comment on.",
+    "banner.degraded": (
+        "ℹ This review is thinner than a full one: {parts}. The comments below "
+        "are real; there may be fewer of them than usual."),
+    # One line per adjustment the run made behind the operator's back.
+    "adjust.line": "⚙ ADJUSTED — {line}.",
+    "adjust.for": " for {who}",
+    "adjust.the_provider": "the provider",
+    "adjust.a_stage": "a stage",
+    "adjust.an_agent": "an agent",
+    "adjust.configured_model": "the configured model",
+    "adjust.clamped": (
+        "max_output_tokens {requested} was above what {by} accepts and was cut "
+        "to {sent}{who_clause}"),
+    "adjust.reasoning": (
+        "reasoning {requested} was refused by {by} and the review ran without "
+        "it{who_clause}"),
+    "adjust.temperature": (
+        "temperature {requested} was refused by {by} and the review ran without "
+        "it{who_clause}"),
+    "adjust.model": "{who} ran on the fallback model {sent} instead of {requested}",
+    "adjust.agent_reply": "{who} gave a near-empty reply",
+    "adjust.graph_unavailable": "graph context unavailable",
+    "adjust.graph_partial": "graph context partial ({sent})",
+    "adjust.other": "{parameter} {requested} was {action} to {sent}{who_clause}",
+    # `status.failed` when no stage left a reason that can be shown.
+    "status.failed_no_stage": "no review stage completed",
+    "status.failed_stages": "no review stage completed ({stages})",
 }
 
 UK: Final[dict[str, str]] = {
@@ -313,15 +366,15 @@ UK: Final[dict[str, str]] = {
     "completed.verdict.comment": "**КОМЕНТАР** — є зауваження, які варто розглянути",
     "completed.verdict.request_changes": "**ПОТРІБНІ ЗМІНИ** — є блокуючі зауваження",
     "completed.verdict.skipped": "**ПРОПУЩЕНО** — нічого не перевірялося",
+    "completed.verdict.incomplete": "**НЕ СХВАЛЕНО** — рев'ю неповне",
+    "completed.at_commit": "коміт `{sha}`",
     "completed.found": "**Знайдено: {n}** ({breakdown})",
-    "completed.clean": "_Зауважень не знайдено._",
-    "completed.by_category": "**За категоріями:** {items}",
-    "completed.top": "**Найважливіші зауваження:**",
-    "completed.more": "_…і ще {n} у коментарях до коду._",
-    "completed.in_description": "_Підсумок змін — в описі pull request._",
+    "completed.more": "_…і ще {n}._",
     "completed.summary": "### Підсумок",
-    "completed.scope": "Файлів: **{files}** · Рядків: **+{added} / -{removed}** · Коміт: `{sha}`",
-    "completed.details": "Обсяг і продуктивність",
+    "completed.blocked_by_rule": "Блокує правило відповідності: {titles}",
+    "completed.commands": "Команди: {items}",
+    "review.pointer": "Деталі: [підсумок рев'ю]({url})",
+    "review.pointer_nolink": "Деталі: у підсумковому коментарі до цього pull request",
     "scope.files": "- Змінено файлів: **{n}**",
     "scope.lines": "- Рядків: **+{added} / -{removed}**",
     "scope.callers": "- Викликів з інших репозиторіїв: **{n}** (радіус впливу за матеріалізованими зв'язками)",
@@ -332,19 +385,16 @@ UK: Final[dict[str, str]] = {
     "perf.agents": "агенти: {agents}",
     "perf.none": "немає",
     "perf.tokens": "токени: {tin}/{tout}",
-    "completed.powered": "Працює на Code Analyzer · {provenance}",
     "completed.posting_shown": "у коді показано до **{n}**",
-    "completed.posting_below": (
-        "{n} нижче порога коментарів ({label}) — записано в Celmis, не опубліковано"),
     "completed.posting_over": "{n} понад ліміт у {cap} коментарів",
-    "completed.settings": "[Налаштування рев'ю для цього репозиторію]({url})",
+    "completed.settings": "[Налаштування рев'ю]({url})",
     "completed.run": "[Це рев'ю в Celmis]({url})",
-    "guide.title": "### Команди",
     "guide.start_review": "`{handle} start-review` — перевірити зміни після останнього рев'ю (першого разу весь pull request)",
     "guide.review_force": "`{handle} review --force` — перевірити весь pull request ще раз, ігноруючи вже переглянуте",
     "guide.remember": "`{handle} remember: <правило>` — навчити рев'юера правилу для цього репозиторію",
     "guide.ask": "Згадайте `{handle}` у гілці коментарів, щоб поставити питання про зміну.",
     "guide.help": "`{handle} help` — показати список команд",
+    "guide.short": "Команди: {items}",
     "guide.business_logic": "`{handle} -v business-logic <тікет>` — звірити зміну з бізнес-правилами тікета",
     "command.ack": "Беруся до роботи — `{command}` від @{actor}.",
     "command.ack_review": "Рев'ю запитав @{actor}. Результат з'явиться тут.",
@@ -383,20 +433,6 @@ UK: Final[dict[str, str]] = {
     "severity.error": "Помилки",
     "severity.warning": "Попередження",
     "severity.info": "Підказки",
-    "threshold.critical": "лише критичні",
-    "threshold.error": "критичні та помилки",
-    "threshold.warning": "попередження й вище",
-    "threshold.fallback": "поріг",
-    "category.Bug": "Помилка",
-    "category.Contract": "Контракт",
-    "category.Security": "Безпека",
-    "category.Performance": "Продуктивність",
-    "category.Business logic": "Бізнес-логіка",
-    "category.Compliance": "Відповідність",
-    "category.Breaking change": "Ламка зміна",
-    "category.Structure": "Структура",
-    "category.Dependencies": "Залежності",
-    "category.Other": "Інше",
     "walk.title": "### Огляд змін",
     "walk.file": "Файл",
     "walk.change": "Що змінилося",
@@ -498,9 +534,84 @@ UK: Final[dict[str, str]] = {
         "_Разова перевірка коміту `{sha}`. До коду нічого не додано, підсумок "
         "рев'ю не змінено._"),
     "business_logic.partial_note": "_Не всі задачі вдалося прочитати: {note}_",
+    "finding.why": "Чому",
+    "finding.fix": "Виправлення",
+    "finding.hint": "Підказка",
+    "finding.rule": "Правило",
+    "merge.also_lines.one": "Також у рядку {lines}.",
+    "merge.also_lines.other": "Також у рядках {lines}.",
+    "merge.same_defect": "Той самий дефект ({count}): {places}.",
+    "merge.several_agents": "Кілька агентів позначили цей рядок",
+    "perf.downgrade": (
+        "_Рівень знижено до warning: код не показує, що вхідні дані ростуть "
+        "без обмежень._"),
+    "compliance.rule": "**Правило**{flag}: {rule}",
+    "compliance.blocking": " (блокує)",
+    "compliance.reason": "**Причина:** {reason}",
+    "banner.skipped": (
+        "⚠ РЕВ'Ю ПРОПУЩЕНО — жоден агент не запускався: усі агенти вимкнені для "
+        "цього репозиторію (див. /review-settings). Цей pull request НЕ перевірено. "
+        "Увімкніть хоча б одного агента, щоб відновити рев'ю."),
+    "banner.failed": (
+        "⚠ РЕВ'Ю НЕ ВДАЛОСЯ — не відпрацювали: {failed}; жоден інший етап теж "
+        "не дав відповіді. Цей pull request НЕ перевірено."),
+    "banner.partial": "⚠ ЧАСТКОВЕ РЕВ'Ю — не відпрацювали: {failed}. {tail}",
+    "banner.critical.one": "{names} — критичний етап, тож це рев'ю не може бути схваленням.",
+    "banner.critical.other": "{names} — критичні етапи, тож це рев'ю не може бути схваленням.",
+    "banner.answered_one.other": "Інші етапи ({ran}) завершились; коментарів нижче: {found}.",
+    "banner.answered_many.other": "Інші етапи ({ran}) завершились; коментарів нижче: {found}.",
+    "banner.nothing.other": "Інші етапи ({ran}) нічого не знайшли, що варто прокоментувати.",
+    "banner.degraded": (
+        "ℹ Це рев'ю неповне: {parts}. Коментарі нижче справжні, але їх може "
+        "бути менше, ніж зазвичай."),
+    "adjust.line": "⚙ ЗМІНЕНО — {line}.",
+    "adjust.for": " для {who}",
+    "adjust.the_provider": "провайдер",
+    "adjust.a_stage": "етап",
+    "adjust.an_agent": "агент",
+    "adjust.configured_model": "налаштовану модель",
+    "adjust.clamped": (
+        "max_output_tokens {requested} перевищував допустиме для {by} і був "
+        "зменшений до {sent}{who_clause}"),
+    "adjust.reasoning": (
+        "reasoning {requested} відхилив {by}, рев'ю виконано без нього{who_clause}"),
+    "adjust.temperature": (
+        "temperature {requested} відхилив {by}, рев'ю виконано без нього{who_clause}"),
+    "adjust.model": "{who} працював на резервній моделі {sent} замість {requested}",
+    "adjust.agent_reply": "{who} дав майже порожню відповідь",
+    "adjust.graph_unavailable": "контекст графа недоступний",
+    "adjust.graph_partial": "контекст графа неповний ({sent})",
+    "adjust.other": "{parameter} {requested} змінено ({action}) на {sent}{who_clause}",
+    "status.failed_no_stage": "жоден етап рев'ю не завершився",
+    "status.failed_stages": "жоден етап рев'ю не завершився ({stages})",
 }
 
 CATALOGS: Final[dict[str, dict[str, str]]] = {"en": EN, "uk": UK}
+
+#: The Ukrainian wording of the sentences in `src.llm.errors` (`_REASON`), by
+#: the same codes. English is that table itself, so it is not copied here; a
+#: test keeps this one complete.
+REASONS_UK: Final[dict[str, str]] = {
+    "no_api_key": "для цього workspace не налаштовано API-ключ",
+    "invalid_key": "провайдер відхилив API-ключ",
+    "model_not_found": "налаштованої моделі не існує в провайдера",
+    "context_too_long": "запит перевищив контекстне вікно моделі",
+    "budget_exceeded": "бюджет витрат workspace вичерпано",
+    "quota_exhausted": "квоту провайдера вичерпано",
+    "rate_limited": "провайдер обмежує частоту запитів цього workspace",
+    "provider_unavailable": "провайдер недоступний",
+    "local_timeout": (
+        "запит перевищив власний тайм-аут цієї інсталяції раніше, ніж відповів "
+        "провайдер — збільште REVIEW_LLM_TIMEOUT_SECONDS, якщо налаштована "
+        "модель повільна"),
+    "model_refused": "модель відмовилась перевіряти цю зміну",
+    "unreadable_reply": "відповідь моделі двічі не вдалося прочитати як знахідки",
+    "vault_not_generated": "для цього репозиторію ще не згенеровано документацію",
+    "vault_unauthorized": "індекс документації відхилив наші облікові дані",
+    "vault_unavailable": "індекс документації недоступний",
+    "unmapped": "виклик провайдера завершився помилкою",
+}
+REASONS: Final[dict[str, dict[str, str]]] = {"uk": REASONS_UK}
 
 
 def normalise_language(lang: str | None) -> str:
@@ -551,6 +662,28 @@ def t(key: str, lang: str | None = None, **kw: object) -> str:
         return string.Formatter().vformat(template, (), _Keep(kw))
     except (ValueError, IndexError, AttributeError):
         return template
+
+
+def localise_reason(text: str, lang: str | None = None) -> str:
+    """A curated failure sentence (`src.llm.errors.curated_reason`) in `lang`.
+
+    The run record stores the English sentence, and the API and the web read it
+    from there, so the translation is made where the text is shown on the pull
+    request. A sentence that is not in the table (a stage's own explanation, a
+    model's remark appended after the table's sentence) is left as it is: it is
+    shown rather than guessed at, and the part that follows a known sentence
+    stays whatever the model wrote.
+    """
+    table = REASONS.get(normalise_language(lang))
+    if not table or not text:
+        return text
+    from src.llm.errors import reason_sentences
+
+    # Longest first: a sentence that is the start of another must not win.
+    for code, sentence in sorted(reason_sentences().items(), key=lambda kv: -len(kv[1])):
+        if text.startswith(sentence) and code in table:
+            return table[code] + text[len(sentence):]
+    return text
 
 
 def plural_form(n: int, lang: str | None = None) -> str:

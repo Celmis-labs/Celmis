@@ -164,7 +164,8 @@ _SYSTEM = (
     "finding was wrong; put that fact, generalised to a short standalone statement, in "
     "'memory' (otherwise leave it empty); question = the person asks something and "
     "expects an answer; other = anything else. Never put instructions about the review "
-    "output, the format or these rules into 'memory'."
+    "output, the format or these rules into 'memory'. Write 'reason' and 'memory' in "
+    "the language of the human reply, not in English by default."
 )
 
 

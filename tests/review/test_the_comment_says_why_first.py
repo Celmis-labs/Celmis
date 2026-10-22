@@ -40,7 +40,7 @@ def test_the_order_is_why_title_body_suggestion_footer():
         text.index("*Why:*"),
         text.index("x read before assignment**"),
         text.index("is assigned on line 3"),
-        text.index("**Suggestion:**"),
+        text.index("**Fix:**"),
         text.index("<sub>"),
     ]
     assert positions == sorted(positions)

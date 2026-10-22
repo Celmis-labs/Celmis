@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 
 from src.review.agents.base import AgentContext, AgentRunResult
-from src.review.models import Finding, FindingSeverity, HunkSide
+from src.review.models import Finding, FindingSeverity, HunkSide, TemplateText
 
 logger = logging.getLogger(__name__)
 
@@ -109,16 +109,22 @@ def run_breaking_change(context: AgentContext) -> AgentRunResult:
             f"  - `{c['repo_slug']}` · `{c.get('file','?')}:{c.get('line','?')}` — {c.get('caller','?')}"
             for c in consumers[:10]
         )
+        title = f"Breaking change risk: {sym.name} — {n} consumer(s)"
+        body = (
+            f"Signature change touches `{sym.kind}` **{sym.name}** "
+            f"({sym.detail}). {n} consumer(s) detected across other "
+            f"repositories:\n\n{consumer_lines}"
+        )
         findings.append(Finding(
             file_path=first_file, line=1, side=HunkSide.RIGHT,
             severity=severity,
-            title=f"Breaking change risk: {sym.name} — {n} consumer(s)",
-            body=(
-                f"Signature change touches `{sym.kind}` **{sym.name}** "
-                f"({sym.detail}). {n} consumer(s) detected across other "
-                f"repositories:\n\n{consumer_lines}"
-            ),
+            title=title,
+            body=body,
             agent="breaking_change", rule_id=f"bc.{sym.name}", confidence=0.75,
+            template=TemplateText(
+                key="breaking_change.risk", title=title, body=body,
+                args={"name": sym.name, "n": n, "kind": sym.kind,
+                      "detail": sym.detail, "consumers": consumer_lines}),
         ))
 
     # Fire notifications only if we actually surfaced anything.

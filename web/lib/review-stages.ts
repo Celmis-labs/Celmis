@@ -92,7 +92,7 @@ export const KNOWN_STAGES = [
   "received", "queued", "retry", "fetch_pr", "settings", "ignore_globs",
   "gate_enabled", "gate_target_branch", "gate_draft", "gate_title", "gate_cadence", "scope",
   "context", "gate_size", "gate_hunks", "summary", "verifier", "learned_filter", "breaking_change", "compliance",
-  "requirements", "resolve_issues", "publish", "record", "finished",
+  "language", "requirements", "resolve_issues", "publish", "record", "finished",
 ];
 
 /** "3 days ago" / "5 minutes ago" in the reader's language, via Intl. */

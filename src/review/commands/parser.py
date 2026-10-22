@@ -233,14 +233,23 @@ def command_lines(
     return lines
 
 
-def guide_lines(
+#: The commands the closing comment names: the one that runs the review again
+#: and the one that lists the rest. The full list is a reply to `help`, so the
+#: comment on every pull request does not have to carry it.
+_SHORT_GUIDE: tuple[str, ...] = (START_REVIEW, HELP)
+
+
+def short_guide_line(
     handle: str, language: str | None = None, *, available: Iterable[str] | None = None,
-) -> list[str]:
-    """The block the review summary carries under `commands_guide_enabled`."""
-    return [
-        messages.t("guide.title", language), "",
-        *command_lines(handle, language, available=available), "",
+) -> str:
+    """One line for the closing comment under `commands_guide_enabled`, "" when
+    this installation runs neither command."""
+    names = None if available is None else set(available)
+    shown = [
+        f"`{handle} {name}`" for name in _SHORT_GUIDE
+        if names is None or name in names
     ]
+    return messages.t("guide.short", language, items=" · ".join(shown)) if shown else ""
 
 
 def help_markdown(

@@ -531,7 +531,7 @@ def test_the_walkthrough_caps_at_thirty_files():
     assert "| _+5 more files_ | | |" in body
 
 
-def test_findings_by_severity_and_source_with_the_threshold_note():
+def test_findings_by_severity_and_source_leave_out_what_is_below_the_threshold():
     findings = [
         _finding(severity=FindingSeverity.CRITICAL, agent="security", title="SQLi"),
         _finding(severity=FindingSeverity.WARNING, agent="defect", title="Off by one"),
@@ -540,11 +540,13 @@ def test_findings_by_severity_and_source_with_the_threshold_note():
     batch = _batch(findings=findings, rich_summary=True,
                    comment_min_severity="warning")
     body = _format_summary(batch, MARKER)
-    assert "🔴 Critical: **1**" in body and "💡 Info: **1**" in body
-    assert "**By category:** Bug: **2** · Security: **1**" in body
+    assert "🔴 Critical: **1**" in body and "🟡 Warning: **1**" in body
+    assert "**By category:** Bug: **1** · Security: **1**" in body
     assert "1. 🔴 **SQLi**" in body
-    assert "Naming" not in body.split("**Top findings:**")[1].split("_")[0]
-    assert "1 below the comment threshold" in body
+    # The info finding is stored, not told: not counted, not categorised, not
+    # listed, and no "1 below the threshold" line in its place.
+    assert "Info" not in body and "Naming" not in body
+    assert "below" not in body
 
 
 def test_a_deleted_line_gets_no_link_into_the_head_commit():

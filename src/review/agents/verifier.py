@@ -73,6 +73,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.review import messages
 from src.review.agents.base import (
     _REASONING_BLOCK,
     AgentContext,
@@ -308,8 +309,12 @@ def prefilter(
     *,
     confidence_threshold: float = 0.5,
     suppressed_rules: Iterable[str] = (),
+    language: str | None = None,
 ) -> PrefilterResult:
     """The deterministic pass, as a function: no model, no context, no I/O.
+
+    `language` is the review language: the few words a merge adds to a comment
+    ("Also at lines 3, 9.") are written in it, from the message catalogue.
 
     Order-independent on purpose. The orchestrator collects agent results
     `as_completed`, so the same review can hand this the same findings in a
@@ -341,7 +346,7 @@ def prefilter(
         if len(group) == 1:
             deduped.append(group[0])
         else:
-            deduped.append(_merge_same_line(group))
+            deduped.append(_merge_same_line(group, language))
             result.dropped_dedup += len(group) - 1
 
     # ── 2b. One line, several agents, different rule ids ──
@@ -360,7 +365,7 @@ def prefilter(
     for bucket in sorted(by_line.values(), key=lambda g: _stable_key(g[0])):
         for cluster in _cluster_same_line_across_agents(bucket):
             cross_agent.append(
-                cluster[0] if len(cluster) == 1 else _merge_cross_agent(cluster)
+                cluster[0] if len(cluster) == 1 else _merge_cross_agent(cluster, language)
             )
             result.dropped_near_duplicate += len(cluster) - 1
     deduped = sorted(cross_agent, key=_stable_key)
@@ -385,7 +390,7 @@ def prefilter(
     groups, folded_across_files = _fold_across_files(groups)
     result.dropped_near_duplicate += folded_across_files
 
-    clustered = [g[0] if len(g) == 1 else _merge_cluster(g) for g in groups]
+    clustered = [g[0] if len(g) == 1 else _merge_cluster(g, language) for g in groups]
 
     # ── 4. Confidence floor ──
     kept = [f for f in clustered if f.confidence >= confidence_threshold]
@@ -527,7 +532,7 @@ def _fold_across_files(
     return out, folded
 
 
-def _also_at_sentence(cluster: list[Finding]) -> str:
+def _also_at_sentence(cluster: list[Finding], language: str | None = None) -> str:
     """The sentence that keeps a merged comment honest about WHERE.
 
     Within one file the other occurrences are line numbers and the comment is
@@ -540,13 +545,15 @@ def _also_at_sentence(cluster: list[Finding]) -> str:
     """
     first, others = cluster[0], cluster[1:]
     if all(f.file_path == first.file_path for f in others):
-        noun = "line" if len(others) == 1 else "lines"
-        return f"Also at {noun} {', '.join(str(f.line) for f in others)}."
+        return messages.tn(
+            "merge.also_lines", len(others), language,
+            lines=", ".join(str(f.line) for f in others))
     places = ", ".join(f"{f.file_path}:{f.line}" for f in cluster)
-    return f"The same defect is at {len(cluster)} locations: {places}."
+    return messages.t(
+        "merge.same_defect", language, count=len(cluster), places=places)
 
 
-def _merge_cluster(cluster: list[Finding]) -> Finding:
+def _merge_cluster(cluster: list[Finding], language: str | None = None) -> Finding:
     """One finding for one defect: anchored at its first occurrence, carrying
     the first body, the highest severity, and every place it was seen at.
 
@@ -557,7 +564,7 @@ def _merge_cluster(cluster: list[Finding]) -> Finding:
     """
     first = cluster[0]
     worst = min(cluster, key=_severity_rank)  # stable: first wins a tie
-    also = _also_at_sentence(cluster)
+    also = _also_at_sentence(cluster, language)
     body = f"{first.body}\n\n{also}" if first.body else also
     agents = sorted({f.agent for f in cluster if f.agent})
     return Finding(
@@ -578,6 +585,9 @@ def _merge_cluster(cluster: list[Finding]) -> Finding:
         evidence_kind="proven" if any(f.is_proven for f in cluster) else first.evidence_kind,
         # A member that cited a review rule keeps the merged comment cited.
         rule=next((f.rule for f in cluster if getattr(f, "rule", "")), ""),
+        # The title and the body start with the first member's, so its
+        # template is the one that can still be found in them.
+        template=first.template,
     )
 
 
@@ -608,7 +618,13 @@ def _cluster_same_line_across_agents(bucket: list[Finding]) -> list[list[Finding
     return clusters
 
 
-def _merge_cross_agent(cluster: list[Finding]) -> Finding:
+#: The most reasoning sentences a cross-agent merge keeps. The reasoning is the
+#: line a reader reads first; five agents' five sentences are a paragraph that
+#: says the same thing five ways.
+_MERGED_REASONING = 2
+
+
+def _merge_cross_agent(cluster: list[Finding], language: str | None = None) -> Finding:
     """Fold one line's cross-agent duplicates into a single comment.
 
     `_merge_same_line` would nearly do, and does not, for one field: it keeps
@@ -620,12 +636,15 @@ def _merge_cross_agent(cluster: list[Finding]) -> Finding:
     one member matching a golden comment; keeping one sentence would be
     keeping a coin flip on which one survives.
     """
-    merged = _merge_same_line(cluster)
+    merged = _merge_same_line(cluster, language)
     seen: list[str] = []
-    for f in cluster:
+    # The worst severity speaks first, and only the first two sentences stay:
+    # `sorted` is stable, so ties keep the cluster's own (deterministic) order.
+    for f in sorted(cluster, key=_severity_rank):
         r = (f.reasoning or "").strip()
         if r and r not in seen:
             seen.append(r)
+    seen = seen[:_MERGED_REASONING]
     if seen:
         merged.reasoning = " ".join(
             r if r.endswith((".", "!", "?")) else r + "." for r in seen
@@ -633,7 +652,7 @@ def _merge_cross_agent(cluster: list[Finding]) -> Finding:
     return merged
 
 
-def _merge_same_line(group: list[Finding]) -> Finding:
+def _merge_same_line(group: list[Finding], language: str | None = None) -> Finding:
     """Combine findings several agents raised on one (file, line, rule):
     highest severity wins, bodies are kept with their provenance, and the
     consensus earns a small confidence bonus."""
@@ -650,7 +669,7 @@ def _merge_same_line(group: list[Finding]) -> Finding:
         line=primary.line,
         side=primary.side,
         severity=primary.severity,
-        title=primary.title or "Multiple agents flagged this line",
+        title=primary.title or messages.t("merge.several_agents", language),
         body="\n\n".join(bodies),
         suggestion=primary.suggestion,
         suggested_code=primary.suggested_code,
@@ -666,6 +685,7 @@ def _merge_same_line(group: list[Finding]) -> Finding:
         # not a judgement.
         evidence_kind="proven" if any(f.is_proven for f in group) else primary.evidence_kind,
         rule=next((f.rule for f in group if getattr(f, "rule", "")), ""),
+        template=primary.template,
     )
 
 
@@ -686,6 +706,7 @@ class VerifierAgent:
         findings: Iterable[Finding],
         *,
         suppressed_rules: Iterable[str] | None = None,
+        language: str | None = None,
     ) -> PrefilterResult:
         """The deterministic pass. `suppressed_rules=None` means the code
         default (`ReviewSettings.suppressed_rules`); a repo policy passes its
@@ -698,6 +719,7 @@ class VerifierAgent:
             findings,
             confidence_threshold=self.confidence_threshold,
             suppressed_rules=rules,
+            language=language,
         )
 
     def llm_pass(
@@ -764,7 +786,12 @@ class VerifierAgent:
         import time
 
         t0 = time.time()
-        pre = self.prefilter(findings, suppressed_rules=suppressed_rules)
+        pre = self.prefilter(
+            findings, suppressed_rules=suppressed_rules,
+            language=messages.resolve_language(
+                getattr(context, "review_language", None),
+                getattr(context, "workspace_id", None)),
+        )
         result = self.llm_pass(pre.kept, context)
         result.dropped_dedup = pre.dropped_dedup
         result.dropped_near_duplicate = pre.dropped_near_duplicate

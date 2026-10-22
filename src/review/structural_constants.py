@@ -64,7 +64,7 @@ from src.review.code_revision import (
     KIND_NONE,
     resolve_code_revision,
 )
-from src.review.models import Finding, FindingSeverity, HunkSide
+from src.review.models import Finding, FindingSeverity, HunkSide, TemplateText
 
 logger = logging.getLogger(__name__)
 
@@ -364,35 +364,44 @@ def _find(pr: Any, root: Path | None) -> list[Finding]:
             continue
         shown = f"{cls}::{name}"
         if not fallback:
-            where, note = "anywhere in the repository at this commit", ""
+            where, note, variant = "anywhere in the repository at this commit", "", "repo"
         elif revision.kind == KIND_BASE_PLUS_DIFF:
             where = "in the pull request's base commit or in this pull request's diff"
             note = ("\n\n_Checked against the pull request's base commit plus this "
                     "diff: its head commit was not available locally._")
+            variant = "base_plus_diff"
         else:
             where = "in the repository's checked-out branch or in this pull request's diff"
             note = ("\n\n_Checked against the checked-out branch (NEWER than the "
                     "pull request) plus this diff: the pull request's head commit "
                     "was not available locally, nor was its base commit._")
+            variant = "branch_plus_diff"
         hint = f" The closest constant of `{target}` is `{near}`." if near else ""
+        title = f"Undefined class constant {shown}"
+        body = (
+            f"`{shown}` is used here, but no constant named `{name}` is defined "
+            f"{where} (searched `const`, enum "
+            f"`case`, `define()`; vendor directories included). PHP raises a "
+            f"fatal `Undefined constant` error when this line runs.{hint}\n\n"
+            f"```\n{text[:200]}\n```{note}"
+        )
+        suggestion = f"Use `{near}`." if near else None
         findings.append(Finding(
             file_path=path,
             line=lineno,
             side=HunkSide.RIGHT,
             severity=FindingSeverity.ERROR,
-            title=f"Undefined class constant {shown}",
-            body=(
-                f"`{shown}` is used here, but no constant named `{name}` is defined "
-                f"{where} (searched `const`, enum "
-                f"`case`, `define()`; vendor directories included). PHP raises a "
-                f"fatal `Undefined constant` error when this line runs.{hint}\n\n"
-                f"```\n{text[:200]}\n```{note}"
-            ),
-            suggestion=(f"Use `{near}`." if near else None),
+            title=title,
+            body=body,
+            suggestion=suggestion,
             agent="structural",
             rule_id=RULE_ID,
             confidence=1.0,
             evidence_kind="proven",
+            template=TemplateText(
+                key=RULE_ID, title=title, body=body, suggestion=suggestion,
+                args={"variant": variant, "shown": shown, "name": name,
+                      "near": near or "", "target": target, "snippet": text[:200]}),
         ))
         if len(findings) >= MAX_FINDINGS:
             break

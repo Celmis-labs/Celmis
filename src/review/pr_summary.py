@@ -25,6 +25,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from src.review.language import target_phrase
 from src.review.models import PullRequest
 
 logger = logging.getLogger(__name__)
@@ -44,14 +45,6 @@ DEFAULT_MAX_OUTPUT_TOKENS = 4096
 #: Caps on what the model may put into the comment.
 OVERVIEW_MAX_CHARS = 1200
 FILE_LINE_MAX_CHARS = 200
-
-_LANGUAGE_NAMES = {
-    "en": "English", "uk": "Ukrainian", "de": "German", "fr": "French",
-    "es": "Spanish", "pl": "Polish", "pt": "Portuguese", "it": "Italian",
-    "ja": "Japanese", "zh": "Chinese", "ko": "Korean", "nl": "Dutch",
-    "cs": "Czech", "tr": "Turkish",
-}
-
 
 @dataclass
 class PRSummaryResult:
@@ -120,16 +113,10 @@ def build_diff_digest(pr: PullRequest, budget_chars: int = DIGEST_BUDGET_CHARS) 
 
 
 def _language_name(language: str | None) -> str:
-    code = (language or "").strip()
-    if not code:
-        return "English"
-    known = _LANGUAGE_NAMES.get(code.lower().split("-")[0].split("_")[0])
-    if known:
-        return known
-    # A free-form value from a policy row: keep letters and spaces only, so
-    # it cannot carry instructions of its own into the prompt.
-    cleaned = re.sub(r"[^A-Za-z \-]", "", code)[:32].strip()
-    return cleaned or "English"
+    """'Ukrainian (українською мовою)' for a prompt: the one table every review
+    prompt shares (`src.review.language`), so a language the review settings
+    offer is a language this call can be asked for."""
+    return target_phrase(language)
 
 
 #: The public name: chat answers are asked for in the policy's language too.
@@ -159,18 +146,19 @@ def build_prompt(
         description or "(none)",
         "",
         "The diff digest is in the source code block above. Return exactly:",
-        '{"overview": "<2-5 sentences>", '
+        '{"overview": "<2-3 sentences>", '
         '"files": [{"path": "<changed file path>", "summary": "<one line>"}]}',
         "",
         "Rules:",
-        "- overview: 2 to 5 plain sentences on what the change does and why it "
-        "matters to a reviewer. No headings, no lists, no markdown links, no "
-        "@-mentions.",
+        "- overview: 2 or 3 short plain sentences, only the substance: what the "
+        "change does and what a reviewer should look at. No preamble, no "
+        "headings, no lists, no markdown links, no @-mentions.",
         f"- files: one entry per changed file ({len(files)} in total), `path` "
         "copied exactly from the changed-files list, `summary` a single line "
-        "of at most 20 words.",
-        f"- Write the overview and every summary in {lang}. Keep file paths, "
-        "identifiers and code as they are.",
+        "of at most 12 words.",
+        f"- Write the overview and every summary in {lang}, the whole sentence, "
+        "not only its first words. Keep file paths, identifiers and code as "
+        "they are.",
     ]
     extra = (instructions or "").strip()
     if extra:

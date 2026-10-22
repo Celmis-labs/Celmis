@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from src.review.agents.base import AgentContext, AgentRunResult, ReviewAgent
-from src.review.models import Finding, FindingSeverity, HunkSide
+from src.review.models import Finding, FindingSeverity, HunkSide, TemplateText
 
 logger = logging.getLogger(__name__)
 
@@ -427,6 +427,11 @@ class StructuralAgent(ReviewAgent):
             # is what separates this from a model's judgement no matter how
             # confident either one is.
             evidence_kind="proven",
+            # The rule's fixed sentences, found again by the language the
+            # review is written in (`finding_text.shown`).
+            template=TemplateText(
+                key=f"structural.{rule.id}", title=rule.title, body=rule.body,
+                suggestion=rule.suggestion),
         )
 
 

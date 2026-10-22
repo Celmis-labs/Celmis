@@ -50,3 +50,29 @@ def test_the_resolve_budget_is_bounded_at_the_api_edge(model) -> None:
     for bad in (-1, 51):
         with pytest.raises(ValidationError):
             model(issues_resolve_max_llm=bad)
+
+
+@pytest.mark.parametrize("render", [_format_summary, _format_rich_summary])
+def test_an_issue_under_the_comment_threshold_is_not_announced_as_fixed(render) -> None:
+    """A nit the repository never commented on is not news when it is fixed."""
+    nit = {**ITEM, "id": "n", "title": "Name could be clearer", "severity": "warning"}
+    bug = {**ITEM, "id": "b", "title": "Total may overflow", "severity": "error"}
+    batch = _batch([nit, bug])
+    batch.comment_min_severity = "error"
+    attach_earlier_issues(batch, batch.earlier_issues)
+    text = render(batch, "<!-- m -->")
+    assert "Total may overflow" in text
+    assert "Name could be clearer" not in text
+
+    only_nit = _batch([nit])
+    only_nit.comment_min_severity = "error"
+    attach_earlier_issues(only_nit, only_nit.earlier_issues)
+    assert "Name could be clearer" not in render(only_nit, "<!-- m -->")
+    assert "раніше знайден" not in render(only_nit, "<!-- m -->")
+
+
+def test_an_issue_without_a_severity_is_still_named() -> None:
+    batch = _batch([ITEM])
+    batch.comment_min_severity = "error"
+    attach_earlier_issues(batch, batch.earlier_issues)
+    assert "Total may overflow" in _format_summary(batch, "<!-- m -->")

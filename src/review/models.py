@@ -29,6 +29,7 @@ from src.llm.capabilities import (
     ParameterAdjustment,
     adjustment_as_dict,
 )
+from src.review import messages
 
 
 class FindingSeverity(StrEnum):
@@ -262,6 +263,28 @@ class PullRequest:
 
 
 @dataclass
+class TemplateText:
+    """The fixed text a finder wrote into a finding, kept to be said again.
+
+    A finder that fills in a template (a structural rule, a dependency
+    advisory, a breaking-change notice) writes English, and the English is what
+    the issue fingerprint is made of — a title that changed with the review
+    language would make the same finding a new one. The pull request is shown
+    the same finding in the review language instead: `key` and `args` name the
+    template and what filled it, and `title`, `body` and `suggestion` are the
+    English as written, so `src.review.finding_text` can find them again inside
+    a body that was merged with another agent's and put the translation in
+    their place.
+    """
+
+    key: str
+    args: dict[str, Any] = field(default_factory=dict)
+    title: str = ""
+    body: str = ""
+    suggestion: str | None = None
+
+
+@dataclass
 class Finding:
     """One review finding — mapped to a provider comment."""
 
@@ -315,10 +338,22 @@ class Finding:
     #: review (`_cite_review_rules`), so a free-form id an agent writes into
     #: the same field never reads as a citation.
     rule: str = ""
+    #: Set by a finder that fills in a fixed template; see `TemplateText`.
+    #: Nothing reads `title`, `body` or `suggestion` differently for it: the
+    #: stored finding, the fingerprint and the run record stay in English, and
+    #: only the text posted to the pull request is swapped.
+    template: TemplateText | None = None
 
     @property
     def is_proven(self) -> bool:
         return self.evidence_kind == "proven"
+
+    @property
+    def is_program_written(self) -> bool:
+        """Written by a program, not by a model: the language check leaves it
+        alone, since its title feeds the fingerprint and its text is said in
+        the review language by its template instead."""
+        return self.is_proven or self.template is not None
 
     @property
     def dedup_key(self) -> tuple[str, int, str]:
@@ -513,11 +548,13 @@ class ReviewBatch:
     #: the API says nothing about — the same rule `partial_banner` already
     #: keeps with `agents_failed`.
     parameter_adjustments: list[ParameterAdjustment] = field(default_factory=list)
-    #: The lowest severity that is posted as an inline comment, from the repo
-    #: policy: "critical" | "error" | "warning" | "info". None posts every
+    #: The lowest severity the pull request is told about, from the repo
+    #: policy: "critical" | "error" | "warning" | "info". None reports every
     #: finding, the same as "info". Findings below it stay in `findings` —
-    #: they are counted in the summary, stored on the run row and tracked as
-    #: issues — they just do not become a comment on the pull request.
+    #: they are stored on the run row and tracked as issues — but the pull
+    #: request never hears of them: no inline comment, no place in the counts
+    #: of the summary, and no part in the verdict (`postable_findings` is the
+    #: one list every one of those reads).
     comment_min_severity: str | None = None
     #: The repo policy's cap on inline comments (1..100). None leaves the
     #: install default, REVIEW_MAX_INLINE_COMMENTS, which every provider
@@ -629,8 +666,38 @@ class ReviewBatch:
 
     @property
     def below_threshold_count(self) -> int:
-        """Findings kept out of the PR comments by the severity threshold."""
+        """Findings kept off the pull request by the severity threshold.
+
+        For the run record and the web app. The posted text never says it: a
+        count of what the reader cannot see is a remark with no body.
+        """
         return len(self.findings) - len(self.postable_findings)
+
+    def reported_count(self, severity: FindingSeverity) -> int:
+        """How many findings of `severity` the pull request is told about.
+
+        `critical_count` and its siblings count everything the run found, and
+        the run row, the API and the CLI read those. This is the same count
+        over `postable_findings`, which is what the posted summary and the
+        verdict must use: a finding below the comment threshold is neither
+        shown nor counted nor weighed.
+        """
+        return sum(1 for f in self.postable_findings if f.severity == severity)
+
+    @property
+    def blocking_compliance_findings(self) -> list[Finding]:
+        """Compliance findings that block the pull request, threshold or not.
+
+        A rule an operator marked blocking is an instruction to stop the
+        merge, so it is read from ALL findings: it holds even when its
+        severity sits below the comment threshold and the finding is not
+        posted (the summary then names it, see `_blocked_by_rule_line`).
+        """
+        return [
+            f for f in self.findings
+            if f.agent == "compliance"
+            and f.severity in {FindingSeverity.CRITICAL, FindingSeverity.ERROR}
+        ]
 
     def inline_findings(
         self, cap: int, *, skip: Callable[[Finding], bool] | None = None,
@@ -835,55 +902,58 @@ class ReviewBatch:
             _first, agents = grouped.setdefault(key, (a, []))
             if a["agent"] and a["agent"] not in agents:
                 agents.append(str(a["agent"]))
+        lang = self.review_language
         lines: list[str] = []
         for first, agents in grouped.values():
             parameter, action = first["parameter"], first["action"]
             requested, sent = first["requested"], first["sent"]
             reason, model = first["reason"], first["model"]
             who = ", ".join(agents)
-            by = model or "the provider"
+            by = model or messages.t("adjust.the_provider", lang)
+            who_clause = messages.t("adjust.for", lang, who=who) if who else ""
             if parameter == PARAM_MAX_OUTPUT_TOKENS and action == ADJUST_CLAMPED:
-                line = (
-                    f"max_output_tokens {requested} was above what {by} accepts "
-                    f"and was cut to {sent}"
-                    + (f" for {who}" if who else "")
-                )
+                line = messages.t(
+                    "adjust.clamped", lang, requested=requested, by=by, sent=sent,
+                    who_clause=who_clause)
             elif parameter == PARAM_REASONING and action == ADJUST_DROPPED:
-                line = (
-                    f"reasoning {requested!r} was refused by {by} and the review "
-                    f"ran without it" + (f" for {who}" if who else "")
-                )
+                line = messages.t(
+                    "adjust.reasoning", lang, requested=repr(requested), by=by,
+                    who_clause=who_clause)
             elif parameter == PARAM_TEMPERATURE and action == ADJUST_DROPPED:
-                line = (
-                    f"temperature {requested} was refused by {by} and the review "
-                    f"ran without it" + (f" for {who}" if who else "")
-                )
+                line = messages.t(
+                    "adjust.temperature", lang, requested=requested, by=by,
+                    who_clause=who_clause)
             elif parameter == PARAM_MODEL and action == ADJUST_SWAPPED:
-                line = (
-                    f"{who or 'a stage'} ran on the fallback model {sent} "
-                    f"instead of {requested or 'the configured model'}"
-                )
+                line = messages.t(
+                    "adjust.model", lang,
+                    who=who or messages.t("adjust.a_stage", lang), sent=sent,
+                    requested=requested or messages.t("adjust.configured_model", lang))
             elif parameter == "agent_reply":
                 # Literal for the same reason as "graph_context" below.
-                line = f"{who or 'an agent'} gave a near-empty reply"
+                line = messages.t(
+                    "adjust.agent_reply", lang,
+                    who=who or messages.t("adjust.an_agent", lang))
             elif parameter == "graph_context":
                 # The graph stage, not a model parameter — it rides this list
                 # because this list is the road to the row and the banner.
                 # A literal, not graph_context.PARAM_GRAPH_CONTEXT: that
                 # module imports this one.
-                what = "unavailable" if action == "unavailable" else f"partial ({sent})"
-                line = f"graph context {what}"
+                line = (
+                    messages.t("adjust.graph_unavailable", lang)
+                    if action == "unavailable"
+                    else messages.t("adjust.graph_partial", lang, sent=sent)
+                )
             else:
                 # A kind this wording does not know yet still gets said,
                 # plainly, rather than dropped on the floor — silence is the
                 # bug this property exists to end.
-                line = (
-                    f"{parameter} {requested!r} was {action} to {sent!r}"
-                    + (f" for {who}" if who else "")
-                )
+                line = messages.t(
+                    "adjust.other", lang, parameter=parameter,
+                    requested=repr(requested), action=action, sent=repr(sent),
+                    who_clause=who_clause)
             if reason:
                 line = f"{line}: {reason}"
-            lines.append(f"⚙ ADJUSTED — {line.rstrip('.')}.")
+            lines.append(messages.t("adjust.line", lang, line=line.rstrip(".")))
         return "\n".join(lines) + "\n\n"
 
     @property
@@ -953,13 +1023,12 @@ class ReviewBatch:
         }
         if not degraded:
             return ""
+        lang = self.review_language
         parts = ", ".join(
-            f"{stage} ({why})" for stage, why in degraded.items()
+            f"{stage} ({messages.localise_reason(why, lang)})"
+            for stage, why in degraded.items()
         )
-        return (
-            f"ℹ This review is thinner than a full one: {parts}. The comments "
-            f"below are real; there may be fewer of them than usual.\n\n"
-        )
+        return messages.t("banner.degraded", lang, parts=parts) + "\n\n"
 
     @property
     def _failure_reasons(self) -> str:
@@ -988,7 +1057,7 @@ class ReviewBatch:
             if reason:
                 grouped.setdefault(reason, []).append(agent)
         return "".join(
-            f" {', '.join(agents)}: {reason}."
+            f" {', '.join(agents)}: {messages.localise_reason(reason, self.review_language)}."
             for reason, agents in grouped.items()
         )
 
@@ -1006,14 +1075,10 @@ class ReviewBatch:
             # into `summary` and return before any banner is applied, and are
             # never posted.) So the banner can name the one cause an operator
             # can actually act on.
-            return (
-                "⚠ REVIEW SKIPPED — no agent ran: every agent is disabled "
-                "for this repository (see /review-settings). This pull "
-                "request has NOT been reviewed. Re-enable at least one agent "
-                "to resume reviews.\n\n"
-            )
+            return messages.t("banner.skipped", self.review_language) + "\n\n"
         if not self.agents_failed:
             return ""
+        lang = self.review_language
         failed = ", ".join(self.agents_failed)
         if self.nothing_ran and not self.findings:
             # Not a partial anything. There is no review under this notice.
@@ -1023,31 +1088,27 @@ class ReviewBatch:
             # comments; anything with findings falls through to the counted
             # wording below, which describes whatever it actually finds.
             return (
-                f"⚠ REVIEW FAILED — {failed} did not run, and no other stage "
-                f"produced an answer either. This pull request has NOT been "
-                f"reviewed.{self._failure_reasons}\n\n"
+                messages.t("banner.failed", lang, failed=failed)
+                + self._failure_reasons + "\n\n"
             )
         blocked = self.failed_critical_agents
         if blocked:
-            tail = (
-                f"{', '.join(blocked)} "
-                f"{'is a critical stage' if len(blocked) == 1 else 'are critical stages'}"
-                f", so this review cannot be an approval."
-            )
+            tail = messages.tn(
+                "banner.critical", len(blocked), lang, names=", ".join(blocked))
         else:
             ran = len(self.agents_run)
-            stages = "stage" if ran == 1 else "stages"
-            found = len(self.findings)
-            tail = (
-                f"{ran} other {stages} completed; "
-                f"{'its' if ran == 1 else 'their'} {found} "
-                f"{'comment is' if found == 1 else 'comments are'} below."
-                if found else
-                f"The {ran} other {stages} that ran found nothing to comment on."
-            )
+            # What the pull request is told about, not everything the stages
+            # found: "their 3 comments are below" over a comment that lists
+            # none of them is the sentence the comment threshold exists to end.
+            found = len(self.postable_findings)
+            if found:
+                group = "banner.answered_one" if ran == 1 else "banner.answered_many"
+                tail = messages.tn(group, found, lang, ran=ran, found=found)
+            else:
+                tail = messages.tn("banner.nothing", ran, lang, ran=ran)
         return (
-            f"⚠ PARTIAL REVIEW — {failed} "
-            f"did not run. {tail}{self._failure_reasons}\n\n"
+            messages.t("banner.partial", lang, failed=failed, tail=tail)
+            + self._failure_reasons + "\n\n"
         )
 
     def apply_partial_banner(self) -> None:
@@ -1057,15 +1118,20 @@ class ReviewBatch:
             self.summary = banner + (self.summary or "")
 
     def compute_verdict(self) -> ReviewVerdict:
-        """Auto-set verdict based on findings severity distribution + agent health."""
+        """Auto-set verdict from the findings the pull request is told about
+        (at or above the comment threshold) and from agent health.
+
+        Findings below the threshold are stored but never weigh here: a
+        verdict of COMMENT over remarks nobody can read is what a team that
+        set "errors only" saw as "there are warnings, but which?". With
+        nothing at or above the threshold the verdict is APPROVE, at every
+        threshold, unless one of the rules below forbids it.
+        """
         # Stage 14: any BLOCKING compliance failure is a hard REJECT — never
-        # downgradable to COMMENT/APPROVE even if severity=warning elsewhere.
-        blocking_compliance = any(
-            f.agent == "compliance"
-            and f.severity in {FindingSeverity.CRITICAL, FindingSeverity.ERROR}
-            for f in self.findings
-        )
-        if blocking_compliance:
+        # downgradable to COMMENT/APPROVE even if severity=warning elsewhere,
+        # and never hidden by the comment threshold (an operator wrote the
+        # rule to stop the merge).
+        if self.blocking_compliance_findings:
             return ReviewVerdict.REQUEST_CHANGES
         # Nothing answered, so there is nothing to have a verdict about. Every
         # other member of this enum is a claim about the code: APPROVE says it
@@ -1085,15 +1151,18 @@ class ReviewBatch:
         # explains why.
         if (self.nothing_ran or self.nothing_dispatched) and not self.findings:
             return ReviewVerdict.SKIPPED
+        critical = self.reported_count(FindingSeverity.CRITICAL)
+        errors = self.reported_count(FindingSeverity.ERROR)
+        warnings = self.reported_count(FindingSeverity.WARNING)
         # If any critical agent failed, never approve — degrade to COMMENT so the
         # summary surfaces the miss instead of hiding it.
         if self.failed_critical_agents:
-            if self.critical_count > 0 or self.error_count >= 3:
+            if critical > 0 or errors >= 3:
                 return ReviewVerdict.REQUEST_CHANGES
             return ReviewVerdict.COMMENT
-        if self.critical_count > 0 or self.error_count >= 3:
+        if critical > 0 or errors >= 3:
             return ReviewVerdict.REQUEST_CHANGES
-        if self.warning_count > 0 or self.error_count > 0:
+        if warnings > 0 or errors > 0:
             return ReviewVerdict.COMMENT
         return ReviewVerdict.APPROVE
 
@@ -1114,7 +1183,7 @@ class ReviewBatch:
         # exactly the path a broken architect or security run takes.
         if (
             self.verdict == ReviewVerdict.COMMENT
-            and not self.findings
+            and not self.postable_findings
             and not self.failed_critical_agents
         ):
             self.verdict = ReviewVerdict.APPROVE

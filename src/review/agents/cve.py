@@ -66,7 +66,14 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from src.review.agents.base import AgentContext, AgentRunResult, ReviewAgent
-from src.review.models import Finding, FindingSeverity, Hunk, HunkSide, PullRequest
+from src.review.models import (
+    Finding,
+    FindingSeverity,
+    Hunk,
+    HunkSide,
+    PullRequest,
+    TemplateText,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -812,13 +819,14 @@ class CveAgent(ReviewAgent):
         version_note = (
             f"declared floor {adv.version}" if change.is_floor
             else f"version {adv.version}")
+        alias = adv.cve if adv.cve and adv.cve != ident else ""
         body_parts = [
             f"`{adv.package}` ({adv.ecosystem}, {version_note}) is affected by "
-            f"**{ident}**" + (f" / {adv.cve}" if adv.cve and adv.cve != ident else "")
-            + ".",
+            f"**{ident}**" + (f" / {alias}" if alias else "") + ".",
         ]
-        if adv.summary:
-            body_parts.append(adv.summary.strip().rstrip(".") + ".")
+        advisory = adv.summary.strip().rstrip(".") + "." if adv.summary else ""
+        if advisory:
+            body_parts.append(advisory)
         body_parts.append(
             f"Fixed in **{adv.fixed_in}**." if adv.fixed_in
             else "OSV lists no fixed version yet.")
@@ -834,13 +842,15 @@ class CveAgent(ReviewAgent):
                 and not change.is_floor):
             suggestion = line_text.replace(adv.version, adv.fixed_in)
 
+        title = f"{adv.package} {adv.version} carries known vulnerability {ident}"
+        body = "\n\n".join(body_parts)
         return Finding(
             file_path=file_path,
             line=line,
             side=HunkSide.RIGHT,
             severity=severity,
-            title=f"{adv.package} {adv.version} carries known vulnerability {ident}",
-            body="\n\n".join(body_parts),
+            title=title,
+            body=body,
             suggestion=suggestion,
             # The manifest line with the fixed version in place of the bad
             # one: an exact replacement for the anchored line, so it may be
@@ -853,6 +863,12 @@ class CveAgent(ReviewAgent):
             # match, the reader can check it in seconds at the advisory URL —
             # which is what keeps it out of the inferred findings' reputation.
             evidence_kind="proven",
+            template=TemplateText(
+                key="cve.advisory", title=title, body=body, suggestion=suggestion,
+                args={"package": adv.package, "ecosystem": adv.ecosystem,
+                      "version": adv.version, "floor": bool(change.is_floor),
+                      "ident": ident, "alias": alias, "summary": advisory,
+                      "fixed_in": adv.fixed_in or "", "url": adv.url or ""}),
         )
 
     @staticmethod

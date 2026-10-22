@@ -20,6 +20,152 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.1] — 2026-10-22
+
+A review now tells the pull request only what reaches it. A finding below the comment level is
+stored for the web app and is not counted, listed or hinted at in the summary or the
+description, and a review with nothing at or above the level approves. The closing comment and
+the inline comments are short: the problem, the reason, the fix. Every sentence a person reads,
+the "why" line included, is in the review language, with one cheap check that has a comment in
+the wrong language written again. The web app starts in the browser's language and follows the
+system's theme. The web image moves to Next.js 16.4.2, which closes two critical advisories.
+
+### Upgrade notes
+
+- **Deploy the server and the web image.** There is no migration and no new setting.
+- **The comment level now decides the verdict.** A review whose findings are all below
+  `comment_min_severity` approves where it used to comment, and under a "critical only" level
+  errors no longer request changes. A repository that wants warnings to hold a pull request
+  back sets the level to `warning`.
+- **The language check can add one model call to a review**, only when a comment fails it,
+  booked under `review_language` in the run's usage.
+
+### Security
+
+- **Next.js 16.4.0 → 16.4.2** (and React 19.3.1). 16.0.0–16.4.0 are affected by two critical
+  advisories, unauthenticated remote code execution in the image optimisation API with SVG
+  files (GHSA-2464-fhr4-w9xw) and in `use cache` functions returning typed arrays
+  (GHSA-673q-mjm6-r5xr), and by a denial of service through Server Actions; `next build`
+  refuses to run on the old version. The lockfile's other packages are refreshed within their
+  ranges, which clears the build-time advisories as well. One remains, `braces` under the
+  ESLint plugin, which is build-time only and has no fixed release yet.
+
+### Changed
+
+- **A finding below the comment level is never mentioned on the pull request.** The level
+  (`comment_min_severity`) only kept such findings out of the inline comments; the summary
+  and the description still counted them ("1 warning" with nothing to read), and they still
+  turned an approval into a comment. Now the counts, the breakdown, the verdict and the
+  description are computed from the findings at or above the level, and the others are
+  stored for the web app and nothing else. A review with nothing at or above the level is an
+  approval, and the provider approves the pull request as it does for a clean review.
+  What forbids an approval still does: a failed critical agent, a blocking compliance
+  finding (even below the level — it is named in one short line), an incomplete review, an
+  installation that has approvals switched off; the comment says in one line why it did not
+  approve. Under a "critical only" level, three errors no longer request changes: they are
+  below the level.
+- **The closing comment is short.** One verdict line, then only what the author can act on:
+  the number of inline comments, the findings that did not fit under the per-review cap, and
+  one line with the two commands that matter (`start-review`, `help`) and a link to the
+  settings. An approval is a heading and one line. The analysis time, agent names, token
+  counts, the `<details>` blocks, the "powered by" footer and the long command guide are gone
+  from this layout. The `classic` layout (`completed_comment`) keeps its shape but counts and lists only findings at or above the level. English and Ukrainian are in step.
+  The wording of the pointer comment a provider posts next to its approval follows the same
+  rule.
+
+- **A comment is the problem, the reason and the fix, and nothing around them.** The finders
+  are asked for a title that is one line stating the problem, at most two short sentences of
+  body that do not repeat the reason, and the concrete fix (with code when there is code); no
+  preamble, no retelling of the code, no hedging, no advice that fits any code. The same goes
+  for the Claude Code engine, the overview (two or three sentences, a file line of at most
+  twelve words) and the answers to `@celmis` questions. In the comment itself: an empty body
+  leaves no "(no details)" line, the fix has one label ("Fix", for replacement code or for a
+  hint that stands alone; a hint that comes with code is the "Hint" block after it), and a
+  finding that could not be anchored keeps its reason in the summary's list. A merge of several
+  agents' findings on one line keeps the two most severe reasons instead of all of them. The
+  footer (`agent`, `rule`, `confidence`) is unchanged: the benchmark harness reads it.
+- **The words the bot adds around a model's sentences follow the review language.** The "Why",
+  "Fix" and "Hint" labels, the sentence a merged comment gets ("Also at lines 3, 9."), the note
+  under a performance finding whose severity was lowered and the labels of a compliance verdict
+  were English literals in the code; they are in the message catalogue now (English and
+  Ukrainian, in step). A language with no catalogue still gets the English labels.
+- **The Claude Code engine and the PR overview use the repository's language.** The engine
+  took the workspace's alone and the overview the repository's alone, so a repository that
+  chose Ukrainian got an English review from one and a workspace that chose it an English
+  overview from the other. Both now use the repository's, else the workspace's, and the
+  overview knows every language the setting offers, not fourteen.
+- **A review in a language without a message catalogue is still written in it.** The model is
+  told the real language (Polish, Bulgarian, ...); the chat answer used to be asked for in the
+  catalogue's language, so a Polish repository got English answers.
+- **The missing-test gate reads Ukrainian.** The gate that refuses a "no test covers this"
+  complaint matched English sentences only, so the moment a model obeyed the language setting
+  its complaints about tests were posted. The Ukrainian shapes are narrow on purpose (a test
+  noun in one of its case forms, never the bare stem).
+
+- **The web app starts in the browser's language and the system's theme.** With no saved
+  choice, the language is the first of the browser's preferred languages that the interface has
+  a dictionary for (`uk-UA`, `pt-BR`, `zh-TW` and the like count as their base language), and
+  English when none does. It is decided on the server from `Accept-Language`, so the first HTML
+  is already in that language; where a proxy strips the header, the page asks
+  `navigator.languages` once instead. The detected language is not saved: only the language
+  switcher writes the `locale` cookie, so changing the browser's language later still takes
+  effect. A `locale` cookie that is not one of the sixteen languages is ignored instead of
+  being put into `<html lang>`.
+- **The theme follows the system while the page is open.** It already did on load; now a change
+  of the system's light/dark setting is applied without a reload, and a choice made with the
+  toggle in another tab is picked up too. A saved choice still wins over the system, and
+  blocked browser storage no longer makes a dark system open light.
+
+### Fixed
+
+- **The "why" sentence could come back in English in a review written in another language.**
+  The language instruction named titles, bodies and suggestions and not the `reasoning` field
+  that opens every finding; a model reads that field as the first line of a scratchpad, the
+  prompt's examples for it are English, and the instruction came before the output format, so
+  the examples were the last thing it read. Now the instruction names every field a person
+  reads (the reason included, as "part of the comment, not a scratchpad"), says that the
+  examples show the shape of a sentence and not its language, comes after the output format
+  and is repeated as the last line of the user turn. The performance agent's `input_size`,
+  which a program reads, stays English.
+- **A comment still in the wrong language is written again, once.** After the findings are
+  final, the text of the comments that will be posted is checked with a cheap deterministic
+  test (a sentence in the wrong script; for Latin-script languages, a sentence made of
+  English function words). What fails goes to one batched rewrite call (a "Language check"
+  stage in the run, booked under `review_language`). A finding is never dropped for its
+  language, one a program proved (its title feeds the issue fingerprint) is never touched,
+  a rewrite that lost a piece of code or is still in the wrong language is not used, and a
+  failed call leaves the review as it was. It cannot tell Ukrainian from Russian, and it is
+  best-effort for Latin-script languages.
+- **The sentences a program writes into a finding are in the review language.** A structural
+  rule ("Empty except clause…"), an undefined class constant, a dependency advisory, a
+  breaking-change notice and the title of a compliance finding were English templates under
+  an otherwise Ukrainian comment. Each finding now records its template, and the comment, the
+  summary list and the folded list of comments a provider refused are written from the
+  translation (Ukrainian has one; any other language shows the English, as the rest of the
+  bot's fixed text does). The stored finding and its fingerprint stay English. The same
+  change closes a hole in the language check above: a breaking-change or compliance finding,
+  which is not "proven", could be sent to the model to be rewritten, its title included, and a
+  title the model words differently on the next push is a new issue.
+- **The notice about a stage that did not run is in the review language, and counts what
+  the comment shows.** "PARTIAL REVIEW — … their 3 comments are below" came in English in a
+  Ukrainian review and counted findings under the comment level that the comment never lists.
+  The notice, the reasons it gives (the provider's quota, a rejected key, …), the
+  "thinner than a full review" note and the "ADJUSTED" lines come from the message catalogue
+  now; the English is word for word what it was, and the run record keeps its English
+  sentences.
+- **The other places that counted every finding now count what the pull request is told.**
+  The requirements checklist no longer names a gap that sits under the comment level, the
+  notification sent to a channel no longer reports "3 warn" under an approval, and the list of
+  earlier issues found fixed leaves out the ones under the level.
+- **"…and N more" no longer promises inline comments.** Under the per-review cap the summary
+  said "…and 3 more in the inline comments" next to "6 over the 2-comment limit"; the line now
+  only counts, and the cap line says where the rest went.
+- **A language the browser asks for is on the first screen.** Only English and Ukrainian are in
+  the page's bundle, so a German browser got `lang="de"` around English text until the
+  dictionary downloaded. The server now loads the dictionary of the language it detected and
+  hands it to the page. The hint under the comment level in the review settings, in all sixteen
+  languages, no longer says that findings under it are still counted in the summary.
+
 ## [3.1.0] — 2026-10-22
 
 A workspace can share one repository with one other workspace for research: for a fixed

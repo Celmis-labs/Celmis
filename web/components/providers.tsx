@@ -10,9 +10,13 @@ import { I18nProvider, type Locale } from "@/lib/i18n";
 export function Providers({
   children,
   initialLocale,
+  initialDict,
+  askBrowser,
 }: {
   children: React.ReactNode;
   initialLocale?: Locale;
+  initialDict?: Record<string, string>;
+  askBrowser?: boolean;
 }) {
   const [queryClient] = useState(
     () =>
@@ -31,7 +35,7 @@ export function Providers({
   );
   return (
     <SessionProvider>
-      <I18nProvider initialLocale={initialLocale}>
+      <I18nProvider initialLocale={initialLocale} initialDict={initialDict} askBrowser={askBrowser}>
         <QueryClientProvider client={queryClient}>
           {/* Motion, loaded lean. Components use the `m.*` elements from
               "motion/react-m", which carry no animation code of their own;
