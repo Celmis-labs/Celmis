@@ -318,6 +318,13 @@ def test_unregistering_a_repository_is_recorded(recorded, monkeypatch):
 
     monkeypatch.setattr(repos_router, "get_auto_review_store", lambda: _Store())
 
+    async def _no_shares(*_a, **_k):
+        return []
+
+    # Ending the shares of the repository reads the database, which has nothing to do
+    # with what is asserted here (tests/security/test_repo_share_lifecycle.py has it).
+    monkeypatch.setattr(repos_router, "_end_shares_of", _no_shares)
+
     user = SimpleNamespace(id="u-lead", email="lead@audit.example.com")
     import asyncio
     asyncio.run(repos_router.remove_repo(

@@ -76,7 +76,10 @@ def run(pattern: str, repo: str = "", path_glob: str = "", regex: bool = False,
         except RepoNotAccessible:
             return common.repo_error(scope, repo)
     else:
-        slugs = scope.slugs(need="code")
+        # Shared repositories first, so that the cut to `MAX_REPOS` falls on the
+        # caller's own repositories and not on the one shared with them.
+        slugs = scope.slugs(need="code", shared_first=True)
+        scope.note_shared(slugs[:MAX_REPOS])
     note_lines: list[str] = []
     if len(slugs) > MAX_REPOS:
         note_lines.append(common.cut_note(MAX_REPOS, len(slugs)))

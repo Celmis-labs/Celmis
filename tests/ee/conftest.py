@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from tests.ee.licensing import isolate_license_store
+from tests.ee.sharing_support import gw, nw  # noqa: F401 — the sharing world, licensed or not
 
 
 @pytest.fixture(autouse=True)

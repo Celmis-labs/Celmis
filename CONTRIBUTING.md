@@ -34,7 +34,8 @@ The test: if switching a feature off would make the free build **less safe** or
 enterprise-only — the audit *log* is always written, whatever a licence says
 about the console for reading it.
 
-Today the boundary holds single sign-on and review analytics. It was drawn
+Today the boundary holds single sign-on, review analytics and the making of
+repository shares. It was drawn
 before them because adding it later means
 re-asking every contributor who has already sent work under an unqualified
 AGPL, and a contribution arrives under the licence it was made under.

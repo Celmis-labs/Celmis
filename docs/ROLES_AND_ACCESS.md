@@ -18,6 +18,8 @@ admin (the instance operator) passes every workspace check.
 | Productivity metrics (`/productivity`) | no | no | no | yes | yes |
 | Jira connection and the Jira helper pages | no | no | no | yes | yes |
 | Git connections, LLM keys, webhooks (create, repair) | no | no | no | yes | yes |
+| Share one of the workspace's repositories with another workspace, or give more of a share (needs the `sharing` licence claim; [Sharing](SHARING.md)) | no | no | no | yes | yes |
+| See what the workspace shares out, who reads it, narrow a share, switch a person off, end it | no | no | no | yes | yes |
 | Members and invitations (who may grant which role: see Workspace roles in the README) | no | no | no | yes | yes |
 | Deleting the workspace | no | no | no | no | yes |
 
@@ -69,6 +71,12 @@ audit work: [MCP access](mcp-access.md).
   404, as for a pull request that does not exist.
 - Webhooks are verified (HMAC or token) before anything is read, and a delivery
   is bound to the workspace of the registered repository.
+- A repository shared by another workspace reaches a person in one way only: the
+  superadmin names the share on that person's read-only developer token. Being an
+  admin or owner of the receiving workspace gives no access to it and does not show
+  that it exists; the share belongs to the workspace that gave it, and only that
+  workspace's admins and owners (and the superadmin) see it, narrow it or end it.
+  Details: [Sharing a repository with another workspace](SHARING.md).
 
 ## Seats
 

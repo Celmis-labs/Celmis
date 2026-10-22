@@ -80,3 +80,87 @@ def test_a_missing_id_and_a_foreign_id_read_the_same(db):
     missing = _get_project_impl("00000000-0000-0000-0000-000000000000", WS_A)
 
     assert set(foreign) == set(missing) == {"error"}
+
+
+# ─── a project does not carry a shared repository to people who do not hold the share ───
+#
+# The routes refuse to put a repository of another workspace into a project (the REST
+# twin resolves slugs in the workspace's own registry), so a project holding one is a
+# row somebody wrote past them. What it must still not do is name the repository to
+# anyone the share was not given to: the project tools filter the repositories of a
+# project by what the caller can read, and a project whose repositories the caller
+# can read none of is not shown at all.
+
+
+def _project_with(world, name: str, *slugs: str) -> str:
+    with world.session() as s:
+        p = Project(workspace_id="wsid-a", name=name, description="receiver only")
+        s.add(p)
+        s.flush()
+        s.add_all(ProjectRepo(project_id=p.id, repo_slug=slug) for slug in slugs)
+        s.commit()
+        return str(p.id)
+
+
+@pytest.fixture(params=["single_tenant", "multi_tenant"])
+def shared_world(request, mcp_world, monkeypatch):
+    from tests.security.mcp_world import set_env
+
+    set_env(monkeypatch, CELMIS_DEPLOYMENT_MODE=request.param)
+    monkeypatch.setattr("src.mcp_server.http_app._sync_engine", lambda: mcp_world.engine)
+    return mcp_world
+
+
+def test_a_project_that_names_a_shared_repository_shows_it_to_the_holder_and_to_nobody_else(
+        shared_world):
+    from tests.security.mcp_world import SHARED, WILD
+    from tests.security.share_world import holder_token, make_share
+
+    world = shared_world
+    pid = _project_with(world, "mixed", WILD, SHARED)
+
+    world.as_(holder_token(world, [make_share(world)], own=[WILD], who="owner")[0])
+    held = _get_project_impl(pid, "wsid-a")
+    assert {r["repo_slug"] for r in held["repos"]} == {WILD, SHARED}
+
+    world.as_(world.issue("owner", [WILD], kind="pat", profile="dev")[0])
+    other = _get_project_impl(pid, "wsid-a")
+    assert [r["repo_slug"] for r in other["repos"]] == [WILD]
+    assert SHARED not in repr(other)
+
+
+def test_a_project_of_nothing_but_a_shared_repository_is_not_there_for_anybody_without_the_share(
+        shared_world):
+    from tests.security.mcp_world import SHARED, WILD
+    from tests.security.share_world import holder_token, make_share
+
+    world = shared_world
+    pid = _project_with(world, "only-shared", SHARED)
+
+    world.as_(world.issue("owner", [WILD], kind="pat", profile="dev")[0])
+    assert _get_project_impl(pid, "wsid-a") == {"error": f"project {pid!r} not found"}
+    names = [p["name"] for p in _list_projects_impl("wsid-a")["projects"]]
+    assert "only-shared" not in names
+
+    world.as_(holder_token(world, [make_share(world)], own=[WILD], who="owner")[0])
+    assert _get_project_impl(pid, "wsid-a")["name"] == "only-shared"
+
+
+def test_a_project_of_the_owner_is_not_shown_to_the_receiver_for_the_share(shared_world):
+    """The share is one repository. The owner's projects, and what else is in them,
+    stay the owner's."""
+    from tests.security.mcp_world import SHARED, WILD
+    from tests.security.share_world import holder_token, make_share
+
+    world = shared_world
+    with world.session() as s:
+        p = Project(workspace_id="wsid-b", name="owners-platform", description="owner only")
+        s.add(p)
+        s.flush()
+        s.add(ProjectRepo(project_id=p.id, repo_slug=SHARED))
+        s.commit()
+        owners = str(p.id)
+
+    world.as_(holder_token(world, [make_share(world)], own=[WILD], who="owner")[0])
+    assert _get_project_impl(owners, "wsid-a") == {"error": f"project {owners!r} not found"}
+    assert "owners-platform" not in repr(_list_projects_impl("wsid-a"))

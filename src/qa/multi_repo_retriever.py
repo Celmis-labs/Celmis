@@ -34,16 +34,24 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from src.access import RepoAccessDecision, resolve_access
 from src.access.file_scope import FileScope, apply_scopes
 from src.config import Settings, get_settings
 from src.llm.prompts.technical_answer import TECHNICAL_ANSWER_PROMPT, TECHNICAL_ANSWER_SYSTEM
 from src.retrieval.tier1_vault import VaultRetriever
-from src.retrieval.vector_store import VectorScope
+from src.retrieval.vector_store import VECTOR_WORKSPACE_KEY, VectorScope
 from src.security.secret_files import SecretPathRefused, is_secret_path, safe_join
 
 logger = logging.getLogger(__name__)
+
+
+def _askable(decision: RepoAccessDecision) -> bool:
+    """May a question be answered from this repository? Researchable, and, when it
+    is another workspace's (``via_share``), only if the owner allowed questions."""
+    return bool(decision.researchable) and (
+        getattr(decision, "via_share", None) is None or bool(getattr(decision, "ask_ok", True)))
 
 
 def _secret_prefixed(prefixed: str) -> bool:
@@ -140,6 +148,11 @@ class RetrievalContext:
     # True when part of the bundle came from the no-vault fallback pick
     # (graph + entry points) rather than from vault-driven retrieval.
     code_fallback_used: bool = False
+    # Slugs among the repositories asked about that ANOTHER workspace shares with the
+    # caller's token (``via_share``). The caller of the retriever keeps what is sent
+    # to the model provider off the asker's own audit trail for these (their paths
+    # are the owner's, and the trail is read by people who do not hold the share).
+    shared_repos: tuple[str, ...] = ()
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -193,6 +206,7 @@ class MultiRepoRetriever:
         token_filter: tuple[str, ...] | None = None,
         name_free_notice: bool = False,
         file_scopes: Mapping[str, FileScope] | None = None,
+        token_shares: tuple[str, ...] = (),
     ) -> RetrievalContext:
         """Returns a ready prompt + meta for streaming.
 
@@ -202,6 +216,10 @@ class MultiRepoRetriever:
 
         ``token_filter`` is the repo list of the MCP token the question comes
         in on: access is then the token's (see :mod:`src.access.effective`).
+        ``token_shares`` is the ids of the shares that token carries: with them a
+        repository another workspace shares can be among ``repos``, read on the
+        conditions of :mod:`src.access.shares` and only if its owner allowed
+        questions (``ask_ok``). A question from a person's own session has none.
         ``name_free_notice`` is for callers that must not learn which other
         repositories exist (MCP): related repositories are not probed and the
         boundary notice names none, nor is ``blocked_repos`` filled.
@@ -224,7 +242,8 @@ class MultiRepoRetriever:
             from src.access.effective import Principal, effective_access
 
             access = effective_access(
-                Principal(user_id or "default", is_admin, token_filter),
+                Principal(user_id or "default", is_admin, token_filter,
+                          share_ids=tuple(token_shares or ())),
                 workspace_id, repos)
         else:
             access = resolve_access(
@@ -234,8 +253,11 @@ class MultiRepoRetriever:
                 repos=repos,
             )
         access = apply_scopes(access, file_scopes)
-        accessible = [r for r in repos if access[r].researchable]
-        denied_targets = [r for r in repos if not access[r].researchable]
+        # A shared repository is asked about only when its owner said so. The
+        # caller (`ask_code`) has already refused one that did not; this is the
+        # second line, on the decision the retrieval itself just computed.
+        accessible = [r for r in repos if _askable(access[r])]
+        denied_targets = [r for r in repos if not _askable(access[r])]
 
         # If the caller can research NONE of the target repos, short-circuit
         # with a pure boundary answer (no retrieval at all).
@@ -272,7 +294,20 @@ class MultiRepoRetriever:
         # to embed the question, ask Qdrant, take the 404 and degrade — paying
         # for a vector that could not be used, on every message, in the one
         # state where the user can do nothing about it.
-        scope = (VectorScope.global_admin() if is_admin
+        #
+        # A question from a token never reads the whole installation, even when
+        # the person who holds the token is a global administrator: it reads the
+        # tenant of the workspace that holds each repository's data, one query per
+        # tenant (`_vault_hits`). A person's own session keeps its scope.
+        #
+        # One thing a global administrator's token keeps from the days it read
+        # everything: on its OWN repositories it still finds the notes that belong
+        # to no tenant (written before notes were stamped, or by the built-in
+        # `default` workspace, whose notes are never stamped). Without that, the
+        # upgrade would silently empty the vault part of every answer for an
+        # installation whose notes were never given an owner.
+        token_call = token_filter is not None
+        scope = (VectorScope.global_admin() if is_admin and not token_call
                  else VectorScope.for_workspace(workspace_id))
         hits: list[MultiRepoVaultHit] = []
         related_inaccessible: list[str] = []
@@ -282,7 +317,10 @@ class MultiRepoRetriever:
                 question,
                 operation="embed_query_multi_repo", workspace_id=workspace_id,
             )
-            hits = self._qdrant_query(query_vec, accessible, scope=scope)
+            hits = self._vault_hits(
+                query_vec, accessible, access, workspace_id=workspace_id,
+                scope=scope, per_tenant=token_call,
+                own_unattributed=token_call and bool(is_admin))
             # Drop vault notes whose source path is denied (creds/crypto notes).
             hits = self._filter_hits_by_access(hits, access)
 
@@ -400,6 +438,8 @@ class MultiRepoRetriever:
             code_included=include_code,
             vault_unavailable=self.vault_unavailable,
             code_fallback_used=code_fallback_used,
+            shared_repos=tuple(r for r in accessible
+                               if getattr(access[r], "via_share", None) is not None),
         )
 
     # ─── Tier 2: graph expansion ─────────────────────────────────────
@@ -947,15 +987,85 @@ class MultiRepoRetriever:
             logger.warning("collection_probe_failed err=%s", text[:200])
             return True
 
+    def _vault_hits(
+        self,
+        embedding: list[float],
+        accessible: list[str],
+        access: Mapping[str, RepoAccessDecision],
+        *,
+        workspace_id: str,
+        scope: VectorScope,
+        per_tenant: bool,
+        own_unattributed: bool = False,
+    ) -> list[MultiRepoVaultHit]:
+        """The vault notes for ``accessible``, by one query per tenant that holds them.
+
+        Without ``per_tenant`` (a person's session) it is the single query it has
+        always been, under ``scope``. With it (a token), the repositories are
+        grouped by the workspace that holds their data (``data_workspace``; the
+        caller's own for everything that is not shared) and each group is asked
+        with the ordinary scope of THAT workspace plus the repository filter:
+        ``must(workspace_id=owner) AND must(repo IN group)``. There is no query
+        without a workspace condition, no OR across tenants (the one OR there is, below,
+        is with "no tenant at all"), and the embedding is
+        the one computed (and paid for) once by the caller's workspace; the
+        installation has one embedding model, so the owner's vectors are
+        comparable with it. The groups' hits are merged by score and cut to the
+        same top-k as one query would have returned.
+
+        ``own_unattributed`` (a global administrator's token) widens the caller's OWN
+        group, and only that one, by the points that carry no tenant at all: the
+        condition is ``workspace_id = own OR workspace_id is missing``, so a point of
+        any other tenant is still out, whatever its repository is called. A shared
+        repository is always asked under its owner's tenant alone."""
+        if not per_tenant:
+            return self._qdrant_query(embedding, accessible, scope=scope)
+        groups: dict[str, list[str]] = {}
+        for repo in accessible:
+            groups.setdefault(access[repo].data_workspace or workspace_id, []).append(repo)
+        hits: list[MultiRepoVaultHit] = []
+        # The caller's own workspace first, then the others by id: a fixed order, so
+        # that equal scores merge the same way on every call.
+        for tenant in sorted(groups, key=lambda w: (w != workspace_id, w)):
+            own = tenant == workspace_id
+            # The caller's own tenant is the scope the caller computed (and warned about,
+            # for the built-in `default` workspace, once); the others are built here.
+            hits.extend(self._qdrant_query(
+                embedding, groups[tenant],
+                scope=scope if own and not scope.global_ else VectorScope.for_workspace(tenant),
+                unattributed=own_unattributed and own))
+        if len(groups) > 1:
+            hits.sort(key=lambda h: h.score, reverse=True)
+            hits = hits[:self.settings.retrieval_vector_topk]
+        return hits
+
+    @staticmethod
+    def _tenant_or_nobody(scope: VectorScope) -> list[Any]:
+        """``workspace_id = scope's tenant OR workspace_id is missing``, as one
+        condition to splice into a ``must``. Never wider than that: another tenant's
+        stamp matches neither side. For a scope without a tenant (the built-in
+        ``default`` workspace) the first side matches nothing and only the points
+        that belong to nobody remain."""
+        from qdrant_client.models import Filter, IsEmptyCondition, PayloadField
+
+        return [Filter(should=[
+            *scope.must_conditions(),
+            IsEmptyCondition(is_empty=PayloadField(key=VECTOR_WORKSPACE_KEY)),
+        ])]
+
     def _qdrant_query(
         self,
         embedding: list[float],
         repos: list[str],
         *,
         scope: VectorScope,
+        unattributed: bool = False,
     ) -> list[MultiRepoVaultHit]:
         """One Qdrant query with MUST(workspace) + MUST + OR(repo IN [...]) on
         a ready embedding.
+
+        ``unattributed`` lets the points that carry no tenant in beside the scope's
+        own (see :meth:`_vault_hits`); the repository condition stays a ``must``.
 
         The embedding is computed once in `retrieve()` and is reused both here
         and for the cross-repo probe — so that we don't pay for the embed
@@ -971,9 +1081,11 @@ class MultiRepoRetriever:
         # whose data exists as far as they are concerned. Both are `must`, so a
         # repo slug that happens to collide across tenants still cannot pull in
         # the other tenant's notes.
+        tenant = (self._tenant_or_nobody(scope) if unattributed and not scope.global_
+                  else scope.must_conditions())
         qfilter = Filter(
             must=[
-                *scope.must_conditions(),
+                *tenant,
                 FieldCondition(key="repo", match=MatchAny(any=repos)),
             ]
         )

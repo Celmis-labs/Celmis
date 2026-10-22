@@ -396,6 +396,9 @@ Beyond the first review, the reviewer works inside the pull request:
   one of these features reads a repository only for people who may read it, by
   the same rule as MCP ([MCP access](docs/mcp-access.md)); chat replies and the
   Jira check never quote code the asker cannot open.
+- **Share a repository with another workspace.** For research, for a fixed time, to the
+  few people whose developer tokens name it, with paths hidden and questions off unless the
+  owner allows them ([Sharing](docs/SHARING.md)).
 - **A compact MCP profile for coding assistants.** `/mcp/dev` serves eleven
   read-only tools sized for an editor, with `howto` for "how does this service
   do auth", `brief` and `skills` for the workspace's own knowledge packs, and a
@@ -1155,8 +1158,9 @@ whose name contains `.ee.`, is covered by [LICENSE_EE](LICENSE_EE) instead.
 [LICENSING.md](LICENSING.md) states the boundary in full — `LICENSE` itself is
 the unmodified AGPL text, because a licence file with a preamble in front of
 it is not recognised as that licence.
-Two enterprise features live behind it today — single sign-on (OIDC /
-Keycloak) and review analytics, in `src/ee/` and `web/ee/`, switched on by an
+Three enterprise features live behind it today — single sign-on (OIDC /
+Keycloak), review analytics, and making a repository share (the rest of
+[sharing](docs/SHARING.md) is AGPL), in `src/ee/` and `web/ee/`, switched on by an
 offline licence key (see [ee/README.md](ee/README.md)). The boundary was drawn
 before the first tag because adding it afterwards means re-asking every
 contributor who has already sent work under an unqualified AGPL.

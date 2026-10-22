@@ -21,7 +21,9 @@ overrides the scratch ones as it always did.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +59,10 @@ def _point_home_defaults_at_scratch() -> Path:
     credential store is a singleton), and those read the settings long before a
     session fixture runs, so they would open the real home."""
     root = Path(tempfile.mkdtemp(prefix="celmis-test-data-"))
+    # Nothing else owns this folder, so without this every run left one behind in the
+    # system temp dir. Removed when the interpreter exits; atexit runs the handlers
+    # last-in first-out, so whatever was imported later has had its say by then.
+    atexit.register(shutil.rmtree, root, ignore_errors=True)
     for var, sub in _HOME_DEFAULTS.items():
         os.environ[var] = str(root / sub)
     return root

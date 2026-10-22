@@ -294,7 +294,10 @@ def repo_map(repo: str, path: str = "", budget_tokens: int = 800) -> str:
         files = {f: n for f, n in _tree(store, rel).items() if scope.listable(slug, f)}
         if not files:
             return emit.error([fresh], f"nothing indexed under {rel or '.'}", "try map without path")
-        used = _top_names(store, rel, "used", 400)
+        # Of the files shown only: a directory line lists the most used names under
+        # it, and a name taken from a file that is hidden (a deny rule, the secret
+        # floor) is still the content of that file.
+        used = {f: n for f, n in _top_names(store, rel, "used", 400).items() if f in files}
     for depth in (1, 2, 3):
         dirs, leaves = _group(files, rel, depth)
         if len(dirs) + len(leaves) >= 8:

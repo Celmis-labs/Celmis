@@ -4,8 +4,8 @@ Celmis Enterprise Edition Licence
 Applies to: any file whose path contains `ee/`, and any file whose name
 contains `.ee.`. Everything else in this repository is AGPL-3.0 — see LICENSE.
 
-Behind this boundary today: single sign-on and review analytics, in `src/ee/`,
-`web/ee/` and `tests/ee/`. The line was drawn before they existed, on
+Behind this boundary today: single sign-on, review analytics and creating or
+extending a repository share, in `src/ee/`, `web/ee/` and `tests/ee/`. The line was drawn before they existed, on
 purpose: moving a file under it later means re-asking every contributor who
 had already sent work under an unqualified AGPL, and that conversation does
 not get easier with time.
@@ -82,8 +82,8 @@ not get easier with time.
    stop.
 
    What is on offer today, stated plainly so nobody wastes a meeting: the
-   `ee/` tree holds single sign-on and review analytics, and a commercial
-   licence over it covers those two. What can also be arranged is a written
+   `ee/` tree holds single sign-on, review analytics and creating or extending
+   a repository share, and a commercial licence over it covers those three. What can also be arranged is a written
    support, warranty and indemnity agreement over the AGPL build — the thing neither
    this licence nor the AGPL provides, and the thing procurement usually
    stops on. Terms are quoted on request against your deployment, because a

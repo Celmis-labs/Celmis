@@ -16,7 +16,11 @@ The contract (docs/MCP_ACCESS.md "Who can use a token", docs/CODEBASE.md
     tokens (`cmcp_`, which have no person) included;
   * deleting an account deletes the person's personal workspace, and with it the
     tokens that OTHER members hold for that workspace, and its project tokens;
-  * a knowledge-pack publish token (`cpk_`) of the same person goes the same way.
+  * a knowledge-pack publish token (`cpk_`) of the same person goes the same way;
+  * a token that carries a SHARE (a repository another workspace lets this one read)
+    goes the same way, and the share goes with the token and no further: the owner's
+    consent is the owner's, it does not end because one person left, and the place
+    the person held on it is free again.
 
 The world is `tests/api/rbac_world.py`: real routers, real resolver, SQLite.
 """
@@ -31,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from tests.api.codebase_support import call, note_zip, upload_zip
 from tests.api.rbac_world import _sqlite_booleans, world
+from tests.api.sharing_world import add_share
 
 AUDIT = "mcp.token_revoked_on_removal"
 
@@ -432,3 +437,82 @@ def test_revoke_held_stages_the_change_for_the_callers_transaction(tokens):
         assert out == {w.ws["ws-a"]: [token_id]}
         s.rollback()                              # the caller's transaction failed
     assert _row(w, token_id).revoked_at is None
+
+
+# ─── a token that carries a share ────────────────────────────────────
+
+
+def _holders(w, share_id: str) -> dict[str, list[str]]:
+    from src.access import shares
+
+    with Session(w.engine) as s:
+        return shares.holders(s, share_id)
+
+
+async def test_a_person_who_leaves_takes_a_share_off_their_token_and_nothing_off_the_share(tokens):
+    from src.access import shares
+
+    w = tokens
+    share_id = add_share(w, people=1)
+    token_id = _issue(w, "member_a", "ws-a", "pat", shared=[share_id])
+    assert _live(w, token_id) and list(_holders(w, share_id)) == [w.uid("member_a")]
+    with Session(w.engine) as s:
+        assert not shares.has_room(s, share_id, w.uid("viewer_a")), "the one place is taken"
+
+    await _remove(w, "su", "member_a")
+
+    assert not _live(w, token_id)
+    assert _row(w, token_id).revoked_by == f"membership_removed:{w.uid('su')}"
+    assert _holders(w, share_id) == {}, "a revoked token holds no place"
+    with Session(w.engine) as s:
+        assert shares.has_room(s, share_id, w.uid("viewer_a")), "and the place is free again"
+    from tests.api.sharing_world import share_row
+
+    assert share_row(w, share_id).revoked_at is None, "the owner's consent is untouched"
+
+
+@pytest.mark.parametrize("role", ["viewer", "member", "admin"])
+async def test_adding_the_person_back_does_not_bring_the_share_back(tokens, role):
+    from src.access import shares
+
+    w = tokens
+    share_id = add_share(w)
+    token_id = _issue(w, "member_a", "ws-a", "pat", shared=[share_id])
+    await _remove(w, "su", "member_a")
+    await _add(w, "su", "member_a", role)
+
+    assert not _live(w, token_id)
+    assert _holders(w, share_id) == {}
+    with Session(w.engine) as s:
+        # The share could be put on a NEW token for them (that is the issuer's call);
+        # what must not happen is that the old token reads it again.
+        assert shares.check_attachable(
+            s, [share_id], workspace_id=w.ws["ws-a"], user_id=w.uid("member_a")) == [share_id]
+
+
+async def test_a_token_with_a_share_is_left_alone_when_somebody_else_leaves(tokens):
+    w = tokens
+    share_id = add_share(w)
+    mine = _issue(w, "member_a", "ws-a", "pat", shared=[share_id])
+    theirs = _issue(w, "viewer_a", "ws-a", "pat", shared=[share_id])
+
+    await _remove(w, "su", "viewer_a")
+
+    assert _live(w, mine) and not _live(w, theirs)
+    assert list(_holders(w, share_id)) == [w.uid("member_a")]
+
+
+async def test_deleting_the_receiving_workspace_revokes_the_token_and_ends_the_share(tokens):
+    from tests.api.sharing_world import share_row
+
+    w = tokens
+    share_id = add_share(w)
+    token_id = _issue(w, "member_a", "ws-a", "pat", shared=[share_id])
+    assert _live(w, token_id)
+
+    r = await w.client.delete(f"/api/workspaces/{w.ws['ws-a']}", headers=w.h("su"))
+    assert r.status_code == 204, r.text
+
+    assert not _live(w, token_id)
+    row = share_row(w, share_id)
+    assert row.revoked_at is not None and row.revoke_reason == "workspace_deleted"

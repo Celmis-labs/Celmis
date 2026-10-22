@@ -23,6 +23,8 @@ TOKENS = ("a7c41e9b2d10", "mcp_tokens", "c1f6b8d0e256", "mcp_tokens")
 LOG = ("a7c41e9b2d11", "mcp_call_log", "a7c41e9b2d10", "mcp_call_log")
 #: Adds `mcp_call_log.packs` (and the knowledge-pack tables).
 CODEBASE = "e5b8c2d9a1f6"
+#: Adds `mcp_tokens.shared_repos` and `mcp_call_log.shares` (and `repo_shares`).
+SHARING = "017a06ecb85d"
 
 
 def _module(revision: str):
@@ -78,6 +80,9 @@ def test_the_tables_hold_the_columns_the_models_read(engine):
     # `mcp_call_log.packs` (the packs a call read) arrives with the Codebase
     # revision, which also creates its own tables; the models read it.
     _run(engine, CODEBASE, "upgrade")
+    # `mcp_tokens.shared_repos` and `mcp_call_log.shares` arrive with the
+    # sharing revision.
+    _run(engine, SHARING, "upgrade")
     for model in (McpToken, McpCallLog):
         have = {c["name"] for c in sa.inspect(engine).get_columns(model.__tablename__)}
         assert {c.name for c in model.__table__.columns} <= have, model.__tablename__

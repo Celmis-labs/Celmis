@@ -177,6 +177,9 @@ export default function McpPage() {
             <div key={row.id} className="flex flex-wrap items-center gap-2 rounded-md border border-[var(--color-border)] p-2 text-xs">
               <Badge variant={row.status === "active" ? "success" : "outline"}>{row.status}</Badge>
               <span>{row.matched_repos.length > 0 ? row.matched_repos.length : row.repos.length} {t("mcp.reposCount")}</span>
+              {(row.shares ?? []).length > 0 && (
+                <Badge variant="info">{t("mcpTokens.shared.chip", { count: (row.shares ?? []).length })}</Badge>
+              )}
               <span className="text-[var(--color-muted-foreground)]">
                 {t("mcp.expires", { date: row.expires_at.slice(0, 10) })}
               </span>
@@ -186,6 +189,19 @@ export default function McpPage() {
                         onClick={() => revokeMine.mutate(row.id)}>
                   {t("mcp.revoke")}
                 </Button>
+              )}
+              {/* The repositories other workspaces share with this one that the token
+                  lists: by name, who gives them and until when. */}
+              {(row.shares ?? []).length > 0 && (
+                <ul className="basis-full space-y-0.5 text-[var(--color-muted-foreground)]">
+                  {(row.shares ?? []).map((sh) => (
+                    <li key={sh.share_id} className="break-words">
+                      <code>{sh.slug}</code>{" · "}
+                      {t("mcpTokens.shared.from", { name: sh.owner_name })}{" · "}
+                      {t("mcpTokens.shared.until", { date: sh.expires_at.slice(0, 10) })}
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
           ))}

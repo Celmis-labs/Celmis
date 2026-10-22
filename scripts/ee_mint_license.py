@@ -1,7 +1,7 @@
 """Mint a Celmis Enterprise licence — an EdDSA (Ed25519) JWT.
 
     python scripts/ee_mint_license.py --customer "Acme Corp" \
-        --features sso,analytics --days 365 \
+        --features sso,analytics,sharing --days 365 \
         --key ~/.celmis-ee/license-signing-key.pem
 
     # optional limits (people the installation may hold / sign in via SSO):
@@ -38,7 +38,7 @@ ISSUER = "celmis-licensing"
 #: Kept in step with src/ee/license.py KNOWN_FEATURES by
 #: tests/ee/test_the_licence_gate.py, rather than imported: this script must
 #: run on a machine that has only the script and the key.
-KNOWN_FEATURES = ("sso", "analytics")
+KNOWN_FEATURES = ("sso", "analytics", "sharing")
 #: Kept in step with src/ee/license.py MAX_SEATS by the same test.
 MAX_SEATS = 1_000_000
 
@@ -100,7 +100,7 @@ def _load_key(path: str) -> Ed25519PrivateKey:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--customer", required=True)
-    ap.add_argument("--features", required=True, help="comma-separated, e.g. sso,analytics")
+    ap.add_argument("--features", required=True, help="comma-separated, e.g. sso,analytics,sharing")
     ap.add_argument("--days", type=int, default=365)
     ap.add_argument("--key", required=True, help="path to the Ed25519 private key (PEM)")
     ap.add_argument("--not-before", help="ISO date the licence starts (optional)")

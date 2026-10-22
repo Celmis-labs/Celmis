@@ -152,6 +152,10 @@ export const SECTION_TABS = {
     { href: "/admin/workspaces", labelKey: "nav.workspaces" },
     { href: "/admin/teams", labelKey: "nav.teams" },
     { href: "/admin/access", labelKey: "nav.access" },
+    // What this workspace lets another one read. The owner's administrators only
+    // (`require_workspace_admin`); the licensed half, making and extending a share,
+    // is a button on the page that follows `repo_sharing_grant`, not a tab.
+    { href: "/admin/sharing", labelKey: "nav.sharing", workspaceAdminOnly: true, requiresFeature: "repo_sharing" },
   ],
   // Usage & cost is its own section, not a page of Administration. It used to
   // be listed under `admin`, which is where the breadcrumb and the tab row

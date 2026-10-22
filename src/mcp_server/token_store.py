@@ -68,6 +68,17 @@ class TokenView:
     revoked_at: datetime | None
     created_at: datetime | None = None
     last_used_at: datetime | None = None
+    #: Ids of the shares the row lists (``mcp_tokens.shared_repos``), as stored.
+    #: Whether they count is decided by :attr:`shares_apply`, not by their being here.
+    shares: tuple[str, ...] = ()
+
+    @property
+    def shares_apply(self) -> bool:
+        """The row may carry shares, and they count: a ``pat`` of the ``dev``
+        profile that cannot write. For any other row the column is ignored, even
+        when somebody put ids in it directly in the database."""
+        return (self.kind == "pat" and self.profile == "dev"
+                and not self.allow_write and self.authoritative)
 
     @property
     def authoritative(self) -> bool:
@@ -92,6 +103,8 @@ def _aware(value: datetime | None) -> datetime:
 
 
 def _view(row) -> TokenView:  # noqa: ANN001
+    from src.access.shares import clean_ids
+
     return TokenView(
         id=row.id, kind=row.kind, workspace_id=row.workspace_id, user_id=row.user_id,
         issued_by=row.issued_by or "", label=row.label or "",
@@ -103,6 +116,7 @@ def _view(row) -> TokenView:  # noqa: ANN001
         revoked_at=_aware(row.revoked_at) if row.revoked_at else None,
         created_at=_aware(row.created_at) if row.created_at else None,
         last_used_at=_aware(row.last_used_at) if row.last_used_at else None,
+        shares=tuple(clean_ids(getattr(row, "shared_repos", None))),
     )
 
 
@@ -150,8 +164,9 @@ def may_issue(user) -> bool:  # noqa: ANN001
 # ════════════════════════════════════════════════════════════════════
 
 
-def normalise_patterns(patterns: Iterable[str]) -> list[str]:
-    """The repo list, validated and de-duplicated. At least one entry."""
+def normalise_patterns(patterns: Iterable[str], *, allow_empty: bool = False) -> list[str]:
+    """The repo list, validated and de-duplicated. At least one entry, unless
+    ``allow_empty``: a token that lists only shared repositories has none of its own."""
     out: list[str] = []
     for raw in patterns or []:
         p = str(raw or "").strip()
@@ -161,10 +176,35 @@ def normalise_patterns(patterns: Iterable[str]) -> list[str]:
             raise TokenError(f"{p[:60]!r} is not a repository slug or glob")
         if p not in out:
             out.append(p)
-    if not out:
+    if not out and not allow_empty:
         raise TokenError("a token needs at least one repository (a slug or a glob)")
     if len(out) > MAX_PATTERNS:
         raise TokenError(f"at most {MAX_PATTERNS} repository entries")
+    return out
+
+
+def normalise_shares(shares: Iterable[str] | None, *, kind: str, profile: str,
+                     allow_write: bool) -> list[str]:
+    """The share ids of a token, validated, once each.
+
+    Only a ``pat`` of the ``dev`` profile that cannot write may carry shares; for
+    any other token a non-empty list is refused, not dropped, so a caller that
+    thinks it granted a share finds out it did not. This checks the SHAPE of the
+    ids. Whether a share exists, is for the token's workspace and has room is the
+    issuing code's business (and is judged again on every call)."""
+    from src.access.shares import MAX_SHARES_PER_TOKEN, clean_ids, is_share_id
+
+    raw = [] if shares is None else list(shares)
+    if not raw:
+        return []
+    if not all(is_share_id(s) for s in raw):
+        raise TokenError("not a share id")
+    out = clean_ids(raw)
+    if kind != "pat" or profile != "dev" or allow_write:
+        raise TokenError(
+            "only a read-only developer token (kind 'pat', profile 'dev') can carry shared repositories")
+    if len(out) > MAX_SHARES_PER_TOKEN:
+        raise TokenError(f"at most {MAX_SHARES_PER_TOKEN} shared repositories per token")
     return out
 
 
@@ -303,12 +343,23 @@ def create_row(
     expires_in_days: int | None = None,
     token_id: str | None = None,
     write_scopes: Iterable[str] | None = None,
+    shared: Iterable[str] = (),
+    not_after: datetime | None = None,
 ):
     """Insert a grant row and return it (committed).
 
     ``write_scopes`` narrows what a write-capable token carries to exactly the
     write scopes it was granted (a self-service token asked for one of them);
-    left out, a write token carries all of them."""
+    left out, a write token carries all of them.
+
+    ``shared`` lists the ids of repositories other workspaces share with this
+    token's workspace. They are stored beside the repo list, never in it, and a
+    token that has them may have an empty list of its own.
+
+    ``not_after`` ends the token no later than that instant, whatever
+    ``expires_in_days`` says: the issuing code passes the earliest end of the
+    shares the token carries, so that a token does not outlive the consent it was
+    made for. It can only shorten."""
     from src.db.models import McpToken
 
     if kind not in KINDS and kind != INTERNAL_KIND:
@@ -318,12 +369,17 @@ def create_row(
     if profile == "dev" and allow_write:
         raise TokenError("the dev profile is read-only: a write token needs profile 'full'")
     days = clamp_days(expires_in_days)
+    shared_ids = normalise_shares(shared, kind=kind, profile=profile, allow_write=allow_write)
+    expires = datetime.now(UTC) + timedelta(days=days)
+    if not_after is not None:
+        expires = min(expires, _aware(not_after))
     row = McpToken(
         id=token_id or str(uuid.uuid4()), kind=kind, workspace_id=workspace_id,
         user_id=user_id, issued_by=issued_by, label=(label or "")[:80],
-        repo_patterns=normalise_patterns(patterns), allow_write=bool(allow_write),
+        repo_patterns=normalise_patterns(patterns, allow_empty=bool(shared_ids)),
+        allow_write=bool(allow_write),
         scopes=_scopes_granted(profile, allow_write, write_scopes), profile=profile,
-        created_at=datetime.now(UTC), expires_at=datetime.now(UTC) + timedelta(days=days),
+        created_at=datetime.now(UTC), expires_at=expires, shared_repos=shared_ids or None,
     )
     session.add(row)
     session.commit()
@@ -348,14 +404,24 @@ def sign(row) -> str:  # noqa: ANN001
     )
 
 
-def mint(**kwargs) -> tuple[str, TokenView]:  # noqa: ANN003
-    """Create a grant and sign its token. Returns ``(token, view)``."""
+def mint(*, session=None, **kwargs) -> tuple[str, TokenView]:  # noqa: ANN001, ANN003
+    """Create a grant and sign its token. Returns ``(token, view)``.
+
+    ``session`` is for a caller that has read something under a lock and must write
+    the token in the same transaction (issuing a token that carries a share counts
+    the people who hold the share first, see ``shares.lock_places``); the row is
+    committed there. Left out, the grant is made in a session of its own."""
     from sqlalchemy.orm import Session
 
-    with Session(_engine()) as s:
-        row = create_row(s, **kwargs)
+    if session is not None:
+        row = create_row(session, **kwargs)
         token = sign(row)
         view = _view(row)
+    else:
+        with Session(_engine()) as s:
+            row = create_row(s, **kwargs)
+            token = sign(row)
+            view = _view(row)
     invalidate(view.id)
     return token, view
 
@@ -499,7 +565,7 @@ def revoke_held(session, *, by: str, user_id: str | None = None,  # noqa: ANN001
 
 def update_row(session, token_id: str, *, patterns: Iterable[str] | None = None,  # noqa: ANN001
                expires_in_days: int | None = None, allow_write: bool | None = None,
-               label: str | None = None):
+               label: str | None = None, shares: Iterable[str] | None = None):
     """Change a grant. Takes effect on the next verification — the token is not
     reissued, because the repo list is looked up on the server.
 
@@ -507,18 +573,34 @@ def update_row(session, token_id: str, *, patterns: Iterable[str] | None = None,
     its own expiry and its own scopes, so a grant can be *narrowed* (fewer
     repos, an earlier expiry, writing switched off) or revoked, but not
     widened: a later expiry or switching writing on needs a new token. A
-    self-service token's repos are its holder's own access, never a list."""
+    self-service token's repos are its holder's own access, never a list.
+
+    ``shares`` REPLACES the list of shared repositories the token may read (adding
+    and removing are the same call). Like the repo list it is read from the row on
+    every call, so the token is not reissued. It is the one kind of change here
+    that can add access, which is why only the issuer's routes reach it and why
+    each share is judged again on every call."""
     from src.db.models import McpToken
 
     row = session.get(McpToken, token_id)
     if row is None:
         return None
+    new_shares = None if shares is None else normalise_shares(
+        shares, kind=row.kind, profile=row.profile or "dev", allow_write=bool(row.allow_write))
+    can_share = (row.kind == "pat" and (row.profile or "dev") == "dev"
+                 and not row.allow_write)
+    final_shares = (new_shares if new_shares is not None
+                    else [str(x) for x in (row.shared_repos or [])] if can_share else [])
     if patterns is not None:
         if row.kind in ("self", INTERNAL_KIND):
             raise TokenError(
                 "a self-service token has no repository list of its own: it "
                 "reaches what its holder reaches. Revoke it, or issue a listed token.")
-        row.repo_patterns = normalise_patterns(patterns)
+        row.repo_patterns = normalise_patterns(patterns, allow_empty=bool(final_shares))
+    if new_shares is not None:
+        if not new_shares and not (row.repo_patterns or []):
+            raise TokenError("a token needs at least one repository (a slug, a glob or a share)")
+        row.shared_repos = new_shares or None
     if expires_in_days is not None:
         new_expiry = datetime.now(UTC) + timedelta(days=clamp_days(expires_in_days))
         if new_expiry > _aware(row.expires_at):
@@ -567,6 +649,7 @@ def active_grant(session, *, user_id: str, workspace_id: str):  # noqa: ANN001, 
 __all__ = [
     "CACHE_TTL_SECONDS", "INTERNAL_KIND", "TokenError", "TokenView", "active_grant", "clamp_days",
     "create_row", "invalidate", "legacy_tokens_accepted", "list_rows", "lookup",
-    "max_days", "may_issue", "mint", "mint_internal", "normalise_patterns", "revoke",
-    "revoke_held", "self_service_enabled", "sign", "touch", "update_row",
+    "max_days", "may_issue", "mint", "mint_internal", "normalise_patterns",
+    "normalise_shares", "revoke", "revoke_held", "self_service_enabled", "sign", "touch",
+    "update_row",
 ]

@@ -257,6 +257,14 @@ FEATURES: tuple[Feature, ...] = (
     Feature("llm_config", ("/api/llm", "/api/models", "/api/vector-store"),
             ("/settings/llm", "/settings/models")),
     Feature("gdpr", ("/api/gdpr",), ("/admin/gdpr",)),
+    # Sharing a repository with another workspace, owner's side: see who reads it,
+    # narrow it, end it (src/api/routers/sharing.py). Free in every build, so a
+    # workspace that was once given the right to share can always take it back.
+    Feature("repo_sharing", ("/api/sharing",), ("/admin/sharing",)),
+    # Creating and extending a share (src/ee/sharing, LICENSE_EE). A prefix of its
+    # own: `/api/sharing` would not cover it, because a claim matches a whole path
+    # segment, and it must not be satisfied by the free routes above.
+    Feature("repo_sharing_grant", ("/api/sharing-grants",), (), license_feature="sharing"),
 
     # Backend-only capabilities: no page of their own, but a client that knows
     # they are off can say so instead of offering a setup flow that dead-ends.
@@ -545,7 +553,7 @@ class DeploymentOut(BaseModel):
 
 
 class LicenseOut(BaseModel):
-    #: Licence feature names granted ("sso", "analytics"); empty in community.
+    #: Licence feature names granted ("sso", "analytics", "sharing"); empty in community.
     features: list[str] = []
     #: Who the licence was issued to — only for an authenticated caller.
     customer: str | None = None

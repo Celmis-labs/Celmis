@@ -461,6 +461,23 @@ async def _ask_stream(
     }
 
 
+def _files_sent(context: Any) -> list[str]:
+    """The files to write on the audit trail of what was sent to the model provider.
+
+    The trail belongs to the ASKING workspace and its administrators read it, whether
+    or not they hold the share a question was answered from. The slug and the paths of
+    another workspace's repository are the owner's, so they are replaced by one line
+    that says how many files of a shared repository were sent; the holder of the token
+    has the names in the answer."""
+    shared = tuple(f"{slug}/" for slug in getattr(context, "shared_repos", ()) or ())
+    if not shared:
+        return list(context.files_read)
+    kept = [f for f in context.files_read if not f.startswith(shared)]
+    hidden = len(context.files_read) - len(kept)
+    noun = "file" if hidden == 1 else "files"
+    return kept + ([f"(shared repository: {hidden} {noun})"] if hidden else [])
+
+
 async def _generate_full(
     *,
     target_repos: list[str],
@@ -473,12 +490,17 @@ async def _generate_full(
     token_filter: tuple[str, ...] | None = None,
     name_free_notice: bool = False,
     file_scopes: Mapping[str, FileScope] | None = None,
+    token_shares: tuple[str, ...] = (),
 ) -> tuple[str, dict[str, Any]]:
     """Non-streaming alternate — the full text + meta in one block.
 
     ``token_filter`` / ``name_free_notice`` are for the MCP path: access is the
     token's, and neither the notice nor the meta names a repository the caller
-    cannot read."""
+    cannot read. ``token_shares`` is the ids of the shares the token carries, for
+    a question that names a repository another workspace shares. The streaming
+    route has no such parameter and never will: a person's chat in the web
+    interface answers from the workspace's own registry, where a shared
+    repository is not."""
     from src.llm.gemini_client import _estimate_tokens
     from src.qa.multi_repo_retriever import MultiRepoRetriever
 
@@ -488,6 +510,7 @@ async def _generate_full(
         user_id=user_id, is_admin=is_admin, workspace_id=workspace_id,
         include_code=include_code, token_filter=token_filter,
         name_free_notice=name_free_notice, file_scopes=file_scopes,
+        token_shares=token_shares,
     )
     from src.llm.completion import stream_chat
     full = []
@@ -495,7 +518,7 @@ async def _generate_full(
         prompt=context.prompt,
         system_instruction=context.system_instruction,
         question=question,
-        files_sent=context.files_read,
+        files_sent=_files_sent(context),
         workspace_id=workspace_id,
         user_id=user_id,
     ):

@@ -34,7 +34,7 @@ GUIDE = """\
 - [Celmis agent](/automation): this conversation as a full page, with the list of past chats. Also opened from the round button at the bottom right of every page.
 - Monitoring: [Alerts](/alerts) (Grafana or any webhook), [Notifications](/admin/notifications) (Slack, Discord, Google Chat or webhook channels), [Job queue](/admin/jobs), [Audit log](/admin/audit) (every LLM call).
 - [Usage & cost](/admin/usage): spend per workspace and the budget cap.
-- Team: [Workspaces & members](/admin/workspaces) (invite people, set roles), [Teams](/admin/teams), [Code access](/admin/access).
+- Team: [Workspaces & members](/admin/workspaces) (invite people, set roles), [Teams](/admin/teams), [Code access](/admin/access), [Repository sharing](/admin/sharing) (let another workspace read one of your repositories for a limited time; owners and admins only, enterprise licence).
 - Settings: [Account](/settings), [LLM keys & models](/settings/llm), [Model catalog](/settings/models), [Git connections](/connections), [MCP for your editor](/settings/mcp).
 
 ## Connecting GitHub, GitLab or Bitbucket

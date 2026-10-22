@@ -492,7 +492,7 @@ services:
       # the web GOOGLE_CLIENT_ID. Empty -> Google sign-in returns 503.
       GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:-}"
       # Celmis Enterprise licence (ee/README.md). Empty -> community edition:
-      # SSO and analytics are not mounted. Read once at start-up.
+      # analytics and repository sharing are not mounted. Read once at start-up.
       CELMIS_LICENSE_KEY: "${CELMIS_LICENSE_KEY:-}"
       CELMIS_LICENSE_FILE: "${CELMIS_LICENSE_FILE:-}"
       # Keycloak / OIDC sign-in (enterprise: needs a licence granting "sso").

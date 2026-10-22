@@ -364,9 +364,9 @@ admin): shows "Community" or "Enterprise", "Licensed to", "Expires",
 "Features". Paste the key into "Paste licence key" and press "Activate";
 "Remove licence" switches enterprise features off for everyone at once. The
 operator may instead set `CELMIS_LICENSE_KEY` or `CELMIS_LICENSE_FILE` and
-restart (the environment then wins). The licence gates exactly two features:
-single sign-on and [Analytics](/analytics); everything else is in the
-community edition.
+restart (the environment then wins). The licence gates exactly three features:
+single sign-on, [Analytics](/analytics) and making a repository share (the claim
+`sharing`); everything else is in the community edition.
 """,
     ),
 )

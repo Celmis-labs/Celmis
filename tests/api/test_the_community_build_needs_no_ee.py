@@ -132,9 +132,15 @@ def test_the_app_builds_as_the_community_edition_without_the_package(monkeypatch
     assert doc.features["productivity"].available is False
     assert doc.features["review_issues"].available is True
     assert doc.features["core"].available is True
+    # Sharing: the safe half (seeing, narrowing, ending a share, reading its usage) is
+    # community; only making a share and giving more of one wait for the licence claim.
+    assert doc.features["repo_sharing"].available is True
+    assert doc.features["repo_sharing_grant"].available is False
     paths = caps.mounted_paths(app)
     assert "/api/auth/login" in paths
     assert "/api/auth/oidc" not in paths
+    assert "/api/sharing/shares" in paths
+    assert not any(p.startswith("/api/sharing-grants") for p in paths)
 
 
 # ─── web ─────────────────────────────────────────────────────────────
@@ -151,6 +157,9 @@ WEB_IMPORTERS = {
     "app/invite/[token]/invite-view.tsx",
     "app/(app)/analytics/page.tsx",
     "app/(app)/productivity/page.tsx",
+    # Making a share and giving more of one is the licensed `sharing` feature; the
+    # page draws its dialogs only when /api/capabilities says the routes are mounted.
+    "app/(app)/admin/sharing/page.tsx",
 }
 
 _IMPORT_EE = re.compile(r"""^\s*(?:import|export)\b[^;]*?from\s+["']@/ee/""", re.M | re.S)

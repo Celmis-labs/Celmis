@@ -593,3 +593,10 @@ version goes live, mandatory packs, a library shared across workspaces, group
 sync from an identity provider, and analytics that go beyond a count) is planned
 for the enterprise edition; this page will describe it when it exists. Community
 code does not depend on it.
+
+A *library shared across workspaces* is a different idea from sharing a repository, and
+the first does not exist yet. [Sharing a repository with another workspace](SHARING.md)
+(3.1.0) lets one workspace's repository be read, for a while and by named people, through
+the receiving workspace's MCP developer tokens; it carries no pack and publishes nothing,
+and a pack stays inside the workspace that owns it. A pack library for several
+workspaces, if it comes, will be its own feature with its own rules.

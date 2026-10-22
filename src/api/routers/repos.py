@@ -650,6 +650,37 @@ def abort_upload_session(
     return Response(status_code=204)
 
 
+async def _end_shares_of(workspace_id: str, slug: str, user: User) -> list[str]:
+    """End every live share of `slug` that `workspace_id` gives, and commit it.
+
+    A share names a repository by its slug in the owner's workspace; the owner
+    removing that repository ends the consent. Ending it here, explicitly, is what
+    makes registering the same repository again start with nothing shared: the
+    identity check on every call (provider and full name still registered) would
+    otherwise bring the share back to life. Returns the ids ended."""
+    from src.access import shares as repo_shares
+    from src.db import async_session
+
+    async with async_session() as session:
+        rows = (await session.execute(
+            repo_shares.live_of_repo(workspace_id, slug))).scalars().all()
+        ended = repo_shares.end_rows(rows, by=user.id, reason="repo_removed")
+        await session.commit()
+    return ended
+
+
+def _record_auto_revoked(share_ids: list[str], workspace_id: str, user: User,
+                         request: Request) -> None:
+    """One `sharing.auto_revoked` row per share, in the OWNER's trail."""
+    from src.access import shares as repo_shares
+
+    for share_id in share_ids:
+        repo_shares.audit_owner(
+            "sharing.auto_revoked", owner_workspace_id=workspace_id, share_id=share_id,
+            actor=user.email, actor_id=user.id, ip=client_ip(request),
+            detail={"reason": "repo_removed"})
+
+
 @router.delete("/{slug}")
 async def remove_repo(
     slug: str,
@@ -668,6 +699,9 @@ async def remove_repo(
     """Remove repo. Default — lightweight (unregister from the workspace).
     With ?purge=true — cascade delete across all stores. Returns a
     PurgeReport JSON if purge=true, else 204."""
+    # BEFORE anything is removed: a repository that is shared with another workspace
+    # stops being readable there first. If this fails the repository stays as it was.
+    ended_shares = await _end_shares_of(workspace_id, slug, user)
     if not purge:
         store = get_auto_review_store()
         if not store.delete_in_workspace(workspace_id, slug):
@@ -679,8 +713,9 @@ async def remove_repo(
         record_action(
             action="repo.unregistered", actor=user.email, actor_id=user.id,
             workspace_id=workspace_id, target=slug, ip=client_ip(request),
-            detail={"purge": False},
+            detail={"purge": False, "shares_revoked": len(ended_shares)},
         )
+        _record_auto_revoked(ended_shares, workspace_id, user, request)
         from fastapi import Response
         return Response(status_code=204)
 
@@ -693,6 +728,8 @@ async def remove_repo(
         # purge scoped only by slug can take another workspace's vectors with
         # it.
         report = await do_purge(slug, session=session, workspace_id=workspace_id)
+    # The purge ends what is still live too; these were ended just before it.
+    report.shares_revoked += len(ended_shares)
     _forget_webhook_state(workspace_id, slug)
     # A separate action from the unregister above, because it is a separate
     # event: this one destroys the clone, the graph, the vault notes, the
@@ -706,6 +743,7 @@ async def remove_repo(
             k: v for k, v in report.as_dict().items() if isinstance(v, (int, bool))
         }},
     )
+    _record_auto_revoked(ended_shares, workspace_id, user, request)
     return report.as_dict()
 
 

@@ -652,6 +652,44 @@ async def require_workspace_admin(
     )
 
 
+def require_share_admin(
+    share_id: str,
+    user: User = Depends(get_current_user),
+) -> User:
+    """Caller administers the workspace that OWNS the share `share_id` (or is the
+    superadmin).
+
+    A share is the owner's: only its administrators read or change it. Everybody
+    else, including the administrators of the workspace it is shared WITH, gets the
+    answer a share that does not exist gets (404, not 403): a 403 would confirm that
+    the id is live. The route's own workspace header is not consulted. A person can
+    administer several workspaces, and the share, not the header, says which one
+    this is about.
+
+    A global admin passes `is_workspace_admin` for any workspace, as everywhere else
+    that rule is used.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session as _Session
+
+    from src.access.shares import is_share_id
+    from src.db.models import RepoShare
+    from src.users.roles import is_superadmin
+
+    owner: str | None = None
+    if is_share_id(share_id):
+        eng = create_engine(sync_database_url(), pool_pre_ping=True)
+        try:
+            with _Session(eng) as s:
+                row = s.get(RepoShare, share_id)
+                owner = row.owner_workspace_id if row is not None else None
+        finally:
+            eng.dispose()
+    if owner is not None and (is_superadmin(user) or is_workspace_admin(user, owner)):
+        return user
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such share.")
+
+
 def can_see_review_cost(user: User, workspace_id: str) -> bool:
     """May this person see what reviews COST (cost_usd, cost totals)?
 

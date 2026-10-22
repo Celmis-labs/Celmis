@@ -26,12 +26,13 @@ something to put behind it.
 ## What is here
 
 New **enterprise** capabilities, from their first commit. Things a company
-buys because it is a company. Two today:
+buys because it is a company. Three today:
 
 | Feature | Licence name | API | Web | Tests |
 |---|---|---|---|---|
 | Single sign-on (OIDC / Keycloak); up to five people without a licence | `sso` | `src/ee/sso/` — `POST /api/auth/oidc` | `web/ee/sso/` — the NextAuth provider and the "Sign in with …" button | `tests/ee/test_oidc_sign_in.py` |
 | Review analytics ("extended reporting") | `analytics` | `src/ee/analytics/` — `GET /api/analytics/summary` | `web/ee/analytics/` — the `/analytics` dashboard and charts | `tests/ee/test_analytics_is_a_leads_view.py` |
+| Making a repository share, and giving more of one (sharing a repository with another workspace for research) | `sharing` | `src/ee/sharing/` — `POST /api/sharing-grants`, `POST /api/sharing-grants/{id}/extend` and `GET /api/sharing-grants/workspaces` (the dialog's list of receiving workspaces, `single_tenant` only) | `web/ee/sharing/` — the "Share a repository" dialog | `tests/ee/test_sharing_is_enterprise.py`, `tests/ee/test_creating_a_share_records_what_the_owner_agreed_to.py`, `tests/ee/test_extending_a_share_changes_it_in_place.py`, `tests/ee/test_the_grant_routes_answer_the_right_people.py`, `tests/ee/test_the_create_dialog_lists_the_workspaces_a_share_could_go_to.py` |
 
 The licence check is `src/ee/license.py`; the mount point is
 `src/ee/__init__.py`.
@@ -42,6 +43,16 @@ take it away: the users store's `oidc_iss`/`oidc_sub` columns and
 guard, `AUTH_PASSWORD_LOGIN`, the editor role and `require_analytics_access`
 (RBAC); the review issues and pull-request tables and everything that writes
 them; the ignore globs and the comment threshold. Analytics only reads.
+
+Sharing licenses **two acts and nothing else**: making a share and giving more of one
+(a later end, fewer hidden paths, questions switched on, more people, a person switched
+back on). Everything that keeps a share safe is AGPL, in every build: the conditions
+checked on every call (`src/access/shares.py`, `src/access/effective.py`), narrowing,
+blocking a person, ending a share, the owner's reading of who used it
+(`src/api/routers/sharing.py`) and putting a share on a developer token
+(`src/api/routers/mcp_tokens.py`). A licence that lapses or is removed unmounts the
+licensed routes, so no new share can be made; it ends no share that exists, which runs to its own
+end or until its owner revokes it. See [`docs/SHARING.md`](../docs/SHARING.md).
 
 ## What does not
 
@@ -71,7 +82,7 @@ calls home. Its claims:
 |---|---|
 | `iss` | always `celmis-licensing` |
 | `sub` | the customer, as shown to an administrator |
-| `features` | list of licence names: `sso`, `analytics` |
+| `features` | list of licence names: `sso`, `analytics`, `sharing` |
 | `iat`, `exp` | required; `nbf` optional |
 | `seats` | optional whole number from 1 to 1,000,000: how many people the installation may hold. Absent = **unlimited**, which is what every licence issued before seats existed means |
 | `sso_seats` | optional whole number from 1 to 1,000,000: how many people may sign in through single sign-on, on a licence that grants `sso`. Absent = **unlimited** |
@@ -187,7 +198,7 @@ shipped compose runs one.
 
 ```bash
 python scripts/ee_mint_license.py --customer "Acme Corp" \
-    --features sso,analytics --days 365 \
+    --features sso,analytics,sharing --days 365 \
     --key ~/.celmis-ee/license-signing-key.pem
 ```
 
@@ -203,6 +214,14 @@ can run it — a token signed with any other key does not verify. Tests sign
 with a throwaway keypair (`tests/ee/licensing.py`) and point the embedded key
 at it for the duration of the test; one test asserts that such a token does
 **not** verify against the real key.
+
+**Adding a claim means re-issuing the licence.** A licence is signed over its claims, so
+an installation whose licence was issued before `sharing` existed does not gain the
+feature by upgrading: the operator who holds the signing key mints a new token with
+`--features` naming `sharing` (beside the claims it already had) and the customer enters
+it as before; the routes are mounted at once, with no restart when it is entered in the
+UI. Until then 3.1.0 runs as 3.0.2 did: no share can be made. This project does not ship,
+generate or hold a signing key, and its documentation and tests never ask for one.
 
 ## Seats and the community limits
 

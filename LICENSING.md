@@ -31,8 +31,8 @@ exception.
     is kept and none can drift out of date. The line was drawn before any
     product code lived behind it, because adding it later would mean
     re-asking every contributor who had already sent work under an
-    unqualified AGPL. It now covers single sign-on and review analytics, in
-    `src/ee/`, `web/ee/` and `tests/ee/`.
+    unqualified AGPL. It now covers single sign-on, review analytics and the
+    making of repository shares, in `src/ee/`, `web/ee/` and `tests/ee/`.
 
     Everything else in this repository — `src/`, `web/` and `tests/` outside
     their `ee/` directories, `scripts/` and the deployment files — is
@@ -95,3 +95,16 @@ covered file, which plugs into the AGPL module through a registered hook so
 that every way of adding or switching on a person asks it. The enterprise
 licence code tells both what the licence in force allows. The numbers an
 administrator sees are on **Admin / Health**.
+
+## Repository sharing
+
+Making a share of a repository with another workspace, and giving more of one, need a
+licence that grants `sharing` (`src/ee/sharing/`, covered by `LICENSE_EE`). The rest of
+sharing is AGPL in every build: the check on every call, narrowing, blocking a person,
+ending a share, the owner's view of who read it, and putting a share on a developer token.
+A licence that lapses stops new shares and ends none that exist.
+
+An installation that already has a licence does not get the claim by upgrading: the claim is
+signed into the licence, so the operator who holds the signing key re-issues it with
+`sharing` among its features (see [`ee/README.md`](ee/README.md)). This project never ships
+or generates a signing key. How sharing works is in [`docs/SHARING.md`](docs/SHARING.md).

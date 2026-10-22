@@ -10,7 +10,8 @@ Append-only by design: other modules add helpers here, nobody changes the
 meaning of an existing one.
 
 The record never holds argument values, results or secrets — only the tool
-name, the repos and knowledge packs touched (by id), sizes and counters.
+name, the repos and knowledge packs touched (by id), the shares read through (by
+id, and never by the name of the shared repository), sizes and counters.
 """
 
 from __future__ import annotations
@@ -32,6 +33,15 @@ class CallRecord:
     #: ``<pack uuid>/<skill name>`` for a skill whose body was returned. Ids and
     #: validated skill names only, never a title, a path or a query.
     packs: set[str] = field(default_factory=set)
+    #: Ids of the ``repo_shares`` the call read through. A shared repository is
+    #: recorded HERE and not in ``repos``: the log is the receiving workspace's,
+    #: and its administrators must not learn from it that the repository exists.
+    shares: set[str] = field(default_factory=set)
+    #: The answer names a shared repository (the ``repos`` listing) though the call
+    #: read nothing through the share. Not logged: it only makes the answer carry the
+    #: note that text from another workspace is data. A listing is not a read, and the
+    #: owner's view of who read the share is made from ``shares``.
+    shows_shares: bool = False
     #: ok | denied | error
     status: str = "ok"
     result_bytes: int = 0
@@ -64,6 +74,28 @@ def note_repos(*slugs: str) -> None:
     rec = _CURRENT.get()
     if rec is not None:
         rec.repos.update(s for s in slugs if s)
+
+
+def note_shares(*ids: object) -> None:
+    """Record the shares a call read through, by id. Anything that is not a share
+    id (a slug, a title, a path) is ignored, so the wrong thing passed here cannot
+    put the name of a shared repository into the log."""
+    rec = _CURRENT.get()
+    if rec is None:
+        return
+    from src.access.shares import clean_ids
+
+    for item in ids:
+        rec.shares.update(clean_ids(
+            item if isinstance(item, list | tuple | set | frozenset) else (item,)))
+
+
+def note_shown_share() -> None:
+    """The answer in flight names a shared repository. It is said to the reader (the
+    note under the ``idx:`` line) and never written to the call log."""
+    rec = _CURRENT.get()
+    if rec is not None:
+        rec.shows_shares = True
 
 
 #: A skill name as ingest accepts it (``src/knowledge/ingest.py``).

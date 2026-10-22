@@ -210,6 +210,46 @@ def test_the_enterprise_features_follow_the_licence(app):
     assert doc.features["core"].available is True
 
 
+def test_the_owners_side_of_sharing_is_free_and_granting_a_share_is_the_licensed_part(app):
+    """What a client may offer on the sharing page follows from the routes. Seeing,
+    narrowing and ending a share are in every build: a workspace that was once
+    allowed to share must always be able to take it back. Creating and extending
+    one is the licence feature `sharing`, mounted only when it is granted (and no
+    licence the suite mints grants it, so it is off in both editions here)."""
+    doc = caps.build_capabilities(app)
+
+    assert doc.features["repo_sharing"].available is True
+    assert doc.pages["/admin/sharing"] is True
+    grant = doc.features["repo_sharing_grant"]
+    assert grant.available is ("sharing" in _mounted_features(app))
+    assert "sharing" not in doc.license.features
+
+
+def test_the_free_sharing_routes_do_not_stand_in_for_the_licensed_ones():
+    """`/api/sharing` and `/api/sharing-grants` are different prefixes: a claim
+    matches a whole path segment. An app that mounts only the free router must
+    report granting a share off, or an unlicensed build would offer a button whose
+    route does not exist."""
+    from src.api.routers import sharing
+
+    application = FastAPI()
+    application.include_router(caps.router)
+    application.include_router(sharing.router)
+    doc = caps.build_capabilities(application)
+
+    assert doc.features["repo_sharing"].available is True
+    assert doc.features["repo_sharing_grant"].available is False
+
+
+def test_the_two_sharing_claims_name_different_prefixes_and_only_one_is_licensed():
+    by_key = {f.key: f for f in caps.FEATURES}
+    free, grant = by_key["repo_sharing"], by_key["repo_sharing_grant"]
+    assert free.license_feature is None and grant.license_feature == "sharing"
+    assert set(free.prefixes).isdisjoint(grant.prefixes)
+    assert not any(p.startswith(q + "/") or p == q for p in grant.prefixes
+                   for q in free.prefixes), "one claim must not cover the other"
+
+
 # ─── 2. derivation: the answer follows the routes ────────────────────
 
 

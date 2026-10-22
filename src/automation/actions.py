@@ -50,6 +50,12 @@ class Actor:
     #: token is authoritative — and a repo outside the list is as unknown as
     #: one that was never registered.
     token_filter: tuple[str, ...] | None = None
+    #: Ids of the shares the same token carries (``mcp_tokens.shared_repos``):
+    #: repositories of other workspaces shared with this one. Empty for everyone
+    #: but a read-only developer token that lists some. Only ``ask`` is meant to
+    #: read them; every other verb resolves repositories from the workspace's own
+    #: registry, where a shared repository is not.
+    token_shares: tuple[str, ...] = ()
 
 
 class ActionError(RuntimeError):

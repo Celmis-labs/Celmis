@@ -3791,9 +3791,16 @@ export type McpTokenRow = {
   user_email: string;
   issued_by: string;
   label: string;
+  /** The token's OWN entries. Shared repositories are in `shares`, never here. */
   repos: string[];
   /** The workspace's registered repos the patterns cover right now. */
   matched_repos: string[];
+  /** Repositories other workspaces share with this one that the token lists.
+   *  Absent from a server older than repository sharing. */
+  shares?: McpTokenShare[];
+  /** Sentences in English about an entry that reaches further than it looks.
+   *  The page words the ones it needs itself and does not print these. */
+  warnings?: string[];
   allow_write: boolean;
   profile: string;
   created_at: string | null;
@@ -3801,6 +3808,16 @@ export type McpTokenRow = {
   revoked_at: string | null;
   last_used_at: string | null;
   /** active | revoked | expired */
+  status: string;
+};
+
+/** One share a token lists, as the issuer's token page shows it. */
+export type McpTokenShare = {
+  share_id: string;
+  slug: string;
+  owner_name: string;
+  expires_at: string;
+  /** active | expired | revoked */
   status: string;
 };
 
@@ -3816,6 +3833,8 @@ export type McpTokenIssueIn = {
   workspace_id: string;
   label?: string;
   repos: string[];
+  /** Ids from `mcpTokensApi.shares`. Read-only developer tokens only. */
+  shares?: string[];
   allow_write: boolean;
   expires_in_days: number;
   profile: "dev" | "full";
@@ -3831,6 +3850,8 @@ export type McpCallRow = {
   tool: string;
   profile: string;
   repos: string[];
+  /** Shared repositories the call read, as `slug@owner`. */
+  shares?: string[];
   /** ok | denied | error */
   status: string;
   result_bytes: number;
@@ -3846,6 +3867,22 @@ export type McpMyTokens = {
 
 export type McpRepo = { slug: string; full_name: string };
 
+/** A repository another workspace shares with a workspace, for the token page's
+ *  picker. What the owner hid is a count here, never the patterns. */
+export type McpShare = {
+  share_id: string;
+  slug: string;
+  full_name: string;
+  owner_name: string;
+  expires_at: string;
+  allow_ask: boolean;
+  deny_count: number;
+  /** People with a live token for it now, and how many the owner allowed. */
+  holders: number;
+  max_people: number;
+  status: string;
+};
+
 export const mcpTokensApi = {
   list: (token: string, f?: { user?: string; workspace?: string; status?: string }) => {
     const qs = new URLSearchParams();
@@ -3858,12 +3895,21 @@ export const mcpTokensApi = {
   issue: (token: string, body: McpTokenIssueIn) =>
     api<McpTokenIssued>("/api/admin/mcp-tokens", { token, method: "POST", json: body }),
   patch: (token: string, id: string,
-          body: { repos?: string[]; expires_in_days?: number; allow_write?: boolean; label?: string }) =>
+          body: {
+            repos?: string[];
+            /** REPLACES the token's shared repositories; the token is not reissued. */
+            shares?: string[];
+            expires_in_days?: number; allow_write?: boolean; label?: string;
+          }) =>
     api<McpTokenRow>(`/api/admin/mcp-tokens/${id}`, { token, method: "PATCH", json: body }),
   revoke: (token: string, id: string) =>
     api<McpTokenRow>(`/api/admin/mcp-tokens/${id}/revoke`, { token, method: "POST" }),
   repos: (token: string, workspace: string) =>
     api<McpRepo[]>(`/api/admin/mcp-repos?workspace=${encodeURIComponent(workspace)}`, { token }),
+  /** The live shares granted to `workspace` (id or slug): what a token of it can
+   *  be given beyond its own repositories. */
+  shares: (token: string, workspace: string) =>
+    api<McpShare[]>(`/api/admin/mcp-shares?workspace=${encodeURIComponent(workspace)}`, { token }),
   calls: (token: string, f?: { user?: string; tool?: string; status?: string; days?: number }) => {
     const qs = new URLSearchParams();
     if (f?.user) qs.set("user", f.user);
@@ -3875,6 +3921,121 @@ export const mcpTokensApi = {
   mine: (token: string) => api<McpMyTokens>("/api/mcp/tokens/me", { token }),
   revokeMine: (token: string, id: string) =>
     api<McpTokenRow>(`/api/mcp/tokens/${id}/revoke`, { token, method: "POST" }),
+};
+
+// lane:access — repository sharing: the owner's view of what it gave another workspace.
+// Seeing, narrowing and ending a share are free (/api/sharing); making one and giving
+// more of one is the licensed `sharing` feature (/api/sharing-grants), mounted only
+// when /api/capabilities says `repo_sharing_grant` is available.
+
+/** active | expired | revoked */
+export type ShareStatus = "active" | "expired" | "revoked";
+
+export type ShareSummary = {
+  share_id: string;
+  slug: string;
+  full_name: string;
+  grantee_workspace_id: string;
+  grantee_name: string;
+  status: ShareStatus;
+  created_at: string | null;
+  expires_at: string;
+  allow_ask: boolean;
+  max_people: number;
+  /** How many path patterns the owner hides in it (the patterns are in the detail). */
+  deny_count: number;
+  /** People who hold a live token for it now. */
+  holders: number;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  /** owner | superadmin | repo_removed | workspace_deleted | expired */
+  revoke_reason: string | null;
+};
+
+export type SharePerson = { user_id: string; name: string; email: string };
+
+export type ShareHolder = SharePerson & {
+  /** How many live tokens of theirs carry the share. */
+  tokens: number;
+  last_used_at: string | null;
+};
+
+export type ShareDetail = ShareSummary & {
+  deny_globs: string[];
+  /** People the owner switched off. */
+  blocked: SharePerson[];
+  people: ShareHolder[];
+  created_by: string;
+};
+
+export type ShareActivity = {
+  ts: string;
+  tool: string;
+  status: string;
+  user_id: string;
+  name: string;
+  email: string;
+};
+
+/** What a share can be changed to by anybody: less. Anything wider is a 409. */
+export type ShareNarrowIn = {
+  add_deny?: string[];
+  expires_at?: string;
+  allow_ask?: boolean;
+  max_people?: number;
+  block?: string[];
+};
+
+export type ShareCreateIn = {
+  repo_slug: string;
+  /** The receiving workspace: its slug or id. */
+  workspace: string;
+  days?: number;
+  deny_globs?: string[];
+  max_people?: number;
+  allow_ask?: boolean;
+};
+
+/** A workspace a share could be made to (`GET /api/sharing-grants/workspaces`). */
+export type ShareTarget = { id: string; slug: string; name: string };
+
+export type ShareExtendIn = {
+  /** A new end, counted from now. */
+  days?: number;
+  /** The WHOLE list of the share's own hidden paths, not an addition to it. */
+  deny_globs?: string[];
+  allow_ask?: boolean;
+  max_people?: number;
+  /** People (user ids) to switch back on. */
+  unblock?: string[];
+};
+
+export const sharingApi = {
+  list: (token: string) => api<ShareSummary[]>("/api/sharing/shares", { token }),
+  get: (token: string, id: string) =>
+    api<ShareDetail>(`/api/sharing/shares/${encodeURIComponent(id)}`, { token }),
+  activity: (token: string, id: string, f?: { days?: number; limit?: number }) =>
+    api<ShareActivity[]>(
+      `/api/sharing/shares/${encodeURIComponent(id)}/activity`
+        + `?days=${f?.days ?? 30}&limit=${f?.limit ?? 200}`,
+      { token }),
+  narrow: (token: string, id: string, body: ShareNarrowIn) =>
+    api<ShareDetail>(`/api/sharing/shares/${encodeURIComponent(id)}`,
+      { token, method: "PATCH", json: body }),
+  revoke: (token: string, id: string) =>
+    api<ShareDetail>(`/api/sharing/shares/${encodeURIComponent(id)}/revoke`,
+      { token, method: "POST" }),
+  /** Licensed: 404 when the build does not mount it, 403 when the licence lapsed. */
+  create: (token: string, body: ShareCreateIn) =>
+    api<ShareDetail>("/api/sharing-grants", { token, method: "POST", json: body }),
+  extend: (token: string, id: string, body: ShareExtendIn) =>
+    api<ShareDetail>(`/api/sharing-grants/${encodeURIComponent(id)}/extend`,
+      { token, method: "POST", json: body }),
+  /** The other workspaces a share from the active one could go to. Licensed like
+   *  `create`, and 404 where the installation's workspaces are not one organisation
+   *  (`multi_tenant`): the caller then types a slug. */
+  workspaces: (token: string) =>
+    api<ShareTarget[]>("/api/sharing-grants/workspaces", { token }),
 };
 
 export const unruledApi = {

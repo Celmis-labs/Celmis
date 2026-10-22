@@ -580,6 +580,10 @@ def build_app() -> FastAPI:
     from src.api.routers import mcp_tokens as mcp_tokens_router
     app.include_router(mcp_tokens_router.router)
     app.include_router(mcp_tokens_router.me_router)
+    # The owner's side of repository sharing (see, narrow, end): free in every
+    # build. Creating and extending a share is Enterprise and is mounted below.
+    from src.api.routers import sharing as sharing_router
+    app.include_router(sharing_router.router)
     from src.api.routers import automation as automation_router
     app.include_router(automation_router.router)
 

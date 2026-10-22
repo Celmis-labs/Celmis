@@ -16,6 +16,12 @@ row — and checked something other than whose repository it was:
   * MCP ``caller_access`` decided research rules without asking whether the
     repository was the caller's tenant's at all, and ``list_deprecations`` /
     ``get_review`` read across every tenant.
+
+The last section is about a repository one workspace SHARES with another (a
+``repo_shares`` row, put on an MCP token by the superadmin). A share is not a
+registration: the receiving workspace's lists, groups, projects and teams are built
+from its own registry and never take the shared repository, and the owner's side
+shows nothing of the receiving workspace's.
 """
 
 from __future__ import annotations
@@ -538,3 +544,154 @@ def test_bootstrap_client_single_tenant_unchanged(registry, single_tenant,
                                                   mcp_caller, projects,
                                                   snapshots):
     assert _bootstrap(projects[WS_B], SLUG_B)["top_owners"] != []
+
+
+# ─── what a workspace SHARES is not in its registry ──────────────────
+
+
+async def _get(w, who: str, ws: str, url: str):
+    return await w.client.get(url, headers=w.h(who, ws))
+
+
+@pytest.mark.parametrize("who", ["admin_a", "member_a", "su", "gadmin"])
+async def test_the_receivers_repository_list_does_not_hold_a_shared_repository(sw, who):
+    from tests.api.rbac_world import A_REPO, B_REPO, B_REPO_FULL
+    from tests.api.sharing_world import add_share
+
+    add_share(sw)
+    r = await _get(sw, who, "ws-a", "/api/repos")
+    assert r.status_code == 200, r.text
+    slugs = {row["slug"] for row in r.json()}
+    if who != "member_a":              # a plain member sees only what a team gives
+        assert A_REPO in slugs
+    assert B_REPO not in slugs
+    assert B_REPO not in r.text and B_REPO_FULL not in r.text
+
+
+async def test_the_owners_lists_show_nothing_of_the_receiving_workspace(sw):
+    """Sharing goes one way. B sees that it gave (the sharing routes) and nothing of
+    what A holds: A's repositories, people and teams stay out of B's lists."""
+    from tests.api.rbac_world import A_REPO, A_REPO_FULL
+    from tests.api.sharing_world import add_share
+
+    add_share(sw)
+    repos = await _get(sw, "admin_b", "ws-b", "/api/repos")
+    members = await _get(sw, "admin_b", "ws-b", "/api/workspaces/wsid-b/members")
+    teams = await _get(sw, "admin_b", "ws-b", "/api/teams")
+    for r in (repos, members, teams):
+        assert r.status_code == 200, r.text
+        for needle in (A_REPO, A_REPO_FULL, "acme-corp.io/a", "alpha-team", "member-a@"):
+            assert needle not in r.text, needle
+
+
+async def test_a_team_grant_of_the_receiver_on_a_shared_repository_opens_nothing(sw):
+    """A team grant is keyed by the slug and the route does not check the registry
+    (it never did: a grant on a repository that is registered nowhere is accepted
+    too). It is inert because every repository route checks the registry of the
+    active workspace BEFORE it looks at grants: a grant of A's team on B's repository
+    changes what nobody can do, in A or in B."""
+    from src.api.deps import _effective_repo_permission
+    from tests.api.rbac_world import B_REPO
+    from tests.api.sharing_world import WS_B, add_share, share_row
+
+    share_id = add_share(sw)
+    in_b = ("member_b", "admin_b")
+    before = {who: await _effective_repo_permission(B_REPO, sw.users[who], WS_B) for who in in_b}
+    r = await sw.client.put(f"/api/teams/{sw.ids['team_a']}/repos/{B_REPO}",
+                            json={"permission": "admin"}, headers=sw.h("admin_a", "ws-a"))
+    assert r.status_code in (200, 403, 404, 422), r.text
+    assert {who: await _effective_repo_permission(B_REPO, sw.users[who], WS_B)
+            for who in in_b} == before, "B's own permissions did not move"
+    for who in ("admin_a", "member_a"):
+        for method, url in (("GET", f"/api/repos/{B_REPO}/branches"),
+                            ("GET", f"/api/repos/{B_REPO}/pulls"),
+                            ("POST", f"/api/repos/{B_REPO}/index"),
+                            ("DELETE", f"/api/repos/{B_REPO}")):
+            got = await sw.client.request(method, url, headers=sw.h(who, "ws-a"))
+            assert got.status_code in (403, 404), (who, method, url, got.status_code)
+    # A refused removal by the receiver is not the owner removing the repository:
+    # the share is the owner's and stays in force.
+    assert share_row(sw, share_id).revoked_at is None
+    assert not [a for a in sw.audit if a["action"].startswith("sharing.")]
+
+
+async def test_a_project_of_the_receiver_cannot_name_a_shared_repository(sw):
+    from tests.api.rbac_world import A_REPO, B_REPO
+    from tests.api.sharing_world import WS_A, add_share
+
+    add_share(sw)
+    from src.api.routers.projects import _require_registered
+
+    await _require_registered([A_REPO], WS_A, sw.users["admin_a"])
+    with pytest.raises(HTTPException) as refused:
+        await _require_registered([B_REPO], WS_A, sw.users["admin_a"])
+    assert refused.value.status_code == 404
+    with pytest.raises(HTTPException) as missing:
+        await _require_registered(["github_nobody-nothing"], WS_A, sw.users["admin_a"])
+    assert (missing.value.status_code, missing.value.detail.replace("github_nobody-nothing", "")
+            ) == (404, refused.value.detail.replace(B_REPO, ""))
+
+
+async def test_a_group_of_the_receiver_cannot_name_a_shared_repository(sw):
+    from tests.api.rbac_world import A_REPO, B_REPO, B_REPO_FULL
+    from tests.api.sharing_world import WS_A, add_share
+
+    add_share(sw)
+    from src.api.routers.groups import _resolve_in_workspace
+
+    assert _resolve_in_workspace([A_REPO], WS_A, sw.users["admin_a"]), "its own is accepted"
+    for ident in (B_REPO, B_REPO_FULL, f"https://github.com/{B_REPO_FULL}"):
+        with pytest.raises(HTTPException) as refused:
+            _resolve_in_workspace([ident], WS_A, sw.users["admin_a"])
+        assert refused.value.status_code == 422, ident
+
+
+async def test_the_registry_of_the_receiver_is_what_it_was_with_a_share_in_force(sw):
+    """The one fact all of the above stands on: `get_in_workspace` is the registry's,
+    and a share does not add to it."""
+    from src.api.auto_review import get_auto_review_store
+    from tests.api.rbac_world import A_REPO, B_REPO
+    from tests.api.sharing_world import WS_A, WS_B, add_share
+
+    store = get_auto_review_store()
+    before = sorted(c.repo_slug for c in store.list_for_workspace(WS_A))
+    add_share(sw)
+    assert sorted(c.repo_slug for c in store.list_for_workspace(WS_A)) == before
+    assert store.get_in_workspace(WS_A, B_REPO) is None
+    assert store.get_in_workspace(WS_A, A_REPO) is not None
+    assert store.get_in_workspace(WS_B, B_REPO) is not None
+
+
+async def test_the_automation_verbs_of_a_token_holder_know_nothing_of_the_shared_repository(
+        sw, monkeypatch):
+    """Automation, review and the packs resolve repositories from the workspace's own
+    registry. A token that carries a share (`token_shares`) changes none of that: the
+    repository list, the lookup by slug and the registration check answer as they do
+    for a slug nobody registered. Only `ask` reads the share, and it is pinned apart
+    (tests/security/test_ask_on_a_shared_repo.py)."""
+    from src.automation.actions import (
+        ActionError,
+        Actor,
+        list_repos,
+        resolve_repo,
+        workspace_configs,
+    )
+    from tests.api.rbac_world import A_REPO, B_REPO
+    from tests.api.sharing_world import WS_A, add_share
+
+    share_id = add_share(sw)
+    admin = sw.users["admin_a"]
+    for token_filter in (None, ("**",)):
+        actor = Actor(user_id=admin.id, email=admin.email, workspace_id=WS_A, label="agent",
+                      token_filter=token_filter, token_shares=(share_id,))
+        assert B_REPO not in {c.repo_slug for c in workspace_configs(actor)}
+        listing = await list_repos(actor)
+        assert B_REPO not in str(listing)
+        with pytest.raises(ActionError) as shared:
+            resolve_repo(actor, B_REPO)
+        with pytest.raises(ActionError) as ghost:
+            resolve_repo(actor, "github_nobody-nothing")
+        assert str(shared.value).replace(B_REPO, "<slug>") == (
+            str(ghost.value).replace("github_nobody-nothing", "<slug>"))
+    assert resolve_repo(Actor(user_id=admin.id, email=admin.email, workspace_id=WS_A,
+                              label="agent"), A_REPO) == A_REPO

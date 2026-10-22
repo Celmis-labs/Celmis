@@ -17,6 +17,11 @@ read path:
    ``code`` on the matching repositories of the token's workspace, team rules
    or not. Path-level ``deny_globs`` of any rule on the repo still conceal
    paths (secrets, crypto, connections) — a token never opens those.
+4. **A token with shares** (``mcp_tokens.shared_repos``, via
+   :attr:`Principal.share_ids`): on top of its own list, and never through it,
+   ``code`` on the repositories other workspaces have shared with the token's
+   workspace and that the owner's consent still covers on THIS call
+   (:mod:`src.access.shares`). Those decisions carry ``via_share``.
 
 :class:`CallerScope` is what MCP tool bodies use: ``scope.get(slug)`` returns a
 decision or raises :class:`RepoNotAccessible`, whose message is the same for a
@@ -63,6 +68,12 @@ class Principal:
     #: with their own rights, or a self-service token whose ceiling is the
     #: person's own access).
     repo_patterns: tuple[str, ...] | None = None
+    #: Ids of the shares the token carries (``mcp_tokens.shared_repos``). Only an
+    #: authoritative token (``repo_patterns`` set, possibly empty) can use them; a
+    #: person asking with their own rights has no such list. They are never
+    #: matched against anything: :func:`effective_access_sync` asks
+    #: :mod:`src.access.shares` whether each one still holds.
+    share_ids: tuple[str, ...] = ()
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -169,16 +180,38 @@ def effective_access_sync(
     from src.access.resolver import resolve_access_sync
 
     registry = registered_repos(workspace_id)
-    asked = list(dict.fromkeys(registry if repos is None else repos))
+    patterns = principal.repo_patterns
+    shared: dict = {}
+    if patterns is not None and principal.share_ids:
+        from src.access import shares
+
+        try:
+            shared = shares.live_grants(
+                session, share_ids=principal.share_ids, workspace_id=workspace_id,
+                user_id=principal.user_id,
+                slugs=None if repos is None else list(repos),
+            )
+        except Exception as exc:  # noqa: BLE001 — an unreadable share grants nothing
+            logger.warning("shares_unreadable ws=%s err=%s", workspace_id, type(exc).__name__)
+            shared = {}
+        # A slug the caller's own workspace has too is the caller's own and never
+        # the owner's, whatever a share says: two readings of one name is nobody's.
+        shared = {slug: grant for slug, grant in shared.items() if slug not in registry}
+    asked = list(dict.fromkeys([*registry, *shared] if repos is None else repos))
     out: dict[str, RepoAccessDecision] = {r: RepoAccessDecision.denied(r) for r in asked}
     known = [r for r in asked if r in registry]
-    if not known:
+
+    if patterns is not None:
+        # An authoritative token never reaches the resolver below, and an empty
+        # list is "nothing of my own", not "no limit": a token that lists only
+        # shares reads exactly those.
+        listed = [r for r in known if match_any(patterns, *registry[r])]
+        if listed:
+            out.update(_token_decisions(session, workspace_id, listed))
+        out.update({slug: grant.decision() for slug, grant in shared.items() if slug in out})
         return out
 
-    patterns = principal.repo_patterns
-    if patterns is not None:
-        listed = [r for r in known if match_any(patterns, *registry[r])]
-        out.update(_token_decisions(session, workspace_id, listed))
+    if not known:
         return out
 
     out.update(resolve_access_sync(
@@ -243,13 +276,25 @@ class CallerScope:
         dec = self.decisions.get(slug)
         if dec is None or not (dec.code_visible if need == "code" else dec.researchable):
             raise RepoNotAccessible()
-        try:
-            from src.mcp_server import callctx
-
-            callctx.note_repos(slug)
-        except Exception:  # noqa: BLE001 — audit bookkeeping never blocks a read
-            pass
+        note_touched(slug, dec)
         return dec
+
+
+def note_touched(slug: str, dec: RepoAccessDecision) -> None:
+    """Record in the MCP call log that the call read ``slug``. Never blocks a read.
+
+    A repository the caller owns is recorded by name. A shared one is recorded by
+    the id of its share and NOT by name: the log belongs to the receiving
+    workspace, whose administrators must not learn that the repository exists."""
+    try:
+        from src.mcp_server import callctx
+
+        if getattr(dec, "via_share", None):
+            callctx.note_shares(dec.via_share)
+        else:
+            callctx.note_repos(slug)
+    except Exception:  # noqa: BLE001 — audit bookkeeping never blocks a read
+        pass
 
 
 def _indexed_slugs() -> list[str]:
@@ -284,5 +329,5 @@ def mcp_scope(candidates: Iterable[str] | None = None) -> CallerScope:
 __all__ = [
     "ANY", "NOT_ACCESSIBLE", "CallerScope", "Principal", "RepoNotAccessible",
     "effective_access", "effective_access_sync", "match_any", "matched_repos",
-    "mcp_scope", "pattern_matches", "registered_repos",
+    "mcp_scope", "note_touched", "pattern_matches", "registered_repos",
 ]

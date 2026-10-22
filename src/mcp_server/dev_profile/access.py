@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Literal
 
-from src.access.effective import NOT_ACCESSIBLE, RepoNotAccessible  # noqa: F401
+from src.access.effective import NOT_ACCESSIBLE, RepoNotAccessible, note_touched  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +40,40 @@ class DevScope:
     kind: str = ""
     allow_write: bool = False
 
-    def slugs(self, *, need: Need = "metadata") -> list[str]:
+    def slugs(self, *, need: Need = "metadata", shared_first: bool = False) -> list[str]:
+        """The repositories the caller may use at ``need``, sorted by name.
+
+        ``shared_first`` puts the ones another workspace shares ahead of the rest
+        (each group still sorted). A tool that fans out over every repository and
+        must cut the list (``find``, ``grep``) asks for it, so that the cut falls
+        on the caller's own repositories and not silently on the shared one that
+        the person was given this token for."""
         out = []
         for slug, dec in sorted(self.decisions.items()):
             if need == "code" and not dec.code_visible:
                 continue
             out.append(slug)
+        if shared_first:
+            out.sort(key=lambda s: 0 if self.is_shared(s) else 1)
         return out
+
+    def is_shared(self, slug: str) -> bool:
+        """Is ``slug`` a repository another workspace shares with the caller's?"""
+        return bool(getattr(self.decisions.get(slug), "via_share", None))
+
+    def note_shared(self, slugs) -> None:  # noqa: ANN001
+        """Record, in the call log, the shares a search over ``slugs`` reads.
+
+        A tool that searches every repository does not call :meth:`get` for each
+        one, and the log of a caller who can read many repositories does not list
+        them (``caller_access`` notes only small sets). The owner reads the usage
+        of a share from that log, so a search that went through a shared
+        repository must say so itself. By share id, never by name."""
+        for slug in slugs:
+            dec = self.decisions.get(slug)
+            if dec is not None and getattr(dec, "via_share", None) and slug not in self.touched:
+                self.touched.append(slug)
+                note_touched(slug, dec)
 
     def get(self, slug: str, *, need: Need = "code"):  # noqa: ANN201
         dec = self.decisions.get(slug)
@@ -54,12 +81,9 @@ class DevScope:
             raise RepoNotAccessible
         if slug not in self.touched:
             self.touched.append(slug)
-            try:
-                from src.mcp_server import callctx
-
-                callctx.note_repos(slug)
-            except Exception:  # noqa: BLE001 - audit bookkeeping never blocks a read
-                pass
+            # By name for the caller's own repository, by share id for a shared
+            # one: the call log is the receiving workspace's and never names it.
+            note_touched(slug, dec)
         return dec
 
     def level(self, slug: str) -> str:

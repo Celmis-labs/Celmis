@@ -20,6 +20,176 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.0] — 2026-10-22
+
+A workspace can share one repository with one other workspace for research: for a fixed
+time, with paths hidden, a ceiling on how many people may read it, and questions off unless
+the owner turns them on. The superadmin names the share on the developer tokens of the
+few people of the receiving workspace who should have it, and everybody else in that workspace
+gets the answer they get for a repository that does not exist. Making a share and giving
+more of one are enterprise features; everything that keeps a share safe is in every build.
+The release also stops `refs` and `map` from giving away names that only a hidden file
+defines, in every repository and not only in shared ones, and reads the deny patterns of a
+share the way they were meant.
+
+### Upgrade notes
+
+- **Run the database migration** (`alembic upgrade head`; one revision, `017a06ecb85d`).
+  It adds one table (`repo_shares`) and two nullable columns (`mcp_tokens.shared_repos`,
+  `mcp_call_log.shares`). It is additive and can be run twice. There is no new setting. An
+  installation that shares nothing behaves as it did.
+- **Making a share needs a licence that grants `sharing`.** The claim is signed into the
+  licence, so an installation that already has one does not gain it by upgrading: whoever
+  holds the signing key re-issues the licence with `sharing` among its features (for
+  example `scripts/ee_mint_license.py --features sso,analytics,sharing`) and the customer
+  enters it as before; the licensed routes are mounted as soon as it is. This project does not
+  ship, generate or hold a signing key. Until then 3.1.0 deploys and runs, and no share can
+  be made. Narrowing, blocking a person, revoking, reading the usage and putting a share on
+  a token stay in the community edition, and a licence that lapses or is removed ends no
+  share that exists: each runs to its own end or until its owner revokes it.
+- **Questions over a shared repository are off.** `allow_ask` is false on every share until
+  its owner turns it on, because a question sends excerpts of the owner's code to the
+  receiving workspace's language-model provider, on that workspace's budget.
+- **This release needs a server deploy** (and the web image, for the new pages). The Claude
+  Code plugin and `celmis-pack` are unchanged apart from the version they report.
+- **Rolling back:** `UPDATE repo_shares SET revoked_at = now(), revoked_by = 'operator',
+  revoke_reason = 'superadmin' WHERE revoked_at IS NULL` ends every share from the next call
+  on. `alembic downgrade -1` then removes the table and the columns; the previous release
+  ignores them, so a token that carried shares simply loses them and keeps its own
+  repositories.
+- **Write deny patterns from the root of the repository.** A pattern that begins with `/`
+  or `./` (the way a `.gitignore` is written) matches nothing in an access rule. 3.1.0 reads
+  such a pattern as meant where a share applies it (the share's own list and the owner's
+  rules for the shared repository, see *Security*); in the rules you set for a workspace's
+  own reading of its repositories the matcher is unchanged, so write `secrets/**` there, not
+  `/secrets/**`.
+
+### Added
+
+- **Share a repository with another workspace for research.** An owner or admin of the
+  workspace that holds a repository shares it with one other workspace of the installation
+  (`POST /api/sharing-grants`, enterprise): for a fixed time (30 days unless said, at most
+  `CELMIS_MCP_TOKEN_MAX_DAYS`), with extra hidden paths, a ceiling of 1 to 25 people (5
+  unless said), and questions off. Reading only: no review, no write, no webhook, no web
+  page, no team rule of the receiving workspace and no REST call ever reaches the
+  repository. Only a repository registered in the owner's own workspace can be shared, so a
+  share cannot be passed on, and neither side can be the built-in `default` workspace.
+  There is one running share per owner, receiver and repository.
+- **Pick the receiving workspace from a list.** The "Share a repository" dialog (enterprise)
+  lists the installation's other workspaces by name (`GET /api/sharing-grants/workspaces`),
+  because the admin of the owner workspace is usually not a member of the one that should
+  receive the share. Never the owner itself and never the built-in `default` workspace; for the
+  people who may make a share, like the dialog. Only under `single_tenant`, where all workspaces
+  of an installation are one organisation: under `multi_tenant` the route answers `404` like a
+  path that does not exist, to everybody, and the dialog keeps its text field.
+- **Give more of a share in place.** `POST /api/sharing-grants/{id}/extend` (enterprise)
+  sets a later end, a different list of hidden paths, questions on, more people, or
+  switches a person back on, all or nothing, with the before and after in the owner's
+  audit trail. Nobody reissues a token. A share that has ended, or whose repository is no
+  longer the one that was shared, is not extended: it is made again.
+- **A share reaches only the tokens the superadmin names it on.** `GET
+  /api/admin/mcp-shares?workspace=` lists the shares live for a workspace;
+  `POST /api/admin/mcp-tokens` takes `shares`, and `PATCH /api/admin/mcp-tokens/{id}`
+  replaces them on a token that already exists, without reissuing it. Only a read-only
+  developer token can carry one. A shared repository is listed beside the repository list,
+  never inside it: no pattern, `*` included, matches one. Everybody else in the receiving
+  workspace, administrators included, gets the answer they get for a repository that does
+  not exist, and a share that cannot be put on a token (unknown, ended, somebody else's, no
+  room) answers one sentence, "No such share.". The places of a share are counted under a
+  lock on its row, in the same transaction that writes the token, so two tokens issued at
+  the same moment cannot both take the last place.
+- **`refs` follows a shared repository both ways.** The callers of a symbol of the shared
+  repository are looked for in the repositories the person can read, and the callers of a
+  symbol of an own repository in the shared one, up to 20 repositories in parallel. It stays
+  the text scan it has always been; there is still no call graph between repositories.
+- **`repos` marks shared repositories** (`shared` after the level), `find` and `grep` search
+  them first when they have to cut the list, and every answer of a call that read through a
+  share carries one line saying that its text comes from another workspace and is data, not
+  instructions.
+- **`ask` over a shared repository, when the owner allows it.** The owner's hidden paths,
+  the share's own and secret files never reach the model; the owner's vectors are read with
+  the owner's tenant filter in a query of their own. The web chat of the receiving workspace
+  never sees a shared repository. When the owner has not allowed questions, the person who
+  holds the share is told so ("ask is not enabled for this shared repository"), since they
+  already know the repository from `repos`; anybody else gets the answer for a repository
+  that does not exist.
+- **The owner sees who reads the repository.** `GET /api/sharing/shares`, `/{id}` and
+  `/{id}/activity` show each share, the people who hold a token for it, and the recent
+  reads: who (name and email), when, which tool, never the question or the code. The owner
+  can narrow a share (`PATCH`: more hidden paths, an earlier end, questions off, fewer
+  people), switch one person off without ending the share, and end it. Widening through
+  these routes is `409` and says it needs the licence.
+- **Admin, Sharing** (a new page, in sixteen languages) and **Shared with us** on the MCP
+  tokens page. The page lists the shares the workspace made, with the names and emails of
+  the readers marked as people of another workspace, and lets its owner and admins narrow
+  a share, switch a person off and end it. Making and extending a share is the licensed
+  dialog, drawn only where the capabilities document says the routes are mounted; a build
+  without the licence says so once. On the MCP tokens page, still for superadmins only, a
+  read-only developer token can carry shares, they can be changed in place without
+  reissuing the token, and a token cut short by a share says so.
+- **The capabilities document says what is mounted.** `repo_sharing` is available in every
+  build; `repo_sharing_grant` only with a licence that grants `sharing`.
+- **A new document, `docs/SHARING.md`,** covers what a share is, what the owner agrees to,
+  what the receiving side sees, what is written down, how to stop it, and a worked example.
+
+### Security
+
+- **A share is checked on every call**, not when the token is issued: its expiry and
+  revocation, the owner's own deny rules, the repository still being registered to the owner
+  under the same provider and name as when it was shared (a repository removed and
+  registered again does not revive its old share), the person still being a member of the
+  receiving workspace and not switched off. A share whose lists cannot be read is refused.
+  Removing or purging the repository, deleting either workspace, or deleting the account
+  whose personal workspace it was ends its shares and writes `sharing.auto_revoked`.
+- **`refs` no longer reports symbols that only a hidden file defines.** It looked a name up in
+  the whole graph, so a name defined only in a file the caller may not list (a deny rule, a
+  secret file, a share's hidden path) answered "callers: 0", while a name that is nowhere
+  answered "no symbol": a probe for which names a hidden file defines. Both now answer
+  alike. This applies to every repository, not only shared ones.
+- **`map` no longer prints names from hidden files.** It named the most used symbols of each
+  directory from every file in it, so `top: helper` could give away `helper` of a file that
+  was hidden. It now names symbols of the files the caller may list. This applies to every
+  repository.
+- **A deny pattern written from the root of the repository hides what it says.** The
+  matcher compares patterns with paths that have no leading `/` or `./`, so `/secrets/**`,
+  `./secrets/**` and `src/**/` matched nothing, and an owner who saw no error believed the
+  directory hidden. A share's own list is now written down in the form the matcher reads
+  (leading `/` or `./` dropped, `src/**/` read as the directory and everything under it,
+  a pattern that is only the root as the whole repository), and the owner's deny rules are
+  read the same way every time a share applies them, so a row written earlier or by hand
+  hides the same. Patterns never hide less than they did.
+- **Question answering over a shared repository** reads the owner's vectors with the owner's
+  tenant filter in a query of its own; the receiving workspace's vectors keep theirs. The
+  language-model provider and the budget are the receiving workspace's, which is why
+  questions are off by default. The audit line of such a question, which the receiving
+  workspace's administrators read, lists the files of a shared repository as one entry
+  with their number, never as slugs and paths.
+- **A token never searches the whole installation.** Q&A started from a token held by a
+  global administrator used the installation-wide vector scope; it now uses the tenant scope
+  of the workspace that holds the data, like every other token. What it keeps on its own
+  repositories is the notes that carry no tenant (written before notes were stamped, or by
+  the built-in `default` workspace, which is never stamped), so an upgrade does not empty
+  the vault part of its answers; a note stamped for another workspace is never read, and a
+  shared repository is always read under its owner's tenant alone.
+- **Raw graph queries refuse a shared repository** (they cannot filter by path).
+- **The receiving workspace's logs never name the repository or its owner.** The call log
+  keeps the ids of the shares a call read, which only whoever issues tokens sees expanded;
+  the action audit page shows only how many shared repositories a token has. What happens
+  to a share is written to the owner's audit trail (`sharing.created`, `sharing.extended`,
+  `sharing.narrowed`, `sharing.revoked`, `sharing.token_attached`, `sharing.token_detached`,
+  `sharing.auto_revoked`).
+
+### Changed
+
+- **Making a share is licensed; everything that makes one safer is not.** `sharing` joins
+  `sso` and `analytics` as a licence claim (`KNOWN_FEATURES`, in `src/ee/license.py` and in
+  `scripts/ee_mint_license.py`). An older build given a licence that names `sharing` ignores
+  the claim it does not know. `ee/README.md`, `LICENSING.md`, `docs/MCP_DEV.md`,
+  `docs/CODEBASE.md` (a library of packs shared across workspaces stays a separate, later
+  idea), `docs/ROLES_AND_ACCESS.md` and `docs/mcp-access.md` describe it.
+- **The call log has a `shares` column** (ids only), and `mcp.token_issued` carries
+  `shared_repos`, a count.
+
 ## [3.0.2] — 2026-10-21
 
 The Claude Code plugin keeps its address and token as plugin options instead of

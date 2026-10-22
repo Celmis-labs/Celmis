@@ -121,7 +121,9 @@ def run(query: str, repo: str = "", kind: str = "", mode: str = "auto",
                           "pass a symbol name, e.g. find(query=\"OrderService\")")
     if mode not in MODES:
         return emit.error(None, f"mode must be one of {', '.join(MODES)}")
-    slugs, err = common.pick_repos(scope, repo)
+    # Shared repositories first: `cap_repos` below cuts from the end, and a token
+    # that reaches many repositories must not lose the shared one to the cut.
+    slugs, err = common.pick_repos(scope, repo, shared_first=True)
     if err:
         return err
     slugs, cut = common.cap_repos(slugs)

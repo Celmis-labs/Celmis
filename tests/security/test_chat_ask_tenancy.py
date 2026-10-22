@@ -20,10 +20,18 @@ workspace pointing at somebody else's project or repository.
 Source-level assertions: exercising the streaming endpoint needs a database, a
 retriever and a provider, and a test that needs all three is the test that does
 not run in CI.
+
+The last two sections are about a repository SHARED with the workspace. A share
+lets an MCP token (and only that) ask about the owner's code, and only when the
+owner allowed questions. The web chat is a person's own session: it never carries
+a token's repo list or its shares into the Q&A pipeline, and a chat or a project
+cannot be pointed at a shared repository, because it is not one of the workspace's
+registered repositories.
 """
 
 from __future__ import annotations
 
+import ast
 import inspect
 import re
 from pathlib import Path
@@ -111,3 +119,98 @@ def test_the_guards_are_reachable_from_both_routers():
     assert callable(_owned_chat) and callable(_owned_project)
     projects = (ROOT / "src" / "api" / "routers" / "projects.py").read_text()
     assert "from src.api.routers.chats import" not in projects
+
+
+# ─── a repository shared with the workspace is not part of its web chat ───
+
+
+def _calls_in(source: str, function: str | None, callee: str):
+    """The keyword names of every call to ``callee`` (a function or a method) made
+    inside ``function``, or anywhere when ``function`` is None."""
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if function is not None and node.name != function:
+            continue
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            name = (call.func.attr if isinstance(call.func, ast.Attribute)
+                    else getattr(call.func, "id", None))
+            if name == callee:
+                yield node.name, {k.arg for k in call.keywords}
+
+
+def test_the_web_chat_asks_the_pipeline_as_a_person_and_never_as_a_token():
+    """Both web routes (the chat ask and its stream) reach the pipeline without a
+    token's repo list or its shares: that is how a shared repository stays out of
+    them. A person's access is their own workspace's (`resolve_access`)."""
+    seen = []
+    for function, callee in (("ask", "_generate_full"), ("_ask_stream", "retrieve")):
+        seen += [(function, kw) for _name, kw in _calls_in(QA, function, callee)]
+    assert len(seen) == 2, "the two web ask paths moved: re-check what they pass"
+    for function, keywords in seen:
+        assert not keywords & {"token_filter", "token_shares", "name_free_notice"}, (
+            f"{function} hands the pipeline a token's rights")
+
+
+def test_only_the_token_verbs_hand_shares_to_the_pipeline():
+    """The set of places that put a share into a question, pinned: the MCP `ask`
+    action, the actor it is built from, and the pass-through in between. A new one
+    has to be added here on purpose, with its own test on ``allow_ask``."""
+    allowed = {
+        "api/routers/qa.py",                    # _generate_full: a parameter, passed on
+        "automation/actions.py",                # Actor.token_shares
+        "automation/actions_reviews.py",        # ask_code: only the shares that allow it
+        "mcp_server/identity.py",               # actor_for: from the verified token
+        "mcp_server/dev_profile/tools_ask.py",  # the dev `ask` verb
+        "qa/multi_repo_retriever.py",           # retrieve: Principal(share_ids=...)
+    }
+    src_dir = ROOT / "src"
+    found = {
+        str(path.relative_to(src_dir))
+        for path in src_dir.rglob("*.py")
+        if re.search(r"\btoken_shares\b", path.read_text())
+    }
+    assert found == allowed
+
+
+def test_the_stream_route_has_no_way_to_take_shares_at_all():
+    from src.api.routers import qa
+
+    params = inspect.signature(qa._ask_stream).parameters
+    assert not {"token_shares", "token_filter"} & set(params)
+
+
+async def test_a_chat_cannot_be_started_on_a_repository_shared_with_the_workspace(
+        tmp_path, monkeypatch):
+    from src.api.routers import chats
+    from tests.api.sharing_world import A_REPO, B_REPO, add_share, shared_world
+
+    async with shared_world(tmp_path, monkeypatch, extra_routers=(chats.router,)) as w:
+        add_share(w, ask=True)       # the owner allows questions: this is the open case
+        mine = await w.client.post("/api/chats", json={"repo_slug": A_REPO},
+                                   headers=w.h("admin_a", "ws-a"))
+        assert mine.status_code == 201, mine.text
+        theirs = await w.client.post("/api/chats", json={"repo_slug": B_REPO},
+                                     headers=w.h("admin_a", "ws-a"))
+        assert theirs.status_code == 404 and theirs.json()["detail"] == "repo not registered"
+
+
+async def test_a_project_cannot_take_a_repository_shared_with_the_workspace(
+        tmp_path, monkeypatch):
+    from src.api.routers import projects
+    from tests.api.sharing_world import A_REPO, B_REPO, add_share, shared_world
+
+    async with shared_world(tmp_path, monkeypatch, extra_routers=(projects.router,)) as w:
+        add_share(w, ask=True)
+        mine = await w.client.post(
+            "/api/projects", json={"name": "mine", "repos": [{"repo_slug": A_REPO}]},
+            headers=w.h("admin_a", "ws-a"))
+        assert mine.status_code == 201, mine.text
+        theirs = await w.client.post(
+            "/api/projects", json={"name": "theirs", "repos": [{"repo_slug": B_REPO}]},
+            headers=w.h("admin_a", "ws-a"))
+        assert theirs.status_code == 404 and B_REPO in theirs.json()["detail"]
+

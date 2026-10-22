@@ -570,6 +570,8 @@ def delete_account(
         revoked_invites = release_account_sync(s, user_id=user.id, email=user.email)
         revoked_tokens = revoke_account_tokens_sync(s, user_id=user.id)
         revoked_project_tokens: dict[str, list[str]] = {}
+        ended_shares: list[str] = []
+        share_owners: dict[str, str] = {}
         s.execute(_delete(WorkspaceMember).where(WorkspaceMember.user_id == user.id))
         ws = s.execute(
             _select(Workspace).where(Workspace.slug == personal_slug(user.id))
@@ -588,6 +590,12 @@ def delete_account(
             workspace_tokens, revoked_project_tokens = revoke_workspace_tokens_sync(
                 s, by=f"workspace_deleted:{user.id}", workspace_ids=[ws.id])
             revoked_tokens = merge_revocations(revoked_tokens, workspace_tokens)
+            # Shares the personal workspace gives or receives end with it.
+            from src.access import shares as repo_shares
+
+            ended_shares = repo_shares.revoke_for_workspace(
+                s, ws.id, reason="workspace_deleted", by=user.id)
+            share_owners = repo_shares.owner_workspaces(s, ended_shares)
             s.delete(ws)
         s.commit()
 
@@ -603,6 +611,15 @@ def delete_account(
         revoked_tokens, actor=user.email, actor_id=user.id, user_id=user.id,
         via="account_deleted", ip=client_ip(request),
         project_revoked=revoked_project_tokens)
+    if ended_shares:
+        from src.access import shares as repo_shares
+
+        for share_id in ended_shares:
+            repo_shares.audit_owner(
+                "sharing.auto_revoked",
+                owner_workspace_id=share_owners.get(share_id, personal_ws_id or ""),
+                share_id=share_id, actor=user.email, actor_id=user.id,
+                ip=client_ip(request), detail={"reason": "workspace_deleted"})
 
     # Best-effort: purge the personal workspace's encrypted credential rows.
     if personal_ws_id is not None:

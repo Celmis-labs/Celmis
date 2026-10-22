@@ -170,6 +170,19 @@ class RepoAccessDecision:
     #: A project's include/exclude patterns laid over the rules (None = no
     #: project narrowing). Only ever hides more; see :mod:`src.access.file_scope`.
     scope: object | None = None
+    #: The ``repo_shares`` id this decision comes from, when the repository is
+    #: another workspace's and was shared with the caller's (``src.access.shares``).
+    #: None for everything that is the caller's own. Deliberately not in
+    #: :meth:`to_dict`: that is what the UI and the API show, and a share is not
+    #: something they show.
+    via_share: str | None = None
+    #: The workspace whose data this decision reads, when it is not the caller's
+    #: own (the owner of a shared repository). Vector and graph reads of the
+    #: repository filter on THIS workspace, never on the caller's.
+    data_workspace: str | None = None
+    #: May ``ask`` send excerpts of the repository to the caller's model. True for
+    #: everything the caller owns; the owner of a share decides it there.
+    ask_ok: bool = True
 
     def with_scope(self, scope: object | None) -> RepoAccessDecision:
         """This decision, narrowed to a project's file scope."""

@@ -27,6 +27,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -957,6 +958,72 @@ class RepoAccessRule(Base):
             name="uq_repo_access_rule",
         ),
         Index("ix_repo_access_rules_repo", "workspace_id", "repo_slug"),
+    )
+
+
+class RepoShare(Base):
+    """One repository of a workspace, readable by ONE other workspace, for a while.
+
+    The owner's consent, not a grant: nobody in the receiving workspace reads the
+    repository because a share exists. A person does only when the superadmin
+    names this share's id on that person's MCP token (``mcp_tokens.shared_repos``)
+    and every condition of :mod:`src.access.shares` still holds on the call. The
+    row says what the owner agreed to: for how long, which paths stay hidden,
+    whether ``ask`` may send excerpts to the receiver's model, how many people may
+    hold a token for it and whom the owner has switched off.
+
+    No foreign keys, like ``repo_access_rules`` and ``mcp_tokens``: the workspace
+    and the repository live in other stores, and a share must keep its history
+    after either is gone. Ending one is explicit (``revoked_at`` and a reason), so
+    a repository registered again under the same slug never revives it.
+
+    ``repo_provider`` and ``repo_full_name`` are the identity of the repository at
+    the time of sharing: a slug can be taken over by another repository after the
+    first one is removed.
+    """
+
+    __tablename__ = "repo_shares"
+
+    #: A lower-case uuid4. Wherever one arrives from outside, or reaches a LIKE,
+    #: it is checked against ``src.access.shares.SHARE_ID_RE`` first.
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_uuid_pk)
+    owner_workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    grantee_workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    repo_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    repo_provider: Mapped[str] = mapped_column(Text, nullable=False)
+    repo_full_name: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Paths the receiver never sees, on top of the owner's own rules for the repo.
+    deny_globs: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    allow_ask: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false(), default=False)
+    max_people: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="5", default=5)
+    #: User ids the owner has switched off without ending the share.
+    blocked_user_ids: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    created_by: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: owner | superadmin | repo_removed | workspace_deleted | expired
+    revoke_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("owner_workspace_id <> grantee_workspace_id",
+                        name="owner_differs_from_grantee"),
+        CheckConstraint("max_people BETWEEN 1 AND 25", name="max_people_range"),
+        Index("ix_repo_shares_owner", "owner_workspace_id"),
+        Index("ix_repo_shares_grantee", "grantee_workspace_id", "revoked_at"),
+        # One live share of a repository per pair of workspaces. A revoked or
+        # lapsed row stays as history and does not count.
+        Index(
+            "uq_repo_shares_live", "owner_workspace_id", "grantee_workspace_id",
+            "repo_slug", unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+            sqlite_where=text("revoked_at IS NULL"),
+        ),
     )
 
 
@@ -2380,6 +2447,11 @@ class McpToken(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True)
     last_used_ip: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Ids of ``repo_shares`` rows this token may read, next to ``repo_patterns``
+    #: and never through it: a glob cannot name a shared repository by
+    #: construction. NULL (or empty) = what a token was before sharing existed.
+    #: Honoured only on a ``pat`` token of the ``dev`` profile that cannot write.
+    shared_repos: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         Index("ix_mcp_tokens_ws_user", "workspace_id", "user_id"),
@@ -2416,6 +2488,10 @@ class McpCallLog(Base):
     #: Ids of the knowledge packs the call read from (NULL before packs existed
     #: and for calls that touched none). Ids only — never a pack's name or text.
     packs: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    #: Ids of the ``repo_shares`` the call read through (NULL for calls that
+    #: touched none). Ids only: the slug of a shared repository is never written
+    #: to the receiving workspace's log, which is why it is not in ``repos``.
+    shares: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         Index("ix_mcp_call_log_ts", "ts"),

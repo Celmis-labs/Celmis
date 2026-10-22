@@ -45,6 +45,8 @@ class PurgeReport:
     group_memberships_removed: int = 0
     groups_touched: list[str] = field(default_factory=list)
     orphan_rows_removed: int = 0
+    #: Shares of the repository to other workspaces that this purge ended.
+    shares_revoked: int = 0
     disk_bytes_freed: int = 0
     elapsed_seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
@@ -227,6 +229,25 @@ def _purge_groups(slug: str, report: PurgeReport) -> None:
             report.groups_touched.append(name)
 
 
+async def _end_shares(
+    slug: str, session: Any, report: PurgeReport, workspace_id: str | None,
+) -> None:
+    """End every live share of `slug` and commit it on its own.
+
+    A share is the owner's consent to let another workspace read this repository.
+    A purge takes the repository away, so the consent goes first: before the clone
+    and the vectors are removed, and not in the transaction of the other deletes,
+    where one failed statement would roll it back with them. With `workspace_id`
+    it is the owner's shares; without one (the command line, which purges a slug
+    for every workspace) it is every owner's, because the clone is shared by all."""
+    from src.access.shares import end_statement
+
+    result = await session.execute(
+        end_statement(workspace_id, slug, by="system", reason="repo_removed"))
+    report.shares_revoked = result.rowcount or 0
+    await session.commit()
+
+
 async def _purge_postgres(
     slug: str, session: Any, report: PurgeReport, workspace_id: str | None = None,
 ) -> None:
@@ -288,6 +309,13 @@ async def purge_repo(
     """
     started = time.monotonic()
     report = PurgeReport(slug=slug)
+
+    try:
+        await _end_shares(slug, session, report, workspace_id)
+    except Exception as exc:  # noqa: BLE001
+        report.errors.append(f"shares: {exc}")
+        with contextlib.suppress(Exception):
+            await session.rollback()
 
     if not skip_qdrant:
         try:

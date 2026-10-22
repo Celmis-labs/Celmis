@@ -85,6 +85,12 @@ class McpCaller:
     repo_patterns: tuple[str, ...] | None = None
     #: Write tools are refused unless the grant explicitly allows them.
     allow_write: bool = False
+    #: Ids of the shares (``repo_shares``) the token may read, next to its repo
+    #: list. Set only for a read-only ``pat`` of the ``dev`` profile (see
+    #: :attr:`src.mcp_server.token_store.TokenView.shares_apply`); empty for every
+    #: other caller. An id here is a claim, not a grant: each one is judged again
+    #: on every call by :mod:`src.access.shares`.
+    share_ids: tuple[str, ...] = ()
 
 
 _WS_RANK = WORKSPACE_ROLE_RANK
@@ -276,6 +282,7 @@ class _Grant:
     patterns: tuple[str, ...] | None = None
     allow_write: bool = False
     workspace_id: str | None = None
+    shares: tuple[str, ...] = ()
 
 
 def grant_claim(payload: dict | None) -> str | None:
@@ -325,6 +332,9 @@ def resolve_grant(payload: dict, user_id: str) -> _Grant:
         patterns=view.patterns if view.authoritative else None,
         allow_write=view.allow_write,
         workspace_id=view.workspace_id,
+        # The column counts for a read-only developer `pat` and for nothing else,
+        # whatever is written in it.
+        shares=view.shares if view.shares_apply else (),
     )
 
 
@@ -460,6 +470,7 @@ def resolve_caller() -> McpCaller:
         tuple(scopes), authenticated=True, workspace_resolved=resolved,
         token_id=grant.token_id, kind=grant.kind,
         repo_patterns=grant.patterns, allow_write=grant.allow_write,
+        share_ids=grant.shares,
     )
 
 
@@ -538,18 +549,35 @@ def caller_access(repos: list[str]):
             return caller, {r: RepoAccessDecision.denied(r) for r in repos}
         foreign = [r for r in repos
                    if not tenancy.workspace_owns_slug(caller.workspace_id, r)]
+        if caller.share_ids and foreign:
+            # A token with shares: a slug that is not the caller's workspace's
+            # own may be a repository shared with it, and `effective_access`
+            # alone says whether it is (through a live share, nothing else). A
+            # slug the workspace HAS but cannot own alone (bound to another
+            # workspace as well) stays refused, as before.
+            from src.access.effective import registered_repos
+
+            mine = registered_repos(caller.workspace_id)
+            foreign = [r for r in foreign if r in mine]
         own = [r for r in repos if r not in foreign]
         decided = {r: RepoAccessDecision.denied(r) for r in foreign}
     if own:
         decided.update(effective_access(
-            Principal(caller.user_id, caller.is_admin, caller.repo_patterns),
+            Principal(caller.user_id, caller.is_admin, caller.repo_patterns,
+                      share_ids=caller.share_ids),
             caller.workspace_id, own,
         ))
     if len(repos) <= 20:
         from src.mcp_server import callctx
 
+        # The caller's own repositories, by name. A shared one is NOT noted here: this
+        # is the set the caller COULD research, and the owner reads the usage of a share
+        # from the call log, so a share is recorded only when the call reads through it
+        # (`DevScope.get` / `DevScope.note_shared`, by id and never by name). Noting it
+        # here made every call of a person who holds a share look like a read of it.
         callctx.note_repos(*[r for r in repos
-                             if (decided.get(r) is not None and decided[r].researchable)])
+                             if (decided.get(r) is not None and decided[r].researchable
+                                 and not getattr(decided[r], "via_share", None))])
     return caller, decided
 
 
@@ -592,4 +620,5 @@ def actor_for(label: str, *, writing: bool = False):  # noqa: ANN201 — automat
         workspace_id=caller.workspace_id,
         label=label,
         token_filter=caller.repo_patterns,
+        token_shares=caller.share_ids,
     )

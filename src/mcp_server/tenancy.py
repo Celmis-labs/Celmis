@@ -139,6 +139,11 @@ def unrestricted(dec) -> bool:  # noqa: ANN001
     """
     if dec is None:
         return False
+    if getattr(dec, "via_share", None):
+        # Another workspace's repository, shared. Its owner's rules and the
+        # secret floor hide paths a query cannot be filtered by, so a shared
+        # repository is never "unrestricted" — not even one with no deny glob.
+        return False
     if dec.open_default:
         return True
     return any(

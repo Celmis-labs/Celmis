@@ -41,6 +41,10 @@ SURFACES: dict[str, set[str]] = {
     "/api/access/": {"require_workspace_admin"},
     "/api/admin/access-requests": {"require_superadmin"},
     "/api/admin/mcp-": {"_require_issuer"},
+    # Repository sharing, the owner's side: the list is for the active workspace's
+    # administrators, every route that names one share for the administrators of
+    # the workspace that OWNS it (the next test says which is which).
+    "/api/sharing": {"require_workspace_admin", "require_share_admin"},
     "/oauth/clients": {"require_workspace_admin"},
     "/oauth/register": {"require_workspace_admin"},
     # knowledge packs: a workspace role first (reader / author), or a login for
@@ -106,8 +110,9 @@ def _router_modules() -> list:
     try:  # the enterprise package is optional in a trimmed build
         from src.ee.analytics import productivity_router
         from src.ee.analytics import router as analytics_router
+        from src.ee.sharing import router as sharing_grants_router
 
-        found += [analytics_router, productivity_router]
+        found += [analytics_router, productivity_router, sharing_grants_router]
     except ImportError:  # pragma: no cover
         pass
     return found
@@ -140,6 +145,7 @@ def test_the_walk_finds_the_surfaces_it_guards() -> None:
     paths = {path for _, path, _ in ROUTES}
     for prefix in ("/api/memories", "/api/task-context", "/api/connections", "/api/learning",
                    "/api/access/", "/api/admin/mcp-tokens", "/api/admin/mcp-calls",
+                   "/api/admin/mcp-shares", "/api/sharing/shares",
                    "/api/codebase/packs", "/api/codebase/invites"):
         assert any(p.startswith(prefix) for p in paths), prefix
     assert len(ROUTES) > 150
@@ -208,3 +214,46 @@ def test_the_project_token_routes_are_for_the_superadmin_alone() -> None:
     for (method, path), wanted in EXCEPTIONS.items():
         if path.startswith("/api/projects/") and path.endswith(("mcp-tokens", "{token_id}")):
             assert gates[(method, path)] & wanted, (method, path)
+
+
+def test_a_route_that_names_one_share_is_gated_on_the_workspace_that_owns_it() -> None:
+    """`require_workspace_admin` alone would let the administrator of whatever
+    workspace the caller works in read or end somebody else's share. The gate that
+    loads the share and compares its OWNER is the one these routes need, and the
+    list (which names no share) is the one that asks about the active workspace."""
+    sharing = [(m, p, g) for m, p, g in ROUTES if p.startswith("/api/sharing/")]
+    assert len(sharing) >= 5, "the owner's routes are mounted"
+    for method, path, gates in sharing:
+        if "{share_id}" in path:
+            assert "require_share_admin" in gates, (method, path, sorted(gates))
+            assert "require_workspace_admin" not in gates, (method, path, sorted(gates))
+        else:
+            assert "require_workspace_admin" in gates, (method, path, sorted(gates))
+
+
+def test_the_owners_side_of_sharing_mounts_no_route_that_creates_or_extends_a_share() -> None:
+    """Creating and extending is the licensed part (`src/ee`); the free router that
+    every build mounts must not offer either, or the licence would gate nothing."""
+    mounted = {(m, p) for m, p, _ in ROUTES if p.startswith("/api/sharing/")}
+    assert ("POST", "/api/sharing/shares") not in mounted
+    assert not [r for r in mounted if r[1].endswith("/extend")], mounted
+    # Narrowing is the only change the free router makes to a share.
+    assert {m for m, p in mounted if p == "/api/sharing/shares/{share_id}"} == {"GET", "PATCH"}
+
+
+def test_the_licensed_routes_of_sharing_are_gated_on_the_right_workspace() -> None:
+    """`/api/sharing-grants` is on the `/api/sharing` surface by its prefix, which only
+    proves that one of the two gates is there. Making a share is for the administrators
+    of the ACTIVE workspace (the owner of the repository being shared); extending names a
+    share and is for the administrators of the workspace that OWNS it."""
+    grants = {(m, p): g for m, p, g in ROUTES if p.startswith("/api/sharing-grants")}
+    assert set(grants) == {("POST", "/api/sharing-grants"),
+                           ("POST", "/api/sharing-grants/{share_id}/extend"),
+                           ("GET", "/api/sharing-grants/workspaces")}, sorted(grants)
+    made = grants[("POST", "/api/sharing-grants")]
+    assert "require_workspace_admin" in made and "require_share_admin" not in made
+    extended = grants[("POST", "/api/sharing-grants/{share_id}/extend")]
+    assert "require_share_admin" in extended and "require_workspace_admin" not in extended
+    # The picker of the create dialog is for the same people as making a share.
+    listed = grants[("GET", "/api/sharing-grants/workspaces")]
+    assert "require_workspace_admin" in listed and "require_share_admin" not in listed

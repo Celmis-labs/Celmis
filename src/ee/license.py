@@ -9,7 +9,7 @@ this repository. Its claims:
 
     iss       "celmis-licensing" — nothing else is a Celmis licence
     sub       the customer, as it is shown to an administrator
-    features  the enterprise features it grants, e.g. ["sso", "analytics"]
+    features  the enterprise features it grants, e.g. ["sso", "analytics", "sharing"]
     iat, exp  required; nbf optional
     seats     optional, a positive integer — how many people the installation
               may hold. Absent: unlimited (a licence issued before seats
@@ -98,7 +98,7 @@ ALGORITHM = "EdDSA"
 
 #: Enterprise features this build knows how to mount. A licence may name
 #: others (a newer licence on an older build); they are ignored, not refused.
-KNOWN_FEATURES: tuple[str, ...] = ("sso", "analytics")
+KNOWN_FEATURES: tuple[str, ...] = ("sso", "analytics", "sharing")
 
 #: The largest `seats` / `sso_seats` a licence may carry. A bigger number is
 #: not a limit anybody meant, so the claim is ignored like any malformed one.

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Collection, Mapping
 from typing import Any
 
 from src.automation.actions import (
@@ -127,8 +128,16 @@ def _outside_token(actor: Actor, cfg: Any) -> bool:
     return actor.token_filter is not None and cfg is None
 
 
-async def _can_read(actor: Actor, user: Any, slug: str, cache: dict[str, bool]) -> bool:
-    """The team's `read` grant on one repository, remembered per call."""
+async def _can_read(
+    actor: Actor, user: Any, slug: str, cache: dict[str, bool],
+    *, askable: Collection[str] = (),
+) -> bool:
+    """The team's `read` grant on one repository, remembered per call.
+
+    ``askable`` is the slugs of other workspaces' repositories this token may ask
+    about (:func:`_ask_shares`): the one thing a token reads that is not in its own
+    workspace's registry. It matters to a token only; a person asking with their
+    own rights has no share to ask about."""
     if slug in cache:
         return cache[slug]
     if actor.token_filter is not None:
@@ -136,7 +145,8 @@ async def _can_read(actor: Actor, user: Any, slug: str, cache: dict[str, bool]) 
         # it said which repositories it may read, team grants or not.
         from src.automation.actions import workspace_configs
 
-        cache[slug] = any(c.repo_slug == slug for c in workspace_configs(actor))
+        cache[slug] = slug in askable or any(
+            c.repo_slug == slug for c in workspace_configs(actor))
         return cache[slug]
     from src.api.deps import enforce_repo_permission
 
@@ -802,6 +812,50 @@ async def update_issue(
 # ─── questions about the code ────────────────────────────────────────
 
 
+def _ask_shares(actor: Actor) -> dict[str, Any]:
+    """``{slug: grant}`` of the shared repositories this actor may ASK about.
+
+    Another workspace's repository is never in the actor's registry, so the only
+    way `ask_code` reaches one is through the shares on the actor's token, and only
+    through one whose owner turned asking on (C8, :func:`shares.ask_targets`): the
+    answer sends pieces of the owner's code to the receiving workspace's model
+    provider and bills the receiving workspace. Every condition of reading is read
+    again here, from the database, on this call. Empty for a person asking with
+    their own rights (no token list) and for anything that cannot be read: an
+    unreadable share grants nothing."""
+    if actor.token_filter is None or not actor.token_shares:
+        return {}
+    try:
+        from sqlalchemy.orm import Session
+
+        from src.access import shares
+        from src.access.resolver import _sync_engine
+
+        with Session(_sync_engine()) as session:
+            return shares.ask_targets(
+                session, share_ids=actor.token_shares,
+                workspace_id=actor.workspace_id, user_id=actor.user_id)
+    except Exception as exc:  # noqa: BLE001 — refuse rather than grant
+        logger.warning("ask_shares_unreadable ws=%s err=%s", actor.workspace_id,
+                       type(exc).__name__)
+        return {}
+
+
+def _resolve_askable(actor: Actor, name: str, shared: Mapping[str, Any]) -> str:
+    """The slug `name` means for `ask_code`: a repository of the actor's own
+    workspace first, then one shared with it whose owner allows asking.
+
+    Anything else raises the one refusal `resolve_repo` gives, so a repository the
+    owner did not open for questions answers like one that is not there."""
+    try:
+        return resolve_repo(actor, name)
+    except ActionError:
+        wanted = (name or "").strip()
+        if wanted in shared:
+            return wanted
+        raise
+
+
 async def ask_code(
     actor: Actor, session: Any = None, *, question: str,
     repo_slugs: list[str] | None = None, include_code: bool = True,
@@ -813,6 +867,12 @@ async def ask_code(
     call booked as Q&A spend), non-streaming. The hard-stop budget gate is
     the one the streaming route runs first. Output is bounded; sources are
     the files the answer was built from.
+
+    A token that carries shares may name a repository another workspace shares,
+    and only one whose owner allowed questions (:func:`_ask_shares`). The money
+    and the model provider are the asker's workspace's, never the owner's, and
+    the owner's hidden paths and the secret floor apply inside the retriever as
+    they do for the owner's own people.
     """
     from src.api.routers import qa as qa_router
     from src.llm.budget import BudgetExceeded
@@ -824,10 +884,15 @@ async def ask_code(
         raise ActionError("Ask a question about the code.")
     user = _user_for(actor)
     registered = _registered(actor)
+    # Shared repositories are asked about by NAME only. "Every repository you can
+    # read" (no names) is the actor's own workspace, as it has always been: a
+    # shared one is never swept into a question nobody aimed at it.
+    shared = _ask_shares(actor)
     named = list(dict.fromkeys(repo_slugs or []))
-    slugs = [resolve_repo(actor, s) for s in named] if named else sorted(registered)
+    slugs = ([_resolve_askable(actor, s, shared) for s in named]
+             if named else sorted(registered))
     allowed: dict[str, bool] = {}
-    slugs = [s for s in slugs if await _can_read(actor, user, s, allowed)]
+    slugs = [s for s in slugs if await _can_read(actor, user, s, allowed, askable=shared)]
     if not slugs:
         raise ActionError("No repository to ask about — name one you can read.")
     if len(slugs) > MAX_ASK_REPOS:
@@ -848,7 +913,12 @@ async def ask_code(
                 target_repos=slugs, question=text[:MAX_QUESTION_CHARS], history=[],
                 user_id=user.id, is_admin=bool(getattr(user, "is_admin", False)),
                 workspace_id=actor.workspace_id, include_code=bool(include_code),
-                token_filter=actor.token_filter, name_free_notice=True),
+                token_filter=actor.token_filter, name_free_notice=True,
+                # The retriever reads the shares again for these slugs, so only a
+                # question that names one carries them; an own-only question is
+                # exactly what it was.
+                token_shares=(actor.token_shares
+                              if any(s in shared for s in slugs) else ())),
             timeout=deadline)
     except TimeoutError:
         raise ActionError(limits.answer_too_slow(deadline)) from None

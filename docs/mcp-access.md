@@ -128,6 +128,14 @@ reaches). For those, revoke and issue a new token. An entry such as `acme/shop`
 matches the repository under both providers if both are registered; the issue
 response warns about it, and listing exact slugs avoids it.
 
+### Repositories other workspaces share
+
+A developer token can also carry **shares**: repositories another workspace has shared
+with this one, named by id beside the repository list (`shares` when issuing,
+`PATCH /api/admin/mcp-tokens/{id}` with `shares` to add or remove one without reissuing).
+A pattern never matches a shared repository, `*` included, and a share is checked on
+every call, not when the token is issued. See [Sharing](SHARING.md).
+
 ### When the holder leaves the workspace
 
 Removing a person from a workspace revokes, in the same transaction, every token

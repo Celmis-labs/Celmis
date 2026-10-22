@@ -8,6 +8,12 @@ of the answer and a one-way digest of the arguments. It never holds argument
 values, the answer or a secret: an audit trail that stored the query would be
 the largest copy of the code anybody could read.
 
+The shares a call read through (repositories other workspaces shared with this one)
+are recorded by id in ``mcp_call_log.shares`` and the slug of a shared repository is
+in neither ``repos`` nor the mirror: the log and the page are read by the receiving
+workspace's administrators, who are not meant to learn that the repository exists.
+The owner reads the usage of a share through the share, never through this log.
+
 The packs stay in ``mcp_call_log`` and are NOT mirrored to the action audit. That
 page is read by workspace owners and admins, who are not allowed to learn that a
 restricted pack exists, let alone which skill of it somebody opened; the pack
@@ -45,6 +51,7 @@ _LAST_PURGE = 0.0
 _PURGE_EVERY_SECONDS = 3600.0
 _MAX_REPOS = 50
 _MAX_PACKS = 50
+_MAX_SHARES = 50
 #: Of those, how many may be ``<pack id>/<skill>`` entries: a call that touched
 #: many packs must not push the skills it opened out of the row.
 _MAX_PACK_SKILLS = 10
@@ -110,6 +117,7 @@ def record_call(rec) -> None:  # noqa: ANN001 — a callctx.CallRecord
             "profile": rec.profile,
             "repos": sorted(rec.repos)[:_MAX_REPOS],
             "packs": _pack_entries(getattr(rec, "packs", ())),
+            "shares": sorted(getattr(rec, "shares", ()))[:_MAX_SHARES],
             "status": rec.status,
             "result_bytes": int(rec.result_bytes),
             "result_items": int(rec.result_items),
@@ -186,7 +194,7 @@ def record_denied(payload: dict | None, reason: str, *, client_id: str = "") -> 
                 _DENIED_SEEN.clear()
         _enqueue({
             "ts": datetime.now(UTC), "tool": f"(refused:{code})", "profile": "",
-            "repos": [], "packs": [], "status": "denied", "result_bytes": 0, "result_items": 0,
+            "repos": [], "packs": [], "shares": [], "status": "denied", "result_bytes": 0, "result_items": 0,
             "duration_ms": 0, "args_hash": "",
             "workspace_id": token_workspace(payload) or "", "user_id": user_id,
             "token_id": token_id, "kind": str((payload or {}).get("typ") or ""),
@@ -229,6 +237,7 @@ def write_row(row: dict[str, Any]) -> None:
             token_id=row["token_id"], kind=row["kind"], client_id=row["client_id"],
             tool=row["tool"], profile=row["profile"], repos=list(row["repos"]),
             packs=list(row.get("packs") or []) or None,
+            shares=list(row.get("shares") or []) or None,
             status=row["status"], result_bytes=row["result_bytes"],
             result_items=row["result_items"], duration_ms=row["duration_ms"],
             args_hash=row["args_hash"],
@@ -238,6 +247,7 @@ def write_row(row: dict[str, Any]) -> None:
     try:
         from src.security.audit import record_action
 
+        # An explicit list: neither `packs` nor `shares` is ever mirrored here.
         detail = {k: row[k] for k in (
             "token_id", "kind", "profile", "repos", "status",
             "result_bytes", "result_items", "duration_ms", "args_hash")}

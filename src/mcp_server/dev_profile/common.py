@@ -187,11 +187,17 @@ def norm_format(value: str) -> bool:
 
 
 def pick_repos(scope: DevScope, repo: str, *, need: str = "metadata",
-               ) -> tuple[list[str], str | None]:
-    """(slugs, error). With `repo`: that one; without: every readable one."""
+               shared_first: bool = False) -> tuple[list[str], str | None]:
+    """(slugs, error). With `repo`: that one; without: every readable one.
+
+    A search over every readable repository reads the shared ones among them, so
+    they are put in the call log here (`DevScope.note_shared`). `shared_first`
+    orders them ahead of the caller's own, for a tool that cuts the list."""
     if repo and repo.strip():
         try:
             return [scope.resolve(repo, need=need)], None  # type: ignore[arg-type]
         except RepoNotAccessible:
             return [], repo_error(scope, repo)
-    return scope.slugs(need=need), None  # type: ignore[arg-type]
+    slugs = scope.slugs(need=need, shared_first=shared_first)  # type: ignore[arg-type]
+    scope.note_shared(slugs)
+    return slugs, None

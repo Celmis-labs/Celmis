@@ -138,6 +138,13 @@ def _router_for(feature: str) -> APIRouter:
         both.include_router(review)
         both.include_router(productivity)
         return both
+    if feature == "sharing":
+        # Only the two acts that give another workspace more of a repository.
+        # Enforcing, narrowing and ending a share are AGPL and always mounted
+        # (src/api/routers/sharing.py), so a lapsed licence leaves every share that
+        # exists running to its own end and takes only the making of new ones away.
+        from src.ee.sharing.router import router
+        return router
     raise KeyError(feature)
 
 

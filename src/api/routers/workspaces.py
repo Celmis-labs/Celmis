@@ -250,8 +250,25 @@ async def delete_workspace(
     revoked_tokens, revoked_project_tokens = await session.run_sync(
         lambda s: revoke_workspace_tokens_sync(
             s, by=f"workspace_deleted:{user.id}", workspace_ids=[ws_id]))
+    # The shares it gives AND the ones it receives, in the same transaction. They
+    # are rows of their own that name the workspace by id; left live, each would
+    # read as a working grant, and only the check on every call would be keeping
+    # it from being one.
+    from src.access import shares as repo_shares
+
+    def _end_shares(s):  # noqa: ANN001, ANN202
+        ended = repo_shares.revoke_for_workspace(
+            s, ws_id, reason="workspace_deleted", by=user.id)
+        return ended, repo_shares.owner_workspaces(s, ended)
+
+    ended_shares, share_owners = await session.run_sync(_end_shares)
     await session.delete(ws)
     await session.commit()
+    for share_id in ended_shares:
+        repo_shares.audit_owner(
+            "sharing.auto_revoked", owner_workspace_id=share_owners.get(share_id, ws_id),
+            share_id=share_id, actor=user.email, actor_id=user.id, ip=client_ip(request),
+            detail={"reason": "workspace_deleted"})
     record_token_revocations(
         revoked_tokens, actor=user.email, actor_id=user.id, user_id=None,
         via="workspace_deleted", ip=client_ip(request),

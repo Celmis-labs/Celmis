@@ -183,8 +183,9 @@ PROBES: list[tuple[str, str, dict | None, str]] = [
 def _actor(name: str) -> str:
     # `both` is a member of B, so it may see B when it ASKS for B. What it
     # must not do is carry B into A: it is probed with A as its active
-    # workspace (`both_in_a`), where the B-registered repo is not A's.
-    return "both" if name == "both_in_a" else name
+    # workspace (`both_in_a`), where the B-registered repo is not A's. The
+    # same suffix says it of the platform's own accounts (`su_in_a`).
+    return name.removesuffix("_in_a")
 
 
 async def _b_pack_untouched(w) -> None:
@@ -276,6 +277,48 @@ async def _b_untouched(w) -> None:
     assert get_auto_review_store().get_in_workspace(w.ws["ws-b"], B_REPO) is not None
 
 
+async def _attempt(w, actor: str, via: str, probes, *, slug_stays_hidden: bool = False) -> list[str]:
+    """Every probe, as `actor`; the failures, one line each.
+
+    With `slug_stays_hidden` B's repository slug must not appear in an answer unless
+    the request itself named it (a 404 may say what the caller typed): the check for
+    a world in which B has SHARED that repository with A."""
+    who = _actor(actor)
+    failures: list[str] = []
+    for method, path, body, verdict in probes:
+        if who in ("both", "su", "gadmin") and (path.startswith("/api/workspaces/wsid-b")
+                              or path == "/api/workspaces"
+                              or path.startswith("/api/codebase/invites/")):
+            # Addressed to B by id, these answer about a workspace `both`
+            # really belongs to — legitimately (an invite link to B's pack
+            # is theirs to use: they hold a role in B). What `both` is
+            # probed for is carrying B's repository into A.
+            continue
+        path = path.replace("{me}", w.uid(who))
+        if body and "{me_email}" in str(body):
+            body = {**body, "email": w.users[who].email}
+        headers = {"X-Test-User": who}
+        if actor.endswith("_in_a"):
+            headers["X-Workspace"] = "ws-a"
+        elif via == "header":
+            headers["X-Workspace"] = "ws-b"
+        else:
+            w.client.cookies.set("x-workspace", "ws-b")
+        r = await w.client.request(method, path, json=body, headers=headers)
+        w.client.cookies.clear()
+        text = r.text
+        if r.status_code >= 500:
+            failures.append(f"{method} {path}: {r.status_code} {text[:120]}")
+        elif verdict == "deny" and r.status_code not in (403, 404):
+            failures.append(f"{method} {path}: expected 403/404, got {r.status_code} "
+                            f"{text[:120]}")
+        elif B_SECRET in text:
+            failures.append(f"{method} {path}: {r.status_code} leaked B data")
+        elif slug_stays_hidden and B_REPO in text and B_REPO not in path:
+            failures.append(f"{method} {path}: {r.status_code} named the shared repository")
+    return failures
+
+
 @pytest.mark.parametrize("via", ["header", "cookie"])
 @pytest.mark.parametrize("actor", A_ROLES)
 async def test_a_roles_cannot_reach_workspace_b(tmp_path, monkeypatch, actor, via):
@@ -283,39 +326,75 @@ async def test_a_roles_cannot_reach_workspace_b(tmp_path, monkeypatch, actor, vi
 
     monkeypatch.setattr(analytics, "_load_runs", lambda ws, since: [])
     async with world(tmp_path, monkeypatch) as w:
-        who = _actor(actor)
-        failures: list[str] = []
-        for method, path, body, verdict in PROBES:
-            if who == "both" and (path.startswith("/api/workspaces/wsid-b")
-                                  or path == "/api/workspaces"
-                                  or path.startswith("/api/codebase/invites/")):
-                # Addressed to B by id, these answer about a workspace `both`
-                # really belongs to — legitimately (an invite link to B's pack
-                # is theirs to use: they hold a role in B). What `both` is
-                # probed for is carrying B's repository into A.
-                continue
-            path = path.replace("{me}", w.uid(who))
-            if body and "{me_email}" in str(body):
-                body = {**body, "email": w.users[who].email}
-            headers = {"X-Test-User": who}
-            if actor == "both_in_a":
-                headers["X-Workspace"] = "ws-a"
-            elif via == "header":
-                headers["X-Workspace"] = "ws-b"
-            else:
-                w.client.cookies.set("x-workspace", "ws-b")
-            r = await w.client.request(method, path, json=body, headers=headers)
-            w.client.cookies.clear()
-            text = r.text
-            if r.status_code >= 500:
-                failures.append(f"{method} {path}: {r.status_code} {text[:120]}")
-            elif verdict == "deny" and r.status_code not in (403, 404):
-                failures.append(f"{method} {path}: expected 403/404, got {r.status_code} "
-                                f"{text[:120]}")
-            elif B_SECRET in text:
-                failures.append(f"{method} {path}: {r.status_code} leaked B data")
+        failures = await _attempt(w, actor, via, PROBES)
         assert not failures, "\n".join(failures)
         await _b_untouched(w)
+
+
+# What B has SHARED with A is for tokens only: a share is the owner's consent that
+# the superadmin can put on an MCP token, and no other surface reads it. So every
+# probe above must still be answered as before when B shares the very repository
+# the probes go for, and the routes of sharing itself must tell A's people nothing.
+SHARE_PROBES: list[tuple[str, str, dict | None, str]] = [
+    ("GET", "/api/sharing/shares", None, "no_leak"),
+    ("GET", "/api/sharing/shares/{share}", None, "deny"),
+    ("GET", "/api/sharing/shares/{share}/activity", None, "deny"),
+    ("PATCH", "/api/sharing/shares/{share}", {"add_deny": ["**"]}, "deny"),
+    ("PATCH", "/api/sharing/shares/{share}", {"max_people": 1}, "deny"),
+    ("POST", "/api/sharing/shares/{share}/revoke", None, "deny"),
+    # the token side: the superadmin's alone
+    ("GET", "/api/admin/mcp-shares?workspace=ws-a", None, "deny"),
+    ("GET", "/api/admin/mcp-repos?workspace=ws-a", None, "deny"),
+    ("GET", "/api/admin/mcp-calls", None, "deny"),
+    ("GET", "/api/admin/mcp-tokens", None, "deny"),
+]
+
+
+@pytest.mark.parametrize("via", ["header", "cookie"])
+@pytest.mark.parametrize("actor", A_ROLES)
+async def test_a_share_to_a_does_not_open_workspace_b_to_anyone_in_a(
+        tmp_path, monkeypatch, actor, via):
+    import src.ee.analytics.router as analytics
+    from tests.api.sharing_world import add_share, share_row, shared_world
+
+    monkeypatch.setattr(analytics, "_load_runs", lambda ws, since: [])
+    async with shared_world(tmp_path, monkeypatch) as w:
+        share_id = add_share(w)
+        probes = [(m, p.replace("{share}", share_id), b, v)
+                  for m, p, b, v in (*PROBES, *SHARE_PROBES)]
+        failures = await _attempt(w, actor, via, probes, slug_stays_hidden=True)
+        assert not failures, "\n".join(failures)
+        await _b_untouched(w)
+        row = share_row(w, share_id)
+        assert (row.revoked_at, row.deny_globs, row.max_people) == (None, [], 5), \
+            "a refused request changed the share"
+
+
+async def test_the_answers_do_not_change_for_a_workspace_that_holds_a_share(tmp_path, monkeypatch):
+    """Not only 'no leak' but 'nothing at all': for A's people every probe returns
+    the status it returns when B has shared nothing."""
+    import src.ee.analytics.router as analytics
+    from tests.api.sharing_world import add_share, shared_world
+
+    monkeypatch.setattr(analytics, "_load_runs", lambda ws, since: [])
+
+    async def statuses(w, probes) -> dict[tuple[str, str], int]:
+        out = {}
+        for who in ("admin_a", "member_a"):
+            for method, path, body, _verdict in probes:
+                r = await w.client.request(
+                    method, path.replace("{me}", w.uid(who)), json=body,
+                    headers={"X-Test-User": who, "X-Workspace": "ws-a"})
+                out[(who, f"{method} {path}")] = r.status_code
+        return out
+
+    async with shared_world(tmp_path / "plain", monkeypatch) as w:
+        before = await statuses(w, PROBES)
+    (tmp_path / "shared").mkdir()
+    async with shared_world(tmp_path / "shared", monkeypatch) as w:
+        add_share(w)
+        after = await statuses(w, PROBES)
+    assert after == before
 
 
 @pytest.mark.parametrize("actor, asks, gets", [
@@ -375,3 +454,90 @@ async def test_a_grant_in_b_does_not_decide_access_in_a(tmp_path, monkeypatch):
         perm, any_grants = await _effective_repo_permission(
             B_REPO, w.users["member_b"], w.ws["ws-b"])
         assert (perm, any_grants) == ("admin", True)
+
+
+#: The routes that go for B's repository by its slug: the ones a share must not make
+#: reachable for anybody working in A, the platform's own accounts included.
+REPO_PROBES = [p for p in PROBES if B_REPO in p[1] and p[3] == "deny"]
+
+
+@pytest.mark.parametrize("actor", ["su_in_a", "gadmin_in_a"])
+async def test_the_superadmin_working_in_a_finds_the_shared_repository_nowhere_on_the_rest_surface(
+        tmp_path, monkeypatch, actor):
+    """The superadmin is the one who puts a share on a token, so it is the account
+    most likely to be taken for somebody who may read the repository over HTTP.
+    A share is read by tokens and nothing else: the pages, the review features and
+    the repository routes answer the superadmin working in A exactly as they answer
+    about a repository A has never heard of."""
+    import src.ee.analytics.router as analytics
+    from tests.api.sharing_world import add_share, shared_world
+
+    monkeypatch.setattr(analytics, "_load_runs", lambda ws, since: [])
+    assert len(REPO_PROBES) > 10, "the probe list must reach many routes"
+    async with shared_world(tmp_path, monkeypatch) as w:
+        add_share(w)
+        failures = await _attempt(w, actor, "header", REPO_PROBES, slug_stays_hidden=True)
+        assert not failures, "\n".join(failures)
+        await _b_untouched(w)
+
+
+SLUG_PARAMS = ("slug", "repo_slug", "repo")
+GHOST_SLUG = "github_nobody-nothing"
+
+
+def _slug_keyed_routes() -> list[tuple[str, str]]:
+    """(method, path template) of every route whose only path parameter is a
+    repository slug, among the routers the world mounts. Read from the routers, so
+    a route added tomorrow is probed tomorrow without anybody remembering to list
+    it."""
+    import re
+
+    from fastapi.routing import APIRoute
+
+    from tests.api.rbac_world import _routers
+    from tests.api.sharing_world import routers
+
+    found = []
+    for route in (r for router in (*_routers(), *routers()) for r in router.routes):
+        if not isinstance(route, APIRoute):
+            continue
+        params = re.findall(r"\{(\w+)(?::\w+)?\}", route.path)
+        if params and all(p in SLUG_PARAMS for p in params):
+            found += [(m, route.path) for m in sorted(route.methods - {"HEAD", "OPTIONS"})]
+    return found
+
+
+@pytest.mark.parametrize("actor", ["admin_a", "member_a", "su_in_a", "gadmin_in_a"])
+async def test_every_route_keyed_by_a_repository_answers_for_a_shared_one_as_for_a_missing_one(
+        tmp_path, monkeypatch, actor):
+    """The strongest form of 'a share is for tokens only': for each route of the API
+    that names a repository by its slug, A's people get the answer they get for a
+    slug that is registered nowhere, whatever the verb. No guess about which routes
+    matter: the walk takes them all."""
+    import re
+
+    import src.ee.analytics.router as analytics
+    from tests.api.sharing_world import add_share, shared_world
+
+    monkeypatch.setattr(analytics, "_load_runs", lambda ws, since: [])
+    async with shared_world(tmp_path, monkeypatch) as w:
+        add_share(w)
+        routes = _slug_keyed_routes()
+        assert len(routes) >= 15, "the walk found the repository routes"
+        who = _actor(actor)
+        headers = {"X-Test-User": who, "X-Workspace": "ws-a"}
+        differ = []
+        for method, template in routes:
+            body = {} if method in ("POST", "PUT", "PATCH") else None
+            seen = {}
+            for slug in (B_REPO, GHOST_SLUG):
+                url = re.sub(r"\{\w+(?::\w+)?\}", slug, template)
+                r = await w.client.request(method, url, json=body, headers=headers)
+                assert r.status_code < 500, (method, url, r.status_code, r.text[:200])
+                seen[slug] = r.status_code
+                if slug == B_REPO:
+                    assert B_SECRET not in r.text, (method, url)
+            if seen[B_REPO] != seen[GHOST_SLUG]:
+                differ.append((method, template, seen))
+        assert not differ, f"a shared repository is answered differently from a missing one: {differ}"
+        await _b_untouched(w)

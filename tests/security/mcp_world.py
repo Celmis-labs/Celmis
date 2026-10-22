@@ -15,7 +15,13 @@ Workspace A holds three repositories, one in each state the rule cares about:
   RULED    a research rule at `code` for team-r, denying ``secrets/**``
   WILD     no rule, no grant: the default-deny case
 
-Workspace B holds FOREIGN, a repository that must not exist for anybody in A.
+Workspace B holds two repositories that must not exist for anybody in A, whatever
+A's people hold:
+
+  FOREIGN  nobody outside B ever reads it
+  SHARED   B's repository that `share_world` shares with A, row by row; without a
+           share it is as foreign as FOREIGN. Unlike the others it is a real git
+           clone (the dev tools read files with git), with a secret file in it.
 """
 
 from __future__ import annotations
@@ -33,11 +39,24 @@ from src.config import Settings
 WS_A, WS_B = "wsid-a", "wsid-b"
 GRANTED, RULED, WILD = "github_aco-app", "github_aco-ruled", "github_aco-wild"
 FOREIGN = "github_bco-secret"
+SHARED = "github_bco-shared"             # B's, shared with A by `share_world`
 GHOST = "github_nobody-nothing"          # registered nowhere
 ALL_A = {GRANTED, RULED, WILD}
 SECRET_ID = "secrets/keys.py::load_key"
 HANDLER = "src/app.py::handler"
 HELPER = "src/util.py::helper"
+
+#: What is committed in SHARED: the files the graph rows of `_build` point at, a
+#: `.env`, and a sentence nobody else's repository contains, so a leak is a grep.
+SHARED_MARKER = "bco-shared-marker-7c1e"
+SHARED_FILES = {
+    "src/app.py": (f"# {SHARED_MARKER}\ndef handler():\n    return helper()\n\n\n"
+                   "def load():\n    return 1\n"),
+    "src/util.py": "def helper():\n    return 2\n",
+    "secrets/keys.py": "def load_key():\n    return 3\n\n\ndef load():\n    return 4\n",
+    ".env": "PLACEHOLDER_SETTING=not-a-real-value\n",
+    "config/settings.yaml": "retries: 3\n",
+}
 
 #: name -> (email, global admin, role in A or None)
 CAST = {
@@ -63,10 +82,33 @@ def mcp_graphs(tmp_path_factory):
 
     root = tmp_path_factory.mktemp("mcp-world")
     settings = Settings(workspace_dir=root)
-    for slug in (GRANTED, RULED, WILD, FOREIGN):
+    for slug in (GRANTED, RULED, WILD, FOREIGN, SHARED):
         _build(settings, slug)
         (settings.repos_dir / slug / ".git").mkdir(parents=True, exist_ok=True)
+    _commit(settings.repos_dir / SHARED, SHARED_FILES)
     return root
+
+
+def _commit(clone, files: dict[str, str]) -> None:
+    """Turn the clone's marker directory into a real git repository holding
+    ``files`` (one commit), so the dev tools can read them."""
+    import shutil
+    import subprocess
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(clone), "-c", "user.email=t@example.com", "-c", "user.name=t",
+             "-c", "commit.gpgsign=false", *args],
+            check=True, capture_output=True)
+
+    shutil.rmtree(clone / ".git")
+    git("init", "-q", "-b", "main")
+    for rel, text in files.items():
+        target = clone / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    git("add", "-A", "-f")
+    git("commit", "-q", "-m", "init")
 
 
 _TOOLS: dict | None = None
@@ -199,7 +241,8 @@ def mcp_world(tmp_path, monkeypatch, mcp_graphs):
         s.commit()
 
     store = AutoReviewStore(tmp_path / "ar.db")
-    for ws, slug in ((WS_A, GRANTED), (WS_A, RULED), (WS_A, WILD), (WS_B, FOREIGN)):
+    for ws, slug in ((WS_A, GRANTED), (WS_A, RULED), (WS_A, WILD), (WS_B, FOREIGN),
+                     (WS_B, SHARED)):
         full = slug.split("_", 1)[1].replace("-", "/", 1)
         store.upsert(RepoConfig(user_id=w.users["su"], repo_slug=slug, provider="github",
                                 full_name=full, url=f"https://github.com/{full}",

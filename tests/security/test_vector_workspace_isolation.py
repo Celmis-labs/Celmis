@@ -16,6 +16,11 @@ The one thing it cannot do is server-side BM25 inference (that needs fastembed),
 so the hybrid symbols search is exercised against a fake client that applies
 `must` conditions itself; `test_missing_key_never_matches_an_equality_filter`
 pins the single semantic that fake depends on against the real engine.
+
+The last section is about a token that reads a repository SHARED with its
+workspace: the vectors stay where they are (the owner's tenant), and the token
+reaches them by one query per tenant, each with that tenant's ordinary scope.
+A recording wrapper around the real in-memory client writes down the filters.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ import scripts.backfill_vector_workspaces as bf
 from src.config import get_settings
 from src.retrieval.tier1_vault import VaultRetriever
 from src.retrieval.vector_store import VECTOR_WORKSPACE_KEY, VectorScope
+from tests.security.qdrant_recorder import RecordingQdrant
 
 
 def _stable_point_id(key: str) -> str:
@@ -408,3 +414,124 @@ def test_a_repo_in_two_workspaces_is_never_guessed():
 def test_vault_retriever_cannot_be_built_without_a_workspace(settings, qdrant):
     with pytest.raises(TypeError):
         VaultRetriever(settings, qdrant)
+
+
+# ─── a token that reads a repository shared with its workspace ───────
+
+
+@pytest.fixture
+def recorded(settings, qdrant, two_tenants):
+    """The two-tenant collection behind a client that records its filters, and a
+    retriever built on it. ALPHA is the asking workspace, BETA owns `beta-api`."""
+    from src.qa.multi_repo_retriever import MultiRepoRetriever
+
+    spy = RecordingQdrant(qdrant, settings.qdrant_collection)
+    retriever = MultiRepoRetriever(settings, SimpleNamespace(qdrant=spy))
+    return retriever, spy
+
+
+def _decisions(**data_workspace):
+    """What `effective_access` says about each repo, as far as the vector query reads
+    it: an own repository has no data workspace, a shared one names its owner."""
+    return {repo: SimpleNamespace(data_workspace=owner)
+            for repo, owner in data_workspace.items()}
+
+
+def _token_query(retriever, repos, access, *, scope=None):
+    return retriever._vault_hits(
+        list(VEC), repos, access, workspace_id=ALPHA,
+        scope=scope or VectorScope.for_workspace(ALPHA), per_tenant=True)
+
+
+def test_a_shared_repository_is_asked_in_its_owners_tenant_and_an_own_one_in_the_askers(recorded):
+    retriever, spy = recorded
+    hits = _token_query(retriever, ["alpha-api", "beta-api"],
+                        _decisions(**{"alpha-api": None, "beta-api": BETA}))
+    assert spy.asked() == {ALPHA: ["alpha-api"], BETA: ["beta-api"]}
+    assert _secrets(hits) == {"ALPHA_ONLY_BILLING", "BETA_ONLY_BILLING"}
+
+
+def test_the_query_over_two_tenants_is_two_queries_and_never_one_with_an_or(recorded):
+    """`RecordingQdrant` also fails the test on a filter with `should` or `must_not`:
+    an OR across tenants is how a repo filter would stop being a boundary."""
+    retriever, spy = recorded
+    _token_query(retriever, ["alpha-api", "beta-api"],
+                 _decisions(**{"alpha-api": None, "beta-api": BETA}))
+    assert len(spy.filters) == 2
+    assert all(f["workspace"] and f["repos"] and f["conditions"] == 2 for f in spy.filters)
+
+
+def test_the_owners_tenant_is_never_asked_for_a_repo_that_is_not_shared(recorded):
+    """An own repo is not looked up in somebody else's tenant, whatever its name."""
+    retriever, spy = recorded
+    hits = _token_query(retriever, ["beta-api"], _decisions(**{"beta-api": None}))
+    assert spy.asked() == {ALPHA: ["beta-api"]}
+    assert hits == []
+
+
+def test_a_shared_slug_that_collides_with_an_own_one_stays_in_its_tenant(settings, qdrant,
+                                                                         fake_embed):
+    from src.qa.multi_repo_retriever import MultiRepoRetriever
+
+    _seed_note(VaultRetriever(settings, qdrant, workspace_id=ALPHA), repo="shared-name",
+               note_path="a.md", secret="ALPHA_SIDE")
+    _seed_note(VaultRetriever(settings, qdrant, workspace_id=BETA), repo="shared-name",
+               note_path="b.md", secret="BETA_SIDE")
+    retriever = MultiRepoRetriever(settings, SimpleNamespace(
+        qdrant=RecordingQdrant(qdrant, settings.qdrant_collection)))
+    assert _secrets(_token_query(
+        retriever, ["shared-name"], _decisions(**{"shared-name": None}))) == {"ALPHA_SIDE"}
+    assert _secrets(_token_query(
+        retriever, ["shared-name"], _decisions(**{"shared-name": BETA}))) == {"BETA_SIDE"}
+
+
+def test_the_scope_a_token_call_is_handed_never_widens_its_queries(recorded):
+    """Whatever scope the caller computed (a global administrator's has no condition
+    at all), a token's vector queries each carry their tenant: the scope is for a
+    person's own session."""
+    retriever, spy = recorded
+    hits = _token_query(retriever, ["alpha-api", "beta-api"],
+                        _decisions(**{"alpha-api": None, "beta-api": BETA}),
+                        scope=VectorScope.global_admin())
+    assert None not in spy.asked() and set(spy.asked()) == {ALPHA, BETA}
+    assert _secrets(hits) == {"ALPHA_ONLY_BILLING", "BETA_ONLY_BILLING"}
+
+
+def test_a_persons_own_session_is_one_query_in_its_workspace_and_cannot_reach_a_shared_repo(
+        recorded):
+    """The web chat does not use tokens: it asks about the repositories of its own
+    workspace in one query, and naming the owner's repository finds nothing."""
+    retriever, spy = recorded
+    hits = retriever._vault_hits(
+        list(VEC), ["alpha-api", "beta-api"], {}, workspace_id=ALPHA,
+        scope=VectorScope.for_workspace(ALPHA), per_tenant=False)
+    assert spy.asked() == {ALPHA: ["alpha-api", "beta-api"]}
+    assert _secrets(hits) == {"ALPHA_ONLY_BILLING"}
+
+
+def test_the_merged_answer_of_several_tenants_is_cut_to_the_same_top_k(recorded):
+    retriever, _spy = recorded
+    retriever.settings = SimpleNamespace(
+        qdrant_collection=retriever.settings.qdrant_collection,
+        retrieval_min_score=0.0, retrieval_vector_topk=1)
+    hits = _token_query(retriever, ["alpha-api", "beta-api"],
+                        _decisions(**{"alpha-api": None, "beta-api": BETA}))
+    assert len(hits) == 1
+
+
+def test_a_tenant_with_nothing_to_read_makes_no_query(recorded):
+    retriever, spy = recorded
+    assert _token_query(retriever, [], {}) == []
+    assert spy.filters == []
+
+
+def test_the_vector_scope_has_no_constructor_for_a_set_of_tenants():
+    """Reading a shared repository needed no new kind of scope, and a token still
+    cannot be given the installation-wide one by anything but a deliberate call."""
+    public = {n for n in vars(VectorScope) if not n.startswith("_")}
+    assert {n for n in public if isinstance(vars(VectorScope)[n], classmethod)} == {
+        "for_workspace", "global_admin"}
+    one = VectorScope.for_workspace(BETA).must_conditions()
+    assert [(c.key, c.match.value) for c in one] == [(VECTOR_WORKSPACE_KEY, BETA)]
+    assert VectorScope.global_admin().must_conditions() == []
+
