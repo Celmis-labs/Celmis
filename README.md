@@ -2,62 +2,76 @@
 
 # Celmis
 
-**Self-hosted — from the alert your monitoring already sent, through to a pull request someone can review**
+**From the alert your monitoring already sent, to a pull request someone can review.**
+Self-hosted. One machine. Your model, your subscription, your network.
 
-[**celmis-labs.github.io**](https://celmis-labs.github.io) · [Documentation](https://celmis-labs.github.io/docs/) · [Quick start](#quick-start) · [Results](#results)
+[**Website**](https://celmis-labs.github.io) · [Documentation](https://celmis-labs.github.io/docs/) · [Quick start](#quick-start) · [What's new](#whats-new-in-v3) · [Results](#results)
+
+![licence](https://img.shields.io/badge/licence-AGPLv3-0E5537) ![release](https://img.shields.io/github/v/release/Celmis-labs/Celmis?color=3DBE83) ![MCP tools](https://img.shields.io/badge/MCP%20tools-51-C08A3E) ![languages](https://img.shields.io/badge/languages%20parsed-23-0E5537)
+
+![An alert becomes a pull request](docs/images/alert-to-fix.png)
 
 </div>
 
-An alert arrives from a service you run. Celmis already knows which repository
-that service is and who owns it, so the fix starts there: an embedded Claude Code
-session — on *your* subscription, inside *your* installation — edits the code, and
-the runner commits, pushes a branch and opens a pull request. On one measured
-finding that took **220 seconds**, from whatever device the alert reached first.
+An alert arrives from a service you run. Celmis already knows which repository that
+service is and who owns it, so the fix starts there: an embedded Claude Code session,
+on *your* subscription and inside *your* installation, edits the code, and the runner
+commits, pushes a branch and opens a pull request. On one measured finding that took
+**220 seconds**, from whatever device the alert reached first.
 
-Celmis does not watch your services. Grafana, or whatever you already run, does
-that and does it well. This is the part that comes after the alert: the walk from a
-firing rule to a diff someone can review.
+That loop closes because everything sits on **one index**: a symbol graph built once
+from your repositories, with no model involved in building it. Every other surface
+reads the same index.
 
-To be exact, because the line is easy to blur. The application ingests no logs of its
-own — it starts from the alert. But **the repository ships an optional observability
-overlay**, and that does collect them:
+## What it does
+
+| | |
+|---|---|
+| **Fix from here** | An alert or a dependency finding becomes an embedded session, then a branch, then a pull request. A human reviews and merges; Celmis never merges. [Fix from here](#fix-from-here) · [Alerts](#alerts-and-fixing-from-a-phone) |
+| **Pull-request review** | Agents read the diff and, where the graph exists, who else calls what changed, across repositories. Talk to it with `@celmis`, teach it with `remember`, and it stays quiet when there is nothing to say. [Review](#pull-request-review) |
+| **Ask the code** | Questions across several repositories, answered with `file:line` citations on both sides of a call. [Ask the code](#ask-the-code) |
+| **Codebase and MCP** | 51 tools over MCP, a compact `/mcp/dev` profile for editors, a Claude Code plugin, and versioned knowledge packs of the skills your team already explains out loud. [MCP](#connect-claude-code-and-other-mcp-clients) · [Packs](docs/CODEBASE.md) |
+| **Evidence** | Dependency audit, CycloneDX SBOM and an evidence pack whose manifest a third party recomputes. [SBOM and evidence](#dependencies-sbom-and-the-evidence-pack) |
+| **Access you can defend** | Repositories are closed by default, MCP tokens are issued per person, every call is audited, secrets are withheld at the source, and a repository can be shared with another workspace for a fixed time. [Who can see what](#who-can-see-what) · [Sharing](docs/SHARING.md) |
+
+## Install
+
+```bash
+git clone https://github.com/Celmis-labs/Celmis.git celmis && cd celmis
+./scripts/init-env.sh              # writes .env and fills every secret
+docker compose --env-file .env up -d
+```
+
+Then open <http://localhost> and paste one model provider key under Settings → LLM Setup.
+
+**197 seconds** from clone to six healthy services on a clean server. Postgres and
+Qdrant are bundled; about 4 GB of RAM. Details in [Quick start](#quick-start).
+An installation without a licence admits up to five people; see [Licensing](LICENSING.md).
+
+## What's new in v3
+
+- **Review that earns its comments.** Findings below your comment level never reach the pull request; a review with nothing to say approves. Comments are the problem, the reason and the fix, in the repository's language (3.1).
+- **A reviewer you can talk to.** `@celmis` commands and questions in the thread, `remember` rules, learning from what the team dismisses, incremental review of each push, Jira acceptance criteria checked in the summary (2.3).
+- **Knowledge packs.** Versioned skills, API examples and checklists per workspace, readable in the app and by coding assistants through `brief` and `skills`; `celmis-pack` publishes them (3.0).
+- **Access closed by default.** A repository nobody has a rule for is invisible; MCP tokens belong to a person; every call is audited (2.3.7). Stricter secret hiding in 3.0.2.
+- **Sharing between workspaces.** For research, for a fixed time, with hidden paths and a ceiling on readers (3.1).
+- **A developer MCP profile and a Claude Code plugin** sized for an editor (2.3.7).
+
+Every release is in the [changelog](CHANGELOG.md).
+
+## Logs, and where the line falls
+
+Celmis does not watch your services; Grafana or whatever you already run does that.
+The application ingests no logs of its own and starts from the alert. The repository
+ships an **optional observability overlay** (Prometheus, Loki, Promtail, Grafana) that
+does collect them, platform-wide rather than Celmis-only:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 ```
 
-That brings up Prometheus, Loki, Promtail and Grafana.
-[`docker-compose.observability.yml`](docker-compose.observability.yml) is deliberately
-**platform-wide rather than Celmis-only**: Promtail tails the Docker daemon's container
-logs and labels each stream by container name, so *every* service on that host — all
-thirty of them, if you run thirty — shows up in Grafana's Loki explorer, filterable by
-container. Prometheus scrapes `api:8000/metrics` for Celmis's own counters alongside.
-
-Every port binds to `127.0.0.1` and is reached over an SSH tunnel:
-
-```bash
-ssh -L 3100:localhost:3100 -L 9090:localhost:9090 you@your-server
-```
-
-That is not caution for its own sake. Loki has no authentication, so
-`POST /loki/api/v1/push` accepts writes from anyone who can reach it, and a log store
-strangers can write to is not a log store. `GRAFANA_ADMIN_PASSWORD` is required — the
-stack will not start without one.
-
-That loop is the product. It closes because everything sits on one index: a symbol
-graph Celmis builds from your repositories once. The same index answers questions
-that cross repository boundaries, reviews pull requests, audits dependencies into a
-CycloneDX SBOM and a verifiable evidence pack, generates documentation, and serves
-fifty-one tools over MCP — surfaces worth having, and none of them the point on
-their own.
-
-It runs on one machine under `docker compose`, with the model provider of your
-choice behind it, and nothing leaves your network except the calls you configure.
-
-In the oldest telling, Kelmis was the smelter — one of the three Idaean Dactyls,
-alongside Damnameneus the hammer and Acmon the anvil, to whom the working of iron
-was credited. The index does the reducing here; the surfaces are what work the
-result.
+Every port binds to `127.0.0.1` and is reached over an SSH tunnel, because Loki has no
+authentication. `GRAFANA_ADMIN_PASSWORD` is required.
 
 ## What that buys you that a diff-only tool cannot
 
@@ -110,6 +124,8 @@ of every finding it scored false, and the command that reproduces both are in
 
 ## Table of contents
 
+- [What it does](#what-it-does)
+- [What's new in v3](#whats-new-in-v3)
 - [What that buys you that a diff-only tool cannot](#what-that-buys-you-that-a-diff-only-tool-cannot)
 - [Nine things people do with it](#nine-things-people-do-with-it)
 - [Three numbers](#three-numbers)
