@@ -539,6 +539,7 @@ def build_app() -> FastAPI:
     app.include_router(intel_router_mod.notif_router)
     app.include_router(oauth_metadata_router.router)
     app.include_router(oauth_router.router)
+    app.add_exception_handler(oauth_router.OAuthRefusal, oauth_router.oauth_refusal_handler)
     app.include_router(workspaces_router.router)
     app.include_router(jobs_router.router)
     # Embedded Claude Code agent (subscription auth)

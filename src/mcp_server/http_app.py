@@ -110,7 +110,17 @@ def _explain_invalid_host(host: str) -> str:
         f"    MCP_ALLOWED_HOSTS={host}\n"
         "\n"
         "PUBLIC_BASE_URL is read the same way if you already set it to the "
-        "address people reach this instance at."
+        "address people reach this instance at.\n"
+        "\n"
+        "If people reach it over https (a TLS terminator in front of the bundled "
+        "proxy), write PUBLIC_BASE_URL with https:// as well:\n"
+        "\n"
+        f"    PUBLIC_BASE_URL=https://{host}\n"
+        "\n"
+        "The bundled proxy cannot see the terminator, so with MCP_ALLOWED_HOSTS "
+        "alone the sign-in addresses this server gives to clients start with "
+        f"http://{host}. MCP_OAUTH_ISSUER=https://{host}/backend (the full "
+        "public base, with the prefix) says the same thing explicitly."
     )
 
 
@@ -227,6 +237,139 @@ class _ExplainRefusal:
             await self.app(scope, receive, _send)
         finally:
             _REFUSAL.reset(reset)
+
+
+#: The 401 sentences. Header-safe on purpose (no double quote, no line break):
+#: the same text goes into `WWW-Authenticate: ... error_description="..."` and
+#: into the JSON body, and a client may show either to a person.
+_CHALLENGE_NO_TOKEN = (
+    "Authentication required: add your Celmis token as an "
+    "'Authorization: Bearer <token>' header."
+)
+_CHALLENGE_REJECTED = (
+    "The token was not accepted: it is unknown, revoked or expired. "
+    "{get_new} and enter it again "
+    "(Claude Code plugin: /plugin configure celmis-code@celmis)."
+)
+_CHALLENGE_PROJECT_TOKEN = (
+    " A project token (cmcp_...) works on the full /mcp endpoint only; "
+    "this endpoint takes a developer token."
+)
+
+
+def _challenge_sentence(scope, mount_path: str) -> str:  # noqa: ANN001
+    """What a 401 says, from what the request carried.
+
+    Two cases only, and nothing in between: no bearer token at all, or a bearer
+    token that was not accepted. The second sentence is the same for a forged,
+    unknown, revoked and expired token, so the answer never tells a stranger
+    whether a token exists. A token the server can say more about (its holder
+    left the workspace) never reaches here: that is `_ExplainRefusal`'s 403.
+    """
+    token = ""
+    for key, value in scope.get("headers") or []:
+        if key.lower() == b"authorization":
+            text = value.decode("latin-1").strip()
+            if text.lower().startswith("bearer "):
+                token = text[7:].strip()
+            break
+    if not token:
+        return _CHALLENGE_NO_TOKEN
+
+    try:
+        from src.mcp_server import token_store
+
+        self_service = token_store.self_service_enabled()
+    except Exception:  # noqa: BLE001 — the sentence must never fail to be sent
+        self_service = False
+    get_new = ("Create a new token on the MCP settings page of Celmis"
+               if self_service else "Ask your Celmis administrator for a new token")
+    sentence = _CHALLENGE_REJECTED.format(get_new=get_new)
+    try:
+        from src.mcp_server import project_tokens as pt
+
+        if mount_path != "/mcp" and pt.is_project_token(token):
+            sentence += _CHALLENGE_PROJECT_TOKEN
+    except Exception:  # noqa: BLE001
+        pass
+    return sentence
+
+
+class _PublicChallenge:
+    """Make the 401 of an MCP endpoint a usable invitation.
+
+    The SDK builds its `WWW-Authenticate` once, at start-up, from the JWT
+    issuer and audience (`https://code-analyzer`, `https://mcp-code-analyzer`).
+    Those are names inside tokens, not addresses: the `resource_metadata` URL
+    it printed pointed at a host that does not exist, so a client that followed
+    the challenge failed on the network, fell back to the web app's root, got
+    its sign-in page, and tried to parse HTML as JSON.
+
+    This wrapper puts the real thing there: the metadata document of THIS
+    endpoint, at the API's public address (see :mod:`.public_url`) as the caller
+    reached it. It also replaces the SDK's bare "Authentication required" with a
+    sentence that says whether a token was missing or not accepted, and what to
+    do. The status, the `invalid_token` code and the refusal itself are the
+    SDK's and are not touched: nothing here decides who is allowed in.
+
+    A 403 `insufficient_scope` keeps its sentence and gains the same pointer.
+    Every other response, including `_ExplainRefusal`'s 403 `access_denied`,
+    passes through byte for byte.
+    """
+
+    def __init__(self, app, mount_path: str):  # noqa: ANN001
+        self.app = app
+        self.mount_path = mount_path.rstrip("/") or "/"
+
+    async def __call__(self, scope, receive, send):  # noqa: ANN001
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+
+        import json
+        import re
+
+        from src.mcp_server.public_url import base_from_scope, protected_resource_metadata_url
+
+        replaced = False
+
+        def _challenge(error: str, description: str) -> bytes:
+            url = protected_resource_metadata_url(base_from_scope(scope), self.mount_path)
+            return (f'Bearer error="{error}", error_description="{description}", '
+                    f'resource_metadata="{url}"').encode("latin-1", "replace")
+
+        async def _send(message):  # noqa: ANN001
+            nonlocal replaced
+            if message["type"] == "http.response.start" and message["status"] == 401:
+                replaced = True
+                description = _challenge_sentence(scope, self.mount_path)
+                body = json.dumps({"error": "invalid_token",
+                                   "error_description": description}).encode("utf-8")
+                await send({
+                    "type": "http.response.start", "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                        (b"www-authenticate", _challenge("invalid_token", description)),
+                        (b"cache-control", b"no-store"),
+                    ],
+                })
+                await send({"type": "http.response.body", "body": body})
+                return
+            if replaced and message["type"] == "http.response.body":
+                return
+            if message["type"] == "http.response.start" and message["status"] == 403:
+                headers = list(message.get("headers") or [])
+                for i, (key, value) in enumerate(headers):
+                    if key.lower() == b"www-authenticate" and b"insufficient_scope" in value:
+                        text = value.decode("latin-1")
+                        text = re.sub(r',?\s*resource_metadata="[^"]*"', "", text)
+                        url = protected_resource_metadata_url(base_from_scope(scope), self.mount_path)
+                        headers[i] = (key, f'{text}, resource_metadata="{url}"'.encode("latin-1", "replace"))
+                        message = {**message, "headers": headers}
+                        break
+            await send(message)
+
+        await self.app(scope, receive, _send)
 
 
 def _build_mcp() -> FastMCP:  # noqa: F821 — quoted for typing without an import when the package is absent
@@ -2187,8 +2330,11 @@ def mount_mcp(app: FastAPI, *, path: str = "/mcp") -> bool:
         if dev is not None and dev_app is not None:
             with contextlib.suppress(Exception):
                 dev.settings.streamable_http_path = "/"
-            app.mount(f"{path.rstrip('/')}/dev", _ExplainInvalidHost(_ExplainRefusal(dev_app)))
-        app.mount(path, _ExplainInvalidHost(_ExplainRefusal(sub_app)))
+            dev_path = f"{path.rstrip('/')}/dev"
+            app.mount(dev_path, _PublicChallenge(
+                _ExplainInvalidHost(_ExplainRefusal(dev_app)), dev_path))
+        app.mount(path, _PublicChallenge(
+            _ExplainInvalidHost(_ExplainRefusal(sub_app)), path))
         # Assert the endpoint is where we claim: a silent 404 here costs the
         # agent every mcp__celmis__* tool with no error anywhere.
         try:

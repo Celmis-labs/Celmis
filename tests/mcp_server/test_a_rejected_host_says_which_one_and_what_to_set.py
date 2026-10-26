@@ -79,6 +79,17 @@ async def test_the_refusal_names_the_setting_that_would_admit_it():
 
 
 @pytest.mark.asyncio
+async def test_the_refusal_says_to_write_https_when_a_tls_terminator_sits_in_front():
+    """`MCP_ALLOWED_HOSTS` alone leaves the sign-in addresses at the plain `http` the
+    bundled proxy reports; the fix that works is written out, with the host filled in."""
+    _, body = await _run(421, b"Invalid Host header", _scope("celmis.example.com"))
+    text = body.decode()
+    assert "PUBLIC_BASE_URL=https://celmis.example.com" in text
+    assert "MCP_OAUTH_ISSUER=https://celmis.example.com/backend" in text
+    assert "TLS terminator" in text
+
+
+@pytest.mark.asyncio
 async def test_it_reads_the_proxy_header_like_everything_else():
     """Behind Caddy the operator's host is the forwarded one.
 
@@ -195,6 +206,13 @@ def test_the_wrapper_is_actually_mounted(monkeypatch):
 
     mounted = [r for r in app.routes if getattr(r, "path", None) == "/mcp"]
     assert mounted, "nothing was mounted at /mcp"
-    assert isinstance(mounted[0].app, mod._ExplainInvalidHost), (
+    # The outermost wrapper makes the 401 a usable invitation (`_PublicChallenge`);
+    # the host explanation sits directly inside it, so a 421 passes through it
+    # untouched and still gets its wording.
+    outer = mounted[0].app
+    assert isinstance(outer, mod._PublicChallenge), (
+        "the 401 keeps the SDK's made-up resource_metadata host"
+    )
+    assert isinstance(outer.app, mod._ExplainInvalidHost), (
         "the MCP sub-app is mounted raw — the 421 keeps its original wording"
     )

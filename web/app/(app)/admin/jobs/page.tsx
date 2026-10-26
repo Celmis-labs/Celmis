@@ -51,6 +51,7 @@ type ScopedJob = SyncJob & { workspace_id?: string | null };
 
 const STATUS_TONES: Record<string, string> = {
   pending: "text-blue-600",
+  deferred: "text-violet-600",
   running: "text-amber-600 font-semibold",
   completed: "text-emerald-600",
   failed: "text-orange-600",
@@ -60,6 +61,7 @@ const STATUS_TONES: Record<string, string> = {
 
 const STATUS_KEYS: Record<string, string> = {
   pending: "admin.jobs.statusPending",
+  deferred: "admin.jobs.statusDeferred",
   running: "admin.jobs.statusRunning",
   completed: "admin.jobs.statusCompleted",
   failed: "admin.jobs.statusFailed",
@@ -132,8 +134,8 @@ export default function JobsPage() {
         tabs={<SectionTabs set="admin" />}
       />
 
-      <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
-        {(["pending", "running", "completed", "failed", "cancelled", "dead"] as const).map((s) => (
+      <div className="grid grid-cols-2 sm:grid-cols-7 gap-3">
+        {(["pending", "deferred", "running", "completed", "failed", "cancelled", "dead"] as const).map((s) => (
           <button
             key={s}
             className={`rounded border border-[var(--color-border)] p-3 text-left hover:bg-[var(--color-accent)] ${statusFilter === s ? "ring-2 ring-[var(--color-brand,#4f46e5)]" : ""}`}
@@ -226,7 +228,8 @@ function JobRow({
   onFilterKind: () => void;
 }) {
   const t = useT();
-  const canRetry = j.status === "dead" || j.status === "failed" || j.status === "cancelled";
+  const canRetry = j.status === "dead" || j.status === "failed" || j.status === "cancelled"
+    || j.status === "deferred";
   const payloadStr = useMemo(() => JSON.stringify(j.payload), [j.payload]);
   return (
     <div className="border border-[var(--color-border)] rounded p-2 text-xs">
@@ -251,6 +254,7 @@ function JobRow({
             {j.dedup_key && <Badge variant="outline" className="font-mono text-[9px]">{j.dedup_key.slice(0, 60)}</Badge>}
             <span className="text-[var(--color-muted-foreground)] ml-auto">
               {j.status === "pending" ? t("admin.jobs.nextRun", { time: formatDateTime(j.next_run_at) }) : ""}
+              {j.status === "deferred" ? t("admin.jobs.nextCheck", { time: formatDateTime(j.next_run_at) }) : ""}
               {j.status === "running" && j.locked_by ? t("admin.jobs.lockedBy", { who: j.locked_by }) : ""}
               {j.status === "completed" && j.finished_at ? t("admin.jobs.done", { time: formatDateTime(j.finished_at) }) : ""}
             </span>
@@ -258,6 +262,14 @@ function JobRow({
           <div className="mt-1 font-mono truncate text-[var(--color-muted-foreground)]">
             {payloadStr.slice(0, 200)}{payloadStr.length > 200 ? "…" : ""}
           </div>
+          {j.status === "deferred" && (
+            <div className="mt-1 text-violet-700" data-testid="job-deferred">
+              <strong>{t("admin.jobs.waitingForModel")}</strong>
+              {j.defer_reason ? <> {j.defer_reason}.</> : null}{" "}
+              {j.deferred_since ? t("admin.jobs.waitingSince", { time: formatDateTime(j.deferred_since) }) : ""}{" "}
+              {t("admin.jobs.waitingChecks", { count: j.defer_checks ?? 0 })}
+            </div>
+          )}
           {j.last_error && (
             <details className="mt-1">
               <summary className="cursor-pointer text-red-600">{t("admin.jobs.errorSummary")}</summary>
@@ -269,9 +281,9 @@ function JobRow({
         </div>
         {canManage && (
           <div className="flex gap-1 shrink-0">
-            {j.status === "running" && (
+            {(j.status === "running" || j.status === "deferred") && (
               <Button variant="ghost" size="sm" onClick={onCancel}
-                title={t("admin.jobs.cancelTitle")}>
+                title={t(j.status === "deferred" ? "admin.jobs.cancelDeferredTitle" : "admin.jobs.cancelTitle")}>
                 <SquareIcon className="h-3.5 w-3.5 mr-1" /> {t("admin.jobs.cancel")}
               </Button>
             )}

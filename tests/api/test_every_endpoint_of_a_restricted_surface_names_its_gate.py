@@ -88,6 +88,7 @@ EXCEPTIONS: dict[tuple[str, str], set[str]] = {
 PROTOCOL: set[tuple[str, str]] = {
     ("GET", "/.well-known/oauth-authorization-server"),
     ("GET", "/.well-known/oauth-protected-resource"),
+    ("GET", "/.well-known/oauth-protected-resource/mcp"),
     ("GET", "/.well-known/oauth-protected-resource/mcp/dev"),
     ("GET", "/oauth/authorize"),
     ("POST", "/oauth/authorize/consent"),

@@ -187,6 +187,18 @@ class LLMClient:
         # response's own figure, the proxy's declared price, the table.
         self._price_proxy_call = price_proxy_call
 
+    def model_for(self, agent: str) -> str | None:
+        """The model `agent` would be called with — what `generate(agent=...)`
+        resolves, or None when no resolver is wired. Lets a caller that must
+        reason about the model SET of a run (the review preflight) ask the
+        client rather than re-derive the gateway-aware routing."""
+        if not self._resolve_model:
+            return None
+        try:
+            return self._resolve_model(agent) or None
+        except Exception:  # noqa: BLE001
+            return None
+
     def _estimate_proxy_cost(self) -> bool:
         if not self._estimate_proxy_cost_hook:
             return False

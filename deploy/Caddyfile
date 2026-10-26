@@ -14,9 +14,24 @@
 #
 # NextAuth's own `/api/auth/*` lives in the Next app, so only the `/backend`
 # prefix is peeled off — the two `/api` namespaces never meet.
+#
+# The prefix is peeled off, and the API is TOLD it was there (`X-Forwarded-Prefix`):
+# it prints its own public address into the MCP sign-in documents
+# (/.well-known/oauth-*) and into the 401 challenge, and without the header it
+# would name `https://host/mcp/`, an address that does not exist.
+#
+# Behind a TLS terminator of your own this `:80` site sees plain http, and Caddy
+# replaces the terminator's `X-Forwarded-Proto: https` with its own `http`. The
+# API cannot tell, so tell it once in .env: `PUBLIC_BASE_URL=https://<your host>`
+# (or `MCP_OAUTH_ISSUER=https://<your host>/backend`). Otherwise the MCP sign-in
+# documents name `http://`. Not solved here with `trusted_proxies`: on Docker the
+# peer is often the bridge gateway, and trusting it would let any client set
+# X-Forwarded-For and -Proto.
 :80 {
 	handle_path /backend/* {
-		reverse_proxy api:8000
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-Prefix /backend
+		}
 	}
 	reverse_proxy web:3000
 }

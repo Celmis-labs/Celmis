@@ -8,6 +8,7 @@ import { toast } from "sonner";
 
 import { projectsApi, publicMcpUrl, type ProjectMcpTokenIssued } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
+import { copyText } from "@/lib/copy";
 import { useT } from "@/lib/i18n";
 import { formatDateTime } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
@@ -28,14 +29,25 @@ const TTLS = [
 /** The public MCP URL of this deployment, API prefix included. */
 const mcpUrl = () => publicMcpUrl();
 
+/** `copyText`, not `navigator.clipboard`: the token is copied from here and nowhere
+ *  else, and this product is often served over plain HTTP, where the Clipboard API
+ *  does not exist (lib/copy.ts). */
 async function copy(text: string, done: string, failed: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast.success(done);
-  } catch {
-    toast.error(failed);
-  }
+  if (await copyText(text)) toast.success(done);
+  else toast.error(failed);
 }
+
+/** The token is shown once, in a field of its own, and never typed into a command: a
+ *  token in a command stays on screen and in the shell history. The command names a
+ *  shell variable instead and READ_TOKEN fills it (`read -s` takes the value without
+ *  echoing it). The same two lines as the manual route of the connect guide
+ *  (/codebase/connect), and the guide's sentence says how to use them. */
+const READ_TOKEN = "read -rs CELMIS_MCP_TOKEN && export CELMIS_MCP_TOKEN";
+
+/** One line on purpose: a command pasted in several lines is how a line ends up in the
+ *  wrong place. `\${...}` is the shell's, not this file's: it is written, never filled in. */
+const connectCommand = () =>
+  `claude mcp add --transport http project-search ${mcpUrl()} --header "Authorization: Bearer \${CELMIS_MCP_TOKEN}"`;
 
 export function ProjectMcpTokens({ projectId }: { projectId: string }) {
   const t = useT();
@@ -71,9 +83,7 @@ export function ProjectMcpTokens({ projectId }: { projectId: string }) {
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const command = issued
-    ? `claude mcp add --transport http project-search ${mcpUrl()} --header "Authorization: Bearer ${issued.token}"`
-    : "";
+  const command = issued ? connectCommand() : "";
 
   return (
     <Card>
@@ -107,6 +117,12 @@ export function ProjectMcpTokens({ projectId }: { projectId: string }) {
               {t("projects.mcp.copy")}
             </Button>
             <p className="text-xs font-medium">{t("projects.mcp.command")}</p>
+            <p className="text-xs text-muted-foreground">{t("codebase.connect.manual.prepare")}</p>
+            <code className="block break-all text-xs">{READ_TOKEN}</code>
+            <Button size="sm" variant="outline"
+              onClick={() => copy(READ_TOKEN, t("projects.mcp.copied"), t("projects.mcp.copyFailed"))}>
+              {t("projects.mcp.copy")}
+            </Button>
             <code className="block break-all text-xs">{command}</code>
             <Button size="sm" variant="outline"
               onClick={() => copy(command, t("projects.mcp.copied"), t("projects.mcp.copyFailed"))}>

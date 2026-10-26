@@ -480,7 +480,8 @@ class ReviewRunOut(BaseModel):
     cost_source: str | None = None      # 'openrouter_actual' | 'manual_price' | 'proxy_price' | 'litellm_estimate' | 'unknown' | 'mixed'
     tokens_input: int = 0
     tokens_output: int = 0
-    #: Lifecycle state of the run — 'queued' | 'running' | 'complete' |
+    #: Lifecycle state of the run — 'queued' | 'running' | 'deferred' (waiting
+    #: for the model) | 'complete' |
     #: 'partial' | 'failed' | 'skipped' (ReviewRunStatus in src/review/models.py).
     #: 'partial' is the Kodus PARTIAL_ERROR case: the comments were posted and
     #: a stage is missing from them. 'skipped' means nothing was ever
@@ -543,6 +544,21 @@ class ReviewRunOut(BaseModel):
     #: and on a pull request's run list; null on /history rows ("not
     #: shipped") and on runs recorded before stages existed ("not recorded").
     stages: list[ReviewStageOut] | None = None
+    #: Only while `status` is 'deferred': the queue job that will run the
+    #: review again, why it waits, since when and when the model is next
+    #: checked. null otherwise (and when the queue cannot be read).
+    waiting: ReviewRunWaitingOut | None = None
+
+
+class ReviewRunWaitingOut(BaseModel):
+    """A review waiting for the model (see `src.review.model_wait`)."""
+
+    job_id: str
+    #: A curated sentence, never an exception's text.
+    reason: str | None = None
+    #: ISO times: the first deferral, and the next check of the model.
+    since: str | None = None
+    next_check_at: str | None = None
 
 
 class ReviewStageOut(BaseModel):

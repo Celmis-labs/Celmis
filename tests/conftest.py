@@ -175,3 +175,16 @@ def _community_seat_limits():
     _community_limits()
     yield
     _community_limits()
+
+
+@pytest.fixture(autouse=True)
+def _review_model_preflight_off(monkeypatch):
+    """Reviews in tests run without a model behind them. The preflight (a real
+    request through the review's LLM client) is off unless a test turns it on
+    with ``monkeypatch.setenv("CELMIS_REVIEW_MODEL_PREFLIGHT", "on")``."""
+    monkeypatch.setenv("CELMIS_REVIEW_MODEL_PREFLIGHT", "off")
+    from src.review import model_preflight
+
+    model_preflight.reset_cache()
+    yield
+    model_preflight.reset_cache()

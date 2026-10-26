@@ -22,12 +22,18 @@
 # there.
 {$APP_DOMAIN} {
 	handle_path /backend/* {
-		reverse_proxy api:8000
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-Prefix /backend
+		}
 	}
 	reverse_proxy web:3000
 }
 
 # API + MCP (browser calls it directly via NEXT_PUBLIC_API_BASE)
 {$API_DOMAIN} {
-	reverse_proxy api:8000
+	# No prefix on this host: drop one a client may have sent, so the API does not
+	# print `/backend` into a document served from the domain that has none.
+	reverse_proxy api:8000 {
+		header_up -X-Forwarded-Prefix
+	}
 }

@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 _POLL_INTERVAL = float(os.environ.get("CELMIS_SYNC_POLL_SECONDS", "5"))
 _CONCURRENCY = int(os.environ.get("CELMIS_SYNC_WORKER_CONCURRENCY", "2"))
 
+def _defer_check_seconds() -> float:
+    from src.review.model_wait import check_seconds
+    return check_seconds()
+
+
 _TASK: asyncio.Task | None = None
 _HANDLERS: dict[str, Callable[[dict], Awaitable[None]]] = {}
 
@@ -70,7 +75,23 @@ async def _dispatch_forever() -> None:
     soon as it finishes the previous one — a long job (hours-long vault
     generation) occupies exactly one slot instead of barrier-blocking the
     whole queue until it completes."""
-    await asyncio.gather(*[_worker_loop(i) for i in range(_CONCURRENCY)])
+    await asyncio.gather(
+        *[_worker_loop(i) for i in range(_CONCURRENCY)], _deferred_loop(),
+    )
+
+
+async def _deferred_loop() -> None:
+    """Reviews that wait for the model: look at them once at startup, then
+    every CELMIS_REVIEW_DEFER_CHECK_SECONDS. Safe beside other workers and
+    replicas — each deferred row is claimed by a conditional UPDATE."""
+    from src.review.model_wait import check_seconds, process_deferred
+
+    while True:
+        try:
+            await asyncio.to_thread(process_deferred)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("review_defer_processor_failed err=%s", exc)
+        await asyncio.sleep(check_seconds())
 
 
 async def _worker_loop(slot: int) -> None:
@@ -110,6 +131,18 @@ async def _process(job: dict[str, Any]) -> None:
         logger.info("sync_job_cancelled id=%s kind=%s", job["id"], kind)
         await asyncio.to_thread(
             jq.mark_cancelled, job["id"], str(exc) or "cancelled by user")
+        return
+    except jq.JobDeferred as exc:
+        # Waiting is not failing: no attempt is consumed, the row is parked and
+        # the deferred-list processor releases it when the dependency is back.
+        first = await asyncio.to_thread(
+            jq.mark_deferred, job["id"], exc.reason, code=exc.code,
+            floor=_defer_check_seconds())
+        if first and kind == jq.KIND_REVIEW:
+            from src.review.model_preflight import notify_blocked
+
+            await asyncio.to_thread(notify_blocked, job.get("payload") or {},
+                                    exc.code, exc.reason)
         return
     except Exception as exc:  # noqa: BLE001
         err = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[:2000]}"

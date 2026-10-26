@@ -14,7 +14,8 @@
  * token is the part they have to copy.
  */
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
+import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { CheckIcon, CopyIcon, KeyIcon, PlugIcon, TerminalIcon } from "lucide-react";
@@ -29,6 +30,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Callout } from "@/components/ui/callout";
 import { InlineHelp } from "@/components/ui/inline-help";
 
 type McpToken = {
@@ -46,6 +48,16 @@ type McpToken = {
  *  "copy this" is worse than no button. */
 /** The write scopes a token may ask for — the server's `WRITE_SCOPES`. */
 const WRITE_SCOPES = ["write:config", "write:repos", "write:reviews"];
+
+/** `read -s` asks for the token without echoing it: it is neither on screen nor in
+ *  the shell history. A box of its own, run alone (the connection guide says why). */
+const READ_TOKEN = "read -rs CELMIS_MCP_TOKEN && export CELMIS_MCP_TOKEN";
+
+/** The address is known only in the browser. Reading `window` during render made the
+ *  server render and the first client render differ, which rebuilt the tree and lost
+ *  the theme class on <html>; a store that never changes gives each side its own
+ *  snapshot without a mismatch. */
+const noopSubscribe = () => () => {};
 
 function CopyButton({ text, label }: { text: string; label: string }) {
   const t = useT();
@@ -122,14 +134,19 @@ export default function McpPage() {
   // to generate anything first — the config is the part to understand.
   // The developer endpoint is the one a person connects an editor to: read-only
   // tools over the repositories their token names.
+  const ownUrl = useSyncExternalStore(noopSubscribe, () => publicMcpUrl("/mcp/dev/"), () => "/mcp/dev/");
   const url = issued?.url && issued.url !== "/mcp/" && issued.url !== "/mcp/dev/"
     ? issued.url
-    : (typeof window !== "undefined" ? publicMcpUrl("/mcp/dev/") : "/mcp/dev/");
+    : ownUrl;
   const secret = issued?.token ?? "${CELMIS_MCP_TOKEN}";
 
+  // The shell command always names the variable, never the token: a token typed
+  // into a command stays on screen and in the shell history (the connect guide,
+  // /codebase/connect, says so too). The variable is filled by READ_TOKEN, a line of its
+  // own. The JSON file below is a file, not a command.
   const claudeCode = `claude mcp add --transport http celmis \\
   ${url} \\
-  --header "Authorization: Bearer ${secret}"`;
+  --header "Authorization: Bearer \${CELMIS_MCP_TOKEN}"`;
 
   // The header name is a variable, not a literal, and that is deliberate.
   // tests/security/test_download_workspace_header.py bans the literal
@@ -158,6 +175,15 @@ export default function McpPage() {
         description={t("mcp.subtitle")}
         tabs={<SectionTabs set="settings" />}
       />
+
+      {/* The step-by-step guide lives on the Connect page; this page only issues
+          and lists tokens, and says which route to prefer. */}
+      <Callout tone="info" className="flex flex-wrap items-center justify-between gap-2">
+        <span className="min-w-0">{t("mcp.guideHint")}</span>
+        <Link href="/codebase/connect" className="font-medium underline">
+          {t("mcp.guideLink")}
+        </Link>
+      </Callout>
 
       {/* The person's own tokens: metadata and revoke, never a value. */}
       <Card>
@@ -291,6 +317,10 @@ export default function McpPage() {
           <CardDescription>{t("mcp.step2Body")}</CardDescription>
         </CardHeader>
         <CardContent>
+          <Snippet>{READ_TOKEN}</Snippet>
+          <div className="mt-2">
+            <CopyButton text={READ_TOKEN} label={t("mcp.copyCommand")} />
+          </div>
           <Snippet>{claudeCode}</Snippet>
           <div className="mt-2">
             <CopyButton text={claudeCode} label={t("mcp.copyCommand")} />

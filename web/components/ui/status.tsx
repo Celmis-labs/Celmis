@@ -30,7 +30,7 @@ import { cn } from "@/lib/utils";
 
 // ─── lifecycle ──────────────────────────────────────────────────────────
 
-export type RunStatus = "queued" | "running" | "success" | "partial" | "skipped" | "failed";
+export type RunStatus = "queued" | "deferred" | "running" | "success" | "partial" | "skipped" | "failed";
 
 /** Every word the server uses for a run or stage, folded onto the scale.
  *  Unknown words are failures — the same rule the stage pills follow. */
@@ -39,6 +39,8 @@ export function toRunStatus(word: string | null | undefined): RunStatus {
     case "queued":
     case "pending":
       return "queued";
+    case "deferred":
+      return "deferred";
     case "running":
       return "running";
     case "complete":
@@ -56,6 +58,8 @@ export function toRunStatus(word: string | null | undefined): RunStatus {
 
 const STATUS_CLASS: Record<RunStatus, string> = {
   queued: "bg-[var(--color-status-queued-soft)] text-[var(--color-status-queued)]",
+  // Waiting for a dependency, not working and not broken: the warning family.
+  deferred: "bg-[var(--color-status-partial-soft)] text-[var(--color-status-partial)]",
   running: "bg-[var(--color-status-running-soft)] text-[var(--color-status-running)]",
   success: "bg-[var(--color-status-success-soft)] text-[var(--color-status-success)]",
   partial: "bg-[var(--color-status-partial-soft)] text-[var(--color-status-partial)]",
@@ -70,7 +74,7 @@ export function StatusDot({ status, className }: { status: RunStatus; className?
       className={cn(
         "inline-block size-1.5 shrink-0 rounded-full bg-current",
         // Queued is a hollow ring: it has not started, so it is not "filled".
-        status === "queued" && "bg-transparent ring-1 ring-current",
+        (status === "queued" || status === "deferred") && "bg-transparent ring-1 ring-current",
         status === "running" && "animate-pulse-dot",
         className,
       )}

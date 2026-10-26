@@ -30,6 +30,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { DeferredNotice } from "@/components/deferred-notice";
 import { Badge } from "@/components/ui/badge";
 import { Callout } from "@/components/ui/callout";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -400,6 +401,7 @@ function ApplyFixPanel() {
 // the shared status scale (StatusPill), the same one the PR timeline uses.
 const STATUS_BADGES: Record<string, { key: string }> = {
   queued: { key: "reviews.status.queued" },
+  deferred: { key: "reviews.status.deferred" },
   running: { key: "reviews.status.running" },
   complete: { key: "reviews.status.complete" },
   partial: { key: "reviews.status.partial" },
@@ -525,7 +527,7 @@ function RunRow({ run, isAdmin }: { run: ReviewRunOut; isAdmin: boolean }) {
               onClick={() => rerun.mutate()}
               // A run still in flight is already the re-run — queueing a
               // second copy from its own row only doubles the bill.
-              disabled={rerun.isPending || status === "queued" || status === "running"}
+              disabled={rerun.isPending || status === "queued" || status === "deferred" || status === "running"}
               title={t("reviews.rerunReview")}
             >
               <RefreshCwIcon className={`h-3.5 w-3.5 ${rerun.isPending ? "animate-spin" : ""}`} />
@@ -542,6 +544,7 @@ function RunRow({ run, isAdmin }: { run: ReviewRunOut; isAdmin: boolean }) {
           {t("reviews.agentsFailed", { agents: failedAgents })}
         </div>
       )}
+      {status === "deferred" && run.waiting && <DeferredNotice waiting={run.waiting} />}
       {showAdjustments && adjCount > 0 && <ParameterAdjustmentsPanel run={run} />}
       {cleanup && ((cleanup.deleted ?? 0) + (cleanup.failed ?? 0)
         + (cleanup.kept_threaded ?? 0) > 0 || cleanup.complete === false) && (

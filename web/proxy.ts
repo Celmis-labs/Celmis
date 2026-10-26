@@ -51,7 +51,12 @@ export const config = {
   // that answers 307 never registers, so a redirect here disables push
   // entirely — and the manifest and icons are fetched by the browser
   // itself, outside any session, when installing to the Home Screen.
+  //
+  // `.well-known` is exempt for the same reason, and it is the one that was
+  // breaking sign-in for agents: an MCP client looks for the OAuth discovery
+  // documents there, with no session, and a redirect to /login gave it an HTML
+  // page where it expected JSON. app/.well-known answers those requests itself.
   matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|sw\\.js|manifest\\.webmanifest|icon-\\d+\\.png).*)",
+    "/((?!api|_next/static|_next/image|favicon.ico|sw\\.js|manifest\\.webmanifest|icon-\\d+\\.png|\\.well-known).*)",
   ],
 };

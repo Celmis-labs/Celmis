@@ -40,6 +40,7 @@ const EVENT_OPTIONS = [
   { v: "breaking_change", label: "breaking_change" },
   { v: "agent_turn_done", label: "agent_turn_done" },
   { v: "alert_received", label: "alert_received" },
+  { v: "review_model_blocked", label: "review_model_blocked" },
 ];
 
 const SEVERITY_OPTIONS = [

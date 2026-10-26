@@ -10,8 +10,8 @@ Schema:
         user_id         TEXT NOT NULL,
         pr_ref          TEXT NOT NULL,
         status          TEXT NOT NULL,       -- see ReviewRunStatus (src/review/models.py):
-                                             -- queued | running | complete | partial
-                                             -- | skipped | failed
+                                             -- queued | running | deferred | complete
+                                             -- | partial | skipped | failed
         verdict         TEXT NOT NULL DEFAULT 'pending',
         findings_count  INTEGER NOT NULL DEFAULT 0,
         critical        INTEGER NOT NULL DEFAULT 0,

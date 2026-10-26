@@ -3,8 +3,10 @@
     GET    /api/jobs              — list (filter by status/kind)
     GET    /api/jobs/stats        — counts per status
     POST   /api/jobs              — manual enqueue (GLOBAL admin only)
-    POST   /api/jobs/{id}/retry   — reset dead/failed row to pending
-    POST   /api/jobs/{id}/cancel  — cooperative cancel of a running row
+    POST   /api/jobs/{id}/retry   — reset dead/failed row to pending; stop a
+                                    deferred (waiting for the model) row waiting
+    POST   /api/jobs/{id}/cancel  — cooperative cancel of a running row;
+                                    a deferred row is cancelled at once
     DELETE /api/jobs/{id}         — delete a row
 
 Who sees what
@@ -148,8 +150,15 @@ def cancel(
 ) -> dict[str, Any]:
     """Request cooperative cancellation of a RUNNING job. The handler stops
     at its next checkpoint (between modules / repos / phases); the row then
-    shows as 'cancelled' and can be retried later."""
-    _authorize_write(job_id, user, workspace_id)
+    shows as 'cancelled' and can be retried later. A DEFERRED job (a review
+    waiting for the model) is cancelled at once, its run closed and the
+    placeholder on the pull request rewritten."""
+    job = _authorize_write(job_id, user, workspace_id)
+    if job.get("status") == jq.STATUS_DEFERRED:
+        if not _cancel_deferred(job_id):
+            raise HTTPException(status_code=409, detail="job is not running")
+        logger.info("job_cancelled id=%s by=%s", job_id, user.email)
+        return {"ok": True}
     ok = jq.request_cancel(job_id)
     if not ok:
         raise HTTPException(status_code=409, detail="job is not running")
@@ -163,9 +172,26 @@ def delete_job(
     user: User = Depends(require_workspace_admin),
     workspace_id: str = Depends(current_workspace_id),
 ) -> None:
-    _authorize_write(job_id, user, workspace_id)
+    job = _authorize_write(job_id, user, workspace_id)
+    if job.get("status") == jq.STATUS_DEFERRED:
+        # Deleting the row would leave its run 'deferred' for good and the
+        # placeholder promising a re-run: close both first.
+        _cancel_deferred(job_id)
     jq.delete_job(job_id)
     logger.info("job_deleted id=%s by=%s", job_id, user.email)
+
+
+def _cancel_deferred(job_id: str) -> bool:
+    """Cancel a waiting job and close what waits on it. False when the row was
+    no longer deferred (the processor released it first)."""
+    row = jq.cancel_deferred(job_id)
+    if row is None:
+        return False
+    if row.get("kind") == jq.KIND_REVIEW:
+        from src.review.model_wait import close_cancelled
+
+        close_cancelled(row)
+    return True
 
 
 def _serialize_all(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -173,7 +199,7 @@ def _serialize_all(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for r in rows:
         item = dict(r)
         for key in ("next_run_at", "locked_until", "created_at",
-                    "started_at", "finished_at"):
+                    "started_at", "finished_at", "deferred_since"):
             v = item.get(key)
             if v is not None and hasattr(v, "isoformat"):
                 item[key] = v.isoformat()

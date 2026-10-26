@@ -118,6 +118,72 @@ limit, or the check that the pull request has a diff to read.
 | `base_instruction` | none | A sentence every agent is given, such as "we use `Result` types, not exceptions". |
 | `message_started` / `message_finished_header` | built-in | Replace the wording of the two comments. |
 
+## When the model is down
+
+A review that starts while its model cannot be reached waits instead of
+failing. Nothing is lost and nothing is posted.
+
+1. **Preflight.** Before a queued review begins, Celmis sends one tiny request
+   (16 output tokens at the lowest reasoning level, no retries, 20 s timeout) through the same LLM client
+   the review will use, for each distinct model its agents would call. It goes
+   through the workspace key and routing, so the OpenRouter fallback counts.
+   The answer is cached per workspace and model: 60 s when the model answered,
+   15 s when it did not, and a burst of pull-request events costs one probe.
+   A 429 on the probe means the gateway is busy, not down, so the review goes
+   ahead. An inconclusive answer (an empty reply, a refusal, an error Celmis does not
+   recognise, a prompt that is too long) counts as available: the review goes
+   ahead and reports whatever happens.
+2. **Unavailable.** The model is unavailable when the provider is down or
+   times out, or the workspace cannot use it (no
+   or invalid key, unknown model, exhausted budget or quota). Then nothing is
+   posted to the pull request, the run row becomes **deferred** with a short
+   reason, and the job goes to the **deferred list** (`sync_jobs.status =
+   'deferred'`). No attempt is consumed, so waiting never walks a job to *dead*.
+   A new push or comment for the same pull request folds into the waiting job.
+3. **Mid-review outage.** If every agent fails because the model cannot be
+   reached, the review is postponed in the same way. A placeholder comment
+   already on the pull request is edited to say the review is postponed and
+   runs again by itself, in the review language. A partial review, or a failure
+   that is not about reachability (an unreadable reply, a prompt that is too
+   long), behaves as before.
+4. **Releasing.** The worker looks at the deferred list when it starts and then
+   every `CELMIS_REVIEW_DEFER_CHECK_SECONDS`. It groups the jobs by workspace
+   and set of models, probes each group once and, when the model answers,
+   moves the jobs back to the queue oldest first. A group that is still down
+   is looked at again after 1, 2, 5, 10 and then every 15 minutes. Several
+   workers or replicas may run this at once: each row is claimed by a
+   conditional update, so a job is released once. A late "park this job" from a
+   worker that has lost its lease is ignored.
+5. **Giving up.** After `CELMIS_REVIEW_DEFER_MAX_HOURS` the job is *dead*, the
+   run row is *failed* with "model unavailable for N h", a placeholder is
+   rewritten to say the review was not done (a finished summary is never
+   touched) and one ERROR is logged. When the review was parked before any
+   placeholder existed and the pull request has no comment of ours, one short
+   "Review not done" note is created, so the author learns it did not happen.
+   `@celmis review` asks again.
+
+The Jobs page lists deferred jobs (reason, since when, next check), and the
+review runs and pull-request views show the waiting state. A workspace owner or
+admin can press **Retry now** to put a waiting review back in the queue without
+waiting for the next check, or **Cancel** to stop waiting: the run is closed
+and a placeholder is rewritten to say it was cancelled (deleting a waiting job
+does the same first). A manual review of a pull request whose review is
+waiting is answered with "waiting for the model; use Retry now", not "already
+queued". Where the cause needs a person (no or invalid key, unknown model,
+exhausted budget or quota) the review still waits, and the workspace's
+notification channels get one `review_model_blocked` event per job.
+
+Reviews that cannot queue (the synchronous trigger, the CLI, a review run
+inline because there is no queue) cannot wait: they fail at once with the
+same short reason.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `CELMIS_REVIEW_MODEL_PREFLIGHT` | `on` | `off` skips the preflight; an outage in the middle of a review is still postponed. |
+| `CELMIS_REVIEW_MODEL_PREFLIGHT_TIMEOUT_SECONDS` | `20` | Timeout of the probe request. |
+| `CELMIS_REVIEW_DEFER_CHECK_SECONDS` | `60` | How often the worker looks at the deferred list. |
+| `CELMIS_REVIEW_DEFER_MAX_HOURS` | `24` | How long a review may wait before it is given up. |
+
 ## Other settings
 
 Settings for commands, memories, learning, issues and Jira are described where

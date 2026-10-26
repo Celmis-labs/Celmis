@@ -32,7 +32,7 @@ async def handle_review(job: dict[str, Any]) -> None:
     from src.review.dispatch import execute_review
 
     await asyncio.to_thread(execute_review, job["payload"],
-                            attempt=job.get("attempts"))
+                            attempt=job.get("attempts"), can_defer=True)
 
 
 async def handle_pr_command(job: dict[str, Any]) -> None:

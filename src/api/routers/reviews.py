@@ -33,12 +33,41 @@ from src.api.review_runs import (
     record_issues_stage,
     run_stage_sink,
 )
-from src.api.schemas import ReviewRunOut, ReviewTriggerRequest
+from src.api.schemas import ReviewRunOut, ReviewRunWaitingOut, ReviewTriggerRequest
 from src.users import User
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/reviews", tags=["reviews"])
+
+
+def attach_waiting(outs: list[ReviewRunOut]) -> list[ReviewRunOut]:
+    """Fill `waiting` on the deferred runs of `outs` from the queue, in one
+    query. Never raises: a queue that cannot be read costs the extra line,
+    not the list."""
+    deferred = [o for o in outs if o.status == "deferred"]
+    if not deferred:
+        return outs
+    try:
+        from src.sync.queue import deferred_for_runs
+
+        rows = deferred_for_runs([o.id for o in deferred])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("review_waiting_lookup_failed err_type=%s", type(exc).__name__)
+        return outs
+    for o in deferred:
+        row = rows.get(o.id)
+        if row:
+            o.waiting = ReviewRunWaitingOut(
+                job_id=row["id"], reason=row.get("defer_reason"),
+                since=_iso(row.get("deferred_since")),
+                next_check_at=_iso(row.get("next_run_at")))
+    return outs
+
+
+def _iso(value) -> str | None:
+    return value.isoformat() if hasattr(value, "isoformat") else (
+        str(value) if value else None)
 
 
 def _run_to_out(run: ReviewRun, *, with_adjustments: bool = True,
@@ -61,7 +90,8 @@ def _run_to_out(run: ReviewRun, *, with_adjustments: bool = True,
         # 'partial' is NOT folded into it: the UI reads this field and a run
         # that posted comments with one stage missing still has a real
         # verdict to show. The gap travels in `status` + `agents_failed`.
-        verdict=run.status if run.status in ("queued", "running", "failed") else run.verdict,
+        verdict=(run.status if run.status in ("queued", "running", "deferred", "failed")
+                 else run.verdict),
         status=run.status,
         agents_run=run.agents_run,
         agents_failed=run.agents_failed,
@@ -148,7 +178,7 @@ async def trigger_review(
         force=req.force,
     )
     # A run that was just queued has no cost yet: nothing to show or hide.
-    return _run_to_out(run)
+    return attach_waiting([_run_to_out(run)])[0]
 
 
 def _gitlab_base(workspace_id: str) -> str | None:
@@ -253,7 +283,8 @@ async def history(
     runs = [r for r in runs if await _can_see(r, user, workspace_id, verdicts)]
     # The count only — see `_run_to_out`.
     show_cost = await asyncio.to_thread(can_see_review_cost, user, workspace_id)
-    return [_run_to_out(r, with_adjustments=False, show_cost=show_cost) for r in runs]
+    return attach_waiting(
+        [_run_to_out(r, with_adjustments=False, show_cost=show_cost) for r in runs])
 
 
 @router.get("/{run_id}", response_model=ReviewRunOut)
@@ -266,7 +297,7 @@ async def get_run(
     if run is None or not await _can_see(run, user, workspace_id):
         raise HTTPException(status_code=404, detail="Run not found")
     show_cost = await asyncio.to_thread(can_see_review_cost, user, workspace_id)
-    return _run_to_out(run, show_cost=show_cost)
+    return attach_waiting([_run_to_out(run, show_cost=show_cost)])[0]
 
 
 @router.get("/{run_id}/diff")
@@ -386,6 +417,12 @@ def _run_review_task(
         provider, repo, pr_number = _parse_ref(_parse_pr_ref, pr_ref, workspace_id)
         pr_provider = get_provider_for(provider, user_id=user_id, workspace_id=workspace_id)
         try:
+            # Nothing is posted if the model is down: this route cannot queue,
+            # so the run fails with a clear, curated reason instead.
+            from src.review.model_preflight import check_for_review
+
+            check_for_review(provider, repo, workspace_id=workspace_id,
+                             user_id=user_id).raise_if_unavailable()
             orch = ReviewOrchestrator()
             result = orch.review(
                 provider, repo, pr_number,

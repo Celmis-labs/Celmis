@@ -30,16 +30,16 @@ from typing import Any
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import current_workspace_id, get_current_user, require_workspace_admin
+from src.api.deps import current_workspace_id, get_current_user, get_users, require_workspace_admin
 from src.db.models import OAuthAuthCode, OAuthClient, OAuthRefreshToken
 from src.db.session import get_async_session
-from src.users import User
+from src.users import User, UserStore
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +121,67 @@ _NO_GRANT = ("No MCP access has been granted to you for this workspace. "
 
 
 # ─── Dynamic client registration (RFC 7591) ─────────────────────────
+
+
+class OAuthRefusal(Exception):
+    """A refusal on an OAuth endpoint, answered in the RFC 6749 / 7591 error shape.
+
+    FastAPI's own errors are `{"detail": ...}`. An OAuth client does not read
+    that: the official MCP SDK looks for `error` and `error_description`, and
+    when they are missing it reports a schema-validation dump instead of the
+    sentence. The handler below (`oauth_refusal_handler`, installed by
+    `build_app`) writes both, plus `detail` for anything that reads the usual
+    shape.
+    """
+
+    def __init__(self, status_code: int, error: str, description: str) -> None:
+        super().__init__(description)
+        self.status_code = status_code
+        self.error = error
+        self.description = description
+
+
+async def oauth_refusal_handler(request: Request, exc: OAuthRefusal) -> JSONResponse:  # noqa: ARG001
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.error, "error_description": exc.description,
+                 "detail": exc.description},
+        headers={"WWW-Authenticate": "Bearer", "Cache-Control": "no-store"},
+    )
+
+
+#: What an MCP client that tries to register itself is told. Registration
+#: here is for a signed-in workspace admin (`require_workspace_admin`), not for
+#: an anonymous client, and the consent step needs the API's bearer token, which
+#: a browser form does not carry: a stock client cannot finish a browser
+#: sign-in on any installation. The client sees this sentence instead of a
+#: schema-validation dump, and the way in is the token it was given.
+BROWSER_SIGN_IN_CLOSED = (
+    "Celmis does not sign MCP clients in through the browser, so Authenticate "
+    "cannot help. Connect with a Celmis token instead (Claude Code plugin: "
+    "/plugin configure celmis-code@celmis). If you already did, the token was "
+    "not accepted: it is unknown, revoked or expired, so get a new one."
+)
+
+
+def _refuse_anonymous_registration(
+    authorization: str | None = Header(default=None),
+    users: UserStore = Depends(get_users),
+) -> None:
+    """An MCP client registering itself has no Celmis session: say why that
+    cannot work, in the shape a client reads.
+
+    "No session" is a missing bearer token OR one that is not a Celmis user's
+    (an MCP client sends its configured MCP token on every request it makes,
+    this one included, and that is not a session). A caller with a real session
+    goes on to `require_workspace_admin` exactly as before.
+    """
+    try:
+        get_current_user(authorization=authorization, users=users)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            raise OAuthRefusal(401, "access_denied", BROWSER_SIGN_IN_CLOSED) from exc
+        raise
 
 
 class RegisterClientIn(BaseModel):
@@ -212,7 +273,8 @@ async def delete_client(
                 client_id, len(tokens), user.email)
 
 
-@router.post("/register", response_model=RegisterClientOut, status_code=201)
+@router.post("/register", response_model=RegisterClientOut, status_code=201,
+             dependencies=[Depends(_refuse_anonymous_registration)])
 async def register_client(
     payload: RegisterClientIn,
     session: AsyncSession = Depends(get_async_session),
@@ -747,4 +809,4 @@ def _render_consent(**kwargs) -> str:
 """
 
 
-__all__ = ["router"]
+__all__ = ["BROWSER_SIGN_IN_CLOSED", "OAuthRefusal", "oauth_refusal_handler", "router"]

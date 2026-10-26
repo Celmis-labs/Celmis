@@ -15,6 +15,10 @@ Design (10-repo / 3-team scale):
     `attempts++`, `next_run_at = now() + 2**attempts * base_seconds`
     (capped). At `max_attempts` the row goes to `dead` — surfaced in
     the admin UI for human intervention.
+  * Deferral = a handler raising `JobDeferred` (the review model is down)
+    parks the row as `deferred`: no attempt consumed, dedup still holds, a
+    processor in the worker releases it when the dependency answers again,
+    and it goes `dead` after CELMIS_REVIEW_DEFER_MAX_HOURS.
   * Lease timeout — if worker crashes mid-job, `locked_until` expiry
     reclaims the row for another worker on next dequeue.
 
@@ -34,7 +38,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Engine
 
 from src.db.session import get_database_url
@@ -72,9 +76,34 @@ KIND_PRODUCTIVITY_SYNC = "productivity_sync"
 #: One PR re-read after its merge or close webhook.
 KIND_PRODUCTIVITY_PR = "productivity_pr"
 
+STATUS_DEFERRED = "deferred"
+
+#: Seconds between two checks of a deferred job, by how many checks already
+#: failed: 1, 2, 5, 10, then 15 minutes for as long as the outage lasts.
+_DEFER_INTERVALS = (60, 120, 300, 600, 900)
+#: How long a processor owns the jobs it picked up to probe for, so a sibling
+#: replica's tick does not pick the same rows (a crashed one frees them again).
+_DEFER_CLAIM_SECONDS = 120
+
 _LEASE_SECONDS = int(os.environ.get("CELMIS_JOB_LEASE_SECONDS", "600"))
 _BACKOFF_BASE = float(os.environ.get("CELMIS_JOB_BACKOFF_BASE", "5"))
 _BACKOFF_CAP = float(os.environ.get("CELMIS_JOB_BACKOFF_CAP_SECONDS", "1800"))
+
+
+class JobDeferred(Exception):
+    """Raised by a handler that cannot do its work NOW for a reason that is
+    nobody's fault and will pass — the review model is down.
+
+    The worker parks the row as 'deferred' instead of completing or failing
+    it: no attempt is consumed (an outage is not the job's fault), and a
+    processor releases it when the dependency answers again. `reason` is
+    shown in the UI, so it must be a curated sentence — never an exception's
+    own text, never a secret. `code` is a stable slug for tests and filters."""
+
+    def __init__(self, reason: str, *, code: str | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.code = code
 
 
 class JobCancelled(Exception):
@@ -179,7 +208,8 @@ def enqueue(
         if dedup_key:
             row = conn.execute(text(
                 "SELECT id FROM sync_jobs "
-                "WHERE dedup_key = :k AND status IN ('pending','running') LIMIT 1"
+                "WHERE dedup_key = :k "
+                "AND status IN ('pending','running','deferred') LIMIT 1"
             ), {"k": dedup_key}).fetchone()
             if row:
                 logger.info("job_enqueue_deduped kind=%s dedup=%s existing=%s",
@@ -412,15 +442,223 @@ def get_job(job_id: str) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
+def is_deferred(dedup_key: str) -> bool:
+    """True when the job holding `dedup_key` is waiting ('deferred'). Never
+    raises: a failed lookup only costs a less specific message."""
+    try:
+        with _engine().begin() as conn:
+            row = conn.execute(text(
+                "SELECT 1 FROM sync_jobs WHERE dedup_key = :k "
+                "AND status = 'deferred' LIMIT 1"), {"k": dedup_key}).fetchone()
+        return row is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def cancel_deferred(job_id: str, note: str = "cancelled by an administrator"
+                    ) -> dict[str, Any] | None:
+    """Cancel a job that is waiting ('deferred'). Returns the row (its payload,
+    for closing the run) when this call cancelled it, None when it was not
+    deferred. Conditional, so it never races the deferred-list processor."""
+    with _engine().begin() as conn:
+        row = conn.execute(text(
+            "UPDATE sync_jobs SET status='cancelled', last_error=:e, "
+            "  finished_at=:now, locked_by=NULL, locked_until=NULL, "
+            "  cancel_requested=FALSE "
+            "WHERE id = :id AND status = 'deferred' "
+            "RETURNING id, kind, workspace_id, payload"
+        ), {"e": note[:2000], "now": datetime.now(UTC), "id": job_id}).mappings().fetchone()
+    if row is None:
+        return None
+    logger.info("job_cancelled id=%s was=deferred", job_id)
+    return dict(row)
+
+
 def retry_dead(job_id: str) -> bool:
+    """Run a job again now. A dead/failed/cancelled row starts over (attempts
+    and deferral state cleared); a deferred one just stops waiting — its
+    attempts were never consumed."""
     now = datetime.now(UTC)
     with _engine().begin() as conn:
         r = conn.execute(text(
             "UPDATE sync_jobs SET status='pending', attempts=0, "
-            "  next_run_at=:now, last_error=NULL, cancel_requested=FALSE "
+            "  next_run_at=:now, last_error=NULL, cancel_requested=FALSE, "
+            "  deferred_since=NULL, defer_reason=NULL, defer_code=NULL, "
+            "  defer_checks=0 "
             "WHERE id = :id AND status IN ('dead','failed','cancelled')"
         ), {"now": now, "id": job_id})
+        if r.rowcount > 0:
+            return True
+        r = conn.execute(text(
+            "UPDATE sync_jobs SET status='pending', next_run_at=:now, "
+            "  defer_checks=0 "
+            "WHERE id = :id AND status = 'deferred'"
+        ), {"now": now, "id": job_id})
         return r.rowcount > 0
+
+
+# ─── Deferral: wait for a dependency instead of failing ──────────────
+
+
+def defer_interval(checks: int, *, floor: float = 0) -> float:
+    """Seconds until the next check after `checks` failed ones (0-based)."""
+    i = max(0, min(int(checks), len(_DEFER_INTERVALS) - 1))
+    return max(float(floor), float(_DEFER_INTERVALS[i]))
+
+
+def mark_deferred(job_id: str, reason: str, *, code: str | None = None,
+                  floor: float = 0) -> bool:
+    """Park a running job as 'deferred'. True when this is the job's FIRST
+    deferral (the caller logs WARNING once per job, not once per outage tick).
+
+    The attempt `dequeue_one` counted is handed back: an outage is not the
+    job's fault, so a deferral never moves it towards 'dead'. `deferred_since`
+    keeps the first deferral (the expiry clock); the first probe is due after
+    the shortest interval."""
+    now = datetime.now(UTC)
+    with _engine().begin() as conn:
+        row = conn.execute(text(
+            "SELECT deferred_since, defer_checks FROM sync_jobs "
+            "WHERE id = :id AND status = 'running' AND locked_by = :w"),
+            {"id": job_id, "w": _worker_id()}).fetchone()
+        if row is None:
+            # Not ours any more (lease expired, another worker took the row):
+            # a late deferral must not park somebody else's run.
+            return False
+        first = row[0] is None
+        # A job released and deferred AGAIN counts that as one more failed
+        # check, so a request that times out whatever the probe says does not
+        # cycle at the shortest interval for a day.
+        checks = 0 if first else int(row[1] or 0) + 1
+        conn.execute(text(
+            "UPDATE sync_jobs SET status='deferred', "
+            "  attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END, "
+            "  deferred_since = COALESCE(deferred_since, :now), "
+            "  defer_reason = :why, defer_code = :code, defer_checks = :c, "
+            "  next_run_at = :next, locked_by=NULL, locked_until=NULL "
+            "WHERE id = :id"
+        ), {"now": now, "why": reason[:500], "code": code, "id": job_id, "c": checks,
+            "next": now + timedelta(seconds=defer_interval(checks, floor=floor))})
+    if first:
+        logger.warning("job_deferred id=%s code=%s reason=%s", job_id, code or "-",
+                       reason[:200])
+    else:
+        logger.info("job_deferred_again id=%s code=%s", job_id, code or "-")
+    return first
+
+
+def claim_due_deferred(kind: str, *, limit: int = 200) -> list[dict[str, Any]]:
+    """Deferred jobs whose next check is due, claimed for THIS processor.
+
+    Each row is claimed by its own conditional UPDATE (status still deferred,
+    still due), which Postgres serialises per row: exactly one of two
+    concurrent processors wins a given row, and the loser sees rowcount 0.
+    The claim pushes `next_run_at` out by `_DEFER_CLAIM_SECONDS`, so the rows
+    are not due for anybody else while the winner probes — and are due again
+    if it dies."""
+    now = datetime.now(UTC)
+    until = now + timedelta(seconds=_DEFER_CLAIM_SECONDS)
+    with _engine().begin() as conn:
+        rows = conn.execute(text(
+            "SELECT id, kind, workspace_id, payload, deferred_since, defer_checks "
+            "FROM sync_jobs WHERE status = 'deferred' AND kind = :k "
+            "AND next_run_at <= :now ORDER BY deferred_since, id LIMIT :n"
+        ), {"k": kind, "now": now, "n": limit}).mappings().all()
+        won: list[dict[str, Any]] = []
+        for row in rows:
+            r = conn.execute(text(
+                "UPDATE sync_jobs SET next_run_at = :until "
+                "WHERE id = :id AND status = 'deferred' AND next_run_at <= :now"
+            ), {"until": until, "id": row["id"], "now": now})
+            if r.rowcount:
+                d = dict(row)
+                if isinstance(d.get("payload"), str):
+                    d["payload"] = json.loads(d["payload"])
+                won.append(d)
+    return won
+
+
+def release_deferred(job_ids: list[str]) -> int:
+    """Move claimed deferred jobs back to 'pending', oldest first. Returns how
+    many this call released — a job somebody else already released (manual
+    retry, a sibling replica) is not counted twice."""
+    now = datetime.now(UTC)
+    released = 0
+    with _engine().begin() as conn:
+        for i, job_id in enumerate(job_ids):
+            r = conn.execute(text(
+                "UPDATE sync_jobs SET status='pending', next_run_at=:at, "
+                "  defer_reason=NULL, defer_code=NULL "
+                "WHERE id = :id AND status = 'deferred'"
+            ), {"at": now + timedelta(milliseconds=i), "id": job_id})
+            released += int(r.rowcount or 0)
+        with contextlib.suppress(Exception):
+            conn.execute(text("NOTIFY sync_jobs_new"))
+    return released
+
+
+def reschedule_deferred(jobs: list[dict[str, Any]], *, reason: str | None = None,
+                        code: str | None = None, floor: float = 0) -> None:
+    """The dependency is still down: one more failed check for each job, and
+    the next check later (1, 2, 5, 10, 15 minutes). `jobs` are rows from
+    `claim_due_deferred`."""
+    now = datetime.now(UTC)
+    with _engine().begin() as conn:
+        for j in jobs:
+            checks = int(j.get("defer_checks") or 0) + 1
+            conn.execute(text(
+                "UPDATE sync_jobs SET defer_checks = :c, next_run_at = :next, "
+                "  defer_reason = COALESCE(:why, defer_reason), "
+                "  defer_code = COALESCE(:code, defer_code) "
+                "WHERE id = :id AND status = 'deferred'"
+            ), {"c": checks, "id": j["id"], "why": reason[:500] if reason else None,
+                "code": code,
+                "next": now + timedelta(seconds=defer_interval(checks, floor=floor))})
+
+
+def expire_deferred(kind: str, *, max_age: timedelta) -> list[dict[str, Any]]:
+    """Deferred jobs older than `max_age` (since the FIRST deferral) go dead.
+    Returns the rows this call buried, for the caller to close their run
+    records; a row buried by a sibling replica is not returned twice."""
+    now = datetime.now(UTC)
+    cutoff = now - max_age
+    with _engine().begin() as conn:
+        rows = conn.execute(text(
+            "SELECT id, kind, workspace_id, payload, deferred_since, defer_reason "
+            "FROM sync_jobs WHERE status = 'deferred' AND kind = :k "
+            "AND deferred_since IS NOT NULL AND deferred_since < :cut"
+        ), {"k": kind, "cut": cutoff}).mappings().all()
+        buried: list[dict[str, Any]] = []
+        for row in rows:
+            msg = f"model unavailable for {max_age.total_seconds() / 3600:g} h"
+            r = conn.execute(text(
+                "UPDATE sync_jobs SET status='dead', last_error=:e, finished_at=:now, "
+                "  locked_by=NULL, locked_until=NULL "
+                "WHERE id = :id AND status = 'deferred'"
+            ), {"e": msg, "now": now, "id": row["id"]})
+            if r.rowcount:
+                d = dict(row)
+                d["reason"] = msg
+                if isinstance(d.get("payload"), str):
+                    d["payload"] = json.loads(d["payload"])
+                buried.append(d)
+    return buried
+
+
+def deferred_for_runs(run_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """{run_id: the deferred review job of that run} — for the runs list, which
+    shows why a run waits and lets a workspace admin retry it now."""
+    ids = [r for r in run_ids if r]
+    if not ids:
+        return {}
+    stmt = text(
+        "SELECT id, deferred_since, next_run_at, defer_reason, "
+        "  payload->>'run_id' AS run_id FROM sync_jobs "
+        "WHERE status = 'deferred' AND kind = :k AND payload->>'run_id' IN :ids"
+    ).bindparams(bindparam("ids", expanding=True))
+    with _engine().begin() as conn:
+        rows = conn.execute(stmt, {"k": KIND_REVIEW, "ids": ids}).mappings().all()
+    return {r["run_id"]: dict(r) for r in rows}
 
 
 def delete_job(job_id: str) -> bool:
@@ -449,6 +687,9 @@ __all__ = [
     "KIND_CROSS_REPO_MATERIALIZE", "KIND_REINDEX_QDRANT",
     "KIND_REGENERATE_NOTES", "KIND_PR_COMMAND",
     "JobCancelled",
+    "JobDeferred", "STATUS_DEFERRED", "cancel_deferred", "is_deferred",
+    "deferred_for_runs", "mark_deferred", "claim_due_deferred",
+    "release_deferred", "reschedule_deferred", "expire_deferred", "defer_interval",
     "enqueue", "dequeue_one", "mark_complete", "mark_failure",
     "mark_cancelled", "request_cancel", "is_cancel_requested",
     "list_jobs", "get_job", "retry_dead", "delete_job", "stats",

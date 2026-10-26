@@ -1173,6 +1173,16 @@ class SyncJob(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: status='deferred': the job waits for a dependency (the review model)
+    #: instead of failing. `deferred_since` is the FIRST deferral and survives
+    #: a release, so the expiry clock does not restart on every outage that
+    #: comes back; `defer_checks` grows the interval between probes.
+    #: A deferral never touches `attempts`.
+    deferred_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    defer_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    defer_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    defer_checks: Mapped[int] = mapped_column(nullable=False, server_default="0")
 
     __table_args__ = (
         Index("ix_sync_jobs_workspace", "workspace_id", "next_run_at"),

@@ -195,10 +195,11 @@ def enqueue_review_run(
     try:
         from src.sync.queue import KIND_REVIEW, enqueue
 
+        dedup_key = (f"review:{provider}:{repo}#{int(number)}"
+                     + (":force" if forced else ""))
         job_id = enqueue(
             kind=KIND_REVIEW, payload=payload,
-            dedup_key=f"review:{provider}:{repo}#{int(number)}"
-                      + (":force" if forced else ""),
+            dedup_key=dedup_key,
             enqueued_by=f"{source}:{user_id}",
         )
     except Exception as exc:  # noqa: BLE001
@@ -209,8 +210,14 @@ def enqueue_review_run(
                    "process instead.")
         return QueuedReview(run.id, "inline", "", payload)
     if job_id is None:
-        reason = ("a review of this pull request is already queued or running; "
-                  "this request was folded into it")
+        from src.sync.queue import is_deferred
+
+        if is_deferred(dedup_key):
+            reason = ("the review of this pull request is waiting for the model; "
+                      "use Retry now on the Jobs page to run it at once")
+        else:
+            reason = ("a review of this pull request is already queued or running; "
+                      "this request was folded into it")
         stages.end("queued", "skipped", reason[:1].upper() + reason[1:] + ".",
                    ends_run=True)
         _close_as_skipped(store, run.id, stages, reason)
@@ -230,7 +237,21 @@ def _answer_command(p: dict, provider, *, result=None, failed: bool = False) -> 
         logger.warning("command_ack_failed run=%s", p.get("run_id"))
 
 
-def execute_review(p: dict, *, attempt: int | None = None) -> None:
+def _park_run(store, run_id: str, stages: StageRecorder, reason: str) -> None:
+    """The run waits for the model: status "deferred", a visible
+    "Waiting for the model" stage, no finish time. `reason` is a curated
+    sentence (see `src.review.model_preflight`), never an exception's text."""
+    if stages.get("model_wait") and (stages.get("model_wait") or {}).get("status") == "running":
+        stages.end("model_wait", "skipped", "Still waiting for the model.")
+    stages.begin("model_wait", "Waiting for the model",
+                 f"{reason[:1].upper() + reason[1:]}. The review runs again "
+                 "automatically when the model answers.")
+    store.update(run_id, status="deferred",
+                 summary=f"Waiting for the model: {reason}"[:500])
+
+
+def execute_review(p: dict, *, attempt: int | None = None,
+                   can_defer: bool = False) -> None:
     """Run one queued review and record it — the worker's body, and the body
     of every inline fallback.
 
@@ -244,6 +265,15 @@ def execute_review(p: dict, *, attempt: int | None = None) -> None:
     retry; never raises for a failure to WRITE a review that ran — that
     overwrote the row to "failed", counted the PR's review twice and
     re-raised into a queue that may retry, i.e. post the comments again.
+
+    The model is asked before anything is posted (`src.review.model_preflight`).
+    When it does not answer, `ModelUnavailable` is raised and NOTHING reaches
+    the pull request. `can_defer` says what that means for the caller: the
+    queue worker passes True — the run row becomes "deferred" and the worker
+    parks the job; an inline or synchronous caller cannot wait, so the run
+    row fails with the same curated reason and the exception is its clear
+    error. The same flag lets a review whose every agent failed for want of
+    the model be postponed instead of published as "REVIEW FAILED".
     """
     from src.api import review_runs as runs
     from src.review import issues as issues_mod
@@ -296,7 +326,7 @@ def execute_review(p: dict, *, attempt: int | None = None) -> None:
                        f"Picked up by a review worker after {fmt_wait(waited)}.",
                        started_at=enq, duration_ms=waited)
     else:
-        if existing.status not in ("queued", "running"):
+        if existing.status not in ("queued", "running", "deferred"):
             stages.add("retry", "Retry", "success",
                        f"Retried by the queue (attempt {attempt or '?'}) after "
                        f"the previous attempt ended {existing.status}.",
@@ -306,6 +336,10 @@ def execute_review(p: dict, *, attempt: int | None = None) -> None:
             stages.end("queued", "success",
                        "Picked up by a review worker after "
                        f"{fmt_wait(ms_between(queued.get('started_at')))}.")
+        waiting = stages.get("model_wait")
+        if waiting and waiting.get("status") == "running":
+            stages.end("model_wait", "success",
+                       "The model answers again; the review started.")
         store.update(run_id, status="running")
 
     def _failed(exc: BaseException, reason: str) -> None:
@@ -328,16 +362,30 @@ def execute_review(p: dict, *, attempt: int | None = None) -> None:
         stages.add("fetch_pr", "Fetch pull request", "failed", reason, duration_ms=0)
         _failed(exc, reason)
         raise
+    from src.review.model_preflight import ModelUnavailable, check_for_review
+
     try:
+        check_for_review(provider_name, repo, workspace_id=workspace_id,
+                         user_id=user_id).raise_if_unavailable()
         result = orch.review(
             provider_name, repo, number,
             dry_run=not post, post_comments=post, provider=provider,
             user_id=user_id, workspace_id=workspace_id, stages=stages,
-            request=request,
+            request=request, defer_on_outage=can_defer,
         )
         # A review that a comment asked for answers the comment, while the
         # provider is still open. Never raises.
         _answer_command(p, provider, result=result)
+    except ModelUnavailable as exc:
+        if can_defer:
+            # Not a failure and not an attempt: the job waits for the model.
+            _park_run(store, run_id, stages, exc.reason)
+        else:
+            msg = f"The review model is unavailable: {exc.reason}."
+            stages.add("model_check", "Model check", "failed", msg, duration_ms=0)
+            _failed(exc, msg)
+            _answer_command(p, provider, failed=True)
+        raise
     except Exception as exc:
         _failed(exc, orch_mod._safe_failure_reason(exc))
         _answer_command(p, provider, failed=True)

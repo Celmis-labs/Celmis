@@ -99,6 +99,9 @@ class ReviewRunStatus(StrEnum):
 
     QUEUED = "queued"
     RUNNING = "running"
+    #: Waiting for the review model to come back (a job parked in the queue's
+    #: deferred list). Not finished, not failed: the review runs again by itself.
+    DEFERRED = "deferred"
     COMPLETE = "complete"
     PARTIAL = "partial"
     SKIPPED = "skipped"

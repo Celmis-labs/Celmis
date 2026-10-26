@@ -46,6 +46,23 @@ EN: Final[dict[str, str]] = {
     "status.tail_failed": (
         "_No review was delivered for this commit. Re-run it once the cause is fixed._"
     ),
+    # The model is down: the review waits and runs again by itself.
+    "status.postponed": (
+        "### ⏸️ Review postponed: the model is unavailable. "
+        "It will run again automatically."),
+    "status.tail_postponed": (
+        "_Nothing has been reviewed for this commit yet. No action is needed._"),
+    "status.abandoned": (
+        "### ❌ Review not done: the model stayed unavailable for {hours} h."),
+    "status.tail_abandoned": (
+        "_No review was delivered for this commit. Run it again with "
+        "`@celmis review`, or from the pull requests page, once the model is back._"),
+    "status.cancelled": (
+        "### ❌ Review not done: it was cancelled by an administrator while "
+        "waiting for the model."),
+    "status.tail_cancelled": (
+        "_No review was delivered for this commit. Run it again with "
+        "`@celmis review`, or from the pull requests page._"),
     # The brief note for a review that never started.
     "feedback.note": (
         "⏭️ **Celmis did not review this pull request** (commit `{sha}`): {reason}."
@@ -332,6 +349,22 @@ UK: Final[dict[str, str]] = {
     "status.tail_failed": (
         "_Рев'ю для цього коміту не доставлено. Запустіть його знову, коли причину усунуть._"
     ),
+    "status.postponed": (
+        "### ⏸️ Рев'ю відкладено: модель недоступна. "
+        "Воно запуститься знову автоматично."),
+    "status.tail_postponed": (
+        "_Для цього коміту ще нічого не перевірено. Нічого робити не потрібно._"),
+    "status.abandoned": (
+        "### ❌ Рев'ю не виконано: модель була недоступна {hours} год."),
+    "status.tail_abandoned": (
+        "_Рев'ю для цього коміту не доставлено. Запустіть його знову через "
+        "`@celmis review` або зі сторінки pull request'ів, коли модель повернеться._"),
+    "status.cancelled": (
+        "### ❌ Рев'ю не виконано: адміністратор скасував його, поки воно "
+        "чекало на модель."),
+    "status.tail_cancelled": (
+        "_Рев'ю для цього коміту не доставлено. Запустіть його знову через "
+        "`@celmis review` або зі сторінки pull request'ів._"),
     "feedback.note": (
         "⏭️ **Celmis не перевіряв цей pull request** (коміт `{sha}`): {reason}."
     ),

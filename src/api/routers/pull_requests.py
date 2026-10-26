@@ -662,7 +662,7 @@ async def pull_request_runs(
     except HTTPException:
         raise HTTPException(status_code=404, detail="Pull request not found") from None
     from src.api.review_runs import get_review_run_store
-    from src.api.routers.reviews import _run_to_out
+    from src.api.routers.reviews import _run_to_out, attach_waiting
 
     runs = await asyncio.to_thread(
         get_review_run_store().list_for_pr, ws, row.provider, row.repo,
@@ -673,8 +673,9 @@ async def pull_request_runs(
     show_cost = await asyncio.to_thread(can_see_review_cost, user, ws)
     return PullRequestRuns(
         pr_id=pr_id,
-        items=[_run_to_out(r, with_adjustments=False, with_stages=True,
-                           show_cost=show_cost) for r in runs],
+        items=await asyncio.to_thread(attach_waiting, [
+            _run_to_out(r, with_adjustments=False, with_stages=True,
+                        show_cost=show_cost) for r in runs]),
     )
 
 

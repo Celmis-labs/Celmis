@@ -30,6 +30,7 @@ import { useToken } from "@/lib/use-token";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { QueryState } from "@/components/ui/query-state";
+import { DeferredNotice } from "@/components/deferred-notice";
 import { StatusPill, toRunStatus, type RunStatus } from "@/components/ui/status";
 
 /** A run's lifecycle word as a badge variant — for call sites still on
@@ -54,8 +55,12 @@ export function PullRequestReviews({ prId }: { prId: string }) {
     queryFn: () => pullRequestsApi.runs(token!, prId),
     enabled: !!token,
     // A review still in flight fills its stages in as it goes.
-    refetchInterval: (q) =>
-      (q.state.data?.items ?? []).some((r) => ACTIVE.has(r.status ?? "")) ? 3000 : false,
+    // A review waiting for the model changes rarely: look every 20 s, not 3.
+    refetchInterval: (q) => {
+      const items = q.state.data?.items ?? [];
+      if (items.some((r) => ACTIVE.has(r.status ?? ""))) return 3000;
+      return items.some((r) => r.status === "deferred") ? 20000 : false;
+    },
   });
   return (
     <QueryState query={runs} skeleton={2}>
@@ -167,6 +172,9 @@ function ReviewRunItem({ run, ordinal, defaultOpen }: {
           </span>
         )}
       </button>
+      {status === "deferred" && run.waiting && (
+        <div className="px-3 pb-2.5"><DeferredNotice waiting={run.waiting} /></div>
+      )}
       <AnimatePresence initial={false}>
         {open && (
           <m.div

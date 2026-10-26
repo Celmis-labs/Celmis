@@ -8,7 +8,9 @@
 # colliding without needing a second origin (subdomain or port).
 :80 {
 	handle_path /backend/* {
-		reverse_proxy api:8000
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-Prefix /backend
+		}
 	}
 	reverse_proxy web:3000
 }

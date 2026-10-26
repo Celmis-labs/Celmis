@@ -350,6 +350,10 @@ def status_reason(stages: list[dict] | None, *, status: str, summary: str = "",
     for st in reversed(stages or []):
         if st.get("key") == "finished" and st.get("reason"):
             return str(st["reason"])
+    if status == "deferred":
+        for st in reversed(stages or []):
+            if st.get("key") == "model_wait" and st.get("reason"):
+                return str(st["reason"])
     if status in ("skipped", "failed"):
         text = (error_message or summary or "").strip()
         if text:

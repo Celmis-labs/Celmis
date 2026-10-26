@@ -412,6 +412,9 @@ def _safe_failure_reason(exc: BaseException) -> str:
     LLM failure when there is one, otherwise the exception's type alone —
     the full message stays in the log and the run record.
     """
+    reason_attr = getattr(exc, "reason", None)
+    if type(exc).__name__ == "ModelUnavailable" and isinstance(reason_attr, str):
+        return f"the review model is unavailable: {reason_attr}"
     try:
         from src.llm.errors import classify, curated_reason
 
@@ -544,6 +547,22 @@ class _ReviewLifecycle:
         logger.info("review_status_feedback pr=%s id=%s", self.pr.number, cid)
         return cid is not None
 
+    def postponed(self) -> None:
+        """Rewrite the placeholder THIS run posted as "postponed: the model is
+        unavailable; it will run again automatically". Silent when no
+        placeholder was posted: nothing is written to the PR for a review that
+        has not visibly begun. The note keeps the in-progress mark, so the
+        next run adopts it and the expiry (or a skip) can still rewrite it."""
+        from src.review.providers.base import _format_status_comment
+
+        if self.pr is None or self.started_id is None:
+            return
+        self._write(
+            _format_status_comment(self.pr, outcome="postponed", reason="",
+                                   language=self.language),
+            create=False, what="postponed",
+        )
+
     def failed(self, reason: str) -> None:
         from src.review.providers.base import _format_status_comment
 
@@ -590,6 +609,12 @@ class _PRSummaryJob:
             logger.warning("review_summary_not_started err_type=%s err=%s",
                            type(exc).__name__, str(exc)[:200])
             return None
+
+    def discard(self) -> None:
+        """The review is not going on: drop the overview call. Never raises."""
+        with contextlib.suppress(Exception):
+            self._future.cancel()
+            self._executor.shutdown(wait=False, cancel_futures=True)
 
     def apply_to(self, batch: ReviewBatch) -> tuple[bool, str]:
         """Join the summary call. Returns (ok, a sentence for the run's
@@ -737,6 +762,7 @@ class ReviewOrchestrator:
         workspace_id: str = "default",
         stages: StageRecorder | None = None,
         request: ReviewRequest | None = None,
+        defer_on_outage: bool = False,
     ) -> ReviewRunResult:
         """Run full review pipeline.
 
@@ -754,6 +780,12 @@ class ReviewOrchestrator:
                 decides which gates apply: a person's request skips the
                 draft, title and cadence gates, `force` the target-branch one
                 too. None is an automatic trigger — every gate applies.
+            defer_on_outage: the caller can run this review later (a queued
+                job). When every agent fails because the MODEL cannot be
+                reached, `ModelUnavailable` is raised instead of publishing
+                "REVIEW FAILED", and a placeholder this run posted is rewritten
+                as "postponed". False (the default) keeps the old behaviour for
+                callers that cannot wait: CLI, MCP, synchronous routes.
         """
         t0 = time.time()
         if stages is None:
@@ -777,9 +809,16 @@ class ReviewOrchestrator:
                 post_comments=post_comments, provider=provider,
                 user_id=user_id, workspace_id=workspace_id, t0=t0,
                 lifecycle=lifecycle, stages=stages,
-                request=request or AUTOMATIC,
+                request=request or AUTOMATIC, defer_on_outage=defer_on_outage,
             )
         except Exception as exc:
+            from src.review.model_preflight import ModelUnavailable
+
+            if isinstance(exc, ModelUnavailable):
+                # Not a failure: the review will run again by itself.
+                stages.fail_running(exc.reason[:1].upper() + exc.reason[1:])
+                lifecycle.postponed()
+                raise
             reason = _safe_failure_reason(exc)
             # The stage that was under way when it raised is the one that
             # failed — with the same curated sentence the PR gets, never the
@@ -797,6 +836,7 @@ class ReviewOrchestrator:
         lifecycle: _ReviewLifecycle | None = None,
         stages: StageRecorder | None = None,
         request: ReviewRequest = AUTOMATIC,
+        defer_on_outage: bool = False,
     ) -> ReviewRunResult:
         if lifecycle is None:
             lifecycle = _ReviewLifecycle(active=False)
@@ -1370,6 +1410,10 @@ class ReviewOrchestrator:
         cost_sources: set[str] = set()
         any_unknown_cost = False
         cost_sum = 0.0
+        #: The code of every failed agent (None when it had none). A review
+        #: that ended with NOTHING having run is an outage — not a verdict —
+        #: only when each of these says "the model could not be reached".
+        failed_codes: list[str | None] = []
         for r in agent_results:
             # The ledger first, before anything can `continue` past it. A
             # failed agent still sent its prompt and still got billed for it;
@@ -1463,6 +1507,7 @@ class ReviewOrchestrator:
                                r.agent, getattr(r, "error_code", None) or "-",
                                r.error)
                 batch.agents_failed.append(r.agent)
+                failed_codes.append(getattr(r, "error_code", None))
                 # The curated sentence, NOT `r.error`. The record's prose keeps
                 # a provider's own message verbatim for a failure we cannot
                 # name; the banner goes into a pull-request comment, where
@@ -1476,6 +1521,22 @@ class ReviewOrchestrator:
                 continue
             all_findings.extend(r.findings)
             batch.agents_run.append(r.agent)
+
+        # ── The model was down for every agent: wait, do not publish a failure.
+        # Only when the caller can queue the review for later (`defer_on_outage`)
+        # and only for model-availability failures; a partial review, or one
+        # that failed for any other reason, goes on exactly as before.
+        if defer_on_outage and batch.nothing_ran:
+            from src.review.model_preflight import outage_of
+
+            outage = outage_of(failed_codes)
+            if outage is not None:
+                if summary_job is not None:
+                    summary_job.discard()
+                logger.warning(
+                    "review_model_unavailable pr=%d code=%s agents=%s — postponed",
+                    pr.number, outage.code, ",".join(batch.agents_failed))
+                raise outage
 
         # ── Prefilter (always), then the LLM veto (by policy) ──
         #

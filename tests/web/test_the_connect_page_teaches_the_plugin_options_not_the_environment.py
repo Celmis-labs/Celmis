@@ -29,9 +29,13 @@ MESSAGES = WEB / "lib" / "i18n" / "messages"
 PLUGIN = WEB.parent / "packaging" / "claude-plugin" / "celmis-code"
 MARKETPLACE = WEB.parent / ".claude-plugin" / "marketplace.json"
 
-#: The sentences that describe the plugin route, in the order the page shows them.
-PLUGIN_KEYS = ("codebase.connect.plugin.note", "codebase.connect.plugin.address",
-               "codebase.connect.plugin.stored", "codebase.connect.plugin.change")
+#: The sentences that describe the plugin route's two values, in the order the page shows
+#: them. (`plugin.note` and `plugin.change` were folded into the `enter.*` step of the
+#: connection guide, which says the same things and the ones that went wrong on the way.)
+PLUGIN_KEYS = ("codebase.connect.enter.desc", "codebase.connect.plugin.address",
+               "codebase.connect.enter.token", "codebase.connect.enter.verify")
+#: Of those, the ones that may name the program the command is typed into.
+NAMES_THE_PROGRAM = ("codebase.connect.enter.desc",)
 
 
 def _code() -> str:
@@ -75,7 +79,10 @@ def test_the_commands_on_the_page_are_the_ones_the_readme_documents() -> None:
 def test_no_token_value_or_shell_assignment_is_typed_into_the_page() -> None:
     code = _code()
     assert not re.search(r"eyJ[A-Za-z0-9_-]{8,}", code)
-    assert "Bearer" not in code.replace("${AUTH_HEADER}: Bearer", ""), "only the manual route's template"
+    # the one place a header with a bearer is shown is the manual route's command, and it
+    # names the shell variable: the token itself is never on the page
+    assert "Bearer" not in code.replace("Authorization: Bearer \\${CELMIS_MCP_TOKEN}", ""), (
+        "only the manual route's template")
 
 
 @pytest.mark.parametrize("locale", _locales())
@@ -87,12 +94,16 @@ def test_every_language_says_it_without_the_old_instruction(locale: str) -> None
         assert "CELMIS_TOKEN" not in mine[key] and "export" not in mine[key].lower().split()
         if locale != "en":
             assert mine[key] != en[key], f"{key} is still English in {locale}"
-    # only the first sentence names the product (see test_the_section_names_no_assistant_after_a_vendor)
-    assert "Claude Code" in mine["codebase.connect.plugin.note"]
-    for key in PLUGIN_KEYS[1:]:
-        assert "Claude" not in mine[key]
-    # "the variables" was the old promise; the sentence must not make it in any language
-    assert mine["codebase.connect.plugin.note"] != _old_note(locale)
+    # the command is typed into Claude Code, and the sentence that says so names it
+    for key in NAMES_THE_PROGRAM:
+        assert "Claude Code" in mine[key], f"{key} does not say where to type it in {locale}"
+    for key in PLUGIN_KEYS:
+        if key not in NAMES_THE_PROGRAM:
+            assert "Claude" not in mine[key], key
+    # the two sentences the guide folded away are gone, and "the variables" was the old promise
+    assert "codebase.connect.plugin.note" not in mine
+    assert "codebase.connect.plugin.change" not in mine
+    assert mine["codebase.connect.enter.desc"] != _old_note(locale)
 
 
 def _old_note(locale: str) -> str:
@@ -105,10 +116,14 @@ def _old_note(locale: str) -> str:
 
 def test_the_token_and_the_address_sentences_agree_with_what_the_plugin_does() -> None:
     en = _messages("en")
-    note = en["codebase.connect.plugin.note"]
-    assert "address" in note and "token" in note and "step 1" in note
-    assert "keychain" in en["codebase.connect.plugin.stored"]
-    assert "restart" in en["codebase.connect.plugin.change"]
+    ask = en["codebase.connect.enter.desc"]
+    assert "address" in ask and "token" in ask
+    assert "masked" in en["codebase.connect.enter.token"]
+    # (the page used to add a sentence about where the plugin keeps the token; it was
+    # removed as a claim the page cannot check, and the manual route's note says the
+    # opposite for itself)
+    assert "codebase.connect.plugin.stored" not in en
+    assert "restart" in en["codebase.connect.check.restart"].lower()
     # the manifest asks for exactly those two things
     plugin = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert set(plugin["userConfig"]) == {"celmis_url", "celmis_token"}

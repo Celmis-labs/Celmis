@@ -54,6 +54,10 @@ SAME_IN_UK = {
     "codebase.title",
     "codebase.create.slugPlaceholder",
     "codebase.sharing.personPlaceholder",
+    # Two troubleshooting symptoms ARE the program's own English output, quoted so a
+    # person can find the line they are looking at; they stay as the program prints them.
+    "codebase.connect.trouble.saved.symptom",
+    "codebase.connect.trouble.notfound.symptom",
 }
 
 PLACEHOLDER = re.compile(r"\{(\w+)\}")
@@ -115,6 +119,11 @@ def _families() -> dict[str, list[str]]:
             r'\{ key: "(\w+)", variant', _code(COMPONENTS / "versions-tab.tsx")),
         "codebase.permission.*": _array(LIB, "PACK_PERMISSIONS"),
         "codebase.connect.tool.*": _array(APP / "connect" / "page.tsx", "AGENT_STEPS"),
+        "codebase.connect.dont.*": _array(APP / "connect" / "page.tsx", "DONTS"),
+        "codebase.connect.check.prompt.*": _array(APP / "connect" / "page.tsx", "CHECK_PROMPTS"),
+        "codebase.connect.trouble.*.symptom": _array(APP / "connect" / "page.tsx", "TROUBLES"),
+        "codebase.connect.trouble.*.meaning": _array(APP / "connect" / "page.tsx", "TROUBLES"),
+        "codebase.connect.trouble.*.fix": _array(APP / "connect" / "page.tsx", "TROUBLES"),
         "codebase.guide.*": who,
         "codebase.audience.*": audiences,
         "codebase.audience.*.short": audiences,
@@ -287,15 +296,27 @@ def test_ukrainian_is_written_not_copied():
     assert not no_cyrillic, f"uk has no Ukrainian letters: {no_cyrillic}"
 
 
+#: The connection guide is where a person is told, step by step, which program to type
+#: each command into. Saying so ("run this inside Claude Code", "in VS Code open a
+#: terminal") is the plain-text description the terms allow; it names no feature of ours.
+#: What stays unnamed is every title, tab and heading, including the guide's own.
+GUIDE_MAY_NAME_THE_PROGRAM = "codebase.connect."
+GUIDE_HEADINGS = {"codebase.connect.title", "codebase.connect.subtitle"}
+
+
 def test_the_section_names_no_assistant_after_a_vendor():
     """The terms allow saying a product runs Claude Code; they do not allow a
     feature to be named after it. The section is `Codebase`, and the only
-    place an assistant is named is the sentence that says which command to
-    run in it."""
+    place an assistant is named is the connection guide's sentences that say
+    which program a command is typed into."""
     en = _en()
     for key in _owned(en):
-        if "Claude" in en[key] or "Anthropic" in en[key]:
-            assert key == "codebase.connect.plugin.note", key
+        assert "Anthropic" not in en[key], key  # the company is named nowhere
+        if "Claude" in en[key]:
+            assert key.startswith(GUIDE_MAY_NAME_THE_PROGRAM), key
+            assert key not in GUIDE_HEADINGS, key
+            # a title of a step or of the troubleshooting list is a name of ours
+            assert not key.endswith(".title"), key
     for key in ("nav.codebase", "codebase.title", "codebase.tab.packs",
                 "codebase.tab.search", "codebase.tab.connect"):
         assert "Claude" not in en[key]

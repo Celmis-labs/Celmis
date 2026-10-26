@@ -371,8 +371,18 @@ export interface PullRequestSummary {
   updated_at: string | null;
 }
 
+/** Present while a run is `deferred`: the review waits for its model and the
+ *  queue looks again at `next_check_at`. `reason` is a curated sentence. */
+export interface ReviewRunWaiting {
+  job_id: string;
+  reason: string | null;
+  since: string | null;
+  next_check_at: string | null;
+}
+
 export interface ReviewRunOut {
   id: string;
+  waiting?: ReviewRunWaiting | null;
   pr_ref: string;
   verdict: string;
   findings_count: number;
@@ -2487,8 +2497,14 @@ export type SyncJob = {
   kind: string;
   dedup_key: string | null;
   payload: Record<string, unknown>;
-  status: "pending" | "running" | "completed" | "failed" | "cancelled" | "dead";
+  status: "pending" | "running" | "completed" | "failed" | "cancelled" | "dead" | "deferred";
   cancel_requested?: boolean;
+  /** A deferred job waits for the review model: since when, why (a curated
+   *  sentence), the failure code, and how many checks found it still down. */
+  deferred_since?: string | null;
+  defer_reason?: string | null;
+  defer_code?: string | null;
+  defer_checks?: number;
   attempts: number;
   max_attempts: number;
   next_run_at: string;

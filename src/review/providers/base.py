@@ -1865,11 +1865,24 @@ def _format_status_comment(
     pr: PullRequest, *, outcome: str, reason: str, marker: str = "",
     language: str | None = None,
 ) -> str:
-    """A terminal state that is not a review: `outcome` is 'skipped' or 'failed'."""
+    """A state that is not a review: `outcome` is 'skipped', 'failed', 'postponed'
+    (the model is down, the review will run again — still a placeholder, so it
+    carries the in-progress mark) 'abandoned' (it never came back) or 'cancelled' (an
+    administrator stopped the wait)."""
     sha = (pr.head_sha or "")[:7] or "unknown"
     if outcome == "skipped":
         head = messages.t("status.skipped", language, reason=_md_cell(reason, 400))
         tail = messages.t("status.tail_skipped", language)
+    elif outcome == "postponed":
+        head = messages.t("status.postponed", language)
+        tail = messages.t("status.tail_postponed", language)
+        marker = f"{marker}\n{STATUS_IN_PROGRESS_MARK}" if marker else STATUS_IN_PROGRESS_MARK
+    elif outcome == "cancelled":
+        head = messages.t("status.cancelled", language)
+        tail = messages.t("status.tail_cancelled", language)
+    elif outcome == "abandoned":
+        head = messages.t("status.abandoned", language, hours=_md_cell(reason, 20))
+        tail = messages.t("status.tail_abandoned", language)
     else:
         head = messages.t("status.failed", language, reason=_md_cell(reason, 300))
         tail = messages.t("status.tail_failed", language)

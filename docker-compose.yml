@@ -381,6 +381,13 @@ services:
       # рев'ю виконувались двічі. Хендлер тепер продовжує оренду, поки
       # працює, — це стеля, а не здогад про тривалість.
       CELMIS_JOB_LEASE_SECONDS: "${CELMIS_JOB_LEASE_SECONDS:-600}"
+      # A review whose model is down waits instead of failing: preflight on/off
+      # and its timeout, how often the deferred list is looked at, how long a
+      # review may wait before it is given up (docs/REVIEW_SETTINGS.md).
+      CELMIS_REVIEW_MODEL_PREFLIGHT: "${CELMIS_REVIEW_MODEL_PREFLIGHT:-on}"
+      CELMIS_REVIEW_MODEL_PREFLIGHT_TIMEOUT_SECONDS: "${CELMIS_REVIEW_MODEL_PREFLIGHT_TIMEOUT_SECONDS:-20}"
+      CELMIS_REVIEW_DEFER_CHECK_SECONDS: "${CELMIS_REVIEW_DEFER_CHECK_SECONDS:-60}"
+      CELMIS_REVIEW_DEFER_MAX_HOURS: "${CELMIS_REVIEW_DEFER_MAX_HOURS:-24}"
       # README documents this as settable and compose never passed it, so
       # setting it in .env changed nothing: `env_file` is not used here — the
       # container gets the variables this block names and no others — and
@@ -513,6 +520,11 @@ services:
       # header (DNS-rebinding protection) and defaults to localhost only, so a
       # deployed instance is unreachable over MCP until its own host is named.
       MCP_ALLOWED_HOSTS: "${MCP_ALLOWED_HOSTS:-}"
+      # Optional. The full public address of this API as MCP clients reach it
+      # (`https://celmis.example.com/backend`), for the sign-in discovery
+      # documents and the 401 challenge. Empty: derived from the proxy's
+      # forwarded headers and PUBLIC_BASE_URL.
+      MCP_OAUTH_ISSUER: "${MCP_OAUTH_ISSUER:-}"
       CELMIS_UNRULED_REPO_ACCESS: "${CELMIS_UNRULED_REPO_ACCESS:-deny}"
       CELMIS_MCP_SELF_SERVICE: "${CELMIS_MCP_SELF_SERVICE:-false}"
       CELMIS_MCP_TOKEN_ISSUERS: "${CELMIS_MCP_TOKEN_ISSUERS:-superadmin}"

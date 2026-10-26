@@ -182,24 +182,98 @@ Bitbucket hook needs the event added once (reinstall or repair the webhook).
 The repository ships a plugin, `packaging/claude-plugin/celmis-code`, that connects
 `/mcp/dev/`, teaches the search order (`repos`, `find`, `outline`, `read_symbol`,
 `refs`; `howto` for "do it like service X"; `brief` then `skills` at the start of a task)
-and adds three small hooks. It holds no token: Claude Code asks for two values when the
-plugin is enabled, the server address and your token, and substitutes them into the
-plugin's server entry (`${user_config.celmis_url}/mcp/dev/`, `Authorization: Bearer
+and adds three small hooks. It holds no token: Claude Code keeps two values for it, the
+server address and your token (you give them with `/plugin configure`, below), and
+substitutes them into the plugin's server entry (`${user_config.celmis_url}/mcp/dev/`, `Authorization: Bearer
 ${user_config.celmis_token}`).
+
+Add the marketplace first, then install the plugin, one command at a time. Inside Claude
+Code, at its prompt:
 
 ```text
 /plugin marketplace add Celmis-labs/Celmis
+```
+
+```text
 /plugin install celmis-code@celmis
 ```
 
-Give the address the web app's Connect page shows (`https://`, no trailing slash, no
-`/mcp`; on the bundled deployment it ends in `/backend`, for example
-`https://celmis.example.com/backend`) and the token your superadmin issued (shown once;
-the input is masked). The token is kept in the system keychain (`~/.claude/.credentials.json`
-where there is none), the address in your user settings; neither is a shell variable.
-Change either later with `/plugin configure celmis-code@celmis`, then restart Claude
-Code. `CELMIS_URL` and `CELMIS_TOKEN` in the environment are not read by the plugin
-(they were in 3.0.1: run the configure step once when you upgrade).
+or from a plain terminal (it works without opening Claude Code, but needs the `claude`
+command: if the shell says `command not found: claude`, install the Claude Code command
+line first):
+
+```sh
+claude plugin marketplace add Celmis-labs/Celmis
+```
+
+```sh
+claude plugin install celmis-code@celmis
+```
+
+Until the marketplace is added, searching for `celm` under `/plugin`, Discover finds
+nothing: it lists only the official marketplaces. The `/plugin` menu is in the terminal
+version of Claude Code; in VS Code, open a terminal and run `claude`.
+
+**Installing from a terminal does not ask for the two values**, and the `/plugin` menu may
+not either. If nothing asked, run, inside Claude Code,
+
+```text
+/plugin configure celmis-code@celmis
+```
+
+It asks for the address, then the token, in a masked field. Give the address the web
+app's Connect page shows (`https://`, no trailing slash, no `/mcp`; on the bundled
+deployment it ends in `/backend`, for example `https://celmis.example.com/backend`) and
+the token your superadmin issued (shown once; paste it as one line). In a shell,
+`claude plugin configure celmis-code@celmis` only prints which options are set (and takes
+`--values-stdin` for a provisioning script). The token is kept in the system keychain
+(`~/.claude/.credentials.json` where there is none), the address in your user settings;
+neither is a shell variable. Restart Claude Code (in VS Code: a new session, or
+`Developer: Reload Window`) for the values to apply. `CELMIS_URL` and `CELMIS_TOKEN` in
+the environment are not read by the plugin (they were in 3.0.1: run the configure step
+once when you upgrade).
+
+Who issues the token depends on the install. With self-service on, the MCP settings page
+creates your own: leave "Allow changes" off, because a token that can change things does
+not work with the plugin (the server answers 403). With it off, only the superadmin can
+issue one, on the MCP tokens page: a developer token (dev profile, "Allow write tools"
+off, read-only), the repositories it covers, and any repository shared from another
+workspace ticked under "Shared with us" (a change reaches the token within 30 seconds).
+
+Keep the token out of every shell command. Typed inside `${...}` in `claude mcp add` it
+produces `bad substitution` and is then on screen and in the shell history; a clipboard
+one-liner or a multi-line paste put the wrong text in the token field. Use the masked
+prompt only, and do not add the server with `claude mcp add` as well: the agent would get
+two Celmis servers. A token that was shown in a chat, a screenshot or on a screen is
+revoked and issued again: revoke it yourself at once on the MCP settings page, without
+waiting for anyone, then get a new one.
+
+What a failure looks like, and what to do about each, is in the Troubleshooting table of
+the plugin's README
+([`packaging/claude-plugin/celmis-code/README.md`](../packaging/claude-plugin/celmis-code/README.md#troubleshooting)):
+`bad substitution`, an empty Discover, no prompt after install, `Failed to save
+configuration`, a refused token (HTTP 401; the server now says so in a plain sentence,
+"The token was not accepted: it is unknown, revoked or expired", and, when the client
+presses Authenticate anyway, "Celmis does not sign MCP clients in through the browser, so
+Authenticate cannot help"; neither helps by pressing it, get a new token), 403 and
+`read:code`, a shared repository that is missing, and `repo not found or not accessible`.
+The same list is on the web app's Connect page, with your server's address filled in.
+
+A server older than this fix still answers the refused token with a page that is not
+JSON, and the client then shows `JSON Parse error: Unrecognized token '<'` with an
+Authenticate button. The cause is the same, a token that was not accepted, and so is the
+remedy. Behind the bundled proxy the server names its own address from the proxy's
+`X-Forwarded-*` headers (and `X-Forwarded-Prefix`, which the shipped Caddyfiles send:
+restart the proxy after an upgrade), so the sign-in discovery documents carry the public
+`https` address the client used. Set `MCP_OAUTH_ISSUER` (the full public base, for
+example `https://celmis.example.com/backend`) only when that derivation cannot be right
+for your layout. One layout needs it, or `https://` in `PUBLIC_BASE_URL`: a TLS terminator
+(a load balancer, a tunnel) in front of the bundled Caddy. Caddy cannot see it, reports
+its own plain `http`, and a host declared only in `MCP_ALLOWED_HOSTS` is then named
+`http://celmis.example.com/backend/...` in the documents and in the 401. Write
+`PUBLIC_BASE_URL=https://celmis.example.com` (the `https` there is believed for its own
+host) or `MCP_OAUTH_ISSUER=https://celmis.example.com/backend`. The server logs
+`mcp_public_base_plain_http` once for a named host it is writing down as `http`.
 
 From a checkout: `claude --plugin-dir packaging/claude-plugin/celmis-code`. Run `/mcp`
 and check that `celmis` is connected. The plugin's README covers changing the values

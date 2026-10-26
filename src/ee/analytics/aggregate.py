@@ -73,7 +73,7 @@ def summarize(
     runs = [r for r in runs if (_parse_ts(r.get("started_at")) or now) >= since]
     issues = list(issues)
 
-    finished = [r for r in runs if r.get("status") not in ("queued", "running")]
+    finished = [r for r in runs if r.get("status") not in ("queued", "running", "deferred")]
     status_counts = Counter(str(r.get("status") or "unknown") for r in finished)
 
     times = [

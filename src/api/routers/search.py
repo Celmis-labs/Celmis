@@ -391,7 +391,8 @@ async def integrations_health(
         dead = s.get("dead", 0)
         cards.append({
             "kind": "queue", "name": "sync_jobs",
-            "status": "degraded" if dead else "healthy",
+            # Deferred reviews are waiting for a model that is not answering.
+            "status": "degraded" if (dead or s.get("deferred", 0)) else "healthy",
             "detail": ", ".join(f"{k}={v}" for k, v in sorted(s.items())) or "empty",
         })
     except Exception as exc:  # noqa: BLE001

@@ -20,6 +20,152 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.3] — 2026-10-26
+
+A review whose model is down now waits for it instead of failing, the **Connect** page
+walks a first-time user to a working MCP connection, and a refused MCP token is answered in
+words instead of a JSON parse error.
+
+### Upgrade notes
+
+- One migration (`c8d3a5f1b762`) adds the `deferred` state to the job queue. It runs when
+  the API starts, as every migration does; back up the database first, as for any upgrade.
+- New settings, all optional with defaults (`.env.example`, `docs/REVIEW_SETTINGS.md`):
+  `CELMIS_REVIEW_MODEL_PREFLIGHT` (`on`), `CELMIS_REVIEW_MODEL_PREFLIGHT_TIMEOUT_SECONDS`
+  (20), `CELMIS_REVIEW_DEFER_CHECK_SECONDS` (60), `CELMIS_REVIEW_DEFER_MAX_HOURS` (24) and
+  `MCP_OAUTH_ISSUER` (empty: derived from the proxy's forwarded headers and
+  `PUBLIC_BASE_URL`).
+- The bundled Caddyfiles now send `X-Forwarded-Prefix`; restart the proxy
+  (`docker compose restart caddy`) after the upgrade so it reads the new file.
+
+The **Connect** page walks a person who has never connected an agent to a working
+connection, in all sixteen languages, from what went wrong when someone did it for real.
+The token step follows the install: with self-service on it links to the token settings;
+with it off it gives a request to send, with the workspace's name filled in, and a
+superadmin sees how to issue the token (developer profile, read-only, "Shared with us").
+When the page cannot ask who issues tokens it says so and offers both, rather than
+deciding.
+A token made with "Allow changes" ticked does not work with the plugin, and the guide says
+so before the 403 does. The plugin steps name both ways to install (inside Claude Code, from
+a terminal), say that the marketplace comes first (Discover finds nothing before it) and that
+installing from a terminal does not ask for the address and token (the `/plugin` menu may
+not either): `/plugin configure celmis-code@celmis` does, in a masked field, and is the only
+entry the page recommends. A list of four mistakes (a token inside
+`${...}` or in any shell command, several lines pasted at once, `claude mcp add` next to the
+plugin, a token in a chat) and a troubleshooting section with nine symptoms, each with what
+it means and what to do, close the page: `bad substitution`, an empty Discover, no prompt
+after install, `Failed to save configuration`, the refused token that shows as `JSON Parse
+error` with an Authenticate button, 403, a missing shared repository, `repo not found`, an
+address that does not connect. A token that was shown anywhere is revoked at once by its
+owner on the MCP settings page, without waiting for the administrator. Restarting is explained
+for the terminal and for VS Code.
+
+### Added
+
+- **A review waits for its model instead of failing.** Before a queued review starts,
+  Celmis sends one tiny request through the review's own LLM client (cached 60 s when it
+  answered, 15 s when it did not). When the model cannot be reached (provider down or
+  timing out, rate-limited, no or invalid key, unknown model, exhausted budget or quota)
+  nothing is posted to the pull request, the run is **deferred** with a short reason and the
+  job moves to a durable deferred list (`sync_jobs.status = 'deferred'`, migration
+  `c8d3a5f1b762`) without using an attempt. If every agent fails for such a reason in the
+  middle of a review, the review is postponed the same way and a placeholder already posted
+  is edited to say so, in the review language. The worker checks the list at startup and
+  every `CELMIS_REVIEW_DEFER_CHECK_SECONDS` (60), probes once per workspace and set of
+  models, releases the oldest first and backs off 1, 2, 5, 10, 15 minutes; it is safe with
+  several workers. After `CELMIS_REVIEW_DEFER_MAX_HOURS` (24) the job dies, the run fails,
+  the placeholder says the review was not done and one ERROR is logged. The Jobs page and the
+  review run views show the waiting state with **Retry now** for workspace owners and admins,
+  in all sixteen languages. `CELMIS_REVIEW_MODEL_PREFLIGHT=off` skips the preflight. The
+  synchronous trigger, the CLI and the inline fallback cannot queue and fail at once with
+  the same reason. A waiting review can be cancelled from the Jobs page (the run is
+  closed and the placeholder rewritten); a review parked before any comment existed leaves
+  one short "Review not done" note when it gives up; a manual review request for a waiting
+  pull request says it is waiting for the model; the pull request view refreshes itself
+  while a review waits; a 429 on the probe no longer postpones a review; causes that need a
+  person (key, model name, budget) send one `review_model_blocked` notification per job.
+  See `docs/REVIEW_SETTINGS.md`.
+
+### Changed
+
+- **The MCP settings page no longer puts the issued token in the `claude mcp add` command.**
+  The command names `CELMIS_MCP_TOKEN`; a line of its own, `read -rs CELMIS_MCP_TOKEN &&
+  export CELMIS_MCP_TOKEN`, fills the variable without echoing the token, so it is not typed
+  into a shell command and left in its history. The note says the shell expands the name
+  before Claude Code runs, so the value, not the name, is saved. The same line is on the
+  Connect page's by-hand route. The page links to the Connect guide. The JSON snippet, a
+  file, still carries the token.
+- **Project token card (Projects).** The project token card no longer writes the issued token into the `claude mcp add` command: the token is shown once in its own field and the command names `${CELMIS_MCP_TOKEN}`, filled with `read -rs` as in the connection guide; its copy buttons also work over plain HTTP.
+- **The plugin README and `docs/MCP_DEV.md` say the same.** The plugin's `userConfig` is
+  asked for by `/plugin configure`, not by the install; the clipboard one-liner for a person
+  is gone, and `--values-stdin` is described for provisioning scripts only. Each command is
+  in a block of its own, and the troubleshooting table lives in the README alone;
+  `docs/MCP_DEV.md` points to it.
+
+### Fixed
+
+- **A refused MCP token is now answered in words, and sign-in discovery works behind the
+  bundled proxy.** A wrong or revoked token used to end in `JSON Parse error: Unrecognized
+  token '<'` and an Authenticate button that cannot help. Two things caused it. The 401
+  pointed `resource_metadata` at a made-up host (the JWT audience), and the discovery
+  documents named `http://api:8000/mcp`: behind the TLS proxy the API saw neither the public
+  `https` scheme nor the `/backend` prefix. The client then fell back to
+  `/.well-known/oauth-*` on the web host, where the web app redirected to `/login` and the
+  client read an HTML page as JSON. Now:
+  - The 401 carries `error="invalid_token"`, a plain `error_description` ("Authentication
+    required: add your Celmis token as an `Authorization: Bearer` header" with no token;
+    "The token was not accepted: it is unknown, revoked or expired" with one, followed by
+    where to get a new one, which follows the install's self-service setting), a JSON body
+    and `Cache-Control: no-store`, and a `resource_metadata` that is the public `https`
+    address of that endpoint's own document (`/mcp` and `/mcp/dev`). A token that never
+    existed and one that was revoked get the same words. `403 insufficient_scope` keeps its
+    text and gets the same pointer.
+  - The protected-resource and authorization-server documents (and the new
+    `/.well-known/oauth-protected-resource/mcp`) carry the public address the client used.
+    The host and scheme come from `X-Forwarded-Host` / `X-Forwarded-Proto` / `Host`. With
+    `PUBLIC_BASE_URL` set, a host is only named when the MCP endpoint would serve it
+    (localhost, the `PUBLIC_BASE_URL` host, `MCP_ALLOWED_HOSTS`); without `PUBLIC_BASE_URL` and
+    without a declared host (an install that has not been configured yet, where the MCP
+    endpoint itself answers 421) the server hands the caller back the host and scheme it sent.
+    The prefix comes from `X-Forwarded-Prefix`, else `/backend` for a proxied request on the
+    `PUBLIC_BASE_URL` host. New and optional: `MCP_OAUTH_ISSUER` (the full public base, checked
+    like the other parts: scheme, host, and a prefix of plain path segments) overrides the
+    derivation. The JWT audience and issuer checks are unchanged. `service_documentation` of
+    the authorization server document is now a bare URL; the sentence that used to follow it
+    is in a separate `note` member.
+  - The web app serves `/.well-known/oauth-protected-resource` and
+    `/.well-known/oauth-authorization-server` by forwarding them to the API at run time, and
+    answers any other `/.well-known/*` (and the bare `/.well-known`) with a JSON 404. None of
+    them redirects to `/login` any more or answers HTML. (A trailing slash is still normalised
+    by Next with a 308 to the path without it, which then gets the same JSON.)
+  - Celmis does not sign MCP clients in through a browser: registration needs a signed-in
+    workspace admin and the consent step needs a bearer header. A client that presses
+    Authenticate (or is sent to register with a refused token) now gets the OAuth error
+    `access_denied` with "Celmis does not sign MCP clients in through the browser, so
+    Authenticate cannot help. Connect with a Celmis token instead", and shows that instead of
+    a parse error. Nothing is opened up: registration still needs an admin.
+  - The Connect page's troubleshooting entry (all sixteen languages), the plugin README and
+    `docs/MCP_DEV.md` describe the new messages and keep a note that an older server still
+    shows the parse error.
+
+  **Upgrade note:** the bundled Caddyfiles (`deploy/Caddyfile`, `deploy/hetzner/Caddyfile`,
+  `deploy/oracle/Caddyfile.http`) now send `X-Forwarded-Prefix: /backend` to the API. Restart
+  the proxy after the upgrade (`docker compose restart caddy`; a file bind-mounted into a
+  container can keep the old content after an update, so a reload may not see it); without it the prefix is still inferred for an install whose
+  `PUBLIC_BASE_URL` is set, and `MCP_OAUTH_ISSUER` covers any other layout.
+
+  **TLS in front of the bundled proxy:** if a TLS terminator of your own (a load balancer, a
+  tunnel) sits in front of the bundled Caddy, Caddy sees plain `http` and reports it. The
+  scheme is corrected only for the host of an `https://` `PUBLIC_BASE_URL`; a host declared
+  only in `MCP_ALLOWED_HOSTS` is named `http://` in the sign-in documents and the 401. Set
+  `PUBLIC_BASE_URL=https://your.host` or `MCP_OAUTH_ISSUER=https://your.host/backend`. The
+  421 message, `.env.example`, `docs/MCP_DEV.md` and the API log (`mcp_public_base_plain_http`)
+  say so.
+- **The MCP settings page lost the dark theme when it loaded.** The server address was read
+  from `window` while rendering, so the server and the first browser render disagreed, React
+  rebuilt the page from the root and the theme class on `<html>` was lost. The address now
+  comes from a store that has a value for each side. The Connect page does the same.
+
 ## [3.1.1] — 2026-10-22
 
 A review now tells the pull request only what reaches it. A finding below the comment level is
