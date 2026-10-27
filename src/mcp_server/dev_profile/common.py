@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 POOL_SIZE = 8
 #: Most repositories one call fans out to. A token that reaches hundreds of
 #: repositories must name one (`repo=`) to search more than this many.
-MAX_REPOS_PER_CALL = 40
+MAX_REPOS_PER_CALL = 41
 RESPONSE_FORMATS = ("concise", "detailed")
 
 
@@ -110,17 +110,32 @@ def expand(store: Any, symbol: str, direction: str, depth: int,
 
 #: What the dev tools (`find`, `grep`) tell the caller to do about a cut: they take `repo=`.
 TARGET_ONE_REPO = "pass repo= to target one"
+#: The same for a tool that pages by repository (`grep`): the way out is the cursor, `repo=` is the shortcut.
+REPO_TARGETS_ONE = "repo= targets one"
 #: What `search_symbols` tells them: it has no `repo` parameter, only `project_id`.
-#: Not "or a narrower query": the first 40 repositories are searched whatever the query.
+#: Not "or a narrower query": the first `MAX_REPOS_PER_CALL` repositories are searched whatever the query.
 NARROW_THE_SYMBOL_SEARCH = "pass project_id= to narrow"
 
 
-def cut_note(searched: int, total: int, *, advice: str = TARGET_ONE_REPO) -> str:
+def cut_note(searched: int, total: int, *, advice: str = TARGET_ONE_REPO,
+             start: int = 0, then: str = "") -> str:
     """The one line that says a search covered `searched` of `total` repositories.
 
     `advice` is the way out, and it must name parameters the tool really has:
-    `repo=` for the dev tools, not for `search_symbols`."""
-    return f"searched {searched} of {total} repos; {advice}"
+    `repo=` for the dev tools, not for `search_symbols`. "(a cut of this call, not the index)"
+    because an agent once read the cut as "the index holds only these".
+    With `start` (the batch's first repository, 0-based) the line names the range
+    - "searched repositories 42-82 of 120 (a cut of this call, not the index); <then>; <advice>" -
+    and `then` says how to reach the rest (a tool that pages by repository)."""
+    if start or then:
+        head = f"searched repositories {start + 1}-{start + searched} of {total}"
+    else:
+        head = f"searched {searched} of {total} repos"
+    parts = [f"{head} (a cut of this call, not the index)"]
+    if then:
+        parts.append(then)
+    parts.append(advice)
+    return "; ".join(parts)
 
 
 def cap_repos(slugs: list[str], *, advice: str = TARGET_ONE_REPO) -> tuple[list[str], str]:
@@ -128,7 +143,7 @@ def cap_repos(slugs: list[str], *, advice: str = TARGET_ONE_REPO) -> tuple[list[
 
     A tool that fans out over every repository the caller can read calls this
     FIRST, on the repositories that are really readable, and prints the line:
-    a search that covered 40 of 90 repositories and said nothing reads as "no
+    a search that covered 41 of 90 repositories and said nothing reads as "no
     other repository has it". `map_repos` still caps, as a backstop, but a tool
     must not rely on it - its cut is only logged.
     """

@@ -120,7 +120,7 @@ How the tools show it:
   holds a shared repository, although it reads no content and so leaves no share
   in the call log.
 * `find` and `grep` over every repository you can read put the shared ones
-  first, so the cut to a fixed number of repositories falls on your own.
+  first, so the first batch of repositories holds them.
 * `refs` follows a share in both directions. The callers of a symbol of a shared
   repository are looked for in your own repositories, and the callers of a symbol
   of your own repository in the shared ones. It is the same word search as for
@@ -364,12 +364,27 @@ budgets): `CELMIS_MCP_RATE_PER_MINUTE` calls per minute (default 120, `0` switch
 off), `CELMIS_MCP_MAX_CONCURRENT` calls at once (default 4) and
 `CELMIS_MCP_CALL_TIMEOUT_SECONDS` per call (default 60). A call over a limit is
 answered with a short message that says what to narrow or when to retry, and is
-audited as denied. One call searches at most 40 repositories (`grep`: 10); when a
-token reaches more, the answer says so on its first lines (`searched 40 of 90 repos;
-pass repo= to target one`) and `repo=` goes deeper. `search_symbols` has no `repo=`;
-it says `searched 40 of 90 repos; pass project_id= to narrow`, or, when `project_id=` was
-already given and the project itself holds more than 40 repositories,
-`searched 40 of 90 repos in this project; narrow the project`. `refs` says how many
+audited as denied. One call searches at most 41 repositories (`MAX_REPOS_PER_CALL`);
+the cap only bounds the work of one call, not what the index holds. A repository that has
+no index yet is named in the answer (`N of these have no index yet`). A call also has a
+15 s deadline (`CALL_DEADLINE`): repositories not reached, or whose `git grep` hit its 5 s
+timeout, are named (`timed out or were skipped`), so the worst case of one call is about
+20 s. The cursor is bound to the query, the repository list and the caller (user and
+workspace), not to a token.
+`grep` walks the rest by cursor: when a token reaches more, the answer says which part it
+searched (`searched repositories 1-41 of 120 (a cut of this call, not the index); cursor=<next> continues
+with the next 41; repo= targets one`), its `cursor=` continues with the hits left in
+that part and then with the next 41 repositories (`searched repositories 42-82 of 120
+...`, and `this is the last part` on the last), and `repo=` goes to one repository
+without batching. The cursor holds the query, the offset, the batch start and digests of
+the repositories before the batch and of the revisions in it; a cursor of another query
+is refused, and a repository that appeared, vanished or was re-indexed in between is
+said and the walk starts again from page 1. `find` does not page by repository (its hits
+are one ranking over all of them); it says `searched 41 of 90 repos (a cut of this call, not the index);
+pass repo= to target one`. `search_symbols` has no `repo=`; it says
+`searched 41 of 90 repos (a cut of this call, not the index); pass project_id= to narrow`, or, when
+`project_id=` was already given and the project itself holds more than 41 repositories,
+`searched 41 of 90 repos in this project (a cut of this call, not the index); narrow the project`. `refs` says how many
 sibling repositories it looked in for text mentions, and `brief` says when `repos=`
 named more than 20.
 

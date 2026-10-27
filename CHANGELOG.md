@@ -20,6 +20,40 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.4] — 2026-10-27
+
+`grep` now reaches every repository you can read: it searches 41 per call and its cursor
+walks on into the next 41, and every cut line says it is a cut of the call, not the size of
+the index.
+
+### Upgrade notes
+
+- No migration. A `grep` cursor issued by 3.1.3 is not accepted by 3.1.4 (it is now bound to
+  the user and workspace); the call answers with page 1 and a note, so an agent that holds
+  one simply starts over.
+- Plugin users get the updated `celmis-search` skill text with the next plugin update.
+
+### Changed
+
+- **`grep` searches every repository you can read, 41 per page.** It searched at most 10
+  repositories per call and answered `searched 10 of 39 repos; pass repo= to target one`;
+  its cursor only paged hits inside those 10, so the rest were reachable one by one with
+  `repo=`. An agent read the line as "the index covers 10 of 39 repositories" and gave up on
+  Celmis. The per-call cap is now one shared number, `MAX_REPOS_PER_CALL = 41`, and when
+  more repositories are readable the cursor continues first through the hits left in the
+  batch and then into the next 41 repositories. The answer says so in words:
+  `searched repositories 1-41 of 120 (a cut of this call, not the index); cursor=<next> continues with the
+  next 41; repo= targets one`, and so does the tool description. The cursor stays tamper-safe
+  (query hash, revision digest, and for later batches the batch start with a digest of the
+  repositories before it); a repository that appeared, vanished or was re-indexed between
+  pages is reported and the walk restarts from page 1. `find` and `search_symbols` keep
+  one ranking over all repositories, so they only say `(a cut of this call, not the index)` in their cut line.
+  A repository without an index yet is named (`N of these have no index yet`), repositories
+  that hit the 5 s `git grep` timeout or the 15 s call deadline are named too, the grep
+  cursor is bound to the user and workspace, and a stale cursor in a later part says it
+  shows the first page of that part.
+  `ask` stays at 8 repositories (it is paid).
+
 ## [3.1.3] — 2026-10-26
 
 A review whose model is down now waits for it instead of failing, the **Connect** page

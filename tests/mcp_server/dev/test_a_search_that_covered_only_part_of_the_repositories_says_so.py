@@ -2,16 +2,16 @@
 
 The contract (docs/MCP_DEV.md "Limits per token", docs/mcp-access.md):
 
-  * one call searches at most `MAX_REPOS_PER_CALL` (40) repositories; when a
+  * one call searches at most `MAX_REPOS_PER_CALL` (41) repositories; when a
     token reaches more, `find` prints
-    `searched 40 of 90 repos; pass repo= to target one` - the same line `grep`
-    prints for its own cut - and `search_symbols`, which has no `repo=`, prints
-    `searched 40 of 90 repos; pass project_id= to narrow` (not "or a narrower
-    query": the first 40 are searched whatever the query), because a search over
-    40 of 90 repositories that says nothing reads as "no other repository has it";
-    when `project_id=` WAS given and the project itself holds more than 40, advising
+    `searched 41 of 90 repos (a cut of this call, not the index); pass repo= to target one` - the same line `grep`
+    prints for its own cut, with the range (see test_grep_pages_by_repository) - and `search_symbols`, which has no `repo=`, prints
+    `searched 41 of 90 repos (a cut of this call, not the index); pass project_id= to narrow` (not "or a narrower
+    query": the first 41 are searched whatever the query), because a search over
+    41 of 90 repositories that says nothing reads as "no other repository has it";
+    when `project_id=` WAS given and the project itself holds more than 41, advising
     `project_id=` again is no way out, so it prints
-    `searched 40 of 90 repos in this project; narrow the project`;
+    `searched 41 of 90 repos in this project; narrow the project`;
   * the cut is made AFTER the repositories the caller cannot research are
     dropped: they never use up the cap, and the count in the line is of the
     repositories the caller can search, so it names and counts nothing hidden;
@@ -34,11 +34,11 @@ from src.mcp_server.dev_profile import common, tools_find, tools_grep, tools_ref
 from src.mcp_server.dev_profile import tools_skills as ts
 from tests.mcp_server.dev.conftest import BILLING, SHOP
 
-LINE = "searched {} of {} repos; pass repo= to target one"
+LINE = "searched {} of {} repos (a cut of this call, not the index); pass repo= to target one"
 #: `search_symbols` has no `repo=` parameter; its way out is `project_id=`.
-SYMBOLS_LINE = "searched {} of {} repos; pass project_id= to narrow"
+SYMBOLS_LINE = "searched {} of {} repos (a cut of this call, not the index); pass project_id= to narrow"
 #: ...and when the caller already named the project, which is itself over the cap.
-PROJECT_LINE = "searched {} of {} repos in this project; narrow the project"
+PROJECT_LINE = "searched {} of {} repos in this project (a cut of this call, not the index); narrow the project"
 
 
 def _many(n: int) -> dict[str, str]:
@@ -50,7 +50,7 @@ def _many(n: int) -> dict[str, str]:
 
 
 def test_find_over_more_repos_than_the_cap_says_it_searched_only_the_cap(as_caller, monkeypatch):
-    as_caller(_many(45))
+    as_caller(_many(46))
     seen: list[list[str]] = []
     monkeypatch.setattr(tools_find, "search",
                         lambda scope, slugs, q, **kw: seen.append(list(slugs)) or [])
@@ -58,10 +58,10 @@ def test_find_over_more_repos_than_the_cap_says_it_searched_only_the_cap(as_call
     out = tools_find.run("create_order")
 
     assert [len(s) for s in seen] == [common.MAX_REPOS_PER_CALL]
-    assert LINE.format(40, 45) in out.splitlines()
+    assert LINE.format(41, 46) in out.splitlines()
 
 
-@pytest.mark.parametrize("readable", [3, 40])
+@pytest.mark.parametrize("readable", [3, 41])
 def test_find_at_or_under_the_cap_has_no_such_line(as_caller, monkeypatch, readable):
     as_caller(_many(readable))
     monkeypatch.setattr(tools_find, "search", lambda scope, slugs, q, **kw: [])
@@ -70,7 +70,7 @@ def test_find_at_or_under_the_cap_has_no_such_line(as_caller, monkeypatch, reada
 
 
 def test_find_with_repo_has_no_such_line_however_many_repos_are_readable(as_caller, monkeypatch):
-    as_caller({**_many(45), SHOP: "code"})
+    as_caller({**_many(46), SHOP: "code"})
     monkeypatch.setattr(tools_find, "search", lambda scope, slugs, q, **kw: [])
 
     assert "searched" not in tools_find.run("create_order", repo=SHOP)
@@ -87,17 +87,18 @@ def test_find_that_cuts_a_real_search_still_answers_from_the_repos_it_kept(as_ca
     assert hits and all(h.startswith(BILLING) for h in hits)      # the repositories sort billing, shop
 
 
-def test_grep_prints_the_same_line_for_its_own_cut(as_caller, world, monkeypatch):
-    monkeypatch.setattr(tools_grep, "MAX_REPOS", 1)
+def test_grep_names_the_range_it_searched_when_it_cuts(as_caller, world, monkeypatch):
+    monkeypatch.setattr(common, "MAX_REPOS_PER_CALL", 1)
 
-    assert LINE.format(1, 2) in tools_grep.run("create_order").splitlines()
+    assert ("searched repositories 1-1 of 2 (a cut of this call, not the index); cursor=<next> continues "
+            "with the next 1; repo= targets one") in tools_grep.run("create_order").splitlines()
 
 
-def test_the_cap_the_documentation_names_is_forty():
-    assert common.MAX_REPOS_PER_CALL == 40
-    assert common.cap_repos([f"r{i}" for i in range(40)]) == ([f"r{i}" for i in range(40)], "")
-    kept, line = common.cap_repos([f"r{i}" for i in range(41)])
-    assert len(kept) == 40 and kept[0] == "r0" and line == LINE.format(40, 41)
+def test_the_cap_the_documentation_names_is_forty_one():
+    assert common.MAX_REPOS_PER_CALL == 41
+    assert common.cap_repos([f"r{i}" for i in range(41)]) == ([f"r{i}" for i in range(41)], "")
+    kept, line = common.cap_repos([f"r{i}" for i in range(42)])
+    assert len(kept) == 41 and kept[0] == "r0" and line == LINE.format(41, 42)
 
 
 # ─── search_symbols (the full server and the REST search) ────────────
@@ -127,34 +128,34 @@ def symbols(monkeypatch, world, freshness, shared_graphs):
 
 
 def test_search_symbols_over_more_repos_than_the_cap_says_so_and_counts_only_what_it_may_search(symbols):
-    readable = [*_many(42)]
+    readable = [*_many(43)]
     hidden = [f"github_acme-private{i}" for i in range(3)]
     symbols(readable, hidden)
 
     out = http_app._search_symbols_impl(None, "create_order", None, 5)
 
-    assert out["note"] == SYMBOLS_LINE.format(40, 42), "42 searchable repos, not the 45 that exist"
+    assert out["note"] == SYMBOLS_LINE.format(41, 43), "43 searchable repos, not the 46 that exist"
     assert out["matches"], "the search itself still ran"
     assert not any(h in str(out) for h in hidden)
 
 
 def test_search_symbols_in_a_project_over_the_cap_does_not_advise_the_project_id_again(symbols, monkeypatch):
     """`project_id=` was passed; "pass project_id= to narrow" would send the caller in a circle."""
-    readable = [*_many(42)]
+    readable = [*_many(43)]
     hidden = [f"github_acme-private{i}" for i in range(3)]
     symbols(readable, hidden)
     monkeypatch.setattr(http_app, "_project_repo_slugs", lambda pid: [*hidden, *readable])
 
     out = http_app._search_symbols_impl("proj-1", "create_order", None, 5)
 
-    assert out["note"] == PROJECT_LINE.format(40, 42), "42 searchable repos of the project, not the 45"
+    assert out["note"] == PROJECT_LINE.format(41, 43), "43 searchable repos of the project, not the 46"
     assert "project_id" not in out["note"]
     assert out["matches"], "the search itself still ran"
     assert not any(h in str(out) for h in hidden)
 
 
 def test_search_symbols_in_a_project_within_the_cap_has_no_such_line(symbols, monkeypatch):
-    readable = [*_many(40)]
+    readable = [*_many(41)]
     symbols(readable)
     monkeypatch.setattr(http_app, "_project_repo_slugs", lambda pid: readable)
 
@@ -163,7 +164,7 @@ def test_search_symbols_in_a_project_within_the_cap_has_no_such_line(symbols, mo
 
 def test_repos_the_caller_cannot_search_do_not_use_up_the_cap(symbols):
     """Ninety repositories exist and the caller may search two: the 88 that sort first must not
-    take the 40 places, or the two real answers are cut away and the search finds nothing."""
+    take the 41 places, or the two real answers are cut away and the search finds nothing."""
     symbols([BILLING, SHOP], hidden=[f"github_acme-private{i:02d}" for i in range(88)])
 
     out = http_app._search_symbols_impl(None, "create_order", None, 5)

@@ -172,6 +172,7 @@ def render_list(
     note: str = "", empty: str = "no results", more_hint: str = "",
     detailed: bool = False, raised: bool = False,
     pin: dict[str, str] | None = None,
+    batch: int = 0, before: list[str] | None = None, then: str = "",
 ) -> str:
     """Header, `head` lines, then `page` (the items at `offset` of `total` in
     the full ranked list) trimmed to the budget, then the truncation line when
@@ -179,6 +180,9 @@ def render_list(
 
     `pin` is the slug -> sha map the cursor is bound to; the tool passes the
     same one it validates an incoming cursor against (default: the idx entries).
+    A tool that pages by repository too passes `batch` / `before` (see `cursor`)
+    so the cursors it hands out stay in that batch, and `then`: the last line
+    once the page is the end of the batch (it carries the cursor to the next one).
     """
     try:
         header = idx_line(entries)
@@ -202,11 +206,14 @@ def render_list(
         if remaining > 0:
             cur = cursor_mod.encode(
                 query_hash, offset + shown,
-                pin if pin is not None else {e.slug: e.sha for e in entries})
+                pin if pin is not None else {e.slug: e.sha for e in entries},
+                batch=batch, before=before or ())
             tail = f"… +{remaining} more · cursor={cur}"
             if more_hint:
                 tail += f" · narrow with {more_hint}"
             lines.append(tail)
+        elif then:
+            lines.append(_safe(then))
         return header + "\n" + "\n".join(lines)
     except RedactionFailed:
         return withheld(entries)

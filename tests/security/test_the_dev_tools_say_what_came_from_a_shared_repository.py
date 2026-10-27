@@ -154,13 +154,13 @@ def test_an_answer_with_no_call_in_flight_has_no_note_and_no_error(world):
 
 
 def test_a_grep_over_every_repository_cut_short_keeps_the_shared_one(world, monkeypatch):
-    from src.mcp_server.dev_profile import tools_grep
+    from src.mcp_server.dev_profile import common, tools_grep
 
-    monkeypatch.setattr(tools_grep, "MAX_REPOS", 1)
+    monkeypatch.setattr(common, "MAX_REPOS_PER_CALL", 1)
     _call(world, _holder(world, make_share(world)), "grep")
     out = tools_grep.run(SHARED_MARKER)
     assert f"{SHARED} src/app.py" in out and SHARED_MARKER in out
-    assert "searched 1 of 3 repos" in out, "and it says that it stopped short"
+    assert "searched repositories 1-1 of 3" in out, "and it says that it stopped short"
 
 
 def test_a_find_over_every_repository_cut_short_keeps_the_shared_one(world, monkeypatch):
@@ -230,10 +230,10 @@ def test_a_grep_logs_the_share_it_went_through(world, monkeypatch):
 
 
 def test_a_search_cut_to_one_repository_logs_the_shared_one_it_kept(world, monkeypatch):
-    from src.mcp_server.dev_profile import tools_grep
+    from src.mcp_server.dev_profile import common, tools_grep
 
     _many_candidates(monkeypatch)
-    monkeypatch.setattr(tools_grep, "MAX_REPOS", 1)
+    monkeypatch.setattr(common, "MAX_REPOS_PER_CALL", 1)
     share_id = make_share(world)
     rec = _call(world, _holder(world, share_id), "grep")
     out = tools_grep.run("handler")

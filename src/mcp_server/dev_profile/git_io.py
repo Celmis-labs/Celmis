@@ -133,7 +133,7 @@ def grep(
     slug: str, sha: str, pattern: str, *, regex: bool = False,
     path_glob: str = "", max_hits: int = 60, timeout: float = 5.0,
     ignore_case: bool = False, per_file: int = 8, first_only: bool = False,
-    word: bool = False,
+    word: bool = False, timed_out: list | None = None,
 ) -> list[GrepHit]:
     """`git grep` at `sha`, secret files excluded by git itself.
 
@@ -172,7 +172,12 @@ def grep(
     prefix = f"{sha}:"
     import threading
 
-    timer = threading.Timer(timeout, proc.kill)
+    def _expire() -> None:
+        if timed_out is not None:
+            timed_out.append(slug)  # git was killed: the hits may be partial
+        proc.kill()
+
+    timer = threading.Timer(timeout, _expire)
     timer.start()
     try:
         assert proc.stdout is not None  # noqa: S101

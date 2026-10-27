@@ -48,7 +48,12 @@ that part and tell the user. When `brief` finds nothing, carry on.
 Other tools:
 
 - `grep` - text search at the indexed commit, for literals, config keys and
-  env var names. Not for identifiers `find` can rank.
+  env var names. Not for identifiers `find` can rank. It reads up to 41
+  repositories per call and walks every repository you can read across the pages
+  (one still being indexed is named in the answer); when you
+  can read more, the answer says `searched repositories 1-41 of 120` and its
+  `cursor=` continues with the next hits and then the next repositories.
+  "Not searched yet" means a later page, not a gap in the index.
 - `map` - repository or module map, to orient in an unfamiliar repository.
 - `ask` - an LLM answer. Slow and billed; only when the tools above cannot
   assemble the answer.

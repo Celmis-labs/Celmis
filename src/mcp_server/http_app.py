@@ -1627,8 +1627,8 @@ def _search_symbols_impl(
     if cut and project_id:
         # `project_id=` was already given: advising it again is no way out. The
         # project itself has more repositories than one call searches.
-        cut = (f"searched {len(repo_slugs)} of {len(searchable)} repos in this project; "
-               "narrow the project")
+        cut = (f"searched {len(repo_slugs)} of {len(searchable)} repos in this project "
+               "(a cut of this call, not the index); narrow the project")
 
     def one(slug: str) -> list[dict[str, Any]]:
         dec = access.get(slug)
