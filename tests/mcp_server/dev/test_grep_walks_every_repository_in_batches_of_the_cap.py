@@ -267,7 +267,7 @@ def test_a_git_grep_that_timed_out_is_named(fleet, monkeypatch):
 
     out = tools_grep.run("needle")
 
-    assert f"1 repos timed out or were skipped" in out and slugs[1] in out
+    assert "1 repos timed out or were skipped" in out and slugs[1] in out
 
 
 def test_the_call_deadline_skips_and_names_the_rest(fleet, monkeypatch):
