@@ -126,7 +126,7 @@ def run(pattern: str, repo: str = "", path_glob: str = "", regex: bool = False,
             return []
         hits = git_io.grep(slug, fresh[slug].sha, pat, regex=regex, path_glob=path_glob,
                            max_hits=PER_REPO_HITS, ignore_case=ignore_case,
-                           timed_out=timed_out)
+                           timed_out=timed_out, deadline=deadline)
         return [(slug, x) for x in hits if scope.readable(slug, x.path)]
 
     flat = [t for part in common.map_repos(slugs, one).values() for t in part]

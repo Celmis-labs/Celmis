@@ -20,6 +20,29 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.9] — 2026-10-28
+
+`grep` finds text in a large uploaded archive, and a lowercase pattern matches
+non-ASCII text in any case.
+
+### Fixed
+
+- **`grep` over an uploaded archive timed out with no hits.** The unpacked tree
+  was searched with `git grep --no-index`, which walks every path through the
+  secret-file pathspecs before it reads a line; on an archive of some twenty
+  thousand files that outlasted the 5 s git was given. A search index now sits
+  beside the archive (never inside the tree): a git dir of intent-to-add
+  entries, made when the archive is installed and, for an archive installed
+  before, on the first search. `git grep` runs on it in work-tree mode, the
+  first hit comes at once, and the archive's own `.gitignore`, the secret-file
+  floor and the revision check hold as before; symlinks are skipped. If the
+  index cannot be built the search falls back to `--no-index`.
+- **`git grep` was given the rest of the call, not a fixed 5 s** (within 3–20 s).
+- **A lowercase pattern did not match Cyrillic (or any non-ASCII) text in
+  another case.** git ran under `LC_ALL=C`, where `-i` and `-w` work byte by
+  byte; it now runs under `C.UTF-8`. Where that locale is missing git falls
+  back to `C`, the old behaviour.
+
 ## [3.1.8] — 2026-10-28
 
 An uploaded repository reaches the MCP tools and the people it is shared with, and an SSO

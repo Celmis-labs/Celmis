@@ -383,6 +383,12 @@ def install_archive(stored: StoredArchive, filename: str, slug: str, *,
     data_dir = settings.repo_data_path(slug)
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "upload.json").write_text(json.dumps(meta), encoding="utf-8")
+    try:  # the search index of the new archive; grep builds it lazily if this fails
+        from src.mcp_server.dev_profile import git_io
+
+        git_io.build_upload_index(slug)
+    except Exception:  # noqa: BLE001
+        logger.warning("upload_grep_index_failed slug=%s", slug)
     return final
 
 
