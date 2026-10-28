@@ -20,6 +20,56 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.10] — 2026-10-28
+
+1C:Enterprise code joins the graph and the Q&A: modules, methods, calls and
+metadata objects with their synonyms are symbols, and a question in one
+language reaches code named in another. The platform moves to Python 3.14 with
+its dependencies brought up to date.
+
+### Added
+
+- 1C:Enterprise (BSL) in the code graph: `.bsl` modules and OneScript `.os` files. Procedures and
+  functions (Russian or English keywords, `Async`/`Export`, compiler directives, the comment block
+  above as the docstring) are symbols named `<Module>.<Method>`, where the module comes from the
+  configuration dump's layout (Designer `Ext/` folders and EDT `src/` folders alike), so `find`,
+  `outline` and `map` answer for a method, an object and `CommonModule.Method`. Calls inside a
+  module, `CommonModule.Method(` and `Manager.Object.Method(` become `CALLS` edges; BSL names are
+  matched case-insensitively. A repository indexed earlier gets this graph on its next full index.
+- 1C metadata in the code graph: each object of a Designer configuration dump (`Catalogs/<Object>.xml`,
+  documents, registers, reports, enums, subsystems ...) is a symbol `<Type>.<Object>` (kind
+  `vendor.onec.<type>`) whose docstring holds its synonyms in every language of the file, plus its
+  fields. `find` matches a synonym (what the users call the object), a module is linked to the
+  object it belongs to, a method to each data object its code or query text names, and a subsystem
+  to its content (`DEFINED_IN` / `REFERENCES`).
+
+- Q&A (`ask`, the web chat) over a 1C repository matches the question's words
+  against every symbol's name, docstring and signature — so a metadata
+  object's synonyms too — as stems that ignore case endings and Russian /
+  Ukrainian spelling, and, when a model is reachable, one short call restates
+  them in the language of the repository's identifiers. The matched method
+  bodies go first into the prompt as line-ranged excerpts. Rows are filtered by
+  the asker's access before they are scored. A repository without 1C code is
+  left to the tiers it had, with no model call added.
+- `.bsl` modules are chunked one chunk per procedure or function.
+
+### Changed
+
+- Python 3.14 (images, CI, `requires-python`); 3.15 waits for tree-sitter
+  wheels.
+- Dependencies brought up to date: `cryptography` 50 (the 45 line carried
+  thirteen advisories), `google-genai` 2, `cachetools` 7, `structlog` 26,
+  `rich` 15, `unidiff` 1, newer floors for the rest; uv 0.13.6 and
+  osv-scanner 2.7.0 in the images; `next` 16.4.3 and `motion` 14 in the web
+  app. `mcp` stays below 2 (2.x removes the server API in use) and
+  `tree-sitter` below 0.26 (it crashes the interpreter in the Vue extractor).
+- The Q&A identifier targets accept identifiers in any script.
+
+### Fixed
+
+- `find` tokenises Cyrillic camelCase names (it gave them no tokens, so a Russian or Ukrainian
+  identifier could not be found by part of its name).
+
 ## [3.1.9] — 2026-10-28
 
 `grep` finds text in a large uploaded archive, and a lowercase pattern matches

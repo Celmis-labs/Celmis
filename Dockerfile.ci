@@ -9,10 +9,10 @@
 # Qdrant client, no Postgres driver. Someone running this on a pull request
 # should not be pulling a runtime they will never execute.
 
-FROM python:3.13-slim
+FROM python:3.14-slim
 
-ARG OSV_SCANNER_VERSION=2.5.0
-ARG OSV_SCANNER_SHA256=edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c
+ARG OSV_SCANNER_VERSION=2.7.0
+ARG OSV_SCANNER_SHA256=160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
 
 # `git` because the audit is pointed at a checkout; `nodejs` because
 # `npm audit` is one of the auditors and is the one that covers the ecosystem

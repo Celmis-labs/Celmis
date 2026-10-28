@@ -124,14 +124,23 @@ class GraphStore(ABC):
     def close(self) -> None: ...
 
 
-_TOKEN_SPLIT = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+# Latin and Cyrillic letters: 1C code (and any repository written in Russian or
+# Ukrainian) names things in Cyrillic camelCase, and a tokenizer that only knew
+# A-Za-z gave such a name no tokens at all, so `find` could not match it.
+_UP = "A-ZА-ЯЁЇІЄҐ"
+_LO = "a-zа-яёїієґ"
+_TOKEN_SPLIT = re.compile(rf"[{_UP}]+(?![{_LO}])|[{_UP}]?[{_LO}]+|\d+")
+_NOT_NAME = re.compile(rf"[^{_UP}{_LO}0-9]+")
+#: Kinds whose docstring is searched by `find` as well as the name: the metadata
+#: objects of a 1C configuration, whose synonyms are what people call them.
+_DOC_KIND_PREFIX = "vendor.onec."
 
 
 def name_tokens(text: str) -> list[str]:
     """camelCase / snake_case / kebab / dotted name → lowercase tokens
     (`OrderService.create_order` → order, service, create, order)."""
     out: list[str] = []
-    for part in re.split(r"[^A-Za-z0-9]+", text or ""):
+    for part in _NOT_NAME.split(text or ""):
         out.extend(t.lower() for t in _TOKEN_SPLIT.findall(part) if t)
     return list(dict.fromkeys(out))
 
@@ -468,13 +477,22 @@ class FalkorDBLiteStore(GraphStore):
             if len(text) >= 3:
                 conds.append("toLower(s.name) STARTS WITH $p3")
                 params["p3"] = text[:3].lower()
+            if tokens:
+                any_doc = " OR ".join(f"toLower(s.docstring) CONTAINS $t{i}"
+                                      for i, _ in enumerate(tokens))
+                conds.append(f"(s.kind STARTS WITH '{_DOC_KIND_PREFIX}' AND ({any_doc}))")
             where.append("(" + " OR ".join(conds or ["false"]) + ")")
         else:  # contains: every token
             if not tokens:
                 return []
+            by_name = " AND ".join(f"toLower(s.name) CONTAINS $t{i}"
+                                   for i, _ in enumerate(tokens))
+            by_doc = " AND ".join(f"toLower(s.docstring) CONTAINS $t{i}"
+                                  for i, _ in enumerate(tokens))
             for i, tok in enumerate(tokens):
-                where.append(f"toLower(s.name) CONTAINS $t{i}")
                 params[f"t{i}"] = tok
+            where.append(f"(({by_name}) OR (s.kind STARTS WITH '{_DOC_KIND_PREFIX}' "
+                         f"AND {by_doc}))")
         # The cap is spent on the best candidates, not the shortest names: tier
         # (how the name matches), then how much the symbol is used, then length.
         # A pure `ORDER BY size(name) LIMIT` dropped the long, heavily-called
@@ -490,12 +508,15 @@ class FalkorDBLiteStore(GraphStore):
             first3 = "toLower(s.name) STARTS WITH $p3"
         else:
             first3 = "false"
+        by_doc = " AND ".join(
+            f"toLower(s.docstring) CONTAINS $t{i}" for i, _ in enumerate(tokens)) or "false"
         tier = (
             "CASE WHEN toLower(s.name) = $ql THEN 0 "
             "WHEN toLower(s.name) STARTS WITH $ql THEN 1 "
             f"WHEN {all_tokens} THEN 2 "
             "WHEN toLower(s.name) CONTAINS $ql THEN 3 "
-            f"WHEN {first3} THEN 4 ELSE 5 END"
+            f"WHEN {first3} THEN 4 "
+            f"WHEN s.kind STARTS WITH '{_DOC_KIND_PREFIX}' AND {by_doc} THEN 5 ELSE 6 END"
         )
         res = self._g.ro_query(
             "MATCH (s:Symbol) WHERE " + " AND ".join(where) + " "
@@ -508,6 +529,27 @@ class FalkorDBLiteStore(GraphStore):
         )
         cols = [h[1] for h in res.header]
         return [dict(zip(cols, row, strict=True)) for row in res.result_set]
+
+    def symbol_text_rows(self, limit: int = 300_000) -> list[dict]:
+        """Every symbol's searchable text (name, docstring, signature) and place,
+        for a caller that matches words itself — a Cyrillic stem, a translated
+        term — which Cypher's ``CONTAINS`` cannot. At most ``limit`` rows."""
+        res = self._g.ro_query(
+            "MATCH (s:Symbol) RETURN s.id AS id, s.name AS name, s.kind AS kind, "
+            "s.file AS file, s.start_line AS start_line, s.end_line AS end_line, "
+            "s.docstring AS docstring, s.signature AS signature LIMIT $limit",
+            params={"limit": int(limit)},
+        )
+        cols = [h[1] for h in res.header]
+        return [dict(zip(cols, row, strict=True)) for row in res.result_set]
+
+    def has_language(self, languages: tuple[str, ...]) -> bool:
+        """Whether any symbol is in one of ``languages`` (reads one row at most)."""
+        res = self._g.ro_query(
+            "MATCH (s:Symbol) WHERE s.language IN $langs RETURN s.id LIMIT 1",
+            params={"langs": list(languages)},
+        )
+        return bool(res.result_set)
 
     def symbols_in_file(self, path: str, limit: int = 500) -> list[SymbolInfo]:
         """Every symbol declared in one file, in source order (`file_module`

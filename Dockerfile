@@ -5,7 +5,7 @@
 # ============================================================================
 # STAGE 1 — builder
 # ============================================================================
-FROM python:3.13-slim-trixie AS builder
+FROM python:3.14-slim-trixie AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -39,9 +39,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # artifact:
 #   https://github.com/astral-sh/uv/releases/download/<VER>/uv-<TRIPLE>.tar.gz.sha256
 ARG TARGETARCH
-ARG UV_VERSION=0.12.5
-ARG UV_SHA256_AMD64=68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2
-ARG UV_SHA256_ARM64=9bf43b4d1a07665bf64d4c4e710930b382321a785e0eb10aac07f46471f86a31
+ARG UV_VERSION=0.13.6
+ARG UV_SHA256_AMD64=f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645
+ARG UV_SHA256_ARM64=229e194255c7958d86d56e8790d969a6f74736592133f0dfd0076f754c642c1d
 
 RUN set -eu; \
     case "${TARGETARCH:-}" in \
@@ -78,7 +78,7 @@ RUN uv venv /opt/pip-audit \
 # ============================================================================
 # STAGE 2 — runtime
 # ============================================================================
-FROM python:3.13-slim-trixie AS runtime
+FROM python:3.14-slim-trixie AS runtime
 
 # Required by the official MCP registry to prove this image is the one a
 # server.json package entry claims it is (checked at publish time against
@@ -144,9 +144,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # "we downloaded something" is not the same as "we downloaded this".
 # Bump ALL THREE lines together; one SHA256SUMS file lists every artifact:
 #   https://github.com/google/osv-scanner/releases/download/vX.Y.Z/osv-scanner_SHA256SUMS
-ARG OSV_SCANNER_VERSION=2.5.0
-ARG OSV_SCANNER_SHA256_AMD64=edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c
-ARG OSV_SCANNER_SHA256_ARM64=fe152e1a546af223e6c557cc3111a8bb3e5dc02fcbf7dbe95d26567c0f0041f2
+ARG OSV_SCANNER_VERSION=2.7.0
+ARG OSV_SCANNER_SHA256_AMD64=160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+ARG OSV_SCANNER_SHA256_ARM64=4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \

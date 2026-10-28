@@ -61,8 +61,14 @@ class HeuristicResolver:
         # file → symbol_id (for DEFINED_IN edges, optional)
         self.by_file_default: dict[str, str] = {}
 
+        # BSL identifiers are case-insensitive: `acmeutils.getname(` is a call
+        # of `AcmeUtils.GetName`. Lower-cased names of BSL symbols only.
+        self.bsl_by_lower: dict[str, list[str]] = defaultdict(list)
+
         for s in symbols:
             self.by_name[s.name].append(s.id)
+            if s.language in ("bsl", "onec"):
+                self.bsl_by_lower[s.name.lower()].append(s.id)
             # Default export — synthetic "default" symbol per file.
             # We check kind, not name — in `export default IDENT` symbol.name
             # is now = the identifier text, not "default" (for DoD
@@ -98,6 +104,8 @@ class HeuristicResolver:
                 resolved = self._resolve_import(edge)
             elif edge.kind == "CALLS":
                 resolved = self._resolve_call(edge)
+            elif edge.kind in ("DEFINED_IN", "REFERENCES") and edge.raw_target:
+                resolved = self._resolve_named(edge)
             else:
                 resolved = edge  # no special logic
 
@@ -172,6 +180,8 @@ class HeuristicResolver:
             return self._unresolved(edge)
 
         candidates = self.by_name.get(edge.raw_target, [])
+        if not candidates and edge.from_id.lower().split("::", 1)[0].endswith((".bsl", ".os")):
+            candidates = self.bsl_by_lower.get(edge.raw_target.lower(), [])
 
         if not candidates:
             # External function or dynamic — we leave it unresolved
@@ -194,6 +204,18 @@ class HeuristicResolver:
             confidence="weak",
             raw_target=edge.raw_target,
         )
+
+    def _resolve_named(self, edge: EdgeInfo) -> EdgeInfo | None:
+        """An edge to a 1C metadata object named `<Type>.<Object>` (a module
+        belongs to it, a method or a subsystem refers to it). 1C names are
+        case-insensitive. A name no object has is dropped: it names something
+        outside the configuration dump."""
+        target = edge.raw_target or ""
+        found = self.by_name.get(target) or self.bsl_by_lower.get(target.lower())
+        if not found:
+            return None
+        return EdgeInfo(from_id=edge.from_id, to_id=found[0], kind=edge.kind,
+                        confidence="strong", raw_target=target)
 
     # ─── path resolution ───────────────────────────────────────────
 

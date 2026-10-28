@@ -50,7 +50,7 @@ docker compose --env-file .env up -d
 For work on the Python side without containers:
 
 ```bash
-python3.13 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python3.14 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/python -m pytest tests/ -q
 ```
 

@@ -481,6 +481,7 @@ class Settings(BaseSettings):
             ".gleam",                             # Gleam
             ".rkt",                               # Racket
             ".f90", ".f95", ".f03", ".f08",       # Fortran
+            ".bsl", ".os",                        # 1C:Enterprise (BSL), OneScript
             # Infrastructure (Stage 4):
             # Dockerfile detected via filename pattern, not extension
             ".tf",                                # Terraform

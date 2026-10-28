@@ -38,6 +38,7 @@ def build_default_registry(
     registry = LanguageRegistry()
 
     # Lazy import — so a user can add/remove an extractor without circular deps
+    from src.indexing.graph.languages.bsl import BslExtractor
     from src.indexing.graph.languages.ci_workflow import (
         CIWorkflowExtractor,
         is_ci_workflow_file,
@@ -50,6 +51,10 @@ def build_default_registry(
     from src.indexing.graph.languages.helm import HelmExtractor, is_helm_chart_yaml
     from src.indexing.graph.languages.java import JavaExtractor
     from src.indexing.graph.languages.k8s import K8sManifestExtractor, is_k8s_manifest
+    from src.indexing.graph.languages.onec_metadata import (
+        OneCMetadataExtractor,
+        is_metadata_path,
+    )
     from src.indexing.graph.languages.php import PHPExtractor
     from src.indexing.graph.languages.python import PythonExtractor
     from src.indexing.graph.languages.tags import TagsExtractor
@@ -129,6 +134,23 @@ def build_default_registry(
     # ─── Infrastructure (Stage 4 — Phase C) ─────────────────────────
     # Dockerfile — filename pattern (no extension): Dockerfile, Dockerfile.*,
     # *.Dockerfile. Priority high so it does not conflict with generic YAML.
+    # ─── 1C:Enterprise (BSL) ────────────────────────────────────────
+    registry.register(
+        BslExtractor(ctx=ctx, repo_root=repo_root),
+        name="bsl",
+        priority=10,
+        extensions=(".bsl", ".os"),
+    )
+
+    # The metadata XML of a configuration dump (`Catalogs/<Object>.xml`): `.xml`
+    # is shared, so the type directory decides.
+    registry.register(
+        OneCMetadataExtractor(ctx=ctx, repo_root=repo_root),
+        name="onec_metadata",
+        priority=10,
+        path_matcher=is_metadata_path,
+    )
+
     registry.register(
         DockerfileExtractor(ctx=ctx, repo_root=repo_root),
         name="dockerfile",

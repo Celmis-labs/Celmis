@@ -46,7 +46,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"     # pyproject: requires-python = ">=3.13"
+          python-version: "3.14"     # pyproject: requires-python = ">=3.14"
           cache: pip
           cache-dependency-path: pyproject.toml
 

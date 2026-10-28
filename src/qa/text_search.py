@@ -47,6 +47,8 @@ _STOP = frozenset({
     "does", "are", "is", "in", "of", "to", "a", "an", "де", "що", "як", "які",
     "який", "яка", "для", "або", "це", "чи", "цей", "ця", "та", "на", "по",
     "где", "что", "как", "или", "это",
+    "explain", "describe", "show", "tell", "поясни", "поясніть", "розкажи", "опиши",
+    "опишіть", "объясни", "расскажи",
 })
 
 
@@ -177,10 +179,16 @@ def search_text(
 def rank_files(
     root: Path, question: str, *, scope: FileScope | None = None, limit: int = 8,
     time_budget: float = DEFAULT_TIME_BUDGET_S, visible=None,  # noqa: ANN001
+    extra_terms=(),  # noqa: ANN001 — stems from src.qa.query_terms (translations)
 ) -> list[str]:
     """Repo-relative paths most worth reading for ``question``: files ranked by
-    how many distinct question words they contain (path matches count double)."""
-    words = terms_of(question)
+    how many distinct question words they contain (path matches count double).
+
+    Words are compared as stems (case endings and ru/uk spellings levelled,
+    :mod:`src.qa.query_terms`); ``extra_terms`` are further stems to look for."""
+    from src.qa.query_terms import fold, lexical_terms
+
+    words = list(dict.fromkeys([*lexical_terms(question), *extra_terms]))
     if not words:
         return []
     deadline = time.monotonic() + time_budget
@@ -191,8 +199,9 @@ def rank_files(
         if visible is not None and not visible(rel):
             continue
         text = _read_text(full)
-        low = norm(text) if text is not None else ""
-        score = sum(1 for w in words if w in low) + 2 * sum(1 for w in words if w in norm(rel))
+        low = fold(text) if text is not None else ""
+        frel = fold(rel)
+        score = sum(1 for w in words if w in low) + 2 * sum(1 for w in words if w in frel)
         if score:
             scored.append((score, rel))
     scored.sort(key=lambda t: (-t[0], t[1]))

@@ -20,10 +20,13 @@ TIER_EXACT_CI = 85
 TIER_PREFIX = 60
 TIER_TOKENS = 45
 TIER_SUBSTRING = 30
+TIER_SYNONYM = 25
 TIER_FUZZY = 15
 FUZZY_MIN_RATIO = 0.75
 
 _GOOD_KINDS = {"class", "function", "method", "interface", "struct", "enum", "type"}
+#: Metadata objects of a 1C configuration; their docstring is the synonyms.
+_DOC_KIND_PREFIX = "vendor.onec."
 _WEAK_KINDS = {"variable", "import", "export", "constant"}
 _LOW_PATH = re.compile(
     r"(^|/)(tests?|__tests__|spec|vendor|node_modules|migrations?|dist|build|"
@@ -55,14 +58,26 @@ def match_tier(name: str, query: str) -> int:
     return 0
 
 
+def synonym_tier(row: dict, query: str) -> int:
+    """TIER_SYNONYM when every word of the query is in the synonyms (docstring) of
+    a metadata object — the name people use is not the name in the code."""
+    if not str(row.get("kind") or "").startswith(_DOC_KIND_PREFIX):
+        return 0
+    doc = str(row.get("docstring") or "").lower()
+    toks = name_tokens(query)
+    return TIER_SYNONYM if toks and all(t in doc for t in toks) else 0
+
+
 def score(row: dict, query: str) -> float:
     """Ranking score of one candidate row from `GraphStore.find_symbols`."""
     tier = match_tier(str(row.get("name") or ""), query)
+    if tier < TIER_SYNONYM:
+        tier = max(tier, synonym_tier(row, query))
     if tier == 0:
         return 0.0
     s = float(tier)
     kind = str(row.get("kind") or "")
-    if kind in _GOOD_KINDS:
+    if kind in _GOOD_KINDS or kind.startswith(_DOC_KIND_PREFIX):
         s += 10
     elif kind in _WEAK_KINDS:
         s -= 10

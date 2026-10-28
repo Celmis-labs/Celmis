@@ -164,6 +164,45 @@ class CodeChunker:
             )
         return self._splitters[language]
 
+    def _bsl_chunks(self, path: Path, source: str, rel: str) -> list[CodeChunk]:
+        """One chunk per procedure/function (long ones in line windows), plus the
+        lines between them (module header, variables); [] when the module has no
+        method or cannot be read, and the caller falls back to line windows.
+        A chunk that is one method says so in ``symbol``."""
+        try:
+            methods = _bsl_methods_of(path, source)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("bsl_chunk_failed path=%s err=%s", path, e)
+            return []
+        if not methods:
+            return []
+        lines = source.splitlines(keepends=True)
+        spans: list[tuple[int, int, str | None]] = []
+        cursor = 1
+        for name, a, b in methods:
+            a, b = max(a, cursor), min(b, len(lines))
+            if b < a:
+                continue
+            if a > cursor:
+                spans.append((cursor, a - 1, None))
+            spans.append((a, b, name))
+            cursor = b + 1
+        if cursor <= len(lines):
+            spans.append((cursor, len(lines), None))
+        out: list[CodeChunk] = []
+        for a, b, name in spans:
+            body = "".join(lines[a - 1:b])
+            for text, off in _line_windows(
+                body, lines=self.settings.chunk_lines,
+                overlap=self.settings.chunk_lines_overlap,
+            ):
+                first = a + off - 1
+                out.append(CodeChunk(
+                    text=text, file=rel, start_line=first,
+                    end_line=first + text.rstrip("\n").count("\n"),
+                    language="bsl", chunk_index=len(out), symbol=name))
+        return out
+
     def chunk_file(
         self,
         file_path: Path | str,
@@ -194,6 +233,11 @@ class CodeChunker:
         # chunking (one chunk may cover script + template), but retrieval will
         # then have the full SFC context. The alternative — chunking <script>
         # separately as TS — is harder, YAGNI until it becomes a problem.
+        if language == "bsl":
+            by_method = self._bsl_chunks(path, source, rel)
+            if by_method:
+                return by_method
+
         try:
             splitter = self._get_splitter(language)
             chunks_text: list[str] = splitter.split_text(source)
@@ -251,6 +295,17 @@ class CodeChunker:
             ))
 
         return out
+
+
+def _bsl_methods_of(path: Path, source: str) -> list[tuple[str, int, int]]:
+    """``(name, first line, last line)`` of every procedure/function of a BSL
+    module, from the graph extractor (BSL has no tree-sitter grammar)."""
+    from src.indexing.graph.languages.bsl import BslExtractor
+
+    result = BslExtractor().extract(path, source.encode("utf-8"))
+    return sorted(
+        (s.name, s.start_line, s.end_line or s.start_line)
+        for s in result.symbols if s.kind in ("method", "function"))
 
 
 def _line_windows(

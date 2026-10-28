@@ -92,7 +92,7 @@ def is_suspicious_name(name: str) -> bool:
 #: What is left is shape-specific: a pattern here matches because the string
 #: announces what it is (`ghp_`, `sk-ant-`, `AIza`, `Bearer `, a URL with a
 #: password in it), not because it looks random.
-LOG_REDACTION_PATTERNS: dict[str, "re.Pattern[str]"] = {
+LOG_REDACTION_PATTERNS: dict[str, re.Pattern[str]] = {
     name: SECRET_PATTERNS[name]
     for name in (
         "url-with-creds",

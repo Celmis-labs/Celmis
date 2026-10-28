@@ -691,10 +691,10 @@ not filtered out of a response that already contained them.
 
 ## Languages and formats
 
-Seventeen graph modules, plus a generic path through tree-sitter tag queries for
+Eighteen graph modules, plus a generic path through tree-sitter tag queries for
 languages without one:
 
-**Code** — Python, TypeScript, JavaScript, Go, Java, C#, C++, PHP, Vue, and more
+**Code** — Python, TypeScript, JavaScript, Go, Java, C#, C++, PHP, Vue, 1C:Enterprise (BSL), and more
 through the generic path.
 
 **Infrastructure** — Dockerfile, docker-compose, Helm, Kubernetes manifests,

@@ -9,7 +9,7 @@
 # its own network, no secret env, no workspace volume, a read-only root and
 # hard resource limits. This just gives the command something to run in.
 
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 # What a real repository's own commands need, and what an agent reaches for
 # while working out why one failed.

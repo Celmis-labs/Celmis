@@ -225,7 +225,7 @@ _CODE_EXT = frozenset({
     ".cuh", ".dart", ".lua", ".pl", ".pm", ".r", ".jl", ".ex", ".exs", ".erl", ".hrl",
     ".hs", ".ml", ".mli", ".clj", ".cljs", ".cljc", ".elm", ".nim", ".zig", ".sol",
     ".sql", ".proto", ".graphql", ".gql", ".thrift", ".css", ".scss", ".sass", ".less",
-    ".html", ".htm", ".ipynb", ".tf", ".bicep",
+    ".html", ".htm", ".ipynb", ".tf", ".bicep", ".bsl", ".os",
 })
 _DOC_EXT = frozenset({".md", ".mdx", ".markdown", ".rst", ".adoc", ".asciidoc"})
 _SOURCE_OR_DOC_EXT = _CODE_EXT | _DOC_EXT

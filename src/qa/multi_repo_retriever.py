@@ -29,6 +29,7 @@ Tenancy:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Iterable, Mapping
@@ -40,6 +41,8 @@ from src.access import RepoAccessDecision, resolve_access
 from src.access.file_scope import FileScope, apply_scopes
 from src.config import Settings, get_settings
 from src.llm.prompts.technical_answer import TECHNICAL_ANSWER_PROMPT, TECHNICAL_ANSWER_SYSTEM
+from src.qa import query_terms
+from src.qa.query_terms import SymbolHit
 from src.retrieval.tier1_vault import VaultRetriever
 from src.retrieval.vector_store import VECTOR_WORKSPACE_KEY, VectorScope
 from src.security.secret_files import SecretPathRefused, is_secret_path, safe_join
@@ -76,6 +79,12 @@ _GRAPH_MAX_CALLERS = 6      # direct callers listed per symbol
 # code and the symbol graph" in exactly that state. Everything below is what
 # can be picked WITHOUT vault notes; the caps exist because an unguided pick
 # has no relevance signal to stop it, so it must be stopped by budget.
+_EXCERPT_MAX_CHARS = 6_000       # one matched method body in the prompt
+_TEXT_MATCH_EXCERPTS = 8         # method bodies the graph's word match puts first
+_TEXT_MATCH_BLOCKS = 6           # of them also listed in the graph context
+# The word match reads every symbol of a repo and may cost a model call, so it
+# runs only where identifiers rarely name the question's words: 1C code.
+_TEXT_MATCH_LANGUAGES = ("bsl", "onec")
 _FALLBACK_MIN_FILES = 3           # thinner grep result than this → widen
 _FALLBACK_MAX_FILES = 24          # across all repos
 _FALLBACK_MAX_FILES_PER_REPO = 8
@@ -343,10 +352,15 @@ class MultiRepoRetriever:
         # ── Tier 1.5 + Tier 3: code (subject to toggle + path visibility)
         hidden_files: list[str] = []
         code_fallback_used = False
+        text_matches: list[tuple[str, SymbolHit]] = []
+        extra_terms: list[str] = []
         if include_code:
+            text_matches, extra_terms = await asyncio.to_thread(
+                self._graph_text_matches, question, accessible, access,
+                user_id, workspace_id)
             symbol_files = self._grep_symbol_files(question, hits, accessible)
             symbol_files = self._text_search_files(
-                question, accessible, access, workspace_id) + symbol_files
+                question, accessible, access, workspace_id, extra_terms) + symbol_files
             symbol_files = [f for f in dict.fromkeys(symbol_files)
                             if self._in_scope(access, f) and not _secret_prefixed(f)]
             # Both of the usual ways into Tier 3 can be empty at once: without a
@@ -364,6 +378,8 @@ class MultiRepoRetriever:
             files_read, code_bundle, hidden_files = self._read_code_for_hits(
                 hits, priority_files=symbol_files, access=access,
                 overview_files=fallback_files,
+                excerpts=[(f"{r}/{h.file}", h.start_line, h.end_line)
+                          for r, h in text_matches[:_TEXT_MATCH_EXCERPTS]],
             )
             code_fallback_used = bool(set(fallback_files) & set(files_read))
         else:
@@ -410,6 +426,8 @@ class MultiRepoRetriever:
 
         # ── Tier 2: structural context from the tree-sitter graph ─────
         graph_context = self._graph_context(question, hits, accessible, access)
+        if text_matches:
+            graph_context = self._text_match_context(text_matches, graph_context)
 
         # ── Build prompt ──────────────────────────────────────────
         vault_context = self._format_vault_hits(hits)
@@ -533,6 +551,117 @@ class MultiRepoRetriever:
             out.append(f"`{c.get('name')}` ({cfile}:{c.get('start_line', 0)})")
         return out
 
+    # ─── Tier 2.5: word match over the graph's symbols ───────────────
+
+    def _graph_text_matches(
+        self,
+        question: str,
+        repos: list[str],
+        access: Mapping[str, RepoAccessDecision],
+        user_id: str | None,
+        workspace_id: str,
+    ) -> tuple[list[tuple[str, SymbolHit]], list[str]]:
+        """Symbols whose name, docstring or signature carry the question's
+        words, whatever language they are written in.
+
+        The exact-name graph lookup needs an identifier in the question; a
+        consultant-style question ("explain the cutting logic in …") has none.
+        Here the question's words (stems, so case endings and ru/uk spellings
+        do not matter) plus, when a model is reachable, ONE call that restates
+        them in the language of the repository's own identifiers
+        (:mod:`src.qa.query_terms`), are matched against every symbol of each
+        readable 1C repository (``_TEXT_MATCH_LANGUAGES``; any other repository
+        is left to the tiers it had, with no model call added). Rows are filtered by the access decision BEFORE
+        they are scored, so a hidden file neither appears nor shifts a rank.
+
+        Returns ``([(repo, SymbolHit)], terms)``: method/function hits, best
+        first, and the search terms used (for the plain-text floor)."""
+        from src.indexing.graph.graph_store import make_graph_store
+
+        loaded: dict[str, list[dict]] = {}
+        for repo in repos:
+            dec = access.get(repo)
+            if dec is not None and not dec.code_visible:
+                continue
+            try:
+                db = self.settings.repo_graph_path(repo)
+                if not db.exists():
+                    continue
+                store = make_graph_store(db)
+                try:
+                    if not store.has_language(_TEXT_MATCH_LANGUAGES):
+                        continue
+                    rows = store.symbol_text_rows()
+                finally:
+                    store.close()
+            except Exception as exc:  # noqa: BLE001 — no graph is not an error here
+                logger.debug("text_match_rows_failed repo=%s err=%s", repo, exc)
+                continue
+            seen: dict[str, bool] = {}
+
+            def _ok(f: str, dec=dec, seen=seen) -> bool:
+                if f not in seen:
+                    seen[f] = bool(f) and not is_secret_path(f) and (
+                        dec is None or (not dec._outside_scope(f) and dec.path_visible(f)))
+                return seen[f]
+
+            loaded[repo] = [r for r in rows if _ok(str(r.get("file") or ""))]
+        if not loaded:
+            return [], []
+
+        terms = query_terms.lexical_terms(question)
+        if terms:
+            vocab = query_terms.vocabulary_sample(
+                str(r.get("name") or "") for rows in loaded.values() for r in rows[:5000])
+            try:
+                generate = self._terms_generator(user_id, workspace_id)
+            except Exception as exc:  # noqa: BLE001 — no model: the lexical terms stand
+                logger.info("qa_search_terms_no_model err=%s", type(exc).__name__)
+            else:
+                terms += [t for t in query_terms.llm_terms(question, vocab, generate)
+                          if t not in terms]
+
+        matches: list[tuple[str, SymbolHit]] = []
+        for repo, rows in loaded.items():
+            _, symbols = query_terms.rank_symbols(rows, terms)
+            matches += [(repo, h) for h in symbols]
+        matches.sort(key=lambda m: -m[1].score)
+        return matches[:_TEXT_MATCH_EXCERPTS], terms
+
+    @staticmethod
+    def _terms_generator(user_id: str | None, workspace_id: str):
+        """``generate(prompt=…, …)`` bound to the chat model. Raises when no
+        client can be built (the caller treats that as "no model")."""
+        from src.llm.client import build_llm_client
+        from src.llm.profiles import resolve_profile
+
+        def _model(_agent: str | None = None) -> str | None:
+            try:
+                return resolve_profile("chat", workspace_id).model
+            except Exception:  # noqa: BLE001
+                return None
+
+        client = build_llm_client(
+            user_id or "system", workspace_id, surface="chat",
+            spend_surface="qa", resolve_model=_model)
+        return lambda **kw: client.generate(agent="qa", mode="qa", **kw)
+
+    @staticmethod
+    def _text_match_context(
+        matches: list[tuple[str, SymbolHit]], graph_context: str,
+    ) -> str:
+        """The word-matched symbols, listed ahead of the identifier lookup."""
+        lines = []
+        for repo, h in matches[:_TEXT_MATCH_BLOCKS]:
+            line = f"- `{h.name}` ({h.kind or 'symbol'}) — {repo}/{h.file}:{h.start_line}"
+            if h.signature.strip():
+                line += f"\n    signature: `{h.signature.strip()[:160]}`"
+            lines.append(line)
+        head = "Matched on the question's words:\n" + "\n".join(lines)
+        if graph_context.startswith("(no "):
+            return head
+        return head + "\n\n" + graph_context
+
     # ─── Tier 3 fallback: selection without a vault ──────────────────
 
     @staticmethod
@@ -548,6 +677,7 @@ class MultiRepoRetriever:
         repos: list[str],
         access: Mapping[str, RepoAccessDecision],
         workspace_id: str,
+        extra_terms: Iterable[str] = (),
     ) -> list[str]:
         """Files of ``upload`` repositories that mention the question's words.
 
@@ -573,7 +703,8 @@ class MultiRepoRetriever:
             if not root.exists():
                 continue
             visible = dec.path_visible if dec is not None else None
-            for rel in text_search.rank_files(root, question, limit=6, visible=visible):
+            for rel in text_search.rank_files(
+                    root, question, limit=6, visible=visible, extra_terms=extra_terms):
                 out.append(f"{repo}/{rel}")
         return out
 
@@ -1149,7 +1280,8 @@ class MultiRepoRetriever:
         while the graph does an exact-name lookup so short names like `run`
         are both safe and useful there.
         """
-        ident_re = re.compile(rf"\b[A-Za-z_][A-Za-z0-9_]{{{min_len - 1},}}\b")
+        # Any script: a Cyrillic identifier is as much a name as a Latin one.
+        ident_re = re.compile(rf"\b[^\W\d]\w{{{min_len - 1},}}\b")
         common_words = {
             "function", "method", "class", "interface", "import", "export",
             "const", "let", "var", "return", "true", "false", "null", "undefined",
@@ -1257,6 +1389,7 @@ class MultiRepoRetriever:
         priority_files: list[str] | None = None,
         access: dict[str, RepoAccessDecision] | None = None,
         overview_files: list[str] | None = None,
+        excerpts: list[tuple[str, int, int]] | None = None,
     ) -> tuple[list[str], str, list[str]]:
         """For every hit — reads files from the corresponding repo_path.
 
@@ -1284,6 +1417,7 @@ class MultiRepoRetriever:
         files_read: list[str] = []
         code_blocks: list[str] = []
         hidden_files: list[str] = []
+        spans_read: set[tuple[str, tuple[int, int]]] = set()
 
         def _allowed(repo_slug: str, rel: str) -> bool:
             """True if the file is code-visible for the caller. Records a
@@ -1310,12 +1444,19 @@ class MultiRepoRetriever:
         max_chars = self.settings.max_code_tokens_per_qa * 4  # ~4 chars/token
         used_chars = 0
 
-        def _read_one(prefixed: str, limit: int) -> bool:
+        def _read_one(prefixed: str, limit: int,
+                      span: tuple[int, int] | None = None) -> bool:
             """Read one repo-prefixed file into the bundle. The single place
             where a path turns into prompt text — so the access gate has no
-            second door to guard. False when the file was skipped."""
+            second door to guard. False when the file was skipped.
+
+            ``span`` (first, last line) reads those lines only: the body of a
+            matched method, not the head of a module that is far longer than
+            the budget. The file joins ``files_read`` with the first span."""
             nonlocal used_chars
-            if prefixed in files_read:
+            if span is None and prefixed in files_read:
+                return False
+            if span is not None and (prefixed, span) in spans_read:
                 return False
             try:
                 repo_slug, rel = prefixed.split("/", 1)
@@ -1352,13 +1493,21 @@ class MultiRepoRetriever:
                 text = decode(p.read_bytes())
             except OSError:
                 return False
+            first = 1
+            if span is not None:
+                first = max(1, span[0])
+                text = "\n".join(text.splitlines()[first - 1:max(first, span[1])])
             if len(text) > limit:
                 text = text[:limit] + "\n# … truncated"
+            where = prefixed if span is None else f"{prefixed}:{first}-{first + text.count(chr(10))}"
             block = (
-                f"### {prefixed}\n```{p.suffix.lstrip('.')}\n"
-                f"{self._numbered(text)}\n```\n"
+                f"### {where}\n```{p.suffix.lstrip('.')}\n"
+                f"{self._numbered(text, first)}\n```\n"
             )
-            files_read.append(prefixed)
+            if span is not None:
+                spans_read.add((prefixed, span))
+            if prefixed not in files_read:
+                files_read.append(prefixed)
             code_blocks.append(block)
             used_chars += len(block)
             return True
@@ -1372,6 +1521,13 @@ class MultiRepoRetriever:
         # This effectively guarantees that if the question mentions
         # isTotalsAvailable, the files where it definitely lives will end up
         # in the bundle.
+        # Method bodies the graph matched on the question's words come before
+        # them: a 1C or legacy module is far longer than the head the cap keeps.
+        for prefixed, a, b in (excerpts or []):
+            if used_chars >= max_chars:
+                break
+            _read_one(prefixed, _EXCERPT_MAX_CHARS, (a, b))
+
         for prefixed in (priority_files or []):
             _read_one(prefixed, 30_000)
 
@@ -1464,13 +1620,14 @@ class MultiRepoRetriever:
     # ─── Helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _numbered(text: str) -> str:
+    def _numbered(text: str, first: int = 1) -> str:
         """Prefix `   N  ` (right-aligned) to every line — so the LLM can
-        quote line numbers exactly in markdown links."""
+        quote line numbers exactly in markdown links. ``first`` is the number
+        of the first line (an excerpt starts mid-file)."""
         lines = text.splitlines() or [""]
-        width = max(3, len(str(len(lines))))
+        width = max(3, len(str(first + len(lines) - 1)))
         return "\n".join(
-            f"{i:>{width}}  {line}" for i, line in enumerate(lines, 1)
+            f"{i:>{width}}  {line}" for i, line in enumerate(lines, first)
         )
 
     @staticmethod
