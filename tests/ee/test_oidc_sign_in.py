@@ -25,6 +25,7 @@ suite's throwaway key — and one test checks that without one it is not there.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 
@@ -577,3 +578,79 @@ def test_an_unusual_subject_is_hashed_into_the_stand_in():
 def test_a_token_without_a_subject_is_still_refused(client):
     r = client.post("/api/auth/oidc", json={"id_token": _token(sub=None)})
     assert r.status_code == 401
+
+
+# ─── A stand-in gives way to the first trusted address ──────────────
+# The IdP sent no address when the account was made, and the directory's
+# administrator fills one in later: the account is found by subject and takes
+# the real address, so invites and shares to it reach this person.
+
+def _stand_in_account(client, users, **claims):
+    r = client.post("/api/auth/oidc",
+                    json={"id_token": _token(email=None, email_verified=None, **claims)})
+    assert r.status_code == 200, r.text
+    user = users.get_by_oidc(ISSUER, "kc-subject-1")
+    assert user.email == "sso-kc-subject-1@sso.example.com"
+    return user
+
+
+def test_a_trusted_address_replaces_the_stand_in(client, users, monkeypatch):
+    monkeypatch.setenv("OIDC_TRUSTED_EMAIL_DOMAINS", "corp.example")
+    before = _stand_in_account(client, users, name="Jo Person")
+    r = client.post("/api/auth/oidc",
+                    json={"id_token": _token(email="jo@corp.example", email_verified=False)})
+    assert r.status_code == 200, r.text
+    after = users.get_by_oidc(ISSUER, "kc-subject-1")
+    assert (after.id, after.email, after.name) == (before.id, "jo@corp.example", "Jo Person")
+    assert len(users.list(active_only=False)) == 1
+
+
+def test_a_name_that_was_the_stand_in_goes_with_it(client, users):
+    before = _stand_in_account(client, users, name=None, preferred_username=None)
+    assert before.name == "sso-kc-subject-1"
+    r = client.post("/api/auth/oidc", json={"id_token": _token(email="jo@example.com")})
+    assert r.status_code == 200, r.text
+    assert users.get_by_oidc(ISSUER, "kc-subject-1").name == "Dev Person"
+
+
+def test_an_untrusted_address_leaves_the_stand_in(client, users):
+    _stand_in_account(client, users)
+    r = client.post("/api/auth/oidc",
+                    json={"id_token": _token(email="jo@corp.example", email_verified=False)})
+    assert r.status_code == 200, r.text
+    assert users.get_by_oidc(ISSUER, "kc-subject-1").email == "sso-kc-subject-1@sso.example.com"
+
+
+def test_an_address_another_account_holds_leaves_the_stand_in(client, users):
+    _stand_in_account(client, users)
+    _password_user(users)
+    r = client.post("/api/auth/oidc", json={"id_token": _token()})
+    assert r.status_code == 200, r.text
+    assert users.get_by_oidc(ISSUER, "kc-subject-1").email == "sso-kc-subject-1@sso.example.com"
+    assert users.get_by_email("dev@example.com").oidc_sub is None
+
+
+def test_an_address_taken_between_the_lookup_and_the_write_leaves_the_stand_in(
+        client, users, monkeypatch):
+    from src.users import UserExistsError
+
+    _stand_in_account(client, users)
+    _password_user(users)
+    found = users.get_by_email
+    monkeypatch.setattr(users, "get_by_email",
+                        lambda email: None if email == "dev@example.com" else found(email))
+    r = client.post("/api/auth/oidc", json={"id_token": _token()})
+    assert r.status_code == 200, r.text
+    assert users.get_by_oidc(ISSUER, "kc-subject-1").email == "sso-kc-subject-1@sso.example.com"
+    sso_user = users.get_by_oidc(ISSUER, "kc-subject-1")
+    with pytest.raises(UserExistsError):
+        users.update(dataclasses.replace(sso_user, email="dev@example.com"))
+
+
+def test_a_real_address_is_never_replaced(client, users):
+    """Only the stand-in of this very subject gives way: an IdP that renames a
+    mailbox does not rename the account, as before."""
+    assert client.post("/api/auth/oidc", json={"id_token": _token()}).status_code == 200
+    r = client.post("/api/auth/oidc", json={"id_token": _token(email="other@example.com")})
+    assert r.status_code == 200, r.text
+    assert users.get_by_oidc(ISSUER, "kc-subject-1").email == "dev@example.com"

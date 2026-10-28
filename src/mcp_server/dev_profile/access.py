@@ -151,8 +151,10 @@ class DevScope:
 
 
 def indexed_slugs() -> list[str]:
-    """Every repository with a clone AND a graph on this installation."""
+    """Every repository with its files on disk (a clone or an unpacked upload)
+    AND a graph on this installation."""
     from src.config import InvalidRepoSlug, get_settings
+    from src.repos.upload import is_checked_out
 
     settings = get_settings()
     root = settings.repos_dir
@@ -160,7 +162,7 @@ def indexed_slugs() -> list[str]:
         return []
     out: list[str] = []
     for sub in sorted(root.iterdir()):
-        if not sub.is_dir() or not (sub / ".git").exists():
+        if not is_checked_out(sub):
             continue
         try:
             if settings.repo_graph_path(sub.name).exists():

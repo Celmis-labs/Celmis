@@ -5,6 +5,11 @@ working tree: the clone can be ahead of the index (or have uncommitted edits
 from some other tool), and a line number is only worth printing when it is a
 line number of the revision named on the idx line. Committed files only, so an
 untracked `.env` lying around in the clone cannot be read either.
+
+An uploaded archive has no git. Its one revision is the archive's sha-256, and
+its unpacked files are that revision for as long as they are still the archive
+the sha names (`_unpacked_at`); a newer upload leaves the older revision with
+nothing on disk, like a commit missing from a clone.
 """
 
 from __future__ import annotations
@@ -32,6 +37,36 @@ def clone_path(slug: str) -> Path | None:
     except InvalidRepoSlug:
         return None
     return path if (path / ".git").exists() else None
+
+
+def _unpacked_at(slug: str, sha: str) -> Path | None:
+    """The files of the uploaded archive ``slug`` when ``sha`` is its revision."""
+    from src.config import InvalidRepoSlug, get_settings
+    from src.repos.upload import upload_revision
+
+    if not sha or upload_revision(slug) != sha:
+        return None
+    try:
+        path = get_settings().repo_path(slug)
+    except InvalidRepoSlug:
+        return None
+    return path if path.is_dir() else None
+
+
+def _read_unpacked(tree: Path, rel_path: str) -> list[str] | None:
+    """`show_file` in an unpacked archive: a regular file inside ``tree`` only."""
+    try:
+        target = (tree / rel_path).resolve(strict=True)
+        if not target.is_relative_to(tree.resolve()) or not target.is_file():
+            return None
+        if target.stat().st_size > _MAX_FILE_BYTES:
+            return None
+        data = target.read_bytes()
+    except (OSError, ValueError):
+        return None
+    if b"\0" in data[:8000]:
+        return None
+    return data.decode("utf-8", errors="replace").split("\n")
 
 
 def _run(path: Path, args: list[str], timeout: float) -> subprocess.CompletedProcess | None:
@@ -67,6 +102,8 @@ def head_branch(slug: str) -> str | None:
 
 
 def has_commit(slug: str, sha: str) -> bool:
+    if _unpacked_at(slug, sha) is not None:
+        return True
     path = clone_path(slug)
     if path is None or not _SHA.match(sha or ""):
         return False
@@ -76,6 +113,9 @@ def has_commit(slug: str, sha: str) -> bool:
 
 def show_file(slug: str, sha: str, rel_path: str) -> list[str] | None:
     """The lines of `rel_path` at `sha`, or None (missing, binary, too big)."""
+    tree = _unpacked_at(slug, sha)
+    if tree is not None:
+        return None if is_unsafe_rel_path(rel_path) else _read_unpacked(tree, rel_path)
     path = clone_path(slug)
     if path is None or not _SHA.match(sha or "") or is_unsafe_rel_path(rel_path):
         return None
@@ -135,13 +175,16 @@ def grep(
     ignore_case: bool = False, per_file: int = 8, first_only: bool = False,
     word: bool = False, timed_out: list | None = None,
 ) -> list[GrepHit]:
-    """`git grep` at `sha`, secret files excluded by git itself.
+    """`git grep` at `sha`, secret files excluded by git itself. In an uploaded
+    archive it searches the unpacked files, leaving out what the archive's own
+    `.gitignore` names, as a clone would not have it.
 
     Output is read as a stream and the process is stopped at `max_hits`, so a
     pattern that matches a million lines costs a few thousand.
     """
-    path = clone_path(slug)
-    if path is None or not _SHA.match(sha or "") or not pattern:
+    tree = _unpacked_at(slug, sha)
+    path = tree or clone_path(slug)
+    if path is None or not pattern or (tree is None and not _SHA.match(sha or "")):
         return []
     spec: list[str] = []
     if path_glob:
@@ -151,13 +194,14 @@ def grep(
     else:
         spec.append(".")
     spec.extend(git_excludes())
-    args = ["grep", "-n", "-I", "--no-color", "--no-recurse-submodules",
+    args = ["grep", *(["--no-index", "--exclude-standard"] if tree else []),
+            "-n", "-I", "--no-color", "--no-recurse-submodules",
             "-E" if regex else "-F", f"--max-count={1 if first_only else per_file}"]
     if ignore_case:
         args.append("-i")
     if word:
         args.append("-w")
-    args += ["-e", pattern, sha, "--", *spec]
+    args += ["-e", pattern, *([] if tree else [sha]), "--", *spec]
     import os
 
     try:
@@ -169,7 +213,7 @@ def grep(
     except OSError:
         return []
     hits: list[GrepHit] = []
-    prefix = f"{sha}:"
+    prefix = "" if tree else f"{sha}:"
     import threading
 
     def _expire() -> None:

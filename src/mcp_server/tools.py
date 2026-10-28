@@ -23,6 +23,7 @@ from src.indexing.graph.extractor import SymbolInfo
 from src.indexing.graph.graph_store import (
     make_graph_store,
 )
+from src.repos.upload import is_checked_out
 
 logger = logging.getLogger(__name__)
 
@@ -157,14 +158,15 @@ def list_repos(
         return []
     out: list[RepoSummary] = []
     for sub in sorted(settings.repos_dir.iterdir()):
-        if not sub.is_dir() or not (sub / ".git").exists():
+        if not is_checked_out(sub):
             continue
         out.append(_slug_to_summary(sub.name, settings))
     return out
 
 
 def list_repo_slugs(settings: Settings | None = None) -> list[str]:
-    """The slugs of every repository checked out on disk, in order.
+    """The slugs of every repository checked out on disk (a clone or an unpacked
+    upload), in order.
 
     What `list_repos()` returns without its summaries: building a summary opens
     the repository's graph (a FalkorDBLite server start and stop, seconds each),
@@ -174,7 +176,7 @@ def list_repo_slugs(settings: Settings | None = None) -> list[str]:
     if not settings.repos_dir.exists():
         return []
     return [sub.name for sub in sorted(settings.repos_dir.iterdir())
-            if sub.is_dir() and (sub / ".git").exists()]
+            if is_checked_out(sub)]
 
 
 # ─── Symbol queries ─────────────────────────────────────────────────

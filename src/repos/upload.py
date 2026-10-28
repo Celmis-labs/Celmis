@@ -57,6 +57,7 @@ DEFAULT_MAX_ARCHIVE_BYTES = 250 * 1024 * 1024
 MAX_UNPACKED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_FILES = 150_000
 MAX_FILE_BYTES = 128 * 1024 * 1024
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 _CHUNK = 1024 * 1024
 _WIN_DRIVE = re.compile(r"^[A-Za-z]:")
@@ -411,6 +412,23 @@ def is_upload_provider(provider: str | None) -> bool:
     return (provider or "") == UPLOAD_PROVIDER
 
 
+def upload_revision(slug: str) -> str | None:
+    """The sha-256 of the archive unpacked as ``slug``: an upload's one and only
+    revision, the one indexing records. None when ``slug`` is no upload."""
+    sha = str((read_upload_meta(slug) or {}).get("sha256") or "")
+    return sha if _SHA256.fullmatch(sha) else None
+
+
+def is_checked_out(path: Path) -> bool:
+    """Does ``path``, a directory under ``repos_dir``, hold a repository's files?
+
+    A clone is told by its ``.git``. An unpacked archive has none and is told by
+    the record `install_archive` writes for it; without this second test every
+    list of repositories on disk would leave uploads out.
+    """
+    return path.is_dir() and ((path / ".git").exists() or upload_revision(path.name) is not None)
+
+
 __all__ = [
     "ALLOWED_SUFFIXES",
     "ArchiveError",
@@ -423,9 +441,11 @@ __all__ = [
     "archive_kind",
     "extract_archive",
     "install_archive",
+    "is_checked_out",
     "is_upload_provider",
     "max_archive_bytes",
     "read_upload_meta",
     "stream_to_temp",
+    "upload_revision",
     "write_display_name",
 ]

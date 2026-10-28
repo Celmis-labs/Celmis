@@ -20,6 +20,38 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.8] — 2026-10-28
+
+An uploaded repository reaches the MCP tools and the people it is shared with, and an SSO
+account that was made without an address takes the real one when the identity provider
+starts sending it.
+
+### Upgrade notes
+
+- No migration and no new setting. Repositories uploaded as archives appear in `repos` and
+  the other MCP tools of every token that may read them as soon as the new version runs.
+
+### Fixed
+
+- **An uploaded repository was invisible to MCP.** Every list of the repositories on disk
+  looked for `.git`, and an archive is unpacked without one: the repository was indexed and
+  shown as indexed on the web, yet missing from every MCP token, its owner's included, and a
+  share of it answered its holder "no repositories you can read". An unpacked archive now
+  counts as a checkout (the record written at upload tells it), and the readers take its
+  files at its one revision, the SHA-256 of the archive: `grep` searches them with the
+  secret-file floor and the archive's own `.gitignore`, a file is read only inside the
+  unpacked tree, and the idx line reads `upload@<sha>`, `fresh` while that archive is the
+  one indexed and `STALE` once a newer upload waits for its index.
+- **An SSO stand-in address stayed forever.** A person whose first sign-in carried no
+  address got the stand-in `sso-<subject>@<issuer host>` (3.1.6), and the account kept it
+  after the directory filled the address in, so invites and shares addressed to the real
+  mailbox missed them. On a later sign-in a trusted address (verified, or on a domain of
+  `OIDC_TRUSTED_EMAIL_DOMAINS`) now replaces the stand-in of that same subject, together
+  with a name that was only the stand-in's local part, and the change is in the audit log as
+  `auth.oidc_address_set`. An address another account holds is never taken: the stand-in
+  stays and the two accounts are not merged. A real address is never rewritten by a later
+  token, as before.
+
 ## [3.1.6] — 2026-10-28
 
 Company single sign-on lets in everyone the directory signs in: an operator can vouch for

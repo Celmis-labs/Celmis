@@ -46,6 +46,14 @@ archives and scripts.
   the archive. There is no git history, no webhooks and no freshness check
   (state `not_applicable`). Uploading again with the same slug replaces the
   files and re-indexes.
+- The developer MCP tools (`repos`, `find`, `grep`, `refs`, `read_symbol`,
+  `outline`, `map`) read an uploaded repository like a clone, and so does a
+  share of it. The idx line names it `upload@<first 8 of the SHA-256>`: `fresh`
+  while the archive on disk is the one indexed, `STALE` between a re-upload and
+  its index, when nothing of the indexed revision is left to read. `grep`
+  searches the unpacked files and leaves out what the archive's own
+  `.gitignore` names. Before 3.1.8 an uploaded repository was missing from
+  every MCP token, its owner's included.
 - With the chunked upload a proxy only needs to allow a body of one part (about
   33 MB by default).
 

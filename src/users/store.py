@@ -216,32 +216,38 @@ class UserStore:
         return [self._row_to_user(r) for r in rows if r]
 
     def update(self, user: User) -> User:
-        """Update existing user. Raises UserNotFoundError if id missing."""
+        """Update existing user. Raises UserNotFoundError if id missing,
+        UserExistsError if another account holds the email."""
         with self._connect() as conn:
-            cur = conn.execute(
-                """
-                UPDATE users SET
-                    email = ?, auth_method = ?, password_hash = ?,
-                    google_sub = ?, is_admin = ?, is_active = ?,
-                    scopes = ?, last_login_at = ?, name = ?,
-                    oidc_iss = ?, oidc_sub = ?
-                WHERE id = ?
-                """,
-                (
-                    user.email.lower().strip(),
-                    user.auth_method.value,
-                    user.password_hash,
-                    user.google_sub,
-                    int(user.is_admin),
-                    int(user.is_active),
-                    json.dumps(user.scopes),
-                    user.last_login_at,
-                    user.name,
-                    user.oidc_iss,
-                    user.oidc_sub,
-                    user.id,
-                ),
-            )
+            try:
+                cur = conn.execute(
+                    """
+                    UPDATE users SET
+                        email = ?, auth_method = ?, password_hash = ?,
+                        google_sub = ?, is_admin = ?, is_active = ?,
+                        scopes = ?, last_login_at = ?, name = ?,
+                        oidc_iss = ?, oidc_sub = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        user.email.lower().strip(),
+                        user.auth_method.value,
+                        user.password_hash,
+                        user.google_sub,
+                        int(user.is_admin),
+                        int(user.is_active),
+                        json.dumps(user.scopes),
+                        user.last_login_at,
+                        user.name,
+                        user.oidc_iss,
+                        user.oidc_sub,
+                        user.id,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                if "users.email" in str(exc).lower():
+                    raise UserExistsError(f"email {user.email!r} already taken") from exc
+                raise
             if cur.rowcount == 0:
                 raise UserNotFoundError(f"user id={user.id!r} not found")
         return user

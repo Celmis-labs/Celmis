@@ -11,6 +11,10 @@ built from, so a line number in the answer is a line number of THAT commit;
 
 `unknown` is an answer, not a gap: a surface that rendered it as "fresh" would
 be the failure this header exists to prevent.
+
+An uploaded archive has no remote: the archive on disk is the source, so it is
+`fresh` while the index was built from it and `STALE` once a newer upload waits
+for its index. Its branch reads `upload`.
 """
 
 from __future__ import annotations
@@ -73,11 +77,13 @@ def _state(info, now: datetime) -> str:  # noqa: ANN001
 def read_freshness(slugs: list[str]) -> dict[str, RepoFresh]:
     """Freshness of each slug that has a nameable revision.
 
-    A slug with no recorded sha falls back to the clone's HEAD, state
-    `unknown` (the graph exists, but nothing says which commit it was built
-    from). A slug with neither is absent: there is nothing true to print.
+    A slug with no recorded sha falls back to the clone's HEAD (an upload's
+    archive), state `unknown` (the graph exists, but nothing says which commit
+    it was built from). A slug with neither is absent: there is nothing true
+    to print.
     """
     from src.repos import index_state
+    from src.repos.upload import upload_revision
 
     now = datetime.now(UTC)
     try:
@@ -89,14 +95,17 @@ def read_freshness(slugs: list[str]) -> dict[str, RepoFresh]:
     for slug in slugs:
         info = states.get(slug)
         sha = info.last_indexed_sha if info and info.last_indexed_sha else None
+        archive = upload_revision(slug)
         state = _state(info, now)
+        if sha is not None and archive is not None:
+            state = "fresh" if sha == archive else "STALE"
         if sha is None:
-            sha = git_io.head_sha(slug)
+            sha = git_io.head_sha(slug) or archive
             state = "unknown"
         if sha is None:
             continue
         branch = (info.indexed_branch if info and info.indexed_branch else None) \
-            or git_io.head_branch(slug) or "?"
+            or git_io.head_branch(slug) or ("upload" if archive else "?")
         out[slug] = RepoFresh(
             slug=slug, branch=branch.replace(" ", "_"), sha=sha,
             age=human_age(info.last_indexed_at if info else None, now), state=state,

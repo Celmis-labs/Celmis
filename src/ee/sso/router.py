@@ -35,6 +35,7 @@ it is not enterprise and must not disappear with a licence:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import uuid
 
@@ -77,7 +78,8 @@ def oidc_callback(
         Otherwise anyone who can register an unverified address at the IdP
         could sign in as that account, or claim the address before its
         owner does (invites resolve accounts by email). A token without an
-        address gets a stand-in (oidc.address_of) that only creates.
+        address gets a stand-in (oidc.address_of) that only creates, and
+        that the first trusted address the IdP sends later replaces.
 
     The user is found by (iss, sub) first; the email is only used to link
     an account that has no OIDC subject yet.
@@ -116,6 +118,10 @@ def oidc_callback(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This account cannot use single sign-on",
         )
+    if user is not None and verified and user.email == oidc.stand_in_address(sub, config):
+        # Signed up while the IdP sent no address, and it sends a trusted one
+        # now: the stand-in names no mailbox, so the account takes the real one.
+        user = _replace_stand_in(users, user, email, name, request)
     if user is None:
         existing = users.get_by_email(email)
         if existing is not None and (_is_master_account(existing)
@@ -237,3 +243,34 @@ def oidc_callback(
         user, users, email=email, email_verified=verified, ip=client_ip(request),
     )
     return TokenResponse(access_token=token, expires_at=exp)
+
+
+def _replace_stand_in(users: UserStore, user: User, email: str, name: str,
+                      request: Request) -> User:
+    """``user`` with the trusted ``email`` in place of its stand-in.
+
+    Only an address no other account holds: a sign-in never merges two
+    accounts, so with the address taken the stand-in stays and the operator
+    decides. A name that was the stand-in's local part goes with it.
+    """
+    holder = users.get_by_email(email)
+    if holder is not None and holder.id != user.id:
+        logger.warning("oidc_stand_in_kept id=%s reason=address-held", user.id)
+        return user
+    stand_in = user.email
+    renamed = name or email.split("@", 1)[0]
+    updated = dataclasses.replace(
+        user, email=email,
+        name=renamed if user.name == stand_in.split("@", 1)[0] else user.name,
+    )
+    try:
+        users.update(updated)
+    except UserExistsError:
+        logger.warning("oidc_stand_in_kept id=%s reason=address-held", user.id)
+        return user
+    logger.info("oidc_stand_in_replaced id=%s email=%s", user.id, email)
+    record_action(
+        action="auth.oidc_address_set", actor=email[:200], actor_id=user.id,
+        target="oidc", ip=client_ip(request), detail={"replaced": "stand-in"},
+    )
+    return updated

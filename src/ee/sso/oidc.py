@@ -276,10 +276,16 @@ def address_of(claims: dict[str, Any], config: OidcConfig) -> tuple[str, bool]:
     username = str(claims.get("preferred_username") or "").strip()
     if _ADDRESS.fullmatch(username):
         return username, False
-    sub = str(claims.get("sub") or "").strip()
+    return stand_in_address(str(claims.get("sub") or ""), config), True
+
+
+def stand_in_address(sub: str, config: OidcConfig) -> str:
+    """The stand-in `address_of` builds for ``sub``: ``sso-<sub>@<issuer host>``,
+    the subject hashed when it is not a plain name."""
+    sub = sub.strip()
     local = sub if _PLAIN_SUBJECT.fullmatch(sub) else hashlib.sha256(sub.encode()).hexdigest()[:32]
     host = urlsplit(config.issuer).hostname or "sso.invalid"
-    return f"sso-{local}@{host}", True
+    return f"sso-{local}@{host}"
 
 
 def email_is_trusted(email: str, claims: dict[str, Any], config: OidcConfig) -> bool:
