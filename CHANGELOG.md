@@ -20,6 +20,19 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.12] — 2026-10-28
+
+`read_symbol` and `refs` find a 1C method by the name a reader gives, short or
+full. The graph is unchanged: a repository indexed by 3.1.10 needs no reindex.
+
+### Fixed
+
+- `read_symbol` and `refs` find a 1C method. A 1C symbol's name carries its container
+  (`Documents.Acme.ObjectModule.Post`), and both tools looked up only the last segment as a whole
+  name, so every 1C method answered "no symbol", with the missed name itself under "similar". The
+  lookup now takes a dotted name whole first, then the last segment as a whole name or as the last
+  segment of one: `Post` alone is every method of that name, the full name is that one method.
+
 ## [3.1.10] — 2026-10-28
 
 1C:Enterprise code joins the graph and the Q&A: modules, methods, calls and

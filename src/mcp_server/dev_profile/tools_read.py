@@ -207,7 +207,7 @@ def read_symbol(repo: str, name: str, path: str = "", max_lines: int = 60,
 
     neighbours: list[str] = []
     with common.open_store(slug) as store:
-        rows = store.find_symbols(last, mode="exact", limit=60)
+        rows = store.find_named(sym, limit=60)
         rows = [r for r in rows if scope.readable(slug, str(r.get("file") or ""))
                 and (not rel or str(r.get("file")) == rel or str(r.get("file")).endswith(rel))]
         near: list[dict] = []

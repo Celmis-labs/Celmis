@@ -455,6 +455,24 @@ class FalkorDBLiteStore(GraphStore):
             return rows[:limit]
         return self._find_symbols_once(text, mode, kind, limit)
 
+    def find_named(self, name: str, *, limit: int = 60) -> list[dict]:
+        """The symbols a reader means by `name`: bare, ``Class.method`` or ``a::b``.
+
+        A 1C symbol's name carries its container (``Documents.Acme.ObjectModule.Post``),
+        so a dotted name is first looked up whole. Otherwise its last segment, as
+        a whole name or as the last segment of one: ``Post`` alone is every 1C
+        method of that name, and the `Class` of ``Class.method`` is the caller's
+        to pick by.
+        """
+        dotted = (name or "").strip().replace("::", ".")
+        if not dotted:
+            return []
+        if "." in dotted:
+            rows = self._find_symbols_once(dotted, "exact", None, limit)
+            if rows:
+                return rows
+        return self._find_symbols_once(dotted.rsplit(".", 1)[-1], "tail", None, limit)
+
     def _find_symbols_once(
         self, text: str, mode: str, kind: str | None, limit: int,
     ) -> list[dict]:
@@ -467,6 +485,10 @@ class FalkorDBLiteStore(GraphStore):
         if mode == "exact":
             where.append("s.name = $q")
             params["q"] = text
+        elif mode == "tail":
+            where.append("(s.name = $q OR s.name ENDS WITH $qt)")
+            params["q"] = text
+            params["qt"] = "." + text
         elif mode == "prefix":
             where.append("toLower(s.name) STARTS WITH $ql")
             params["ql"] = text.lower()

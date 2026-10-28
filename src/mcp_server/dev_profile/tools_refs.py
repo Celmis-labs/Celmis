@@ -35,8 +35,7 @@ def _symbol_ids(scope, slug: str, store, symbol: str) -> list[str]:  # noqa: ANN
     list, the secret floor) is no symbol here: otherwise `refs` answered "0 callers"
     for it and "no symbol" for a name that is nowhere, which tells the caller that
     the hidden file defines that name. `find` and `read_symbol` already answer so."""
-    last = symbol.replace("::", ".").split(".")[-1]
-    return [str(r["id"]) for r in store.find_symbols(last, mode="exact", limit=40)
+    return [str(r["id"]) for r in store.find_named(symbol, limit=40)
             if scope.listable(slug, str(r.get("file") or ""))]
 
 
