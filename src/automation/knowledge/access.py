@@ -355,9 +355,12 @@ Set up SSO (OIDC) — done by whoever runs the server:
    and optionally `AUTH_OIDC_NAME` (the button label) in `.env`; optionally
    `OIDC_ADMIN_ROLE` (an IdP role/group that makes a person a global admin)
    and `OIDC_ADMIN_ROLE_SYNC=true` (also removes it). Restart.
-3. Activate a licence that includes single sign-on (below). Only verified
+3. Activate a licence that includes single sign-on (below). Only trusted
    emails are accepted; invites addressed to that email are redeemed at
-   sign-in.
+   sign-in. Trusted = the IdP marks it verified, or the domain is in
+   `OIDC_TRUSTED_EMAIL_DOMAINS`, or `OIDC_REQUIRE_VERIFIED_EMAIL=false`. A
+   directory that never sets `email_verified` (common for company
+   directories) refuses every new person until one of the two is set.
 
 Enterprise licence — [System status](/admin/health), "Edition" card (global
 admin): shows "Community" or "Enterprise", "Licensed to", "Expires",

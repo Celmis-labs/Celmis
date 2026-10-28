@@ -296,7 +296,9 @@ email-bound link opened by another account is refused.
 
 **Automatic redemption — verified addresses only.** When somebody signs in
 with Google or company SSO and the identity provider marks the email as
-verified (`email_verified`), the pending invites addressed to that email are
+verified (`email_verified`) — or, for SSO, the operator vouches for it with
+`OIDC_TRUSTED_EMAIL_DOMAINS` / `OIDC_REQUIRE_VERIFIED_EMAIL=false` — the
+pending invites addressed to that email are
 redeemed at sign-in, through the same accept path (grant rule re-checked,
 audited, single use). A **password account is never redeemed by its
 address**: Celmis does not verify the address typed at sign-up, so anyone can

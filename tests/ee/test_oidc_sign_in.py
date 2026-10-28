@@ -478,3 +478,102 @@ def test_unconfigured_is_503(client, monkeypatch):
     assert r.status_code == 503
 
 
+
+
+# ─── Addresses the operator vouches for ─────────────────────────────
+# A company directory often never sets email_verified. The operator names
+# the domains whose mailboxes only the directory's administrator hands out,
+# or trusts every address the IdP sends.
+
+def test_a_trusted_domain_lets_an_unverified_address_create_an_account(client, users, monkeypatch):
+    monkeypatch.setenv("OIDC_TRUSTED_EMAIL_DOMAINS", " Corp.Example , @other.example")
+    r = client.post("/api/auth/oidc",
+                    json={"id_token": _token(email="new.person@corp.example",
+                                             email_verified=False)})
+    assert r.status_code == 200, r.text
+    assert users.get_by_oidc(ISSUER, "kc-subject-1").email == "new.person@corp.example"
+
+
+def test_a_trusted_domain_links_an_unverified_address_to_its_account(client, users, monkeypatch):
+    monkeypatch.setenv("OIDC_TRUSTED_EMAIL_DOMAINS", "example.com")
+    _password_user(users)
+    r = client.post("/api/auth/oidc", json={"id_token": _token(email_verified=False)})
+    assert r.status_code == 200, r.text
+    assert users.get_by_email("dev@example.com").oidc_sub == "kc-subject-1"
+
+
+@pytest.mark.parametrize("address", ["x@sub.corp.example", "x@corp.example.evil", "x@other.example"])
+def test_only_the_listed_domains_are_trusted(client, users, monkeypatch, address):
+    monkeypatch.setenv("OIDC_TRUSTED_EMAIL_DOMAINS", "corp.example")
+    r = client.post("/api/auth/oidc",
+                    json={"id_token": _token(email=address, email_verified=False)})
+    assert r.status_code == 403
+    assert users.get_by_email(address) is None
+
+
+def test_require_verified_email_false_trusts_every_address(client, users, monkeypatch):
+    monkeypatch.setenv("OIDC_REQUIRE_VERIFIED_EMAIL", "false")
+    r = client.post("/api/auth/oidc",
+                    json={"id_token": _token(email="anyone@anywhere.example",
+                                             email_verified=None)})
+    assert r.status_code == 200, r.text
+
+
+def test_the_default_still_requires_a_verified_address():
+    config = oidc.oidc_config()
+    assert config.require_verified_email is True
+    assert config.trusted_email_domains == frozenset()
+    assert not oidc.email_is_trusted("dev@example.com", {"email": "dev@example.com"}, config)
+
+
+# ─── A token without an email claim ─────────────────────────────────
+
+def test_an_address_shaped_username_stands_for_a_missing_email(client, users, monkeypatch):
+    monkeypatch.setenv("OIDC_TRUSTED_EMAIL_DOMAINS", "corp.example")
+    r = client.post("/api/auth/oidc",
+                    json={"id_token": _token(email=None, email_verified=None,
+                                             preferred_username="jo@corp.example")})
+    assert r.status_code == 200, r.text
+    assert users.get_by_oidc(ISSUER, "kc-subject-1").email == "jo@corp.example"
+
+
+def test_an_address_shaped_username_is_not_trusted_by_itself(client, users):
+    """email_verified speaks about the email claim, not about the username."""
+    r = client.post("/api/auth/oidc",
+                    json={"id_token": _token(email=None, email_verified=True,
+                                             preferred_username="jo@corp.example")})
+    assert r.status_code == 403
+    assert users.get_by_email("jo@corp.example") is None
+
+
+def test_without_any_address_a_stand_in_creates_the_account(client, users):
+    token = _token(email=None, email_verified=None, preferred_username="jo", name="Jo Person")
+    r = client.post("/api/auth/oidc", json={"id_token": token})
+    assert r.status_code == 200, r.text
+    user = users.get_by_oidc(ISSUER, "kc-subject-1")
+    assert user.email == "sso-kc-subject-1@sso.example.com"
+    assert user.name == "Jo Person"
+    # Found by subject the next time.
+    assert client.post("/api/auth/oidc", json={"id_token": token}).status_code == 200
+    assert len([u for u in users.list(active_only=False) if u.oidc_sub == "kc-subject-1"]) == 1
+
+
+def test_a_stand_in_never_takes_over_an_account_that_holds_its_address(client, users):
+    stand_in, _ = oidc.address_of({"sub": "kc-subject-1"}, oidc.oidc_config())
+    _password_user(users, email=stand_in)
+    r = client.post("/api/auth/oidc",
+                    json={"id_token": _token(email=None, email_verified=None)})
+    assert r.status_code == 409
+    assert users.get_by_email(stand_in).oidc_sub is None
+
+
+def test_an_unusual_subject_is_hashed_into_the_stand_in():
+    address, stand_in = oidc.address_of({"sub": "auth0|abc/../x y"}, oidc.oidc_config())
+    assert stand_in is True
+    local = address.split("@")[0]
+    assert local.startswith("sso-") and len(local) == 4 + 32 and "|" not in address
+
+
+def test_a_token_without_a_subject_is_still_refused(client):
+    r = client.post("/api/auth/oidc", json={"id_token": _token(sub=None)})
+    assert r.status_code == 401

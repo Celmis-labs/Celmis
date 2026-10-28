@@ -67,7 +67,7 @@ from pathlib import Path, PurePosixPath
 
 PROG = "celmis-pack"
 #: Kept equal to `src.__version__` by tests/plugin; sent as the User-Agent.
-VERSION = "3.1.4"
+VERSION = "3.1.6"
 USER_AGENT = f"{PROG}/{VERSION}"
 
 EXIT_OK = 0

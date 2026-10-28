@@ -509,6 +509,10 @@ services:
       AUTH_OIDC_CLIENT_ID: "${AUTH_OIDC_CLIENT_ID:-}"
       OIDC_ADMIN_ROLE: "${OIDC_ADMIN_ROLE:-}"
       OIDC_ADMIN_ROLE_SYNC: "${OIDC_ADMIN_ROLE_SYNC:-}"
+      # A directory that never sets email_verified: count the addresses on
+      # these domains as verified, or (false) trust every address it sends.
+      OIDC_TRUSTED_EMAIL_DOMAINS: "${OIDC_TRUSTED_EMAIL_DOMAINS:-}"
+      OIDC_REQUIRE_VERIFIED_EMAIL: "${OIDC_REQUIRE_VERIFIED_EMAIL:-}"
       AUTH_PASSWORD_LOGIN: "${AUTH_PASSWORD_LOGIN:-}"
       # PR-review webhook secrets. All three handlers refuse when their secret
       # is unset, and until now none of these reached the container at all —

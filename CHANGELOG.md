@@ -20,6 +20,38 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.6] — 2026-10-28
+
+Company single sign-on lets in everyone the directory signs in: an operator can vouch for
+the addresses of a directory that never marks them verified, and a token without an email
+claim no longer stops the sign-in.
+
+### Upgrade notes
+
+- No migration. Nothing changes until you set one of the two new variables on the `api`
+  service (both are passed through `docker-compose.yml`):
+  - `OIDC_TRUSTED_EMAIL_DOMAINS=example.com,example.org` — addresses on these domains count
+    as verified. Exact domains only: `sub.example.com` is not covered by `example.com`.
+  - `OIDC_REQUIRE_VERIFIED_EMAIL=false` — trust every address the identity provider sends.
+  Set them only for a directory where people cannot pick their own address; otherwise
+  someone could register a colleague's address and sign in under it.
+
+### Fixed
+
+- **SSO refused every new person whose directory account was not marked
+  `email_verified`.** Celmis accepts a new SSO identity only with a verified address, so
+  that nobody can claim somebody else's address before its owner signs in. Many company
+  directories never set the flag at all: everyone there was refused with a 403
+  (`unverified-email-signup` in the audit log) and the sign-in page said only "could not
+  sign in with SSO". An address is now trusted when the IdP verified it, when its domain
+  is in `OIDC_TRUSTED_EMAIL_DOMAINS`, or when `OIDC_REQUIRE_VERIFIED_EMAIL=false`; the same
+  rule decides linking an existing account and redeeming the invites addressed to it.
+- **A token without an `email` claim was a 401.** The address is now the
+  `preferred_username` when it looks like one, and otherwise a stand-in
+  `sso-<subject>@<issuer host>`. A stand-in names no mailbox: it creates the account but
+  never links an existing one or redeems an invite. The person is found by issuer and
+  subject from then on, as before.
+
 ## [3.1.4] — 2026-10-27
 
 `grep` now reaches every repository you can read: it searches 41 per call and its cursor

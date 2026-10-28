@@ -24,6 +24,10 @@ the client id are set:
     OIDC_CLIENT_ID     e.g. celmis-web
     OIDC_ADMIN_ROLE    optional — a role/group that grants global is_admin
     OIDC_ADMIN_ROLE_SYNC  optional "true" — also REVOKE is_admin when absent
+    OIDC_TRUSTED_EMAIL_DOMAINS  optional — comma list of domains whose
+                       addresses count as verified (the IdP admin hands them out)
+    OIDC_REQUIRE_VERIFIED_EMAIL  optional "false" — trust every address the
+                       IdP sends, verified or not
 
 The web side reads the same values as ``AUTH_OIDC_ISSUER`` /
 ``AUTH_OIDC_CLIENT_ID``; those names are accepted here as a fallback so one
@@ -36,9 +40,11 @@ operator's configuration, not from the token.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -73,6 +79,8 @@ class OidcConfig:
     client_id: str
     admin_role: str = ""
     admin_role_sync: bool = False
+    require_verified_email: bool = True
+    trusted_email_domains: frozenset[str] = frozenset()
 
 
 def _env(*names: str) -> str:
@@ -96,6 +104,15 @@ def oidc_config() -> OidcConfig | None:
         client_id=client_id,
         admin_role=_env("OIDC_ADMIN_ROLE"),
         admin_role_sync=_env("OIDC_ADMIN_ROLE_SYNC").lower() in ("1", "true", "yes"),
+        require_verified_email=_env(
+            "OIDC_REQUIRE_VERIFIED_EMAIL", "AUTH_OIDC_REQUIRE_VERIFIED_EMAIL",
+        ).lower() not in ("0", "false", "no"),
+        trusted_email_domains=frozenset(
+            d.strip().lower().lstrip("@")
+            for d in _env("OIDC_TRUSTED_EMAIL_DOMAINS",
+                          "AUTH_OIDC_TRUSTED_EMAIL_DOMAINS").split(",")
+            if d.strip().lstrip("@")
+        ),
     )
 
 
@@ -238,6 +255,49 @@ def email_is_verified(claims: dict[str, Any]) -> bool:
     if isinstance(value, str):
         return value.strip().lower() == "true"
     return value is True
+
+
+_ADDRESS = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+_PLAIN_SUBJECT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def address_of(claims: dict[str, Any], config: OidcConfig) -> tuple[str, bool]:
+    """The account address for these claims, and whether it is a stand-in.
+
+    ``email`` first. A directory that has no address for a person often signs
+    them in with an address-shaped ``preferred_username``, so that is next.
+    Failing both, a stand-in built from the subject under the issuer's host:
+    no mailbox answers it, so it may create an account but never link one or
+    redeem an invite. The person is still found by (iss, sub) afterwards.
+    """
+    email = str(claims.get("email") or "").strip()
+    if email:
+        return email, False
+    username = str(claims.get("preferred_username") or "").strip()
+    if _ADDRESS.fullmatch(username):
+        return username, False
+    sub = str(claims.get("sub") or "").strip()
+    local = sub if _PLAIN_SUBJECT.fullmatch(sub) else hashlib.sha256(sub.encode()).hexdigest()[:32]
+    host = urlsplit(config.issuer).hostname or "sso.invalid"
+    return f"sso-{local}@{host}", True
+
+
+def email_is_trusted(email: str, claims: dict[str, Any], config: OidcConfig) -> bool:
+    """May this address create or link an account and redeem its invites?
+
+    When the IdP marked the ``email`` claim verified, yes. Otherwise only when
+    the operator vouches for the IdP: ``OIDC_REQUIRE_VERIFIED_EMAIL=false``
+    trusts every address it sends, and ``OIDC_TRUSTED_EMAIL_DOMAINS`` the
+    addresses on domains that only the IdP's administrator hands out. A
+    company directory often never sets ``email_verified`` at all; there the
+    flag says nothing about who owns the mailbox.
+    """
+    if email == str(claims.get("email") or "").strip() and email_is_verified(claims):
+        return True
+    if not config.require_verified_email:
+        return True
+    domain = email.rpartition("@")[2].lower()
+    return bool(domain) and domain in config.trusted_email_domains
 
 
 def token_roles(claims: dict[str, Any], client_id: str) -> set[str]:

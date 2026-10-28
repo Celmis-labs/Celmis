@@ -70,11 +70,14 @@ def oidc_callback(
 
       * the token is verified locally against the issuer's JWKS
         (src/ee/sso/oidc.py) — iss, aud (+azp), typ, exp and the signature;
-      * an unknown (iss, sub) is accepted ONLY when the IdP says the email
-        is verified, both for linking an existing account and for creating
-        a new one. Otherwise anyone who can register an unverified address
-        at the IdP could sign in as that account, or claim the address
-        before its owner does (invites resolve accounts by email).
+      * an unknown (iss, sub) is accepted ONLY when its address is trusted
+        — the IdP says it is verified, or the operator vouches for the IdP
+        (OIDC_TRUSTED_EMAIL_DOMAINS, OIDC_REQUIRE_VERIFIED_EMAIL=false) —
+        both for linking an existing account and for creating a new one.
+        Otherwise anyone who can register an unverified address at the IdP
+        could sign in as that account, or claim the address before its
+        owner does (invites resolve accounts by email). A token without an
+        address gets a stand-in (oidc.address_of) that only creates.
 
     The user is found by (iss, sub) first; the email is only used to link
     an account that has no OIDC subject yet.
@@ -94,13 +97,13 @@ def oidc_callback(
         ) from exc
 
     sub = str(claims.get("sub") or "")
-    email = str(claims.get("email") or "").strip()
-    name = str(claims.get("name") or claims.get("preferred_username") or "")
-    if not sub or not email:
+    if not sub:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Token missing required claims",
         )
-    verified = oidc.email_is_verified(claims)
+    email, stand_in = oidc.address_of(claims, config)
+    name = str(claims.get("name") or claims.get("preferred_username") or "")
+    verified = not stand_in and oidc.email_is_trusted(email, claims, config)
 
     user = users.get_by_oidc(config.issuer, sub)
     if _is_master_email(email) or (user is not None and _is_master_account(user)):
@@ -125,7 +128,13 @@ def oidc_callback(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled",
             )
-        if not verified:
+        if stand_in and existing is not None:
+            # A stand-in names no mailbox: it creates an account, never takes one.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Account is linked to a different single sign-on identity",
+            )
+        if not verified and not stand_in:
             # Refused for a new account too, not only for linking. Celmis
             # treats a stored email as identity: an email invite adds an
             # existing account straight to the workspace, and a later Google
@@ -217,11 +226,12 @@ def oidc_callback(
     )
     from src.api.workspace_provision import provision_personal_workspace
     provision_personal_workspace(user.id, user.email, user.name)
-    # The IdP vouched for this address (`email_verified`), so the invites
-    # addressed to it are this person's: redeem them now, through the same
-    # path as clicking the link (src/api/routers/invites.py). An unverified
-    # claim — possible for an identity already bound by subject — redeems
-    # nothing; that person opens the link like a password account does.
+    # The address is trusted (`email_verified`, or vouched for by the
+    # operator), so the invites addressed to it are this person's: redeem them
+    # now, through the same path as clicking the link
+    # (src/api/routers/invites.py). An untrusted address — possible for an
+    # identity already bound by subject — or a stand-in redeems nothing; that
+    # person opens the link like a password account does.
     from src.api.routers.invites import redeem_after_verified_sign_in
     redeem_after_verified_sign_in(
         user, users, email=email, email_verified=verified, ip=client_ip(request),
