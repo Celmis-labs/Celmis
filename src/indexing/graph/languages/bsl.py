@@ -37,6 +37,9 @@ Edge model:
                    module belongs to (`Catalogs.Items`, see `onec_metadata.py`)
     REFERENCES   — method → each data object it names, in code or in query text
                    (`FROM AccumulationRegister.Stock`, `Catalogs.Items.FindByCode(`)
+    READS,       — method → the data object a statement reads or writes, with
+    WRITES         the statement's line: query tables, manager reads, register
+                   movements, record sets (see `bsl_dataflow.py`)
     CALLS        — `Name(` inside the same module (resolved here), `Module.Name(`
                    and `Manager.Object.Name(` (left for the resolver, which
                    matches BSL names case-insensitively)
@@ -44,7 +47,7 @@ Edge model:
 What is NOT covered:
     - calls through a variable (`Query.Execute()`), global-context functions
       and the platform's own methods: they have no definition in the tree
-    - `Perem` (module variables), `#Region`s as containers, query text
+    - `Perem` (module variables), `#Region`s as containers
     - a method header split by `#If ... #Else` into two alternative headers
       (both are read; the second gets a `@line` suffix on its id)
 """
@@ -57,6 +60,7 @@ from pathlib import Path
 
 from src.indexing.graph.configs import RepoContext
 from src.indexing.graph.extractor import EdgeInfo, ExtractionResult, SymbolExtractor, SymbolInfo
+from src.indexing.graph.languages.bsl_dataflow import data_flow_edges
 from src.indexing.graph.languages.onec import (
     data_object,
     module_identity,
@@ -183,6 +187,8 @@ class BslExtractor(SymbolExtractor):
         for m in methods:
             self._calls(m, lines, local, container, result)
             self._data_refs(m, lines, result)
+            result.edges.extend(data_flow_edges(
+                m["id"], [(i, lines[i], code) for i, code in m["body"]]))
         return result
 
     # ─── methods ────────────────────────────────────────────────────

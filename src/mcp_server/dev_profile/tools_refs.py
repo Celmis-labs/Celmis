@@ -20,7 +20,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 60
-DIRECTIONS = ("callers", "callees", "imports")
+#: 1C data flow: the objects a method `reads` / `writes`, and the methods that are
+#: the `readers` / `writers` of an object (READS / WRITES edges, one per statement).
+DATA_DIRECTIONS = {"reads": ("READS", "from"), "writes": ("WRITES", "from"),
+                   "readers": ("READS", "to"), "writers": ("WRITES", "to")}
+DIRECTIONS = ("callers", "callees", "imports", *DATA_DIRECTIONS)
 MAX_SIBLINGS = 5
 #: Most repositories one `refs` scans for text mentions, siblings and the other
 #: side of a share together (`shares.MAX_LINKED`).
@@ -47,6 +51,20 @@ def _imports(store, ids: list[str], limit: int) -> list[dict]:
         "RETURN DISTINCT a.id AS id, a.name AS name, a.kind AS kind, a.file AS file, "
         "a.start_line AS start_line, 1 AS hops ORDER BY a.file LIMIT $limit",
         params={"ids": ids, "limit": limit})
+
+
+def _data_rows(scope, slug: str, store, ids: list[str], direction: str) -> list[dict]:  # noqa: ANN001
+    """READS / WRITES edges as rows of a `refs` list: the file and line of the
+    STATEMENT (in the method), the name of the other end. Both ends must be
+    listable: a register whose file is hidden is not named by the method that
+    reads it, and a method in a hidden file does not show up as a reader."""
+    kind, end = DATA_DIRECTIONS[direction]
+    fetch = store.data_edges if end == "from" else store.data_users
+    return [{"file": e["from_file"], "start_line": e["line"], "kind": kind.lower(),
+             "name": e["to_name"] if end == "from" else e["from_name"], "hops": 1}
+            for e in fetch(ids, 100, kind=kind)
+            if scope.listable(slug, str(e["from_file"] or ""))
+            and scope.listable(slug, str(e["to_file"] or ""))]
 
 
 def _siblings(scope, slug: str) -> list[str]:
@@ -115,6 +133,8 @@ def run(repo: str, symbol: str, direction: str = "callers", depth: int = 1,
                               f"similar: {', '.join(names)}" if names else "try find")
         if direction == "imports":
             rows = _imports(store, ids, 100)
+        elif direction in DATA_DIRECTIONS:
+            rows = _data_rows(scope, slug, store, ids, direction)
         else:
             rows = common.expand(store, sym, direction, depth, 100)
     rows = [r for r in rows if scope.listable(slug, str(r.get("file") or ""))]

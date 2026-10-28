@@ -38,6 +38,7 @@ from pathlib import Path
 
 from src.indexing.graph.configs import RepoContext
 from src.indexing.graph.extractor import EdgeInfo, SymbolInfo
+from src.indexing.graph.languages.onec import RECORD_SETS, RECORDS_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ class HeuristicResolver:
                 resolved = self._resolve_import(edge)
             elif edge.kind == "CALLS":
                 resolved = self._resolve_call(edge)
-            elif edge.kind in ("DEFINED_IN", "REFERENCES") and edge.raw_target:
+            elif edge.kind in ("DEFINED_IN", "REFERENCES", "READS", "WRITES") and edge.raw_target:
                 resolved = self._resolve_named(edge)
             else:
                 resolved = edge  # no special logic
@@ -207,15 +208,30 @@ class HeuristicResolver:
 
     def _resolve_named(self, edge: EdgeInfo) -> EdgeInfo | None:
         """An edge to a 1C metadata object named `<Type>.<Object>` (a module
-        belongs to it, a method or a subsystem refers to it). 1C names are
-        case-insensitive. A name no object has is dropped: it names something
-        outside the configuration dump."""
+        belongs to it, a method or a subsystem refers to it, reads or writes
+        it). 1C names are case-insensitive. A name no object has is dropped: it
+        names something outside the configuration dump.
+
+        `Registers.<Name>` is a document's `Движения.<Name>`: which kind of
+        register it is, only the dump knows. One match is certain; when several
+        kinds of register share the name the first is taken, as a weak edge."""
         target = edge.raw_target or ""
-        found = self.by_name.get(target) or self.bsl_by_lower.get(target.lower())
+        confidence = "strong"
+        if target.startswith(RECORDS_PREFIX):
+            name = target[len(RECORDS_PREFIX):]
+            found = [i for plural in RECORD_SETS
+                     for i in self._named(f"{plural}.{name}")]
+            if len(found) > 1:
+                confidence = "weak"
+        else:
+            found = self._named(target)
         if not found:
             return None
         return EdgeInfo(from_id=edge.from_id, to_id=found[0], kind=edge.kind,
-                        confidence="strong", raw_target=target)
+                        confidence=confidence, raw_target=target, line=edge.line)
+
+    def _named(self, name: str) -> list[str]:
+        return self.by_name.get(name) or self.bsl_by_lower.get(name.lower()) or []
 
     # ─── path resolution ───────────────────────────────────────────
 

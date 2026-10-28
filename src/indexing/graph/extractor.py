@@ -40,9 +40,10 @@ class EdgeInfo:
 
     from_id: str
     to_id: str | None  # None → needs resolution via resolver.py
-    kind: str  # "CALLS" | "IMPORTS" | "DEFINED_IN" | "TEMPLATE_REF"
+    kind: str  # "CALLS" | "IMPORTS" | "DEFINED_IN" | "TEMPLATE_REF" | "READS" | "WRITES"
     confidence: str = "strong"  # "strong" | "weak" | "unresolved"
     raw_target: str | None = None  # for unresolved: the original name/path
+    line: int | None = None  # the statement's line, for the edges that are per statement (READS, WRITES)
 
 
 @dataclass

@@ -51,6 +51,9 @@ ALLOWED_EDGE_KINDS = frozenset(
     }
 )
 
+#: Edge kinds that carry the line of the statement they come from (1C data flow).
+STATEMENT_EDGE_KINDS = frozenset({"READS", "WRITES"})
+
 # Default batch size for UNWIND — the research said 1k-5k, but the redislite
 # subprocess crashes on UNWIND batches of ~1k elements (especially with
 # MATCH+MERGE on both sides of the edge). 200 is stable on 25k symbols /
@@ -314,6 +317,7 @@ class FalkorDBLiteStore(GraphStore):
             by_kind.setdefault(e.kind, []).append({
                 "f": e.from_id,
                 "t": e.to_id,
+                "l": e.line,
                 "confidence": e.confidence,
             })
 
@@ -323,13 +327,22 @@ class FalkorDBLiteStore(GraphStore):
             # complexity). FalkorDB ON CREATE/MATCH SET crashes redislite on
             # 200+ batches — confidence on an edge is not used in the
             # retriever, only in resolver-stats.
-            simple_batch = [{"f": e["f"], "t": e["t"]} for e in batch]
+            per_statement = kind in STATEMENT_EDGE_KINDS
+            simple_batch = [
+                {"f": e["f"], "t": e["t"], "l": e["l"] or 0} if per_statement
+                else {"f": e["f"], "t": e["t"]}
+                for e in batch
+            ]
+            # A data-flow edge is one per statement: the line is part of the
+            # MERGE key, so two reads of a register in a method are two edges
+            # (and one edge per statement, however often it is re-indexed).
+            rel = f"[:{kind} {{line: e.l}}]" if per_statement else f"[:{kind}]"
             for chunk in _chunks(simple_batch, DEFAULT_BATCH_SIZE):
                 # kind is already whitelisted, safe to embed into Cypher
                 res = self._g.query(
                     f"UNWIND $batch AS e "
                     f"MATCH (a:Symbol {{id: e.f}}), (b:Symbol {{id: e.t}}) "
-                    f"MERGE (a)-[:{kind}]->(b)",
+                    f"MERGE (a)-{rel}->(b)",
                     params={"batch": chunk},
                 )
                 total += int(res.relationships_created or 0)
@@ -585,6 +598,39 @@ class FalkorDBLiteStore(GraphStore):
         return [_row_to_symbol(row, cols) for row in res.result_set]
 
     # ─── multi-hop expansion ───────────────────────────────────────
+
+    def data_edges(
+        self, symbol_ids: list[str], limit: int = 200, kind: str | None = None,
+    ) -> list[dict]:
+        """What the given methods read and write (1C data flow), one row per
+        statement: {from_id, from_name, from_file, kind ("READS" | "WRITES"),
+        to_id, to_name, to_kind, to_file, line}, ordered by file and line.
+        ``kind`` keeps one of the two; ``limit`` caps the rows."""
+        if not symbol_ids:
+            return []
+        return self._data_rows("a.id IN $ids", symbol_ids, limit, kind)
+
+    def data_users(
+        self, object_ids: list[str], limit: int = 200, kind: str | None = None,
+    ) -> list[dict]:
+        """The inverse of :meth:`data_edges`: the methods that read and write the
+        given objects, the same rows."""
+        if not object_ids:
+            return []
+        return self._data_rows("b.id IN $ids", object_ids, limit, kind)
+
+    def _data_rows(self, where: str, ids: list[str], limit: int, kind: str | None) -> list[dict]:
+        if kind is not None and kind not in STATEMENT_EDGE_KINDS:
+            raise ValueError(f"kind must be one of {sorted(STATEMENT_EDGE_KINDS)}")
+        # `where` is one of two literals above and the kinds are whitelisted:
+        # nothing of the caller's is embedded into the Cypher.
+        return self.query(
+            f"MATCH (a:Symbol)-[r:{kind or 'READS|WRITES'}]->(b:Symbol) WHERE {where} "
+            "RETURN a.id AS from_id, a.name AS from_name, a.file AS from_file, "
+            "type(r) AS kind, b.id AS to_id, b.name AS to_name, b.kind AS to_kind, "
+            "b.file AS to_file, r.line AS line "
+            "ORDER BY a.file, r.line, b.name LIMIT $limit",
+            params={"ids": ids, "limit": max(1, int(limit))})
 
     def bfs_expand(
         self,

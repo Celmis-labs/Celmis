@@ -41,7 +41,7 @@ from src.access import RepoAccessDecision, resolve_access
 from src.access.file_scope import FileScope, apply_scopes
 from src.config import Settings, get_settings
 from src.llm.prompts.technical_answer import TECHNICAL_ANSWER_PROMPT, TECHNICAL_ANSWER_SYSTEM
-from src.qa import query_terms
+from src.qa import onec_context, query_terms
 from src.qa.query_terms import SymbolHit
 from src.retrieval.tier1_vault import VaultRetriever
 from src.retrieval.vector_store import VECTOR_WORKSPACE_KEY, VectorScope
@@ -379,7 +379,7 @@ class MultiRepoRetriever:
                 hits, priority_files=symbol_files, access=access,
                 overview_files=fallback_files,
                 excerpts=[(f"{r}/{h.file}", h.start_line, h.end_line)
-                          for r, h in text_matches[:_TEXT_MATCH_EXCERPTS]],
+                          for r, h in text_matches],
             )
             code_fallback_used = bool(set(fallback_files) & set(files_read))
         else:
@@ -574,8 +574,14 @@ class MultiRepoRetriever:
         is left to the tiers it had, with no model call added). Rows are filtered by the access decision BEFORE
         they are scored, so a hidden file neither appears nor shifts a rank.
 
-        Returns ``([(repo, SymbolHit)], terms)``: method/function hits, best
-        first, and the search terms used (for the plain-text floor)."""
+        A matched metadata object or module is expanded into its methods, and the
+        best methods' callees (callers, for an impact question) are walked within
+        a character budget (:mod:`src.qa.onec_context`) — the algorithm, not one
+        function of it. The same model call classifies the question's intent.
+
+        Returns ``([(repo, SymbolHit)], terms)``: method/function hits, the
+        direct and expanded ones best first, then the walked ones, and the search
+        terms used (for the plain-text floor)."""
         from src.indexing.graph.graph_store import make_graph_store
 
         loaded: dict[str, list[dict]] = {}
@@ -609,8 +615,9 @@ class MultiRepoRetriever:
         if not loaded:
             return [], []
 
-        terms = query_terms.lexical_terms(question)
-        if terms:
+        lexical = query_terms.lexical_terms(question)
+        plan = query_terms.QueryPlan()
+        if lexical:
             vocab = query_terms.vocabulary_sample(
                 str(r.get("name") or "") for rows in loaded.values() for r in rows[:5000])
             try:
@@ -618,15 +625,80 @@ class MultiRepoRetriever:
             except Exception as exc:  # noqa: BLE001 — no model: the lexical terms stand
                 logger.info("qa_search_terms_no_model err=%s", type(exc).__name__)
             else:
-                terms += [t for t in query_terms.llm_terms(question, vocab, generate)
-                          if t not in terms]
+                plan = query_terms.plan_query(question, vocab, generate)
+        weights = query_terms.term_weights(lexical, plan.terms)
+        terms = list(weights)
+        intent = plan.intent or query_terms.guess_intent(question)
 
-        matches: list[tuple[str, SymbolHit]] = []
+        direct: list[tuple[str, SymbolHit]] = []
+        containers: list[tuple[str, SymbolHit]] = []
         for repo, rows in loaded.items():
-            _, symbols = query_terms.rank_symbols(rows, terms)
-            matches += [(repo, h) for h in symbols]
-        matches.sort(key=lambda m: -m[1].score)
-        return matches[:_TEXT_MATCH_EXCERPTS], terms
+            files, symbols = query_terms.rank_symbols(rows, terms, weights=weights)
+            direct += [(repo, h) for h in symbols]
+            containers += [(repo, h) for f in files for h in f.symbols
+                           if onec_context.is_container(h)]
+        direct.sort(key=lambda m: -m[1].score)
+        direct = direct[:_TEXT_MATCH_EXCERPTS]
+        matches = self._with_expansion(direct, containers, loaded, terms)
+        matches += self._walked(matches, loaded, terms, intent)
+        return matches, terms
+
+    @staticmethod
+    def _with_expansion(
+        direct: list[tuple[str, SymbolHit]], containers: list[tuple[str, SymbolHit]],
+        loaded: Mapping[str, list[dict]], stems: list[str],
+    ) -> list[tuple[str, SymbolHit]]:
+        """``direct`` plus the methods of the matched objects/modules among the
+        best matches (a document found by its synonym has no word in its methods'
+        names), by score. ``loaded`` holds access-filtered rows only."""
+        best = max((h.score for _, h in [*direct, *containers]), default=0.0)
+        top = {h.id: (repo, h) for repo, h in sorted(containers, key=lambda m: -m[1].score)
+               if h.score >= onec_context.EXPAND_MIN_SHARE * best}
+        taken = {h.id for _, h in direct}
+        expanded: list[tuple[str, SymbolHit]] = []
+        for repo, c in list(top.values())[:onec_context.EXPAND_OBJECTS]:
+            for h in onec_context.expand_container(c, loaded[repo], stems, taken=taken):
+                taken.add(h.id)
+                expanded.append((repo, h))
+        expanded.sort(key=lambda m: -m[1].score)
+        merged = direct + expanded[:onec_context.EXPAND_MAX_TOTAL]
+        merged.sort(key=lambda m: -m[1].score)
+        return merged
+
+    def _walked(
+        self, matches: list[tuple[str, SymbolHit]], loaded: Mapping[str, list[dict]],
+        stems: list[str], intent: str,
+    ) -> list[tuple[str, SymbolHit]]:
+        """Methods reached from the best matches by following calls (callers for
+        an impact question), within the character budget shared by all repos.
+        Only the access-filtered rows of ``loaded`` can be reached."""
+        from src.indexing.graph.graph_store import make_graph_store
+
+        seeds: dict[str, list[SymbolHit]] = {}
+        for repo, h in [m for m in matches if m[1].kind in onec_context.CALLABLE_KINDS][
+                :onec_context.WALK_SEEDS]:
+            seeds.setdefault(repo, []).append(h)
+        taken = {h.id for _, h in matches}
+        budget = onec_context.WALK_MAX_CHARS
+        out: list[tuple[str, SymbolHit]] = []
+        for repo, hits in seeds.items():
+            by_id = {str(r.get("id")): r for r in loaded[repo]}
+            try:
+                store = make_graph_store(self.settings.repo_graph_path(repo))
+                try:
+                    walked = onec_context.walk(
+                        hits, by_id, onec_context.neighbours(store, intent), stems,
+                        depth=onec_context.WALK_DEPTH.get(intent, onec_context.WALK_DEPTH["explain"]),
+                        taken=taken, budget=budget, body_max=_EXCERPT_MAX_CHARS)
+                finally:
+                    store.close()
+            except Exception as exc:  # noqa: BLE001 — the direct matches stand without the walk
+                logger.debug("text_match_walk_failed repo=%s err=%s", repo, exc)
+                continue
+            budget -= sum(onec_context.body_cost(h, _EXCERPT_MAX_CHARS) for h in walked)
+            taken |= {h.id for h in walked}
+            out += [(repo, h) for h in walked]
+        return out
 
     @staticmethod
     def _terms_generator(user_id: str | None, workspace_id: str):

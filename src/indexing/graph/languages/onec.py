@@ -52,33 +52,41 @@ SINGULAR: dict[str, str] = {
 }
 TYPES = frozenset(SINGULAR) | {"Configuration"}
 
-#: Russian spellings of the types that code and queries name data objects by
-#: (`Справочники.X`, `РегистрНакопления.X`) → the dump's directory name.
-_RU: dict[str, str] = {
-    "Справочник": "Catalogs", "Справочники": "Catalogs",
-    "Документ": "Documents", "Документы": "Documents",
-    "Обработка": "DataProcessors", "Обработки": "DataProcessors",
-    "Отчет": "Reports", "Отчёт": "Reports", "Отчеты": "Reports", "Отчёты": "Reports",
-    "РегистрСведений": "InformationRegisters", "РегистрыСведений": "InformationRegisters",
-    "РегистрНакопления": "AccumulationRegisters", "РегистрыНакопления": "AccumulationRegisters",
-    "РегистрБухгалтерии": "AccountingRegisters", "РегистрыБухгалтерии": "AccountingRegisters",
-    "РегистрРасчета": "CalculationRegisters", "РегистрыРасчета": "CalculationRegisters",
-    "БизнесПроцесс": "BusinessProcesses", "БизнесПроцессы": "BusinessProcesses",
-    "Задача": "Tasks", "Задачи": "Tasks",
-    "ПланОбмена": "ExchangePlans", "ПланыОбмена": "ExchangePlans",
-    "ПланСчетов": "ChartsOfAccounts", "ПланыСчетов": "ChartsOfAccounts",
-    "ПланВидовХарактеристик": "ChartsOfCharacteristicTypes",
-    "ПланыВидовХарактеристик": "ChartsOfCharacteristicTypes",
-    "ПланВидовРасчета": "ChartsOfCalculationTypes",
-    "ПланыВидовРасчета": "ChartsOfCalculationTypes",
-    "Перечисление": "Enums", "Перечисления": "Enums",
-    "Константа": "Constants", "Константы": "Constants",
-    "ЖурналДокументов": "DocumentJournals", "ЖурналыДокументов": "DocumentJournals",
-    "Последовательность": "Sequences", "Последовательности": "Sequences",
-    "ОбщийМодуль": "CommonModules", "ОбщиеМодули": "CommonModules",
+#: Russian spellings of the types that code and queries name data objects by →
+#: the dump's directory name: (singular, as a query table `РегистрНакопления.X`;
+#: plural, as a manager in code `РегистрыНакопления.X`).
+_RU_FORMS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "Catalogs": (("Справочник",), ("Справочники",)),
+    "Documents": (("Документ",), ("Документы",)),
+    "DataProcessors": (("Обработка",), ("Обработки",)),
+    "Reports": (("Отчет", "Отчёт"), ("Отчеты", "Отчёты")),
+    "InformationRegisters": (("РегистрСведений",), ("РегистрыСведений",)),
+    "AccumulationRegisters": (("РегистрНакопления",), ("РегистрыНакопления",)),
+    "AccountingRegisters": (("РегистрБухгалтерии",), ("РегистрыБухгалтерии",)),
+    "CalculationRegisters": (("РегистрРасчета", "РегистрРасчёта"),
+                             ("РегистрыРасчета", "РегистрыРасчёта")),
+    "BusinessProcesses": (("БизнесПроцесс",), ("БизнесПроцессы",)),
+    "Tasks": (("Задача",), ("Задачи",)),
+    "ExchangePlans": (("ПланОбмена",), ("ПланыОбмена",)),
+    "ChartsOfAccounts": (("ПланСчетов",), ("ПланыСчетов",)),
+    "ChartsOfCharacteristicTypes": (("ПланВидовХарактеристик",), ("ПланыВидовХарактеристик",)),
+    "ChartsOfCalculationTypes": (("ПланВидовРасчета", "ПланВидовРасчёта"),
+                                 ("ПланыВидовРасчета", "ПланыВидовРасчёта")),
+    "Enums": (("Перечисление",), ("Перечисления",)),
+    "Constants": (("Константа",), ("Константы",)),
+    "DocumentJournals": (("ЖурналДокументов",), ("ЖурналыДокументов",)),
+    "Sequences": (("Последовательность",), ("Последовательности",)),
+    "CommonModules": (("ОбщийМодуль",), ("ОбщиеМодули",)),
 }
+_RU: dict[str, str] = {
+    word: plural for plural, (one, many) in _RU_FORMS.items() for word in (*one, *many)}
 #: Data-object types, i.e. the ones a query or a manager call can name.
 _DATA = frozenset(_RU.values()) - {"CommonModules"}
+#: Registers a document's `Движения.<Name>` can be: the name does not say which.
+RECORD_SETS = ("AccumulationRegisters", "InformationRegisters", "AccountingRegisters",
+               "CalculationRegisters")
+#: The raw target of an edge to `Движения.<Name>`: the resolver picks the kind.
+RECORDS_PREFIX = "Registers."
 
 
 def _build_names() -> dict[str, str]:
@@ -91,12 +99,26 @@ def _build_names() -> dict[str, str]:
 
 #: Any spelling (case-blind) of a metadata type → the dump's directory name.
 TYPE_BY_NAME: dict[str, str] = _build_names()
+#: The same for the spellings of a manager in code (`Справочники`, `Catalogs`):
+#: `Справочник.X.Выбрать(` is not a call of the catalog's manager.
+MANAGER_BY_NAME: dict[str, str] = {
+    **{w.lower(): d for d, (_one, many) in _RU_FORMS.items() for w in many},
+    **{plural.lower(): plural for plural in SINGULAR},
+}
 
 
 def data_object(type_word: str, name: str) -> str | None:
     """`<Type>.<Object>` for ``Type.Object`` as code writes it (any language,
     singular or plural), when Type names a data-object type; else None."""
     plural = TYPE_BY_NAME.get(type_word.lower())
+    return f"{plural}.{name}" if plural in _DATA else None
+
+
+def manager_object(type_word: str, name: str) -> str | None:
+    """Like :func:`data_object`, for ``Manager.Object`` as code writes it: only
+    the manager spellings (`Catalogs.Items`, `Справочники.Items`), not the
+    singular ones a query table or a type name uses."""
+    plural = MANAGER_BY_NAME.get(type_word.lower())
     return f"{plural}.{name}" if plural in _DATA else None
 
 

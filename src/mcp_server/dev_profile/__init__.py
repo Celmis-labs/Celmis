@@ -216,10 +216,12 @@ def build_dev_mcp():  # noqa: ANN201
             tools_read.read_symbol, repo, name, path, max_lines, include, response_format)
 
     @tool("refs", "Who calls/imports a symbol (or what it calls), with hop counts; "
-                  "cross-repo via text refs in group repos.")
-    async def _refs(repo: str, symbol: str, direction: Literal["callers", "callees", "imports"] = "callers",
-              depth: int = 1, cross_repo: bool = True, limit: int = 20, cursor: str = "",
-              response_format: Fmt = "concise") -> str:
+                  "cross-repo via text refs in group repos. 1C: reads/writes/readers/writers.")
+    async def _refs(repo: str, symbol: str,
+                    direction: Literal["callers", "callees", "imports", "reads", "writes",
+                                       "readers", "writers"] = "callers",
+                    depth: int = 1, cross_repo: bool = True, limit: int = 20, cursor: str = "",
+                    response_format: Fmt = "concise") -> str:
         return await asyncio.to_thread(
             tools_refs.run, repo, symbol, direction, depth, cross_repo, limit, cursor,
             response_format)

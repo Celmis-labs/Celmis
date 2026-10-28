@@ -71,6 +71,9 @@ CORE_EDGE_KINDS: Final[frozenset[str]] = frozenset({
     "DEFINED_IN",      # symbol lives in a file/class/namespace
     "EXTENDS",         # subclass extends superclass (Java, PHP, C#, C++)
     "IMPLEMENTS",      # class implements interface (Java, C#, Go satisfies)
+    # ─ Data flow (1C:Enterprise) ─
+    "READS",           # method reads a data object (query table, manager read), per statement
+    "WRITES",          # method writes a data object (register movements, record set, object), per statement
     # ─ Infrastructure (Stage 4 — Phase C) ─
     "BUILT_FROM",      # Docker image FROM
     "EXPOSES",         # Dockerfile EXPOSE / Service port mapping

@@ -20,6 +20,34 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.13] — 2026-10-28
+
+A question about 1C code gets the whole algorithm into its context, not one
+function, and the graph knows which methods read and which write each register,
+catalog and document. A 1C repository indexed before needs a reindex for the
+data-flow edges; everything else works on the graph it has.
+
+### Added
+
+- 1C data flow in the code graph: READS and WRITES edges from a method to the registers, catalogs
+  and documents its statements touch, each with the statement's line. Reads come from query tables
+  (FROM/JOIN; a virtual table or a tabular section counts as its object) and manager calls; writes
+  from register movements, record sets and objects written through a variable, and constants set.
+  An object the configuration does not hold gets no edge and no placeholder node.
+- `refs` takes `reads`, `writes` (method → objects) and `readers`, `writers` (object → methods); a
+  file the caller may not see shows on neither end.
+- Q&A on 1C code brings in the whole algorithm: a matched object or module is expanded into its
+  methods, and the best methods' callees are followed within a character budget — their callers
+  for a "what depends on it" question, the other writers and the readers of the same data for a
+  data question.
+- The one search-terms model call also names the question's intent (explain, trace, impact, data);
+  a plain-array reply or a failed call still works.
+
+### Changed
+
+- The question's own words outweigh terms the model added, and a method matching several of them
+  ranks higher. Repositories without 1C code are unchanged and still cost no model call.
+
 ## [3.1.12] — 2026-10-28
 
 `read_symbol` and `refs` find a 1C method by the name a reader gives, short or
