@@ -106,5 +106,10 @@ def test_the_migration_is_the_only_head_after_its_parent():
     root = Path(__file__).resolve().parents[2]
     cfg = Config(str(root / "alembic.ini"))
     cfg.set_main_option("script_location", str(root / "alembic"))
-    heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == [REVISION]
+    script = ScriptDirectory.from_config(cfg)
+    heads = script.get_heads()
+    # One head, and this revision on its chain: a later migration may follow
+    # it, a parallel branch may not.
+    assert len(heads) == 1, heads
+    chain = {rev.revision for rev in script.iterate_revisions(heads[0], "base")}
+    assert REVISION in chain

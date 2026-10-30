@@ -1995,6 +1995,10 @@ class DepFinding(Base):
     #: and why this installation cannot answer it. Nullable: a row written
     #: before the scan existed has no answer, which is not "no".
     named_in_code: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    #: Where `current_version` came from: lock | pin | resolved | range |
+    #: reported. `range` means current_version is the declared range, NOT an
+    #: installed version. Nullable: a row from before this column has no answer.
+    version_source: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index("ix_dep_findings_run", "run_id", "severity"),

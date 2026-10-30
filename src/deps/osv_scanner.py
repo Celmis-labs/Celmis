@@ -30,6 +30,7 @@ import contextlib
 import logging
 from pathlib import Path
 
+from src.deps.applicability import NOT_AFFECTED
 from src.deps.native import (
     TOOL_MISSING,
     TOOL_OS_ERROR,
@@ -41,7 +42,7 @@ from src.deps.native import (
     _loads,
     run_tool,
 )
-from src.deps.registries import osv_fixed_version, osv_severity
+from src.deps.registries import osv_applicability, osv_fixed_version, osv_severity
 from src.deps.severity import SEV_ORDER, severity_from_vector
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,14 @@ REASON_FAILED = "failed"
 REASON_BAD_JSON = "bad_json"
 REASON_NO_SOURCES = "no_sources"
 
-_NO_SOURCES = "osv-scanner recognised no manifest or lock file here"
+# PyPI packages that came from a MANIFEST (requirements.txt, pyproject.toml,
+# setup.py, Pipfile) rather than a lock file. With --no-resolve their version
+# is whatever the file declares — a range floor for `>=4.2` — so when uv has
+# resolved the real tree these rows are noise (and wrong versions).
+_PY_MANIFEST_NAMES = ("requirements", "pyproject.toml", "setup.py", "setup.cfg",
+                      "pipfile")
+
+_NO_SOURCES = "no dependency manifests"
 
 # The binary ran and did its job in both cases; the rest are real failures.
 _EXIT_OK = 0
@@ -79,10 +87,21 @@ _EXIT_NO_SOURCES = 128
 #   --all-vulns           the default hides advisories osv-scanner judges
 #                         unimportant; under-reporting is the output this
 #                         audit must never produce
+#   --no-resolve          osv-scanner's own transitive resolution of manifest
+#                         files INVENTS versions for a requirements.txt without
+#                         a lock (anyio 4.9.0 / idna 3.9.0 where `uv pip
+#                         compile` resolves 4.15.1 / 3.20; tqdm 4.9.0, pygments
+#                         2.9.0, setuptools 9.1.0 elsewhere). Python trees come
+#                         from uv (native.py); lock files are still read as-is.
+#                         Verified against v2.7.0:
+#                         cmd/osv-scanner/internal/helper/flags.go — BoolFlag
+#                         "no-resolve", usage "disable transitive dependency
+#                         resolution of manifest files" (a `scan source` flag,
+#                         also read in scan/source/command.go).
 #   --verbosity error     the progress log is per-file and would bury the
 #                         actual error message on stderr
 _V2_ARGV = ["scan", "source", "--format", "json", "--recursive",
-            "--allow-no-lockfiles", "--all-packages", "--all-vulns",
+            "--allow-no-lockfiles", "--no-resolve", "--all-packages", "--all-vulns",
             "--verbosity", "error"]
 # v1 had no `scan` subcommand and knows none of the flags above. Kept as a
 # fallback so a machine with an older binary degrades to fewer features
@@ -129,8 +148,15 @@ def parse_osv_scanner(
     repo_path: Path | str | None = None,
     direct: dict[str, set[str]] | None = None,
     dev: dict[str, set[str]] | None = None,
+    dropped: list[dict] | None = None,
+    skip_manifest_ecosystems: frozenset[str] | set[str] = frozenset(),
 ) -> list[NativeFinding]:
     """`osv-scanner --format json` output → findings.
+
+    Advisories whose own affected ranges exclude the reported version are
+    dropped into `dropped` (counted, never silent). `skip_manifest_ecosystems`
+    drops packages read from a manifest — not a lock — for ecosystems another
+    source resolved properly (PyPI via uv).
 
     `direct` / `dev` are the manifest scan's package names per ecosystem.
     osv-scanner reports the resolved tree without saying what was declared,
@@ -151,6 +177,8 @@ def parse_osv_scanner(
         if not name:
             continue
 
+        if eco in skip_manifest_ecosystems and _is_manifest_source(source):
+            continue
         direct_names = {n.lower() for n in (direct or {}).get(eco, set())}
         dev_names = {n.lower() for n in (dev or {}).get(eco, set())}
         groups = {str(g).lower() for g in (entry.get("dependency_groups") or [])}
@@ -173,6 +201,14 @@ def parse_osv_scanner(
                 continue
             vuln_id = str(record.get("id") or "")
             aliases = tuple(str(a) for a in (record.get("aliases") or []) if a)
+            pkg_version = str(pkg.get("version") or "")
+            if osv_applicability(record, raw_eco, name, pkg_version) == NOT_AFFECTED:
+                if dropped is not None:
+                    dropped.append({
+                        "id": vuln_id, "ecosystem": eco, "package": name,
+                        "version": pkg_version, "source": SOURCE,
+                        "reason": "version outside every affected range"})
+                continue
             produced.append(NativeFinding(
                 ecosystem=eco,
                 package=name,
@@ -211,6 +247,7 @@ def audit_repo(
     timeout: int = DEFAULT_TIMEOUT,
     runner=run_tool,
     on_progress=None,
+    skip_manifest_ecosystems: frozenset[str] | set[str] = frozenset(),
 ) -> NativeResult:
     """Scan a clone with osv-scanner. Never raises: an unavailable engine
     comes back as an empty result carrying a reason code.
@@ -247,8 +284,10 @@ def audit_repo(
         return _degraded(code, _stderr_tail(result.stderr)
                          or f"osv-scanner exited {result.code} without JSON")
 
-    findings = parse_osv_scanner(payload, repo_path=repo_path,
-                                 direct=direct_by_eco, dev=dev_by_eco)
+    dropped: list[dict] = []
+    findings = parse_osv_scanner(
+        payload, repo_path=repo_path, direct=direct_by_eco, dev=dev_by_eco,
+        dropped=dropped, skip_manifest_ecosystems=skip_manifest_ecosystems)
     scanned = scanned_ecosystems(payload)
     if not scanned:
         return _degraded(REASON_NO_SOURCES, _NO_SOURCES)
@@ -262,7 +301,7 @@ def audit_repo(
               for eco in sorted(scanned)]
     logger.info("osv_scanner_done repo=%s ecosystems=%s findings=%d",
                 repo_path, sorted(scanned), len(findings))
-    return NativeResult(findings=findings, checks=checks)
+    return NativeResult(findings=findings, checks=checks, dropped=dropped)
 
 
 # ─── Internals ───────────────────────────────────────────────────────
@@ -281,6 +320,12 @@ def _iter_packages(payload: object):
         for entry in result.get("packages") or []:
             if isinstance(entry, dict) and isinstance(entry.get("package"), dict):
                 yield source, entry
+
+
+def _is_manifest_source(source: dict) -> bool:
+    name = Path(str(source.get("path") or "")).name.lower()
+    return any(name.startswith(n) if n == "requirements" else name == n
+               for n in _PY_MANIFEST_NAMES)
 
 
 def _grade(record: dict, group_max: str) -> str:
@@ -313,7 +358,10 @@ def _subproject(path: object, repo_path: Path | str | None) -> str:
 def _degraded(code: str, reason: str) -> NativeResult:
     """No findings and a reason — never an exception. One missing engine must
     not take the audit down with it."""
-    status = "failed" if code in (REASON_BAD_JSON, REASON_FAILED) else "not_checked"
+    # "No manifests" is a fact about the repository (a config export with only
+    # XML files, an empty repo), not a failure of the audit.
+    status = ("failed" if code in (REASON_BAD_JSON, REASON_FAILED)
+              else "no_manifests" if code == REASON_NO_SOURCES else "not_checked")
     logger.warning("osv_scanner_unavailable code=%s reason=%s", code, reason)
     return NativeResult(
         findings=[],

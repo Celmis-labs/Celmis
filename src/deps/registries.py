@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 
+from src.deps.applicability import NOT_AFFECTED, evaluate_osv
 from src.deps.severity import (
     normalize_severity,
     severity_from_vector,
@@ -62,6 +63,7 @@ def fetch_latest(client: httpx.Client, ecosystem: str, package: str) -> str | No
 def fetch_vulns_batch(
     client: httpx.Client, deps: list[tuple[str, str, str]],
     *, deadline: float | None = None,
+    dropped: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[tuple[str, str, str], list[dict[str, Any]]], int]:
     """deps: [(ecosystem, package, version)] → ({(eco, pkg, ver): [vuln, …]},
     failed_batches).
@@ -139,6 +141,18 @@ def fetch_vulns_batch(
                 if len(vulns) < MAX_ADVISORY_DETAILS:
                     detail = _fetch_vuln_detail(client, vid, id_cache)
                     if detail:
+                        # OSV matched this record to the version, but the
+                        # record's own ranges are the final word: one that
+                        # puts `ver` outside every affected interval does not
+                        # apply, and is counted rather than silently lost.
+                        state, _fix = evaluate_osv(detail, eco, pkg, ver)
+                        if state == NOT_AFFECTED:
+                            if dropped is not None:
+                                dropped.append({
+                                    "id": vid, "ecosystem": eco, "package": pkg,
+                                    "version": ver, "source": "osv",
+                                    "reason": "version outside every affected range"})
+                            continue
                         vulns.append(_summarise(detail, eco, pkg, ver))
                         continue
                 # Past the detail budget, or the detail fetch failed: the
@@ -250,38 +264,28 @@ def osv_severity(detail: dict[str, Any], *, default: str = "medium") -> str:
 
 def osv_fixed_version(detail: dict[str, Any], ecosystem: str, package: str,
                       current: str = "") -> str | None:
-    """The version to upgrade to, from OSV's affected ranges.
+    """The version to upgrade to, from the affected range that CONTAINS
+    `current`.
 
-    `current` is what makes the answer usable: an advisory patched on several
-    branches lists a `fixed` per branch (log4j-core: 2.3.2, 2.12.2, 2.15.0),
-    and the smallest of those is a *downgrade* for anyone on 2.14.1. The
-    upgrade target is the lowest fix above the installed version.
+    An advisory patched on several branches lists a `fixed` per branch
+    (log4j-core: 2.3.2, 2.12.2, 2.15.0). The old rule — "the lowest fix above
+    the installed version, else the lowest fix" — printed a downgrade for
+    anyone already past every fix (picomatch 4.0.3 "fixed in 2.3.2"). Now the
+    fix comes from the interval the installed version is actually in; a version
+    outside every affected interval has no fix to offer (None) and
+    :func:`osv_applicability` says the advisory does not apply to it.
 
     Names and ecosystems are matched loosely on purpose: registries disagree
     about case, and OSV tags distro advisories with the release ("Debian:12")
     while the scan reports the same package under the bare ecosystem.
     """
-    base = str(ecosystem or "").split(":", 1)[0].lower()
-    name = str(package or "").lower()
-    fixes: list[str] = []
-    for aff in detail.get("affected") or []:
-        pkg = aff.get("package") or {}
-        if str(pkg.get("name") or "").lower() != name:
-            continue
-        if base and str(pkg.get("ecosystem") or "").split(":", 1)[0].lower() != base:
-            continue
-        for rng in aff.get("ranges") or []:
-            for ev in rng.get("events") or []:
-                if "fixed" in ev:
-                    fixes.append(str(ev["fixed"]))
-    if not fixes:
-        return None
-    fixes.sort(key=version_key)
-    if current:
-        above = [f for f in fixes if version_key(f) > version_key(current)]
-        if above:
-            return above[0]
-    return fixes[0]
+    return evaluate_osv(detail, ecosystem, package, current)[1]
+
+
+def osv_applicability(detail: dict[str, Any], ecosystem: str, package: str,
+                      version: str) -> str:
+    """affected | not_affected | unknown — see :mod:`src.deps.applicability`."""
+    return evaluate_osv(detail, ecosystem, package, version)[0]
 
 
 # ─── Version comparison ──────────────────────────────────────────────
@@ -341,6 +345,7 @@ __all__ = [
     "make_client",
     "fetch_latest",
     "fetch_vulns_batch",
+    "osv_applicability",
     "osv_fixed_version",
     "osv_severity",
     "outdated_level",

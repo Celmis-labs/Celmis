@@ -18,10 +18,10 @@ Two formats here, chosen for what they cost:
     here (headings, paragraphs, code blocks, bullets) is small enough to emit
     directly and verify.
 
-PDF is deliberately absent. Doing it server-side means weasyprint and its
-cairo/pango system libraries; the documentation page prints to PDF from the
-browser with the same typography it shows on screen, which is both better and
-free.
+PDF is not produced for the notes (the documentation page prints to PDF from
+the browser). The dependency audit has its own server-side PDF, built with
+fpdf2 rather than weasyprint so the image needs no cairo/pango —
+`src.docs.pdf_blocks`; `to_pdf_document` here is the markdown entry to it.
 """
 
 from __future__ import annotations
@@ -190,28 +190,25 @@ def to_docx_document(markdown: str) -> bytes:
     """A .docx from one markdown string, with no per-note scaffolding.
 
     `to_docx` above assembles a repo's notes and stamps each one's file path
-    under its heading. A document that was authored as a single markdown blob —
-    the dependency audit — already carries its own title and structure, and the
-    path line would be noise. Same converter, same five parts, different
-    envelope.
+    under its heading. A document that was authored as a single markdown blob
+    already carries its own title and structure, so this goes through the block
+    renderer instead (`src.docs.docx_blocks`): real list numbering, tables and
+    a page-number footer rather than typed bullets and stripped emphasis.
+    Callers that build blocks themselves (the dependency audit) call
+    `blocks_to_docx` directly.
     """
-    body = _markdown_to_paragraphs(markdown)
-    document = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        f"<w:body>{''.join(body)}"
-        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
-        '<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/>'
-        "</w:sectPr></w:body></w:document>"
-    )
-    buf = BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("[Content_Types].xml", _CONTENT_TYPES)
-        z.writestr("_rels/.rels", _RELS)
-        z.writestr("word/_rels/document.xml.rels", _DOC_RELS)
-        z.writestr("word/styles.xml", _STYLES)
-        z.writestr("word/document.xml", document)
-    return buf.getvalue()
+    from src.docs.blocks import parse_markdown
+    from src.docs.docx_blocks import blocks_to_docx
+
+    return blocks_to_docx(parse_markdown(markdown))
 
 
-__all__ = ["Note", "to_docx", "to_docx_document", "to_markdown"]
+def to_pdf_document(markdown: str) -> bytes:
+    """A PDF from one markdown string (see `src.docs.pdf_blocks`)."""
+    from src.docs.blocks import parse_markdown
+    from src.docs.pdf_blocks import blocks_to_pdf
+
+    return blocks_to_pdf(parse_markdown(markdown))
+
+
+__all__ = ["Note", "to_docx", "to_docx_document", "to_markdown", "to_pdf_document"]

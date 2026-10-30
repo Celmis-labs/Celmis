@@ -1089,6 +1089,7 @@
   "deps.engineNote": "La auditoría en sí es siempre determinista — auditores nativos (pip-audit, npm audit, …) donde la herramienta está instalada, y archivos lock + OSV.dev en el resto de los casos, sin que intervenga ningún LLM. El selector de motor solo elige quién escribe el informe de texto.",
   "deps.errorTitle": "La auditoría falló",
   "deps.errorUnknown": "Sin mensaje — el trabajo se detuvo sin reportar un motivo.",
+  "deps.exportPdf": "PDF (.pdf)",
   "deps.filterAll": "Todo",
   "deps.filterOutdated": "Solo desactualizados",
   "deps.filterVulnerable": "Solo vulnerables",

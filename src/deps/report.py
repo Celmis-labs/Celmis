@@ -34,6 +34,26 @@ def build_prompt_sync(run_id: str) -> str | None:
     finally:
         engine.dispose()
 
+    return build_prompt(rows, summary)
+
+
+_PROVENANCE_WORDS = {
+    "lock": "version from a lock file",
+    "pin": "version pinned in the manifest",
+    "resolved": "version RESOLVED on the audit date, no lock file",
+    "range": "declared RANGE only; installed version unknown",
+    "reported": "version stated by the audit tool",
+}
+
+
+def build_prompt(rows: list, summary: dict) -> str:
+    """The facts the model gets. Pure, so it can be tested without a database.
+
+    Every row says where its version came from (lock / pin / resolved / range)
+    and the coverage section distinguishes "checked", "covered by OSV" and "no
+    manifests" from real gaps — so the model stops asserting things the data
+    does not say (a floor read as an installation, "probably a false
+    positive")."""
     sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "none": 4}
     rows = sorted(rows, key=lambda r: (sev_rank.get(r.severity, 5), r.outdated == "none"))
     interesting = [r for r in rows if r.severity != "none" or r.outdated != "none"][:120]
@@ -51,6 +71,7 @@ def build_prompt_sync(run_id: str) -> str | None:
         transitive = any(v.get("transitive") for v in vulns)
         lines.append(
             f"{r.repo_slug} | {r.ecosystem} | {r.package} {r.current_version}"
+            f" [{getattr(r, 'version_source', None) or 'unknown provenance'}]"
             f" -> {r.latest_version or '?'} | drift={r.outdated}"
             f" | sev={r.severity}" + (" | TRANSITIVE" if transitive else "")
             + (f" | {vuln_bits}" if vuln_bits else "")
@@ -73,6 +94,40 @@ def build_prompt_sync(run_id: str) -> str | None:
         for h in (hygiene.get("items") or [])[:30]
     ]
 
+    cov = summary.get("coverage") or {}
+    dropped = summary.get("dropped_inapplicable") or {}
+    ranges = summary.get("range_hygiene") or {}
+    chains = summary.get("npm_chains") or {}
+    extra = [
+        "\n\nVersion provenance of the rows above (the bracket after each "
+        "version): " + "; ".join(f"{k} = {_PROVENANCE_WORDS.get(k, k)}" for k in
+                                _PROVENANCE_WORDS) + ". A `range` row is NOT "
+        "vulnerable or safe — its version is unknown; never describe a range "
+        "floor as the installed version.",
+        f"\nCoverage by status: {cov or 'n/a'}. `checked` = a native tool audited the "
+        "tree; `covered_by_osv` = lock/manifest audited through OSV without the "
+        "ecosystem's own CLI (Go: no call-reachability); `no_manifests` = nothing "
+        "to check (not a failure). Only the NOT AUDITED list below is a gap.",
+    ]
+    if dropped.get("total"):
+        extra.append(
+            f"\n{dropped['total']} advisories were NOT counted because the installed "
+            f"version is outside their affected range or at/above every fix "
+            f"(by source: {dropped.get('by_source')}).")
+    if ranges.get("total"):
+        extra.append(
+            f"\n{ranges['total']} dependencies are declared as ranges whose lowest "
+            "version has known advisories — a hygiene note (tighten the bound or "
+            "commit a lock file), not a vulnerability of an installed package.")
+    if chains.get("total"):
+        extra.append(
+            f"\n{chains['total']} npm packages merely pull in a vulnerable "
+            "dependency (chain entries, not vulnerabilities of their own); the "
+            "fix is the vulnerable dependency's fix (override) or a newer parent.")
+    extra.append(
+        "\nDo not speculate that a finding is a false positive; state only what "
+        "the data shows and list what is unknown.")
+
     parts = [
         "You are preparing a dependency-audit executive report for an engineering team.\n",
         f"Workspace summary: {summary.get('repos_scanned')} repos scanned, "
@@ -86,6 +141,7 @@ def build_prompt_sync(run_id: str) -> str | None:
         "Findings (repo | ecosystem | package current -> latest | drift | severity "
         "| TRANSITIVE | CVEs):\n",
         "\n".join(lines),
+        *extra,
     ]
     if gap_lines:
         parts.append(

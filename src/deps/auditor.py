@@ -42,13 +42,14 @@ import logging
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from src.deps.hygiene import check_repo as hygiene_check_repo
 from src.deps.imports import scan_imports
 from src.deps.locks import mark_transitive, scan_locks
+from src.deps.native import _pep503, detect_tools, is_gap
 from src.deps.native import audit_repo as native_audit_repo
-from src.deps.native import detect_tools
 from src.deps.osv_scanner import (
     DEFAULT_TIMEOUT as _OSV_SCANNER_DEFAULT_TIMEOUT,
 )
@@ -176,6 +177,14 @@ def run_audit(run_id: str, workspace_id: str, *,
         transitive_candidates: list[tuple[str, object]] = []  # (repo_slug, LockEntry)
         hygiene_items: list[dict] = []
         hygiene_by_kind: dict[str, int] = {}
+        # Advisories dropped because they do not apply to the version they were
+        # reported for, npm "pulls in vulnerable X" chains, and range-floor
+        # advisories — three things that used to be counted as vulnerabilities
+        # of the installed package (or lost without a trace).
+        inapplicable: list[dict] = []
+        npm_chains: list[dict] = []
+        range_notes: list[dict] = []
+        resolved_by_repo: dict[tuple[str, str, str], str] = {}
 
         for i, cfg in enumerate(repos):
             _phase("scanning", repos_done=i, repos_total=len(repos), current=cfg.repo_slug)
@@ -242,8 +251,9 @@ def run_audit(run_id: str, workspace_id: str, *,
             # treats as one. Observed with a fix branch that had zero
             # vulnerabilities colliding with the pre-fix document that had 38.
             audited_commits[cfg.repo_slug] = _head_sha(repo_path)
-            all_deps.extend((cfg.repo_slug, d) for d in deps)
             logger.info("dep_audit_scanned repo=%s deps=%d", cfg.repo_slug, len(deps))
+            repo_checks_from = len(native_checks)
+            resolved_here: dict[tuple[str, str], str] = {}
 
             # ── Native auditors: the real tree, where the tool exists.
             covered: set[str] = set()
@@ -269,6 +279,11 @@ def run_audit(run_id: str, workspace_id: str, *,
                                    cfg.repo_slug, exc)
                 else:
                     covered = native.covered()
+                    inapplicable.extend({"repo": cfg.repo_slug, **d} for d in native.dropped)
+                    npm_chains.extend({"repo": cfg.repo_slug, **c} for c in native.chains)
+                    resolved_here = dict(native.resolved)
+                    resolved_by_repo.update(
+                        {(cfg.repo_slug, s, p): v for (s, p), v in native.resolved.items()})
                     native_hits.extend((cfg.repo_slug, f) for f in native.findings)
                     native_checks.extend(
                         {"repo": cfg.repo_slug, **c.as_dict()} for c in native.checks)
@@ -286,6 +301,10 @@ def run_audit(run_id: str, workspace_id: str, *,
                 try:
                     scanned_by_osv = osv_scanner_audit_repo(
                         repo_path, declared=deps, timeout=_OSV_SCANNER_TIMEOUT,
+                        # uv resolved the Python tree; osv-scanner's manifest
+                        # packages (range floors) must not be reported again.
+                        skip_manifest_ecosystems=(
+                            {"PyPI"} if "PyPI" in covered else set()),
                         on_progress=lambda tool, sub, _i=i, _cfg=cfg: _phase(
                             "osv_scanner", repos_done=_i, repos_total=len(repos),
                             current=_cfg.repo_slug, tool=tool),
@@ -297,9 +316,16 @@ def run_audit(run_id: str, workspace_id: str, *,
                                    cfg.repo_slug, exc)
                 else:
                     covered |= scanned_by_osv.covered()
+                    inapplicable.extend(
+                        {"repo": cfg.repo_slug, **d} for d in scanned_by_osv.dropped)
                     native_hits.extend((cfg.repo_slug, f) for f in scanned_by_osv.findings)
                     native_checks.extend(
                         {"repo": cfg.repo_slug, **c.as_dict()} for c in scanned_by_osv.checks)
+
+            # Versions `uv pip compile` resolved for requirements files that had
+            # no lock: a range's floor is replaced by what a fresh install gets.
+            deps = _apply_resolved(deps, resolved_here)
+            all_deps.extend((cfg.repo_slug, d) for d in deps)
 
             # ── Hygiene: provenance problems no CVE feed reports.
             _phase("hygiene", repos_done=i, repos_total=len(repos), current=cfg.repo_slug)
@@ -323,6 +349,8 @@ def run_audit(run_id: str, workspace_id: str, *,
             except Exception as exc:  # noqa: BLE001
                 logger.warning("dep_audit_locks_failed repo=%s err=%s", cfg.repo_slug, exc)
                 entries = []
+            _mark_no_manifests(cfg.repo_slug, deps, entries, native_checks,
+                               repo_checks_from)
             picked: set[tuple[str, str, str]] = set()
             for entry in entries:
                 if entry.ecosystem in covered or not entry.transitive or not entry.version:
@@ -413,13 +441,16 @@ def run_audit(run_id: str, workspace_id: str, *,
                    done=0, total=len(vuln_keys))
             vulns: dict[tuple[str, str, str], list[dict]] = {}
             vuln_failed_batches = 0
+            osv_dropped: list[dict] = []
             for i in range(0, len(vuln_keys), _VULN_CHUNK):
                 chunk = vuln_keys[i:i + _VULN_CHUNK]
-                part, failed = fetch_vulns_batch(client, chunk)
+                part, failed = fetch_vulns_batch(client, chunk, dropped=osv_dropped)
                 vulns.update(part)
                 vuln_failed_batches += failed
                 _phase("checking_vulnerabilities", packages=len(vuln_keys),
                        done=min(i + len(chunk), len(vuln_keys)), total=len(vuln_keys))
+
+        inapplicable.extend(osv_dropped)
 
         # ── Build finding rows.
         #
@@ -427,54 +458,42 @@ def run_audit(run_id: str, workspace_id: str, *,
         # more than one source (declared in the manifest, found by pip-audit,
         # found again via the lock file), and three rows for one package is a
         # worse answer than one row carrying three advisories.
-        rows_by_key: dict[tuple[str, str, str], dict] = {}
-
-        def _row(repo_slug: str, ecosystem: str, package: str, version: str,
-                 *, is_dev: bool, transitive: bool) -> dict:
-            key = (repo_slug, ecosystem, package)
-            row = rows_by_key.get(key)
-            if row is None:
-                row = {
-                    "id": str(uuid.uuid4()),
-                    "run_id": run_id,
-                    "repo_slug": repo_slug,
-                    "ecosystem": ecosystem,
-                    "package": package,
-                    "current_version": version or "?",
-                    "latest_version": None,
-                    # "unknown", never "none". A row nobody resolved a latest
-                    # version for used to default to "none", which the table
-                    # and the exported document both render as "up to date":
-                    # `idna 2.10 -> ? (PyPI, none)` on a package two majors
-                    # behind. The aggregate histogram was already honest —
-                    # its own comment says "'unknown' is not 'up to date'" —
-                    # and the row it was built from was not.
-                    "outdated": "unknown",
-                    "is_dev": is_dev,
-                    "vulns": [],
-                    "severity": "none",
-                    "recommendation": "ok",
-                    "_transitive": transitive,
-                    "named_in_code": None,
-                }
-                rows_by_key[key] = row
-                return row
-            if row["current_version"] in ("", "?") and version:
-                row["current_version"] = version
-            # Declared beats derived on both flags: a package that is a direct
-            # production dependency anywhere is not "dev-only" or "transitive".
-            row["is_dev"] = row["is_dev"] and is_dev
-            row["_transitive"] = row["_transitive"] and transitive
-            return row
+        index = RowIndex(run_id)
+        rows_by_key = index.rows
+        _row = index.row
 
         # 1. Declared (direct) dependencies — drift + OSV advisories.
         for repo_slug, d in all_deps:
+            floor_only = d.version_source == "range"
             row = _row(repo_slug, d.ecosystem, d.package, d.version,
-                       is_dev=d.is_dev, transitive=False)
+                       is_dev=d.is_dev, transitive=False,
+                       version_source=d.version_source,
+                       # A range's first number is NOT the installed version:
+                       # the row says "range >=4.2", never "4.2".
+                       shown=f"range {d.raw_spec.strip()}" if floor_only else "")
             lat = latest.get((d.ecosystem, d.package))
             row["latest_version"] = lat
-            row["outdated"] = outdated_level(d.version, lat)
-            for vuln in vulns.get((d.ecosystem, d.package, d.version), []):
+            row["outdated"] = "unknown" if floor_only else outdated_level(d.version, lat)
+            found = vulns.get((d.ecosystem, d.package, d.version), [])
+            if floor_only:
+                # Advisories that hit only the FLOOR are a hygiene note about
+                # what the range permits, not a vulnerability of the package
+                # that is installed (nobody knows which version that is).
+                if found:
+                    range_notes.append({
+                        "repo": repo_slug, "ecosystem": d.ecosystem,
+                        "package": d.package, "spec": d.raw_spec.strip(),
+                        "floor": d.version, "manifest": d.manifest,
+                        "advisories": len(found),
+                        "worst": worst_severity(found),
+                        "ids": [str(v.get("id")) for v in found[:5]],
+                        "note": "range allows vulnerable versions: the range's "
+                                f"lowest version {d.version} has {len(found)} "
+                                "known advisories; tighten the lower bound or "
+                                "commit a lock file",
+                    })
+                continue
+            for vuln in found:
                 merge_vuln(row["vulns"], {**vuln, "transitive": False, "is_dev": d.is_dev})
 
         # 2. Transitive packages from lock files (only where OSV had to stand
@@ -485,16 +504,25 @@ def run_audit(run_id: str, workspace_id: str, *,
             if not found:
                 continue
             row = _row(repo_slug, entry.ecosystem, entry.package, entry.version,
-                       is_dev=entry.is_dev, transitive=True)
+                       is_dev=entry.is_dev, transitive=True, version_source="lock")
             for vuln in found:
                 merge_vuln(row["vulns"], {**vuln, "transitive": True, "is_dev": entry.is_dev})
 
         # 3. Native auditor + osv-scanner findings — authoritative, and the
         #    only sources that see transitive packages for the ecosystems they
         #    cover.
+        resolved_all = {(sub, pkg): ver for (sub, pkg), ver in resolved_by_repo.items()}
         for repo_slug, finding in native_hits:
+            if finding.source in ("npm-audit", "pnpm-audit", "yarn-audit") and finding.version:
+                vsrc = "lock"
+            elif resolved_all.get((repo_slug, finding.subproject, _pep503(finding.package))) \
+                    == finding.version and finding.version:
+                vsrc = "resolved"
+            else:
+                vsrc = ""
             row = _row(repo_slug, finding.ecosystem, finding.package, finding.version,
-                       is_dev=finding.is_dev, transitive=finding.transitive)
+                       is_dev=finding.is_dev, transitive=finding.transitive,
+                       version_source=vsrc)
             merge_vuln(row["vulns"], finding.to_vuln())
 
         rows: list[dict] = []
@@ -572,7 +600,22 @@ def run_audit(run_id: str, workspace_id: str, *,
         # Last checkpoint: a cancel that landed while we were saving must not
         # be overwritten by a "done" a moment later.
         _checkpoint()
-        not_checked = [c for c in native_checks if c.get("status") != "checked"]
+        # A gap is anything that is not `checked`, `covered_by_osv` (lock read
+        # and audited through OSV, e.g. Go without govulncheck, pnpm without
+        # the CLI) or `no_manifests` (nothing to check).
+        not_checked = [c for c in native_checks if is_gap(c.get("status"))]
+        coverage: dict[str, int] = {}
+        for c in native_checks:
+            coverage[str(c.get("status"))] = coverage.get(str(c.get("status")), 0) + 1
+        provenance: dict[str, int] = {}
+        for r in rows:
+            provenance[r["version_source"]] = provenance.get(r["version_source"], 0) + 1
+        inapplicable_by_source: dict[str, int] = {}
+        for d in inapplicable:
+            inapplicable_by_source[d.get("source", "?")] = \
+                inapplicable_by_source.get(d.get("source", "?"), 0) + 1
+        for d in inapplicable[:20]:
+            logger.info("dep_audit_inapplicable %s", d)
         _set_run(status="done", summary={
             "repos_total": len(repos),
             "repos_scanned": len(scanned),
@@ -610,6 +653,34 @@ def run_audit(run_id: str, workspace_id: str, *,
             "native_enabled": _NATIVE_ENABLED,
             "native_tools": {name: bool(path) for name, path in detect_tools().items()},
             "native_checks": native_checks[:_MAX_CHECK_ROWS],
+            "native_checks_total": len(native_checks),
+            #: check status -> how many (checked / covered_by_osv /
+            #: no_manifests are coverage; partial / failed / not_checked are gaps)
+            "coverage": coverage,
+            #: row version provenance: lock | pin | resolved | range | reported.
+            #: `range` rows carry only a floor and no vulnerability counts.
+            "version_provenance": provenance,
+            #: advisories NOT counted because the installed version is outside
+            #: their affected range / at or above every fix. Total is exact;
+            #: `items` is a sample of the first 50 (the cap is stated).
+            "dropped_inapplicable": {
+                "total": len(inapplicable),
+                "by_source": inapplicable_by_source,
+                "items": inapplicable[:50],
+                "items_shown": min(len(inapplicable), 50),
+            },
+            #: "range allows vulnerable versions" — hygiene, not vulnerabilities
+            "range_hygiene": {
+                "total": len(range_notes),
+                "items": range_notes[:_MAX_HYGIENE_ITEMS],
+                "items_shown": min(len(range_notes), _MAX_HYGIENE_ITEMS),
+            },
+            #: npm "pulls in vulnerable X" chains, kept out of the vuln counts
+            "npm_chains": {
+                "total": len(npm_chains),
+                "items": npm_chains[:100],
+                "items_shown": min(len(npm_chains), 100),
+            },
             "not_checked": not_checked[:_MAX_CHECK_ROWS],
             "transitive": n_transitive,
             "transitive_vulnerable": n_transitive_vulnerable,
@@ -640,6 +711,98 @@ def run_audit(run_id: str, workspace_id: str, *,
         raise
     finally:
         engine.dispose()
+
+
+class RowIndex:
+    """The finding rows of one run, keyed by (repo, ecosystem, package, VERSION)."""
+
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+        self.rows: dict[tuple[str, str, str, str], dict] = {}
+
+    def row(self, repo_slug: str, ecosystem: str, package: str, version: str,
+            *, is_dev: bool, transitive: bool, version_source: str = "",
+            shown: str = "") -> dict:
+        # KEYED BY VERSION. A row is a package AT A VERSION: advisories
+        # reported for an older copy of a package used to be painted onto
+        # the row of a newer one (`idna 3.18` carrying "fixed in 3.15").
+        # A report with no version (npm audit without a lock) attaches to
+        # the package's only row, else gets its own unversioned one.
+        key = (repo_slug, ecosystem, package, version or "")
+        row = self.rows.get(key)
+        if row is None and not version:
+            same = [r for k, r in self.rows.items() if k[:3] == key[:3]]
+            if len(same) == 1:
+                row = same[0]
+        if row is None:
+            row = {
+                "id": str(uuid.uuid4()),
+                "run_id": self.run_id,
+                "repo_slug": repo_slug,
+                "ecosystem": ecosystem,
+                "package": package,
+                "current_version": shown or version or "?",
+                "latest_version": None,
+                # "unknown", never "none". A row nobody resolved a latest
+                # version for used to default to "none", which the table
+                # and the exported document both render as "up to date".
+                "outdated": "unknown",
+                "is_dev": is_dev,
+                "vulns": [],
+                "severity": "none",
+                "recommendation": "ok",
+                # lock | pin | resolved | range | reported (see scanner.py)
+                "version_source": version_source or "reported",
+                "_transitive": transitive,
+                "named_in_code": None,
+            }
+            self.rows[key] = row
+            return row
+        if row["current_version"] in ("", "?") and version:
+            row["current_version"] = version
+        if row["version_source"] == "reported" and version_source:
+            row["version_source"] = version_source
+        # Declared beats derived on both flags: a package that is a direct
+        # production dependency anywhere is not "dev-only" or "transitive".
+        row["is_dev"] = row["is_dev"] and is_dev
+        row["_transitive"] = row["_transitive"] and transitive
+        return row
+
+
+def _apply_resolved(deps: list, resolved: dict[tuple[str, str], str]) -> list:
+    """A range with no lock gets the version `uv` resolved for its directory
+    (provenance "resolved"); everything else is unchanged."""
+    if not resolved:
+        return deps
+    out = []
+    for d in deps:
+        if d.version_source == "range" and d.ecosystem == "PyPI":
+            sub = os.path.dirname(d.manifest)
+            ver = resolved.get((sub, _pep503(d.package)))
+            if ver:
+                out.append(replace(d, version=ver, version_source="resolved"))
+                continue
+        out.append(d)
+    return out
+
+
+def _mark_no_manifests(repo: str, deps: list, entries: list, checks: list[dict],
+                       start: int) -> None:
+    """A repository with no dependency manifests at all (a configuration export
+    of XML/BSL files, an empty repo) is "no dependency manifests" — a fact —
+    and not "No scan at all" / an osv-scanner failure."""
+    mine = checks[start:]
+    if deps or entries or any(c.get("ecosystem") != "all" for c in mine):
+        return
+    keep = [c for c in mine
+            if c.get("reason_code") not in ("binary_missing", "no_sources")]
+    del checks[start:]
+    checks.extend(keep)
+    checks.append({
+        "repo": repo, "ecosystem": "all", "tool": "manifest-scan", "subproject": "",
+        "status": "no_manifests", "reason": "no dependency manifests",
+        "findings": 0, "reason_code": "no_manifests",
+    })
 
 
 def vuln_idents(vuln: dict) -> set[str]:

@@ -117,7 +117,8 @@ def test_missing_tool_is_not_checked_with_a_reason(tmp_path) -> None:
 
 
 def test_missing_lockfile_is_reported_not_silently_skipped(tmp_path) -> None:
-    (tmp_path / "package.json").write_text(json.dumps({"name": "app"}))
+    (tmp_path / "package.json").write_text(json.dumps(
+        {"name": "app", "dependencies": {"left-pad": "1.3.0"}}))
 
     def runner(cmd, cwd, timeout):  # не має викликатись узагалі
         raise AssertionError(f"npm audit без lock-файлу не повинен запускатись: {cmd}")

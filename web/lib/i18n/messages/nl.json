@@ -1089,6 +1089,7 @@
   "deps.engineNote": "De audit zelf is altijd deterministisch — native auditors (pip-audit, npm audit, …) waar de tool geïnstalleerd is, elders lockbestanden + OSV.dev, zonder LLM. De engine-keuze bepaalt alleen wie het tekstrapport schrijft.",
   "deps.errorTitle": "Audit mislukt",
   "deps.errorUnknown": "Geen bericht — de taak is gestopt zonder reden op te geven.",
+  "deps.exportPdf": "PDF (.pdf)",
   "deps.filterAll": "Alles",
   "deps.filterOutdated": "Alleen verouderd",
   "deps.filterVulnerable": "Alleen kwetsbaar",

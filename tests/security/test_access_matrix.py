@@ -281,6 +281,24 @@ async def test_the_dependency_findings_hold_no_row_of_an_unseen_repo(matrix, who
         assert summary["packages"] == len(EXPECTED[who])
 
 
+@pytest.mark.parametrize("who", PRINCIPALS)
+async def test_the_dependency_report_export_holds_no_row_of_an_unseen_repo(matrix, who):
+    import io
+
+    from pypdf import PdfReader
+
+    h = matrix.h(who, "ws-a")
+    run_id = matrix.matrix["run"]
+    md = await matrix.client.get(f"/api/deps/{run_id}/export?format=md", headers=h)
+    pdf = await matrix.client.get(f"/api/deps/{run_id}/export?format=pdf", headers=h)
+    assert md.status_code == 200 and pdf.status_code == 200, (md.text, pdf.text[:200])
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert pdf.content.startswith(b"%PDF")
+    _check_listing(who, md.text, surface="/api/deps/export?format=md")
+    text = "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(pdf.content)).pages)
+    _check_listing(who, text, surface="/api/deps/export?format=pdf", lists_all=False)
+
+
 @pytest.mark.parametrize("who", ["editor_a", "member_a", "viewer_a", "both"])
 async def test_the_ai_report_and_evidence_are_for_admins_only(matrix, who):
     h = matrix.h(who, "ws-a")

@@ -1089,6 +1089,7 @@
   "deps.engineNote": "Auditul în sine este întotdeauna determinist — auditori nativi (pip-audit, npm audit, …) acolo unde tool-ul este instalat, lock files + OSV.dev în rest, fără LLM implicat. Selectorul de motor alege doar cine scrie raportul text.",
   "deps.errorTitle": "Auditul a eșuat",
   "deps.errorUnknown": "Niciun mesaj — jobul s-a oprit fără să raporteze un motiv.",
+  "deps.exportPdf": "PDF (.pdf)",
   "deps.filterAll": "Tot",
   "deps.filterOutdated": "Doar învechite",
   "deps.filterVulnerable": "Doar vulnerabile",

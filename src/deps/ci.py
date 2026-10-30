@@ -70,7 +70,9 @@ class CiResult:
         return sum(1 for f in self.findings if _RANK.get(f.severity, 99) <= limit)
 
     def not_checked(self) -> list[dict[str, Any]]:
-        return [c for c in self.checks if c.get("status") != "checked"]
+        from src.deps.native import is_gap
+
+        return [c for c in self.checks if is_gap(c.get("status"))]
 
 
 def audit_path(directory: Path, *, timeout: int = 300) -> CiResult:

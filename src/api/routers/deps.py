@@ -25,7 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import current_workspace_id, get_current_user, readable_repo_slugs
-from src.db.models import DepAuditRun, DepFinding
+from src.db.models import DepAuditRun, DepFinding, Workspace
 from src.db.session import get_async_session
 from src.users import User
 
@@ -63,6 +63,9 @@ class FindingOut(BaseModel):
     #: function is called. See src/deps/imports.py for what reachability would
     #: require and why this installation cannot answer it.
     named_in_code: dict | None = None
+    #: lock | pin | resolved | range | reported | None (row predates the column).
+    #: `range` = current_version is the declared range, not an installed version.
+    version_source: str | None = None
 
 
 def _run_out(r: DepAuditRun) -> RunOut:
@@ -474,27 +477,28 @@ async def findings(
         current_version=r.current_version, latest_version=r.latest_version,
         outdated=r.outdated, is_dev=r.is_dev, vulns=list(r.vulns or []),
         severity=r.severity, recommendation=r.recommendation,
-        named_in_code=r.named_in_code,
+        named_in_code=r.named_in_code, version_source=r.version_source,
     ) for r in rows]
 
 
 @router.get("/{run_id}/export")
 async def export_run(
     run_id: str,
-    format: str = Query(default="md", pattern="^(md|docx)$"),
+    format: str = Query(default="md", pattern="^(md|docx|pdf)$"),
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> Response:
-    """The whole run as one document: overview, coverage, AI report, findings.
+    """The whole run as one document: summary, actions, coverage, findings.
 
-    PDF is not generated here — the dependencies page prints to PDF from the
-    browser, the same choice the documentation export made, and for the same
-    reason: server-side PDF means weasyprint and its cairo/pango libraries.
+    md, docx and pdf are three renderings of the same block list
+    (`src.deps.document.build_report`). The PDF is built server-side with
+    fpdf2 — pure Python, fonts bundled — so the browser no longer prints the
+    whole interactive page to make one.
     """
     from datetime import datetime
 
-    from src.deps.document import PRODUCT, build_markdown
+    from src.deps.document import PRODUCT, build_report, footer_label
 
     run = await session.get(DepAuditRun, run_id)
     if run is None or run.workspace_id != workspace_id:
@@ -515,21 +519,34 @@ async def export_run(
         rows = [r for r in rows if r.repo_slug in visible]
         run = _restricted_run(run, list(rows), visible)
     stamp = datetime.now(UTC).strftime("%Y-%m-%d")
-    markdown = build_markdown(run, list(rows), generated_at=stamp)
+    workspace = await session.get(Workspace, workspace_id)
+    workspace_name = workspace.name if workspace is not None else ""
+    blocks = build_report(run, list(rows), generated_at=stamp, workspace=workspace_name)
 
     logger.info("deps_exported run=%s format=%s findings=%d by=%s",
                 run_id, format, len(rows), user.email)
     name = f"{PRODUCT.lower()}-dependency-audit-{stamp}"
     if format == "docx":
-        from src.docs.export import to_docx_document
+        from src.docs.docx_blocks import blocks_to_docx
         return Response(
-            content=to_docx_document(markdown),
+            content=await asyncio.to_thread(
+                blocks_to_docx, blocks, footer=footer_label(stamp)),
             media_type=("application/vnd.openxmlformats-officedocument"
                         ".wordprocessingml.document"),
             headers={"Content-Disposition": f'attachment; filename="{name}.docx"'},
         )
+    if format == "pdf":
+        from src.docs.pdf_blocks import blocks_to_pdf
+        # CPU-bound (font subsetting, layout): off the event loop.
+        return Response(
+            content=await asyncio.to_thread(
+                blocks_to_pdf, blocks, footer=footer_label(stamp)),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{name}.pdf"'},
+        )
+    from src.docs.blocks import to_markdown_text
     return Response(
-        content=markdown,
+        content=to_markdown_text(blocks),
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{name}.md"'},
     )

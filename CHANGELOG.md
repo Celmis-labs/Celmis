@@ -20,6 +20,51 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.15] — 2026-10-30
+
+### Added
+
+- A real PDF export of the dependency audit: `GET /api/deps/{run_id}/export?format=pdf`,
+  generated server-side from the same report as the Word and markdown exports
+  (title block, KPI cards, tables, severity colours, "Page X of Y", embedded
+  Noto Sans so Cyrillic renders). Built with `fpdf2` (pure Python, no
+  cairo/pango); the OFL fonts and their licence are in `src/docs/fonts/`.
+  The dependencies page now downloads it with the same loading state as the
+  Word button instead of calling `window.print()`, and a manual Ctrl+P hides
+  the page's controls (`@media print`). New locale key `deps.exportPdf`.
+
+### Changed
+
+- The dependency-audit report is restructured and shared by all three formats
+  (`src/deps/document.py` builds blocks, `src/docs/blocks.py` renders markdown).
+  Order: summary, what to do now (fixable and unfixable vulnerabilities grouped
+  across repositories), coverage (check statuses, `version_provenance`,
+  `dropped_inapplicable`, not-checked repositories), findings per repository as
+  tables (package, current, source pin/lock/resolved/range, fixed in, latest,
+  severity, advisories) with the worst repository first, then appendices:
+  outdated packages without a vulnerability (one compact table, capped at 250
+  rows), range-hygiene and npm-chain notes, supply-chain hygiene.
+- The Word export is no longer typed bullets and stripped markdown: real
+  heading/list/table styles, tables with a repeating header row and fixed
+  column widths, severity cell colours, a "Page X of Y" footer and document
+  properties (`src/docs/docx_blocks.py`). Italic markers no longer leave a
+  stray `_` behind. The documentation export's `to_docx_document` uses it too.
+
+### Fixed
+
+- Dependency audit accuracy. A range floor (`>=4.2`, `^8`) is no longer reported
+  as the installed version: direct dependencies take the version from the
+  nearest lock file, Python trees without a lock are resolved with
+  `uv pip compile` for the repository's target Python, and a bare range is
+  shown as a range (advisories hitting only its floor become a hygiene note).
+  osv-scanner runs with `--no-resolve`. Finding rows are kept per package
+  version. "Fixed in" comes from the affected range that contains the installed
+  version, and advisories that do not apply to it are dropped and counted in the
+  run summary. npm `fixAvailable` downgrades and `npm-chain-*` entries are no
+  longer reported as fixes or vulnerabilities. Coverage no longer calls
+  workspace members, Go (via OSV), pnpm/yarn locks or repositories without
+  manifests "not checked". Gradle version catalogs are read.
+
 ## [3.1.13] — 2026-10-28
 
 A question about 1C code gets the whole algorithm into its context, not one

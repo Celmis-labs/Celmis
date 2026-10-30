@@ -1089,6 +1089,7 @@
   "deps.engineNote": "감사 자체는 항상 결정적입니다 — 도구가 설치된 곳에서는 네이티브 감사 도구(pip-audit, npm audit 등)를, 그 외에는 락 파일 + OSV.dev를 쓰며 LLM은 관여하지 않습니다. 엔진 선택은 텍스트 리포트를 누가 쓸지만 정합니다.",
   "deps.errorTitle": "감사 실패",
   "deps.errorUnknown": "메시지가 없습니다 — 작업이 이유를 남기지 않고 멈췄습니다.",
+  "deps.exportPdf": "PDF (.pdf)",
   "deps.filterAll": "전체",
   "deps.filterOutdated": "구버전만",
   "deps.filterVulnerable": "취약한 것만",

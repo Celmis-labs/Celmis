@@ -1089,6 +1089,7 @@
   "deps.engineNote": "审计本身始终是确定性的 — 装有原生审计器（pip-audit、npm audit 等）的用原生工具，其余一律用锁文件 + OSV.dev，全程不涉及 LLM。引擎选择只决定由谁来撰写文字报告。",
   "deps.errorTitle": "审计失败",
   "deps.errorUnknown": "没有错误信息 — 任务停止时未报告原因。",
+  "deps.exportPdf": "PDF (.pdf)",
   "deps.filterAll": "全部",
   "deps.filterOutdated": "仅过期",
   "deps.filterVulnerable": "仅有漏洞",

@@ -1089,6 +1089,7 @@
   "deps.engineNote": "Sam audyt jest zawsze deterministyczny — natywne audytory (pip-audit, npm audit, …) tam, gdzie narzędzie jest zainstalowane, a wszędzie indziej pliki lock + OSV.dev, bez udziału LLM. Wybór silnika decyduje tylko o tym, kto pisze raport tekstowy.",
   "deps.errorTitle": "Audyt nie powiódł się",
   "deps.errorUnknown": "Brak komunikatu — zadanie zatrzymało się bez podania przyczyny.",
+  "deps.exportPdf": "PDF (.pdf)",
   "deps.filterAll": "Wszystko",
   "deps.filterOutdated": "Tylko nieaktualne",
   "deps.filterVulnerable": "Tylko podatne",

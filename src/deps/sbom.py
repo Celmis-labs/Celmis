@@ -138,6 +138,10 @@ def build_sbom(
                 {"name": "celmis:ecosystem", "value": eco},
                 {"name": "celmis:manifest",
                  "value": getattr(dep, "manifest", "") or ""},
+                # lock | pin | resolved | range. `range` means `version` is the
+                # range's floor, not what is installed.
+                {"name": "celmis:version-source",
+                 "value": getattr(dep, "version_source", "pin") or "pin"},
             ],
         })
 

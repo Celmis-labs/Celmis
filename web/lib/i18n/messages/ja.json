@@ -1089,6 +1089,7 @@
   "deps.engineNote": "監査そのものは常に決定的です — ツールが入っていれば専用の監査ツール（pip-audit、npm audit など）を、それ以外はロックファイルと OSV.dev を使い、LLM は関与しません。エンジンの選択は、文章のレポートを誰が書くかを決めるだけです。",
   "deps.errorTitle": "監査に失敗しました",
   "deps.errorUnknown": "メッセージなし — ジョブは理由を報告せずに停止しました。",
+  "deps.exportPdf": "PDF (.pdf)",
   "deps.filterAll": "すべて",
   "deps.filterOutdated": "古いものだけ",
   "deps.filterVulnerable": "脆弱性ありだけ",

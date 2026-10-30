@@ -1089,6 +1089,7 @@
   "deps.engineNote": "Samotný audit je vždy deterministický — nativní auditory (pip-audit, npm audit, …) tam, kde je nástroj nainstalovaný, jinde lock soubory + OSV.dev, žádné LLM. Volba enginu jen určuje, kdo napíše textový report.",
   "deps.errorTitle": "Audit selhal",
   "deps.errorUnknown": "Bez zprávy — úloha skončila, aniž by uvedla důvod.",
+  "deps.exportPdf": "PDF (.pdf)",
   "deps.filterAll": "Vše",
   "deps.filterOutdated": "Jen zastaralé",
   "deps.filterVulnerable": "Jen zranitelné",

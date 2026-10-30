@@ -1089,6 +1089,7 @@
   "deps.engineNote": "L'audit stesso è sempre deterministico — auditor nativi (pip-audit, npm audit, …) dove lo strumento è installato, file di lock + OSV.dev in tutti gli altri casi, nessun LLM coinvolto. Il selettore del motore sceglie solo chi scrive il report testuale.",
   "deps.errorTitle": "Audit non riuscito",
   "deps.errorUnknown": "Nessun messaggio — il job si è interrotto senza indicare un motivo.",
+  "deps.exportPdf": "PDF (.pdf)",
   "deps.filterAll": "Tutto",
   "deps.filterOutdated": "Solo obsoleti",
   "deps.filterVulnerable": "Solo vulnerabili",

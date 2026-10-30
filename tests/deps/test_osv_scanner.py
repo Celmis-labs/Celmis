@@ -378,7 +378,8 @@ def test_no_manifests_is_an_honest_empty_not_a_crash(tmp_path) -> None:
 
     assert result.findings == []
     assert result.checks[0].reason_code == REASON_NO_SOURCES
-    assert result.checks[0].status == "not_checked"
+    # Немає маніфестів — це факт про репозиторій, а не збій аудиту.
+    assert result.checks[0].status == "no_manifests"
 
 
 def test_v1_binary_falls_back_to_the_older_command_form(tmp_path) -> None:

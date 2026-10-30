@@ -1089,6 +1089,7 @@
   "deps.engineNote": "Denetimin kendisi her zaman deterministiktir — aracın kurulu olduğu yerde yerel denetleyiciler (pip-audit, npm audit, …), diğer her yerde lock dosyaları + OSV.dev; LLM devrede değildir. Motor seçici yalnızca metin raporu kimin yazacağını belirler.",
   "deps.errorTitle": "Denetim başarısız",
   "deps.errorUnknown": "Mesaj yok — iş, gerekçe bildirmeden durdu.",
+  "deps.exportPdf": "PDF (.pdf)",
   "deps.filterAll": "Her şey",
   "deps.filterOutdated": "Yalnızca eski sürümler",
   "deps.filterVulnerable": "Yalnızca açığı olanlar",

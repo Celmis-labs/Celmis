@@ -1089,6 +1089,7 @@
   "deps.engineNote": "Das Audit selbst ist immer deterministisch — native Auditoren (pip-audit, npm audit, …), wo das Tool installiert ist, überall sonst Lock-Dateien + OSV.dev, kein LLM ist beteiligt. Die Engine-Auswahl bestimmt nur, wer den Textbericht verfasst.",
   "deps.errorTitle": "Audit fehlgeschlagen",
   "deps.errorUnknown": "Keine Meldung — der Job wurde beendet, ohne einen Grund zu melden.",
+  "deps.exportPdf": "PDF (.pdf)",
   "deps.filterAll": "Alles",
   "deps.filterOutdated": "Nur veraltete",
   "deps.filterVulnerable": "Nur verwundbare",

@@ -149,7 +149,7 @@ def test_a_partial_check_stays_in_the_not_checked_list():
 
     source = (Path(__file__).resolve().parents[2]
               / "src" / "deps" / "auditor.py").read_text()
-    assert 'c.get("status") != "checked"' in source, (
+    assert 'is_gap(c.get("status"))' in source, (
         "the not-checked filter changed — re-check that 'partial' still lands "
         "in the coverage panel"
     )

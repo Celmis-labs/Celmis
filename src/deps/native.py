@@ -30,10 +30,18 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
+from src.deps.applicability import (
+    compare_versions,
+    fixes_say_fixed,
+    lowest_fix_above,
+    semver_range_contains,
+)
 from src.deps.severity import normalize_severity, severity_from_vector
 
 logger = logging.getLogger(__name__)
@@ -143,10 +151,34 @@ class EcosystemCheck:
         return asdict(self)
 
 
+#: Check statuses that are NOT gaps. `checked` — a native tool audited the
+#: tree; `covered_by_osv` — no native tool in this image, but the lock/manifest
+#: was read and OSV audited it (pnpm/yarn without the CLI, Go without
+#: govulncheck: no call-reachability, but not "unchecked"); `no_manifests` —
+#: there is nothing to check, which is a fact about the repository and not a
+#: failure of the audit. Everything else (`not_checked`, `failed`, `partial`)
+#: is a gap and is listed as one.
+COVERED_STATUSES = frozenset({"checked", "covered_by_osv", "no_manifests"})
+
+
+def is_gap(status: object) -> bool:
+    return str(status) not in COVERED_STATUSES
+
+
 @dataclass
 class NativeResult:
     findings: list[NativeFinding]
     checks: list[EcosystemCheck]
+    #: Advisories a source reported that do NOT apply to the version it was
+    #: reported for (installed version outside every affected range, or at or
+    #: above every fix). Counted and surfaced in the run notes, never silent.
+    dropped: list[dict] = field(default_factory=list)
+    #: (subproject, package) → version `uv pip compile` resolved on the audit
+    #: date for a requirements file with no lock. Provenance "resolved".
+    resolved: dict[tuple[str, str], str] = field(default_factory=dict)
+    #: npm "vulnerable through X" chains, kept apart from the vulnerabilities:
+    #: {package, version, severity, pulls_in, fix_via, subproject, is_dev}.
+    chains: list[dict] = field(default_factory=list)
 
     def covered(self) -> set[str]:
         """Ecosystems a native tool actually audited — the auditor skips its
@@ -300,6 +332,10 @@ def _first_version(spec: object) -> str | None:
     return m.group(1) if m else None
 
 
+def _pep503(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", str(name)).lower()
+
+
 def _verkey(v: str) -> tuple:
     parts = []
     for chunk in re.split(r"[.\-+]", str(v).lstrip("v")):
@@ -320,6 +356,7 @@ def parse_pip_audit(
     force_dev: bool = False,
     subproject: str = "",
     source: str = "pip-audit",
+    dropped: list[dict] | None = None,
 ) -> list[NativeFinding]:
     """`pip-audit -f json` — both the current `{"dependencies": [...]}` shape
     and the pre-2.0 bare list.
@@ -334,8 +371,8 @@ def parse_pip_audit(
         deps = payload
     else:
         return []
-    direct_l = {n.lower() for n in (direct or set())}
-    dev_l = {n.lower() for n in (dev or set())}
+    direct_l = {_pep503(n) for n in (direct or set())}
+    dev_l = {_pep503(n) for n in (dev or set())}
 
     out: list[NativeFinding] = []
     for dep in deps:
@@ -347,6 +384,17 @@ def parse_pip_audit(
             if not isinstance(vuln, dict):
                 continue
             vid = str(vuln.get("id") or "")
+            fixes = [str(f) for f in (vuln.get("fix_versions") or []) if f]
+            if fixes_say_fixed("PyPI", version, fixes):
+                # The installed version is at or above EVERY listed fix: the
+                # advisory was reported for an older copy of the package.
+                if dropped is not None:
+                    dropped.append({
+                        "id": vid, "ecosystem": "PyPI", "package": name,
+                        "version": version, "source": source,
+                        "reason": f"installed {version} is at or above every fix "
+                                  f"({', '.join(fixes)})"})
+                continue
             aliases = vuln.get("aliases") or []
             description = str(vuln.get("description") or vuln.get("summary") or "")
             out.append(NativeFinding(
@@ -358,13 +406,15 @@ def parse_pip_audit(
                 severity=normalize_severity(vuln.get("severity"), default="medium"),
                 vuln_id=vid,
                 cve=_cve(vid, aliases),
-                fixed_in=_first_version(vuln.get("fix_versions")),
+                # The lowest fix ABOVE the installed version — never a downgrade.
+                fixed_in=(lowest_fix_above("PyPI", version, fixes)
+                          if version else _first_version(fixes)),
                 summary=description,
                 url=f"https://osv.dev/vulnerability/{vid}" if vid else "",
                 # `force_dev` is how a requirements-dev.txt run labels its whole
                 # result set — pip-audit itself has no notion of dev extras.
-                is_dev=force_dev or name in dev_l,
-                transitive=bool(direct_l) and name not in direct_l,
+                is_dev=force_dev or _pep503(name) in dev_l,
+                transitive=bool(direct_l) and _pep503(name) not in direct_l,
                 source=source,
                 subproject=subproject,
             ))
@@ -381,6 +431,8 @@ def parse_npm_audit(
     prod_names: set[str] | None = None,
     subproject: str = "",
     source: str = "npm-audit",
+    chains: list[dict] | None = None,
+    dropped: list[dict] | None = None,
 ) -> list[NativeFinding]:
     """`npm audit --json`.
 
@@ -402,6 +454,34 @@ def parse_npm_audit(
 
     installed = {k.lower(): v for k, v in (installed or {}).items()}
     out: list[NativeFinding] = []
+
+    def _own_fix(pkg: str, entry: dict, adv_range: str, version: str) -> str | None:
+        """A fix for THIS package. npm's `fixAvailable` names what
+        `npm audit fix --force` would install — often a downgrade (shadcn
+        4.21.0 -> 1.0.0) or a different package's version — so it is accepted
+        only when it names the same package AND is above the installed version
+        (which therefore has to be known). `range` is the VULNERABLE range and
+        is never read as a fix."""
+        fix = entry.get("fixAvailable")
+        if (isinstance(fix, dict) and str(fix.get("name") or pkg) == pkg
+                and fix.get("version") and version
+                and compare_versions("npm", str(fix["version"]), version) > 0):
+            return str(fix["version"])
+        return None
+
+    # name -> best known own fix, for the chain notes below.
+    own_fix: dict[str, str] = {}
+    for name, entry in vulns.items():
+        if isinstance(entry, dict) and any(isinstance(v, dict) for v in entry.get("via") or []):
+            pkg = str(entry.get("name") or name)
+            ver = installed.get(pkg.lower(), "")
+            for adv in entry["via"]:
+                if isinstance(adv, dict):
+                    f = _own_fix(pkg, entry, str(adv.get("range") or ""), ver)
+                    if f and (pkg not in own_fix
+                              or compare_versions("npm", f, own_fix[pkg]) > 0):
+                        own_fix[pkg] = f
+
     for name, entry in vulns.items():
         if not isinstance(entry, dict):
             continue
@@ -409,12 +489,6 @@ def parse_npm_audit(
         severity = normalize_severity(entry.get("severity"), default="medium")
         transitive = not bool(entry.get("isDirect", False))
         is_dev = prod_names is not None and pkg not in prod_names
-        fix = entry.get("fixAvailable")
-        # `fixAvailable` may name a *different* package (the parent that has
-        # to move); only a fix for this package is a version to jump to.
-        fixed_in = (str(fix.get("version")) if isinstance(fix, dict)
-                    and str(fix.get("name") or pkg) == pkg and fix.get("version")
-                    else None)
         version = installed.get(pkg.lower(), "")
 
         advisories = [v for v in (entry.get("via") or []) if isinstance(v, dict)]
@@ -423,16 +497,24 @@ def parse_npm_audit(
             for adv in advisories:
                 url = str(adv.get("url") or "")
                 gid = _ghsa(url, adv.get("id"))
+                adv_range = str(adv.get("range") or "")
+                vid = gid or f"npm-{adv.get('source') or adv.get('id') or pkg}"
+                if version and adv_range and semver_range_contains(adv_range, version) is False:
+                    if dropped is not None:
+                        dropped.append({
+                            "id": vid, "ecosystem": "npm", "package": pkg,
+                            "version": version, "source": source,
+                            "reason": f"installed {version} is outside the "
+                                      f"vulnerable range {adv_range}"})
+                    continue
                 out.append(NativeFinding(
                     ecosystem="npm",
                     package=pkg,
                     version=version,
                     severity=normalize_severity(adv.get("severity"), default=severity),
-                    vuln_id=gid or f"npm-{adv.get('source') or adv.get('id') or pkg}",
+                    vuln_id=vid,
                     cve=_cve(adv.get("cve"), adv.get("cves"), adv.get("title")),
-                    # `range` is the VULNERABLE range, never a fix — inferring
-                    # a target version from it would be a confident lie.
-                    fixed_in=fixed_in,
+                    fixed_in=_own_fix(pkg, entry, adv_range, version),
                     summary=str(adv.get("title") or ""),
                     url=url,
                     is_dev=is_dev,
@@ -440,25 +522,28 @@ def parse_npm_audit(
                     source=source,
                     subproject=subproject,
                 ))
-        else:
-            # Vulnerable only *through* another package — npm reports the
-            # chain, not an advisory of its own.
-            out.append(NativeFinding(
-                ecosystem="npm",
-                package=pkg,
-                version=version,
-                severity=severity,
-                vuln_id=f"npm-chain-{pkg}",
-                cve=None,
-                fixed_in=fixed_in,
-                summary=("vulnerable via " + ", ".join(via_names)) if via_names else
-                        f"vulnerable range {entry.get('range') or '?'}",
-                url="",
-                is_dev=is_dev,
-                transitive=transitive,
-                source=source,
-                subproject=subproject,
-            ))
+        elif chains is not None:
+            # Vulnerable only *through* another package. npm reports a chain
+            # entry for every parent of a vulnerable package; counting it as a
+            # vulnerability of the parent duplicated the real transitive
+            # advisory and inflated every total (`concurrently` "critical, no
+            # fix" only because a transitive shell-quote IS fixed). It is a
+            # note: this package pulls in a vulnerable one, and the remedy is
+            # the vulnerable package's fix (override) or a newer parent.
+            targets = [n for n in via_names if n != pkg]
+            chains.append({
+                "package": pkg,
+                "version": version,
+                "severity": severity,
+                "pulls_in": targets,
+                "fix_via": {n: own_fix[n] for n in targets if n in own_fix},
+                "is_dev": is_dev,
+                "subproject": subproject,
+                "note": "pulls in vulnerable " + ", ".join(
+                    f"{n} (fix via {n} >= {own_fix[n]}, override or upgrade the parent)"
+                    if n in own_fix else f"{n} (no fix known)" for n in targets)
+                if targets else f"vulnerable range {entry.get('range') or '?'}",
+            })
     return out
 
 
@@ -878,7 +963,11 @@ def _pip_audit_targets(directory: Path) -> list[tuple[list[str], bool]]:
     reqs = sorted(p for p in directory.glob("requirements*.txt") if p.is_file())
     if reqs:
         return [(["-r", p.name], bool(_DEV_REQ_HINT.search(p.stem))) for p in reqs[:4]]
-    if PROJECT_BUILD_AUDIT and (directory / "pyproject.toml").is_file():
+    if (directory / "pyproject.toml").is_file():
+        # `.` is the legacy pip-audit target (it BUILDS the project). The uv
+        # path in `audit_repo` reads pyproject.toml's metadata instead and never
+        # builds; the build only happens when uv is missing AND
+        # DEPS_PIP_AUDIT_PROJECT allows it.
         return [(["."], False)]
     return []
 
@@ -951,6 +1040,169 @@ def _pip_audit_pinned_only(
     return payload, note
 
 
+_FROM_PYTHON = re.compile(
+    r"^\s*FROM\s+(?:--\S+\s+)*(?:[\w./-]+/)?python:(\d+\.\d+)", re.I | re.M)
+_REQUIRES_PYTHON = re.compile(r"(\d+\.\d+)")
+
+
+def python_target(repo_path: Path, directory: Path) -> tuple[str, str]:
+    """(X.Y, where it came from) — the interpreter a requirements file will
+    actually run under, so the tree is resolved for THAT Python and not for
+    whichever one the auditor happens to be.
+
+    Order: the nearest Dockerfile* with ``FROM python:X.Y`` (this directory,
+    then each parent up to the repo root), else ``.python-version``, else
+    ``requires-python`` in a pyproject.toml, else the auditor's own
+    interpreter."""
+    folders = [directory, *[p for p in directory.parents
+                            if repo_path in (p, *p.parents)]]
+    for folder in folders:
+        try:
+            dockerfiles = sorted(f for f in folder.glob("Dockerfile*") if f.is_file())
+        except OSError:
+            dockerfiles = []
+        for df in dockerfiles:
+            m = _FROM_PYTHON.search(_read(df))
+            if m:
+                return m.group(1), f"{_rel(repo_path, df.parent) or '.'}/{df.name}"
+    for folder in folders:
+        pv = folder / ".python-version"
+        if pv.is_file():
+            m = _REQUIRES_PYTHON.search(_read(pv))
+            if m:
+                return m.group(1), ".python-version"
+    for folder in folders:
+        pp = folder / "pyproject.toml"
+        if pp.is_file():
+            try:
+                import tomllib
+                spec = str((tomllib.loads(_read(pp)).get("project") or {})
+                           .get("requires-python") or "")
+            except Exception:  # noqa: BLE001
+                spec = ""
+            m = _REQUIRES_PYTHON.search(spec)
+            if m:
+                return m.group(1), "requires-python"
+    return f"{sys.version_info.major}.{sys.version_info.minor}", "auditor interpreter"
+
+
+def _stderr_tail(stderr: str, limit: int = 700) -> str:
+    """The END of a tool's stderr, newlines flattened. The first 200 chars of
+    the last line (what this used to keep) cut the actual cause off: pip's
+    "No matching distribution" arrives as the second-to-last line."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    text = " | ".join(lines[-6:])
+    return text[-limit:]
+
+
+def _uv_resolve(directory: Path, source: str, py: str, runner,
+                timeout: int) -> tuple[str | None, str, str]:
+    """`uv pip compile --python-version X.Y <file>` → (pinned text, error, code).
+
+    Metadata only (`--no-build`: a source distribution is never built, so no
+    repo-supplied build backend executes). The output is the FULL pinned tree
+    for the target Python — what osv-scanner's own manifest resolution got
+    wrong (anyio 4.9.0 where the real resolution is 4.15.1)."""
+    result = runner(
+        ["uv", "pip", "compile", source, "--python-version", py,
+         "--no-header", "--no-annotate", "--quiet", "--no-build"],
+        directory, timeout)
+    if not result.ok:
+        # A runner that says "did not run" without a code is a missing binary.
+        return None, result.error, result.reason_code or TOOL_MISSING
+    if result.code != 0 or not result.stdout.strip():
+        return None, _stderr_tail(result.stderr) or f"uv exited {result.code}", "uv_failed"
+    return result.stdout, "", ""
+
+
+def _pinned_lines(text: str) -> list[str]:
+    out = []
+    for line in text.splitlines():
+        m = _PINNED_LINE.match(line.strip())
+        if m:
+            out.append(f"{m.group(1)}=={m.group(2)}")
+    return out
+
+
+def _pip_audit_compiled(directory: Path, pinned: list[str], runner,
+                        timeout: int) -> tuple[dict | None, str]:
+    """pip-audit over a fully pinned list: no resolution, no pip."""
+    with tempfile.TemporaryDirectory(prefix="pip-audit-compiled-") as tmp:
+        f = Path(tmp) / "requirements.txt"
+        f.write_text("\n".join(pinned) + "\n", encoding="utf-8")
+        result = runner(
+            ["pip-audit", "-s", "osv", "-f", "json", "--progress-spinner", "off",
+             "--no-deps", "--disable-pip", "-r", str(f)], directory, timeout)
+        if not result.ok:
+            return None, result.error
+        payload = _loads(result.stdout)
+        if payload is None:
+            return None, _stderr_tail(result.stderr) or "no JSON on stdout"
+        return payload, ""
+
+
+def _python_lock_pins(directory: Path) -> tuple[list[str], str]:
+    """Pinned lines from a poetry.lock / uv.lock next to the manifest — the
+    versions that are actually installed, no resolution needed."""
+    from src.deps.locks import parse_poetry_lock, parse_uv_lock
+
+    for name, reader in (("uv.lock", parse_uv_lock), ("poetry.lock", parse_poetry_lock)):
+        f = directory / name
+        if f.is_file():
+            pins = sorted({f"{e.package}=={e.version}" for e in reader(_read(f), name)
+                           if e.version})
+            if pins:
+                return pins, name
+    return [], ""
+
+
+def _npm_member_coverage(repo_path: Path, directory: Path) -> str | None:
+    """Why a package.json directory without its own lock is NOT a gap, or None.
+
+    * a workspace member — an ancestor with a lock file whose package.json
+      declares ``workspaces`` (or a pnpm-workspace.yaml): ``npm audit`` runs at
+      that root and covers the member;
+    * no dependencies at all — nothing to check;
+    * every dependency present in a lock file elsewhere in the repo."""
+    try:
+        data = json.loads(_read(directory / "package.json") or "{}")
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    names = {n for key in ("dependencies", "devDependencies", "optionalDependencies",
+                           "peerDependencies") for n in (data.get(key) or {})}
+    if not names:
+        return "no dependencies declared — nothing to check"
+    for folder in directory.parents:
+        if repo_path not in (folder, *folder.parents):
+            break
+        has_lock = any((folder / n).is_file() for n in (
+            "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock"))
+        if not has_lock:
+            continue
+        try:
+            root = json.loads(_read(folder / "package.json") or "{}")
+        except ValueError:
+            root = {}
+        if (isinstance(root, dict) and root.get("workspaces")) or (
+                folder / "pnpm-workspace.yaml").is_file():
+            return f"workspace member — audited at the workspace root {_rel(repo_path, folder) or '.'}"
+    from src.deps.locks import parse_package_lock
+    locked: set[str] = set()
+    for lock in repo_path.rglob("package-lock.json"):
+        rel = lock.relative_to(repo_path)
+        if any(part in _SKIP_DIRS for part in rel.parts):
+            continue
+        try:
+            locked |= {e.package for e in parse_package_lock(json.loads(_read(lock)))}
+        except Exception:  # noqa: BLE001
+            continue
+    if names <= locked:
+        return "every dependency is pinned by a lock file elsewhere in the repository"
+    return None
+
+
 def _npm_installed(directory: Path) -> dict[str, str]:
     """package name → resolved version, from the lock file next to the
     manifest — npm's own report never states it."""
@@ -990,6 +1242,9 @@ def audit_repo(
     """
     findings: list[NativeFinding] = []
     checks: list[EcosystemCheck] = []
+    dropped: list[dict] = []
+    resolved: dict[tuple[str, str], str] = {}
+    chains: list[dict] = []
 
     if on_progress is not None:
         _base_runner = runner
@@ -1016,6 +1271,7 @@ def audit_repo(
         for directory in _manifest_dirs(repo_path, filename):
             if directory not in py_dirs:
                 py_dirs.append(directory)
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     for directory in py_dirs[:MAX_SUBPROJECTS_PER_ECOSYSTEM]:
         sub = _rel(repo_path, directory)
         targets = _pip_audit_targets(directory)
@@ -1025,32 +1281,92 @@ def audit_repo(
                 "no requirements*.txt and project-build auditing is off "
                 "(DEPS_PIP_AUDIT_PROJECT=0) — falling back to lock files + OSV"))
             continue
+        lock_pins, lock_name = _python_lock_pins(directory)
+        py_ver, py_from = python_target(repo_path, directory)
         for target, force_dev in targets:
+            label = target[-1] if target else "environment"
+            tag = f"{sub}:{label}" if sub else label
+            parse_kw = dict(direct=direct_by_eco.get("PyPI"), dev=dev_by_eco.get("PyPI"),
+                            force_dev=force_dev, subproject=sub, dropped=dropped)
+
+            # 1. A lock file next to the manifest: audit exactly what it pins.
+            if lock_pins and target[0] == "-r" and not force_dev:
+                payload, err = _pip_audit_compiled(directory, lock_pins, runner, timeout)
+                if payload is not None:
+                    _add(EcosystemCheck(
+                            "PyPI", "pip-audit", tag, "checked",
+                            f"versions from {lock_name}", reason_code="from_lock"),
+                         parse_pip_audit(payload, **parse_kw))
+                    continue
+
+            # 2. No lock: resolve the tree with uv for the Python this repo
+            #    targets, then audit the pinned result. Replaces both
+            #    osv-scanner's own manifest resolution (invented versions) and
+            #    `pip-audit -r` (a `pip install --dry-run` that fails whenever
+            #    one requirement has no wheel for the auditor's interpreter).
+            source = target[1] if target[0] == "-r" else "pyproject.toml"
             if PIP_AUDIT_NO_EXEC:
-                label = target[-1] if target else "environment"
                 payload, note = _pip_audit_pinned_only(
                     directory, target, runner, timeout,
                     "execution disabled (DEPS_PIP_AUDIT_NO_EXEC=1)")
                 if payload is None:
                     checks.append(EcosystemCheck(
-                        "PyPI", "pip-audit", f"{sub}:{label}" if sub else label,
-                        "not_checked",
+                        "PyPI", "pip-audit", tag, "not_checked",
                         "pip execution is disabled and the requirements are not "
                         "all pinned — falling back to lock files + OSV",
                         reason_code="pip_exec_disabled"))
                     continue
-                _add(EcosystemCheck(
-                        "PyPI", "pip-audit", f"{sub}:{label}" if sub else label,
-                        "partial", note, reason_code="pip_exec_disabled"),
-                     parse_pip_audit(payload, direct=direct_by_eco.get("PyPI"),
-                                     dev=dev_by_eco.get("PyPI"),
-                                     force_dev=force_dev, subproject=sub))
+                _add(EcosystemCheck("PyPI", "pip-audit", tag, "partial", note,
+                                    reason_code="pip_exec_disabled"),
+                     parse_pip_audit(payload, **parse_kw))
                 continue
-            # `-s osv` is mandatory: PyPI's own advisory feed is narrower than
-            # OSV and would quietly under-report.
+            text, uv_err, uv_code = _uv_resolve(directory, source, py_ver, runner, timeout)
+            if text is not None:
+                pinned = _pinned_lines(text)
+                payload, err = _pip_audit_compiled(directory, pinned, runner, timeout)
+                if payload is None:
+                    checks.append(EcosystemCheck(
+                        "PyPI", "pip-audit", tag, "failed",
+                        f"resolved {len(pinned)} packages with uv but pip-audit "
+                        f"failed: {err}"))
+                    continue
+                for line in pinned:
+                    name, _, ver = line.partition("==")
+                    resolved[(sub, _pep503(name))] = ver
+                _add(EcosystemCheck(
+                        "PyPI", "pip-audit", tag, "checked",
+                        f"resolved on {today} for Python {py_ver} ({py_from}) with "
+                        f"uv, no lock file — {len(pinned)} packages",
+                        reason_code="resolved_no_lock"),
+                     parse_pip_audit(payload, **parse_kw))
+                continue
+
+            # 3. No uv result. Say why IN FULL (the tail of stderr, not the
+            #    first 200 characters of its last line), then fall back.
+            uv_missing = uv_code == TOOL_MISSING
+            uv_note = ("" if uv_missing else
+                       f"uv resolution failed for Python {py_ver} ({py_from}): {uv_err}")
+            if not uv_missing:
+                payload, note = _pip_audit_pinned_only(
+                    directory, target, runner, timeout, uv_note)
+                if payload is not None:
+                    _add(EcosystemCheck(
+                            "PyPI", "pip-audit", tag, "partial", note,
+                            reason_code="pip_resolution_failed"),
+                         parse_pip_audit(payload, **parse_kw))
+                else:
+                    checks.append(EcosystemCheck(
+                        "PyPI", "uv", tag, "failed", uv_note, reason_code="uv_failed"))
+                continue
+            # uv is not in this image: the original pip-audit resolution.
+            if target == ["."] and not PROJECT_BUILD_AUDIT:
+                checks.append(EcosystemCheck(
+                    "PyPI", "pip-audit", tag, "not_checked",
+                    "uv is not installed and project-build auditing is off "
+                    "(DEPS_PIP_AUDIT_PROJECT=0) — falling back to lock files + OSV"))
+                continue
             cmd = ["pip-audit", "-s", "osv", "-f", "json",
                    "--progress-spinner", "off", *target]
-            label = target[-1] if target else "environment"
             result = runner(cmd, directory, timeout)
             if not result.ok:
                 checks.append(EcosystemCheck("PyPI", "pip-audit", sub,
@@ -1059,55 +1375,66 @@ def audit_repo(
             payload = _loads(result.stdout)
             degraded = ""
             if payload is None:
-                # Resolution failed. This is COMMON and not the project's
-                # fault: pip-audit resolves by running `pip install --dry-run`,
-                # so one requirement with no wheel for the running interpreter
-                # (Pillow 10.1.0 on Python 3.13, say) fails the whole file and
-                # PyPI silently drops to lock-files-and-OSV. Audit the pinned
-                # requirements directly instead — no transitives, but the
-                # direct dependencies stop being invisible.
                 payload, degraded = _pip_audit_pinned_only(
-                    directory, target, runner, timeout,
-                    (result.stderr.strip().splitlines() or [""])[-1][:200])
+                    directory, target, runner, timeout, _stderr_tail(result.stderr))
             if payload is None:
                 checks.append(EcosystemCheck(
-                    "PyPI", "pip-audit", f"{sub}:{label}" if sub else label, "failed",
-                    degraded or (result.stderr.strip().splitlines()
-                                 or ["no JSON on stdout"])[-1][:200]))
+                    "PyPI", "pip-audit", tag, "failed",
+                    degraded or _stderr_tail(result.stderr) or "no JSON on stdout"))
                 continue
             _add(EcosystemCheck(
-                    "PyPI", "pip-audit", f"{sub}:{label}" if sub else label,
-                    # "partial" keeps the row in the coverage panel's
-                    # not-fully-checked list, which is the honest place for a
-                    # scan that saw the direct dependencies and not the tree.
+                    "PyPI", "pip-audit", tag,
                     "partial" if degraded else "checked", degraded,
                     reason_code="pip_resolution_failed" if degraded else ""),
-                 parse_pip_audit(payload, direct=direct_by_eco.get("PyPI"),
-                                 dev=dev_by_eco.get("PyPI"), force_dev=force_dev,
-                                 subproject=sub))
+                 parse_pip_audit(payload, **parse_kw))
 
     # ── npm family: the lock file decides which tool owns the project ─
     for directory in _manifest_dirs(repo_path, "package.json"):
         sub = _rel(repo_path, directory)
         if (directory / "pnpm-lock.yaml").is_file():
-            _add_npm_family(directory, sub, "pnpm", runner, timeout, checks, findings)
+            flavour = "pnpm"
         elif (directory / "yarn.lock").is_file():
-            _add_npm_family(directory, sub, "yarn", runner, timeout, checks, findings)
+            flavour = "yarn"
         elif (directory / "package-lock.json").is_file() or (
                 directory / "npm-shrinkwrap.json").is_file():
-            _add_npm_family(directory, sub, "npm", runner, timeout, checks, findings)
+            flavour = "npm"
         else:
-            checks.append(EcosystemCheck(
-                "npm", "npm-audit", sub, "not_checked",
-                "no lock file (package-lock.json / pnpm-lock.yaml / yarn.lock) — "
-                "npm audit cannot resolve the tree"))
+            flavour = ""
+        if flavour:
+            _add_npm_family(directory, sub, flavour, runner, timeout, checks,
+                            findings, dropped=dropped, chains=chains)
+            continue
+        why_covered = _npm_member_coverage(repo_path, directory)
+        if why_covered:
+            # Not a gap: the tree is audited at the workspace root, there is
+            # nothing to audit here, or a lock elsewhere pins every package.
+            if "no dependencies" not in why_covered:
+                checks.append(EcosystemCheck("npm", "npm-audit", sub, "checked",
+                                             why_covered, reason_code="covered_by_root"))
+            continue
+        checks.append(EcosystemCheck(
+            "npm", "npm-audit", sub, "not_checked",
+            "no lock file (package-lock.json / pnpm-lock.yaml / yarn.lock) — "
+            "npm audit cannot resolve the tree"))
 
     # ── Go ───────────────────────────────────────────────────────────
     for directory in _manifest_dirs(repo_path, "go.mod"):
         sub = _rel(repo_path, directory)
         result = runner(["govulncheck", "-json", "./..."], directory, timeout)
         if not result.ok:
-            checks.append(EcosystemCheck("Go", "govulncheck", sub, "not_checked", result.error))
+            if result.reason_code == TOOL_MISSING:
+                # go.mod / go.sum are read by osv-scanner and by the OSV
+                # fallback over the lock entries, so Go advisories ARE
+                # reported. What is missing is call-reachability, and the
+                # reason says exactly that instead of "not checked".
+                checks.append(EcosystemCheck(
+                    "Go", "govulncheck", sub, "covered_by_osv",
+                    "covered by OSV (go.mod/go.sum), no call-reachability — "
+                    "govulncheck is not installed",
+                    reason_code="osv_no_reachability"))
+            else:
+                checks.append(EcosystemCheck("Go", "govulncheck", sub,
+                                             "not_checked", result.error))
             continue
         _add(EcosystemCheck("Go", "govulncheck", sub, "checked"),
              parse_govulncheck(result.stdout,
@@ -1166,12 +1493,14 @@ def audit_repo(
         _add(EcosystemCheck("RubyGems", "bundler-audit", sub, "checked"),
              parse_bundler_audit(result.stdout, subproject=sub))
 
-    return NativeResult(findings=findings, checks=checks)
+    return NativeResult(findings=findings, checks=checks, dropped=dropped,
+                        resolved=resolved, chains=chains)
 
 
 def _add_npm_family(
     directory: Path, sub: str, flavour: str, runner, timeout: int,
     checks: list[EcosystemCheck], findings: list[NativeFinding],
+    *, dropped: list[dict] | None = None, chains: list[dict] | None = None,
 ) -> None:
     """npm / pnpm / yarn share an ecosystem and an output dialect but not a
     command line. Only npm can answer the prod-vs-dev question cheaply (a
@@ -1193,7 +1522,16 @@ def _add_npm_family(
             findings.extend(produced)
             return
     if not result.ok:
-        checks.append(EcosystemCheck("npm", tool, sub, "not_checked", result.error))
+        lock = "pnpm-lock.yaml" if flavour == "pnpm" else "yarn.lock"
+        if flavour in ("pnpm", "yarn") and result.reason_code == TOOL_MISSING:
+            # The lock file is parsed here (src/deps/locks.py) and audited
+            # through OSV; the missing CLI only costs the prod/dev split.
+            checks.append(EcosystemCheck(
+                "npm", tool, sub, "covered_by_osv",
+                f"{flavour} is not installed — {lock} read directly and audited via OSV",
+                reason_code="osv_lockfile"))
+        else:
+            checks.append(EcosystemCheck("npm", tool, sub, "not_checked", result.error))
         return
 
     payload = _loads(result.stdout)
@@ -1206,8 +1544,7 @@ def _add_npm_family(
             return
         checks.append(EcosystemCheck(
             "npm", tool, sub, "failed",
-            (result.stderr or "no JSON on stdout").strip().splitlines()[-1][:200]
-            if result.stderr else "no JSON on stdout"))
+            _stderr_tail(result.stderr) or "no JSON on stdout"))
         return
 
     prod_names: set[str] | None = None
@@ -1220,6 +1557,7 @@ def _add_npm_family(
     produced = parse_npm_audit(
         payload, installed=_npm_installed(directory),
         prod_names=prod_names, subproject=sub, source=tool,
+        chains=chains, dropped=dropped,
     )
     checks.append(EcosystemCheck("npm", tool, sub, "checked", "", len(produced)))
     findings.extend(produced)
@@ -1231,7 +1569,10 @@ __all__ = [
     "EcosystemCheck",
     "NativeFinding",
     "NativeResult",
+    "COVERED_STATUSES",
     "audit_repo",
+    "is_gap",
+    "python_target",
     "detect_tools",
     "go_direct_modules",
     "parse_bundler_audit",

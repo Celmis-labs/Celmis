@@ -176,13 +176,17 @@ NPM_AUDIT_V2 = {
 
 
 def test_npm_audit_v2_transitive_dev_and_versions() -> None:
+    chains: list[dict] = []
     findings = parse_npm_audit(
         NPM_AUDIT_V2,
         installed={"minimist": "0.0.8", "mkdirp": "0.5.1", "eslint-utils": "1.4.0"},
         # Другий прогін (--omit=dev) знайшов лише ці два → eslint-utils dev-only.
         prod_names={"minimist", "mkdirp"},
+        chains=chains,
     )
-    assert len(findings) == 3
+    # mkdirp — це лише ланцюг через minimist: НЕ вразливість, а нотатка.
+    assert len(findings) == 2
+    assert [c["package"] for c in chains] == ["mkdirp"]
 
     minimist = _by_pkg(findings, "minimist")
     assert minimist.transitive is True, "isDirect=false → транзитивна"
@@ -192,11 +196,8 @@ def test_npm_audit_v2_transitive_dev_and_versions() -> None:
     assert minimist.version == "0.0.8", "версію бере з lock-файлу (npm її не друкує)"
     assert minimist.fixed_in == "1.2.8"
 
-    mkdirp = _by_pkg(findings, "mkdirp")
-    assert mkdirp.transitive is False
-    # fixAvailable називає САМ пакет → це валідна ціль оновлення.
-    assert mkdirp.fixed_in == "1.0.4"
-    assert "minimist" in mkdirp.summary, "ланцюг уразливості має бути видимим"
+    assert chains[0]["pulls_in"] == ["minimist"], "ланцюг уразливості лишається видимим"
+    assert chains[0]["fix_via"] == {"minimist": "1.2.8"}
 
     eslint_utils = _by_pkg(findings, "eslint-utils")
     assert eslint_utils.is_dev is True, "відсутній у --omit=dev прогоні → dev-only"

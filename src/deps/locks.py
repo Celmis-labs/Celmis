@@ -321,6 +321,32 @@ def parse_cargo_lock(text: str, lockfile: str = "Cargo.lock") -> list[LockEntry]
 
 # ─── Go: go.sum ──────────────────────────────────────────────────────
 
+def parse_uv_lock(text: str, lockfile: str = "uv.lock") -> list[LockEntry]:
+    """uv.lock — `[[package]]` tables with name + version. Virtual/editable
+    workspace members (`source = {virtual|editable = ...}`) are the project
+    itself, not a dependency."""
+    import tomllib
+
+    try:
+        data = tomllib.loads(text)
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[LockEntry] = []
+    for pkg in data.get("package") or []:
+        if not isinstance(pkg, dict) or not pkg.get("name") or not pkg.get("version"):
+            continue
+        source = pkg.get("source") or {}
+        if isinstance(source, dict) and ({"virtual", "editable"} & set(source)):
+            continue
+        out.append(LockEntry(
+            ecosystem="PyPI", package=_clean(pkg["name"]).lower(),
+            version=_clean(pkg["version"]), is_dev=False, transitive=False,
+            resolved=str(source.get("registry") or source.get("git") or "") or None
+            if isinstance(source, dict) else None,
+            lockfile=lockfile))
+    return out
+
+
 _GO_SUM = re.compile(r"^(?P<mod>\S+)\s+v(?P<ver>\S+?)(?:/go\.mod)?\s+h1:")
 
 
@@ -358,6 +384,7 @@ _LOCK_READERS = {
     "pnpm-lock.yaml": parse_pnpm_lock,
     "yarn.lock": parse_yarn_lock,
     "poetry.lock": parse_poetry_lock,
+    "uv.lock": parse_uv_lock,
     "Cargo.lock": parse_cargo_lock,
     "go.sum": parse_go_sum,
 }
@@ -476,6 +503,7 @@ __all__ = [
     "parse_package_lock",
     "parse_pnpm_lock",
     "parse_poetry_lock",
+    "parse_uv_lock",
     "parse_yarn_lock",
     "scan_locks",
 ]

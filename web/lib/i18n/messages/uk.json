@@ -1089,6 +1089,7 @@
   "deps.engineNote": "Сам аудит завжди детермінований — нативні аудитори (pip-audit, npm audit, …) там, де інструмент є, lock-файли + OSV.dev в інших випадках, без LLM. Рушій обирається лише для текстового звіту.",
   "deps.errorTitle": "Аудит завершився помилкою",
   "deps.errorUnknown": "Без повідомлення — джоба зупинилася, не вказавши причини.",
+  "deps.exportPdf": "PDF (.pdf)",
   "deps.filterAll": "Усе",
   "deps.filterOutdated": "Лише застарілі",
   "deps.filterVulnerable": "Лише вразливі",

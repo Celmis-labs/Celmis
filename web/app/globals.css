@@ -398,14 +398,23 @@
   pointer-events: none;
 }
 
-/* Printing is how a PDF gets made here — no server-side renderer, and the
-   page prints with the typography the reader just approved on screen. The
-   app chrome is not part of the document. */
+/* A manual Ctrl+P still works. The dependency audit has a real PDF export now
+   (server-side, `format=pdf`), so printing its page is only a fallback — but a
+   fallback that prints the AI-report selector, the scope picker and a branch
+   dropdown per repository is how a 58-page printout happened. The interactive
+   controls are not part of the document. */
 @media print {
   aside, nav, header, .print\:hidden { display: none !important; }
   main, body { background: #fff !important; color: #000 !important; }
   a[href]::after { content: ""; }
   pre, code { white-space: pre-wrap !important; word-break: break-word; }
+  .deps-page button,
+  .deps-page select,
+  .deps-page input,
+  .deps-page textarea,
+  .deps-page [role="combobox"],
+  .deps-page [role="switch"],
+  .deps-page [role="tablist"] { display: none !important; }
 }
 
 /* ── The agent's sentence while it is being written ──────────────────────

@@ -516,8 +516,8 @@ export default function DependenciesPage() {
   // The audit as a file someone can send on. Not a plain <a href>: the
   // endpoint needs the bearer token, so the document is fetched and handed to
   // the browser as a blob — the same shape the documentation export uses.
-  const [exporting, setExporting] = useState<"md" | "docx" | null>(null);
-  const exportRun = async (format: "md" | "docx") => {
+  const [exporting, setExporting] = useState<"md" | "docx" | "pdf" | null>(null);
+  const exportRun = async (format: "md" | "docx" | "pdf") => {
     const runId = run.data?.id;
     if (!runId) return;
     setExporting(format);
@@ -666,7 +666,7 @@ export default function DependenciesPage() {
   const cancelledByUser = /cancel/i.test(run.data?.error ?? "");
 
   return (
-    <PageShell width="wide">
+    <PageShell width="wide" className="deps-page">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <h1 className="flex flex-wrap items-center gap-2 text-2xl font-semibold tracking-tight">
@@ -1436,8 +1436,9 @@ export default function DependenciesPage() {
             </CardTitle>
             <CardDescription>
               {tf("deps.exportDesc",
-                  "One document: overview, what nobody checked, the report, and "
-                  + "every finding grouped by repository.")}
+                  "One document: summary, what to do now, what nobody checked, and "
+                  + "the findings per repository. The PDF is generated on the "
+                  + "server — a report, not a printout of this page.")}
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-wrap items-center gap-2">
@@ -1458,15 +1459,13 @@ export default function DependenciesPage() {
               {tf("deps.exportMd", "Markdown (.md)")}
             </Button>
             <Button size="sm" variant="outline" className="h-11 sm:h-8"
-              onClick={() => window.print()}>
-              <PrinterIcon className="mr-1 h-3.5 w-3.5" />
-              {tf("deps.exportPdf", "Print / PDF")}
+              disabled={exporting !== null}
+              onClick={() => void exportRun("pdf")}>
+              {exporting === "pdf"
+                ? <RefreshCwIcon className="mr-1 h-3.5 w-3.5 animate-spin" />
+                : <PrinterIcon className="mr-1 h-3.5 w-3.5" />}
+              {tf("deps.exportPdf", "PDF (.pdf)")}
             </Button>
-            <span className="text-xs text-[var(--color-muted-foreground)]">
-              {tf("deps.exportPdfHint",
-                  "PDF comes from your browser's print dialog — choose "
-                  + "“Save as PDF”.")}
-            </span>
           </CardContent>
 
           {/* A second row, and a second audience.

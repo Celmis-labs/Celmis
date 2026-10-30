@@ -127,6 +127,10 @@ dependencies = [
     "typer>=0.25,<1",               # CLI (>=0.25 потребується semgrep)
     "rich>=15,<16",                 # terminal UI
     "jinja2>=3.1.6,<4",                 # vault templates
+    # Server-side PDF of the dependency audit (src/docs/pdf_blocks.py). Pure
+    # Python wheel; its deps are Pillow, fonttools and defusedxml, all with
+    # wheels for 3.14. The OFL fonts it embeds live in src/docs/fonts/.
+    "fpdf2>=2.9.0,<3",
     "python-frontmatter>=1.1,<2",   # MD frontmatter parsing
     "PyYAML>=6.0.3,<7",                 # docker-compose / CI yamls
 
@@ -143,6 +147,8 @@ dev = [
     # scripts/build_e2e_docx.py imports it. Undeclared until the docx had to
     # be rebuilt without a customer's name in it and the import was missing.
     "python-docx",
+    # Reads the exported PDF back in tests/deps/test_report_exports.py.
+    "pypdf>=6.21,<7",
     # Moved out of the production dependencies, where it was pulling a large
     # tree into every image for a code path production never takes:
     # `CodeSplitter` is imported lazily inside
