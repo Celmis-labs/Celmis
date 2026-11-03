@@ -157,12 +157,12 @@ ARM-хости (Oracle Ampere A1, Hetzner CAX), а `Dockerfile` доти тяг�
 збігалася, і білд падав аж на `osv-scanner --version` з `exec format error` —
 тобто задокументований сетап не збирався взагалі.
 
-Два пінованих бінарники всередині образу:
+Бінарники й збирання всередині образу:
 
 | Бінарник | Стадія | Пін | Де взяти суми |
 |---|---|---|---|
 | `uv` | builder | `UV_VERSION` + `UV_SHA256_AMD64` / `UV_SHA256_ARM64` | `.sha256` поруч з кожним артефактом релізу astral-sh/uv |
-| `osv-scanner` | runtime | `OSV_SCANNER_VERSION` + `OSV_SCANNER_SHA256_AMD64` / `_ARM64` | один `osv-scanner_SHA256SUMS` на реліз |
+| `osv-scanner` | 1b (`osv-build`) | `OSV_SCANNER_VERSION` + дайджест образу `golang` | збирається з вихідників тегом `v<версія>` сучасним Go (усі релізи зібрані Go 1.27.0, у його stdlib є вразливості, виправлені в 1.27.2); цілісність — checksum DB Go і `go.sum` |
 
 Правила:
 

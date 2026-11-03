@@ -39,9 +39,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # artifact:
 #   https://github.com/astral-sh/uv/releases/download/<VER>/uv-<TRIPLE>.tar.gz.sha256
 ARG TARGETARCH
-ARG UV_VERSION=0.13.6
-ARG UV_SHA256_AMD64=f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645
-ARG UV_SHA256_ARM64=229e194255c7958d86d56e8790d969a6f74736592133f0dfd0076f754c642c1d
+ARG UV_VERSION=0.13.7
+ARG UV_SHA256_AMD64=c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
+ARG UV_SHA256_ARM64=71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc
 
 RUN set -eu; \
     case "${TARGETARCH:-}" in \
@@ -61,19 +61,44 @@ RUN set -eu; \
     uv --version
 
 WORKDIR /build
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 COPY src/ ./src/
 
-ENV VIRTUAL_ENV=/opt/venv
-RUN uv venv /opt/venv \
-    && uv pip install --no-cache -e .
+# Installed FROM THE LOCK, not resolved at build time. `uv pip install -e .`
+# took whatever was newest inside pyproject's ranges on the day the layer was
+# built, so two builds of one commit could differ and a vulnerable release
+# (urllib3 2.7.0, msgpack 1.1.2 were found in a shipped image) arrived without
+# any change in the repository. `--frozen` refuses to touch uv.lock, and the
+# lock carries a hash for every file, which uv checks on install. CI runs
+# `uv lock --check`, so a pyproject change without a new lock fails there.
+# Bump with `uv lock --upgrade`.
+ENV VIRTUAL_ENV=/opt/venv \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
+RUN uv sync --frozen --no-dev --no-cache
 
 # pip-audit — native Python auditor for the dependency audit (src/deps/native.py).
 # Deliberately its OWN venv: it pins packaging/requests/cyclonedx versions of its
 # own, and letting those resolve against the application venv is how a security
 # tool ends up breaking the app it audits. Only its entrypoint goes on PATH.
+# The floors keep a resolver from picking a vulnerable release for it
+# (msgpack < 1.2.3, urllib3 < 2.8.0): same numbers as pyproject's [tool.uv].
 RUN uv venv /opt/pip-audit \
-    && VIRTUAL_ENV=/opt/pip-audit uv pip install --no-cache pip-audit
+    && VIRTUAL_ENV=/opt/pip-audit uv pip install --no-cache pip-audit \
+        "msgpack>=1.2.4" "urllib3>=2.8.0"
+
+# ============================================================================
+# STAGE 1b — osv-scanner, compiled with a current Go (see the note in runtime)
+# ============================================================================
+# golang:1.27.3-bookworm, pinned by digest (the multi-arch index).
+FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS osv-build
+ARG TARGETARCH
+ARG OSV_SCANNER_VERSION=2.7.0
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} GOTOOLCHAIN=local
+RUN set -eu; \
+    go install -trimpath -ldflags "-s -w" \
+        "github.com/google/osv-scanner/v2/cmd/osv-scanner@v${OSV_SCANNER_VERSION}"; \
+    install -D -m 0755 "$(find /go/bin -type f -name osv-scanner | head -n1)" /out/osv-scanner; \
+    go version -m /out/osv-scanner | head -n 2
 
 # ============================================================================
 # STAGE 2 — runtime
@@ -135,18 +160,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # have quietly downgraded every JavaScript dependency audit to the OSV
 # fallback.
 
-# osv-scanner — the universal dependency auditor (src/deps/osv_scanner.py).
-# Pinned for the same reason as the CLI above, plus one specific to a security
-# tool: an unpinned download in a cached layer keeps whatever was current the
-# day the layer was built, so the scanner silently ages out of its own
-# advisory-matching fixes while every deploy reports success. The checksum is
-# pinned with it — the binary arrives over the network from a release page, and
-# "we downloaded something" is not the same as "we downloaded this".
-# Bump ALL THREE lines together; one SHA256SUMS file lists every artifact:
-#   https://github.com/google/osv-scanner/releases/download/vX.Y.Z/osv-scanner_SHA256SUMS
-ARG OSV_SCANNER_VERSION=2.7.0
-ARG OSV_SCANNER_SHA256_AMD64=160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
-ARG OSV_SCANNER_SHA256_ARM64=4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7
+# osv-scanner — the universal dependency auditor (src/deps/osv_scanner.py),
+# version-pinned in stage 1b: an unpinned one ages out of its own advisory
+# matching while every deploy reports success.
+# npm — the one NodeSource ships is older than the fixes for the advisories in
+# its own bundled packages (tar, glob, ...), and `npm audit` is exactly what
+# this image uses it for. Pinned, so an image never changes under a deploy; a
+# version whose `engines` the installed node does not meet fails the build here
+# instead of at the first audit.
+ARG NPM_VERSION=12.2.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
@@ -156,37 +178,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g --no-fund --no-audit "npm@${NPM_VERSION}" \
+    && npm --version \
     && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 
-# A single static Go binary — no archive to unpack, no toolchain to install,
-# but it IS architecture-specific. This line named the amd64 artifact
-# outright, so on the arm64 hosts both deployment guides recommend
-# (docs/HETZNER.md picks CAX21, docs/ORACLE_CICD.md builds natively on an
-# Ampere A1) the download succeeded, the checksum matched, and `--version`
-# then failed with "exec format error" — the documented setup could not build
-# at all. The name is now derived from TARGETARCH, whose values (`amd64`,
-# `arm64`) happen to be exactly the suffixes this project publishes.
+# osv-scanner is BUILT here rather than downloaded. Every published release
+# (2.6.0 and 2.7.0 included) is compiled with Go 1.27.0, whose standard library
+# carries advisories fixed in 1.27.2; an image scan reports them against the
+# binary however current the scanner itself is. Compiling the same tagged source
+# with a current toolchain removes them, and the release's own SHA256SUMS would
+# only prove we downloaded the vulnerable build.
 #
-# `--version` is a real gate, not decoration: a truncated download or a wrong
-# architecture would otherwise only surface as "not installed in this image"
-# on the first audit, months later.
-ARG TARGETARCH
-RUN set -eu; \
-    case "${TARGETARCH:-}" in \
-      amd64) osv_sha="${OSV_SCANNER_SHA256_AMD64}" ;; \
-      arm64) osv_sha="${OSV_SCANNER_SHA256_ARM64}" ;; \
-      *) echo "FATAL: unsupported TARGETARCH='${TARGETARCH:-}'. osv-scanner is" \
-              "pinned by checksum per architecture; add the digest for this" \
-              "platform instead of letting the build guess." >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL -o /tmp/osv-scanner \
-        "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_${TARGETARCH}"; \
-    echo "${osv_sha}  /tmp/osv-scanner" | sha256sum -c -; \
-    install -m 0755 /tmp/osv-scanner /usr/local/bin/osv-scanner; \
-    rm -f /tmp/osv-scanner; \
-    osv-scanner --version
-
+# What replaces the per-architecture checksum:
+#   * the compiler is the pinned image digest in stage 1b;
+#   * the source is the tag `v${OSV_SCANNER_VERSION}`, resolved by the Go module
+#     proxy and verified against the public checksum database (GONOSUMDB is not
+#     set), and every dependency is checked against that module's go.sum;
+#   * it is cross-compiled for TARGETARCH, so arm64 needs no emulation.
+# Switch back to a downloaded, checksummed binary once a release is built with
+# Go >= 1.27.2 (see the lines this stage replaced in git history).
+#
+# `--version` is a real gate, not decoration: a wrong architecture would
+# otherwise only surface as "not installed in this image" on the first audit.
+COPY --from=osv-build /out/osv-scanner /usr/local/bin/osv-scanner
+RUN osv-scanner --version
 # Non-root user
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -248,4 +264,8 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 
 # Default — uvicorn без --reload (production-like).
 # Для dev mode override `command:` у docker-compose.override.yml.
+# Forwarded headers are believed only from 127.0.0.1 here (uvicorn's default).
+# Behind a proxy set FORWARDED_ALLOW_IPS to the proxy's address or network -
+# never `*` - or use the bundled docker-compose.yml, which works it out
+# (src/api/proxy_trust.py). Without it, redirects fall back to http.
 CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

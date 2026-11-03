@@ -21,6 +21,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
+import { useToken } from "@/lib/use-token";
 
 /** Where the source lives. One constant, changed once if the repo moves. */
 const REPO = "https://github.com/Celmis-labs/Celmis";
@@ -34,9 +35,13 @@ function sourceUrl(version: string | undefined): string {
 }
 
 export function LicenseFooter() {
+  // The version is shown to signed-in users only: the API withholds it from an
+  // anonymous caller (it is an installation fingerprint).
+  const token = useToken();
   const caps = useQuery({
-    queryKey: ["capabilities"],
-    queryFn: () => api<{ api_version?: string }>("/api/capabilities"),
+    queryKey: ["capabilities", token ? "authed" : "anon"],
+    queryFn: () => api<{ api_version?: string }>("/api/capabilities", { token }),
+    enabled: Boolean(token),
     staleTime: 5 * 60 * 1000,
     retry: false,
   });

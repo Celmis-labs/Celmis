@@ -128,12 +128,23 @@ def _undefined_constant(args: dict[str, Any]) -> dict[str, str]:
 
 # ─── A change that breaks other repositories ───────────────────────
 
-_UK_BREAKING: Final[dict[str, str]] = {
-    "title": "Ризик зламу сумісності: {name} — споживачів: {n}",
-    "body": (
-        "Зміна сигнатури зачіпає `{kind}` **{name}** ({detail}). Споживачів в "
-        "інших репозиторіях: {n}:\n\n{consumers}"),
-}
+def _breaking(args: dict[str, Any]) -> dict[str, str]:
+    n = int(args.get("n") or 0)
+    note = args.get("unknown")
+    tail = (f"\n\nРепозиторіїв робочого простору без записаних зв'язків: {note} "
+            "(проіндексовані до появи міжрепозиторних фактів; переіндексуйте їх)." if note else "")
+    if n:
+        return {
+            "title": f"Ризик зламу сумісності: {args['name']} — споживачів: {n}",
+            "body": (f"Зміна контракту зачіпає `{args['kind']}` **{args['name']}** "
+                     f"({args['detail']}). Споживачів в інших репозиторіях: {n}:\n\n"
+                     f"{args['consumers']}{tail}")}
+    return {
+        "title": f"Можливий злам сумісності: {args['name']}",
+        "body": (f"Зміна контракту зачіпає `{args['kind']}` **{args['name']}** "
+                 f"({args['detail']}). Знайдено лише слабкі зв'язки (збігається шлях або "
+                 "ім'я, але адресат не доведений); це не блокує злиття:\n\n"
+                 f"{args['consumers']}{tail}")}
 
 
 # ─── A dependency with a known vulnerability ───────────────────────
@@ -167,7 +178,7 @@ _UK_COMPLIANCE: Final[dict[str, str]] = {"title": "Відповідність: {
 UK: Final[dict[str, Entry]] = {
     **_UK_STRUCTURAL,
     "structural.undefined-class-constant": _undefined_constant,
-    "breaking_change.risk": _UK_BREAKING,
+    "breaking_change.risk": _breaking,
     "cve.advisory": _advisory,
     "compliance.rule": _UK_COMPLIANCE,
 }

@@ -57,7 +57,9 @@ _LATER = ("completed_comment", "commands_guide_enabled", "review_cadence",
           "review_scope", "commands_enabled", "chat_enabled", "command_permission",
           # d2a7c9e1f367, the Jira task context:
           "task_context_enabled", "task_project_keys", "task_acceptance_field",
-          "task_include_comments", "business_logic_auto")
+          "task_include_comments", "business_logic_auto",
+          # a3c5e7b91d24, the breaking-change gate:
+          "breaking_change_gate")
 _AT_V23 = tuple(n for n in V23_FIELDS if n not in _LATER)
 
 

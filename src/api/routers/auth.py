@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
 
 from src.api.deps import client_ip, get_current_user, get_users
 from src.api.jwt_auth import issue_token
@@ -236,7 +237,7 @@ def _master_login(req, users: UserStore,
         ip=client_ip(request) if request else None,
         detail={"granted": "global-admin"},
     )
-    return TokenResponse(access_token=token, expires_at=exp)
+    return session_response(user, token, exp)
 
 
 def seat_limit_refusal(exc: seats.SeatLimitReached, request: Request | None,
@@ -333,7 +334,7 @@ def signup(req: SignupRequest, request: Request,
     # to it stay theirs to accept through the link that reached the mailbox.
     # Google and SSO sign-ins, whose IdP vouches for the address, redeem them
     # automatically — see src/api/routers/invites.py.
-    return TokenResponse(access_token=token, expires_at=exp)
+    return session_response(user, token, exp)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -389,7 +390,7 @@ def login(req: LoginRequest, request: Request,
     )
     from src.api.workspace_provision import provision_personal_workspace
     provision_personal_workspace(user.id, user.email, user.name)
-    return TokenResponse(access_token=token, expires_at=exp)
+    return session_response(user, token, exp)
 
 
 @router.post("/google", response_model=TokenResponse)
@@ -522,7 +523,7 @@ def google_callback(
         email_verified=str(claims.get("email_verified", "")).lower() == "true",
         ip=client_ip(request),
     )
-    return TokenResponse(access_token=token, expires_at=exp)
+    return session_response(user, token, exp)
 
 
 @router.get("/me", response_model=UserOut)
@@ -649,6 +650,20 @@ def delete_account(
     logger.info("account_deleted id=%s email=%s", user.id, user.email)
 
 
+def session_response(user: User, token: str, exp: datetime) -> TokenResponse:
+    """The sign-in answer: a short access token plus the refresh credential.
+
+    The credential (see ``src.api.web_session``) is what lets the access token
+    live an hour instead of a month. A single-sign-on-only user gets one that
+    does not slide, so the identity provider is asked again within a day.
+    """
+    from src.api import web_session
+
+    refresh = web_session.issue(user.id, sliding=not _sso_only(user))
+    return TokenResponse(access_token=token, expires_at=exp, refresh_token=refresh)
+
+
+
 def _sso_only(user: User) -> bool:
     """True when single sign-on is this user's only way in.
 
@@ -661,26 +676,70 @@ def _sso_only(user: User) -> bool:
 
 
 @router.post("/refresh", response_model=TokenResponse)
-def refresh(user: User = Depends(get_current_user)) -> TokenResponse:
-    """Re-issue a session token for a still-valid session (Stage 21).
+def refresh_with_bearer() -> TokenResponse:
+    """Gone. A bearer token used to renew ITSELF here, for as long as it was
+    still valid — which made a stolen token immortal, and made sign-out unable
+    to end it. Renewal now needs the refresh credential that only the web
+    server holds: ``POST /api/auth/session/refresh``."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Use POST /api/auth/session/refresh with the refresh_token",
+    )
 
-    The NextAuth jwt callback calls this when `celmisExpiresAt` is
-    close, so browser sessions silently roll over instead of forcing a
-    re-login. Requires the CURRENT token to still be valid — an expired
-    token cannot self-refresh (that's what the login flow is for).
+
+class SessionRefreshIn(BaseModel):
+    refresh_token: str = Field(min_length=16, max_length=256)
+
+
+class LogoutIn(BaseModel):
+    refresh_token: str = Field(min_length=16, max_length=256)
+
+
+@router.post("/session/refresh", response_model=TokenResponse)
+def refresh_session(
+    payload: SessionRefreshIn, users: UserStore = Depends(get_users),
+) -> TokenResponse:
+    """Swap a live refresh credential for a new short access token.
+
+    Called by the web server's NextAuth ``jwt`` callback, never by page
+    scripts: the credential stays in the encrypted session cookie. Unknown,
+    expired and revoked credentials all answer the same 401, so the answer
+    does not say which of them a guess was. The user is re-read every time, so
+    a disabled account stops here at once.
     """
-    if _sso_only(user):
-        # The IdP is the only way in for this user, so it must be asked again:
-        # a refresh would otherwise keep a user disabled (or stripped of the
-        # admin role) in Keycloak signed in for good. The session ends at its
-        # token's expiry and the next SSO sign-in re-checks the IdP.
+    from src.api import web_session
+
+    found = web_session.redeem_with_mode(payload.refresh_token)
+    user = users.get_by_id(found[0]) if found else None
+    # A credential that slides belonged to someone who could sign in with a
+    # password. If that is no longer so (password login switched off for a
+    # linked SSO account), it must not keep rolling: the IdP is asked again.
+    if user is not None and found[1] and _sso_only(user):
+        user = None
+    if user is None or not user.is_active:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Single sign-on session expired, sign in again",
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Session ended, sign in again",
         )
     token, exp = issue_token(user_id=user.id, email=user.email, scopes=held_scopes(user))
     logger.info("session_token_refreshed id=%s email=%s", user.id, user.email)
+    # The credential is not echoed: the caller already holds it.
     return TokenResponse(access_token=token, expires_at=exp)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(payload: LogoutIn) -> None:
+    """End a session: revoke its refresh credential.
+
+    Possession of the credential is the authority, so this takes no bearer —
+    sign-out must work even when the access token has already expired. The
+    access token that was issued last stays valid until its own (short)
+    expiry; it can no longer be renewed. Always 204: whether the credential
+    existed is not for the caller to learn.
+    """
+    from src.api import web_session
+
+    if web_session.revoke(payload.refresh_token):
+        logger.info("session_logout")
 
 
 # ─── Password reset (Stage 23) ───────────────────────────────────────

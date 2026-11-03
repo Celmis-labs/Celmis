@@ -34,7 +34,9 @@ export function Providers({
       }),
   );
   return (
-    <SessionProvider>
+    // refetchInterval: polled so the jwt callback (auth.ts) can renew the
+    // short-lived API token before it expires, also in a tab left open.
+    <SessionProvider refetchInterval={60}>
       <I18nProvider initialLocale={initialLocale} initialDict={initialDict} askBrowser={askBrowser}>
         <QueryClientProvider client={queryClient}>
           {/* Motion, loaded lean. Components use the `m.*` elements from

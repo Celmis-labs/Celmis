@@ -242,7 +242,9 @@ def oidc_callback(
     redeem_after_verified_sign_in(
         user, users, email=email, email_verified=verified, ip=client_ip(request),
     )
-    return TokenResponse(access_token=token, expires_at=exp)
+    from src.api.routers.auth import session_response
+
+    return session_response(user, token, exp)
 
 
 def _replace_stand_in(users: UserStore, user: User, email: str, name: str,

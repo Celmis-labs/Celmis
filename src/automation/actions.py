@@ -695,7 +695,8 @@ async def list_repos(actor: Actor) -> dict[str, Any]:
 #: know is refused by name rather than written somewhere nothing reads it.
 REVIEW_SETTING_KEYS: tuple[str, ...] = (
     "run_on_drafts", "approve_when_clean", "request_changes_on_critical",
-    "committable_suggestions", "comment_min_severity", "max_inline_comments",
+    "committable_suggestions", "breaking_change_gate", "comment_min_severity",
+    "max_inline_comments",
     "summary_enabled", "review_language", "disabled_agents",
     "agent_prompt_guidelines",
 )
@@ -714,6 +715,7 @@ _GUIDELINES_KEY = "agent_prompt_guidelines"
 REVIEW_SETTING_SECTION: dict[str, str] = {
     "run_on_drafts": "general", "approve_when_clean": "general",
     "request_changes_on_critical": "general", "committable_suggestions": "general",
+    "breaking_change_gate": "general",
     "review_language": "general", "comment_min_severity": "filters",
     "max_inline_comments": "filters", "summary_enabled": "summary",
     "disabled_agents": "categories", "agent_prompt_guidelines": "prompts",

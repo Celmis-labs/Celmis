@@ -68,15 +68,26 @@ def _cve() -> Finding:
 
 
 def _breaking(monkeypatch) -> Finding:
+    from src.groups import impact
     from src.review import breaking_change
 
-    monkeypatch.setattr(breaking_change, "_find_consumers_across_repos", lambda *_a: {
-        "apply_refund": [{"repo_slug": "billing", "file": "api.py", "line": 4,
-                          "caller": "charge"}] * 2})
+    consumer = impact.Consumer("billing", "api.py", 4, "import", impact.STRONG,
+                               "apply_refund", caller="charge")
+    monkeypatch.setattr(impact, "consumers_of_symbols", lambda **_k: impact.Impact(
+        consumers=[consumer, consumer], checked=["billing"]))
+    old = "def apply_refund(order):\n    return 1\n"
+    new = "def apply_refund(order, amount):\n    return 1\n"
+    diff = ("diff --git a/app/refunds.py b/app/refunds.py\n--- a/app/refunds.py\n"
+            "+++ b/app/refunds.py\n@@ -1,2 +1,2 @@\n-def apply_refund(order):\n"
+            "+def apply_refund(order, amount):\n     return 1\n")
+    from src.review.diff import parse_unified_diff
+
+    hunks, _ = parse_unified_diff(diff)
     pr = SimpleNamespace(
-        raw_diff="+def apply_refund(order, amount):\n", local_slug="shop", repo="o/shop",
-        number=3, title="t", url="", changed_files=["app/refunds.py"])
-    context = SimpleNamespace(pull_request=pr, workspace_id="w")
+        raw_diff=diff, hunks=hunks, local_slug="shop", repo="o/shop", number=3, title="t",
+        url="", base_sha="b", head_sha="h", changed_files=["app/refunds.py"])
+    provider = SimpleNamespace(read_file_at=lambda r, ref, path: old if ref == "b" else new)
+    context = SimpleNamespace(pull_request=pr, workspace_id="w", file_provider=provider)
     return breaking_change.run_breaking_change(context).findings[0]
 
 
@@ -151,9 +162,9 @@ def test_a_breaking_change_is_said_in_ukrainian(monkeypatch) -> None:
     finding = _breaking(monkeypatch)
     uk = shown(finding, "uk")
     assert uk.title == "Ризик зламу сумісності: apply_refund — споживачів: 2"
-    assert "Зміна сигнатури зачіпає `function` **apply_refund**" in uk.body
-    assert "`billing` · `api.py:4` — charge" in uk.body, "the consumers are data"
-    assert "Signature change" not in uk.body
+    assert "Зміна контракту зачіпає `function` **apply_refund**" in uk.body
+    assert "`billing` · `api.py:4`" in uk.body, "the consumers are data"
+    assert "Contract change" not in uk.body
 
 
 def test_a_compliance_title_is_said_in_ukrainian_and_the_stored_title_is_not_touched() -> None:

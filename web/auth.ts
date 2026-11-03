@@ -22,11 +22,16 @@
  * forward it as Bearer to FastAPI.
  */
 import NextAuth, { CredentialsSignin } from "next-auth";
+import type { JWT } from "next-auth/jwt";
 import Credentials from "next-auth/providers/credentials";
 import Google from "next-auth/providers/google";
 
 import { api, ApiError, type TokenResponse, type UserOut } from "@/lib/api";
-import { passwordLoginEnabled } from "@/lib/auth-options";
+import {
+  passwordLoginEnabled,
+  renewBeforeMs,
+  sessionMaxAgeSeconds,
+} from "@/lib/auth-options";
 import { seatLimitCodeOf, type SeatLimitCode } from "@/lib/seats";
 import { OIDC_EXCHANGE_PATH, OIDC_PROVIDER_ID, oidcProviders } from "@/ee/sso/oidc-provider";
 
@@ -71,10 +76,42 @@ async function exchangeIdToken(path: string, idToken: string) {
   return { tok, me };
 }
 
+/** A token without credentials: the proxy sees no `celmisToken` and sends the
+ *  person to /login. The identity is kept only so that Auth.js can still
+ *  describe the cookie it is about to replace. */
+function endSession(token: JWT): JWT {
+  delete token.celmisToken;
+  delete token.celmisExpiresAt;
+  delete token.refreshToken;
+  delete token.idToken;
+  token.isAdmin = false;
+  token.isSuperadmin = false;
+  return token;
+}
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   trustHost: true,
-  session: { strategy: "jwt", maxAge: 30 * 24 * 60 * 60 }, // 30 days
+  // Up to 24 hours (CELMIS_WEB_SESSION_HOURS), sliding: the cookie is re-issued
+  // at most once an hour while the person is using the app, and lapses a day
+  // after the last use. The API token inside it lives an hour and is renewed
+  // in the jwt callback below.
+  session: { strategy: "jwt", maxAge: sessionMaxAgeSeconds(), updateAge: 60 * 60 },
   pages: { signIn: "/login" },
+  events: {
+    // Sign-out ends the refresh credential at the API, so a stolen access
+    // token cannot be renewed and dies within its own hour. Best effort: if
+    // the API is unreachable the cookie is still cleared and the credential
+    // lapses by itself a day after its last use.
+    async signOut(message) {
+      const refreshToken = "token" in message ? message.token?.refreshToken : undefined;
+      if (!refreshToken) return;
+      try {
+        await api("/api/auth/logout", { method: "POST", json: { refresh_token: refreshToken } });
+      } catch {
+        // see above
+      }
+    },
+  },
   providers: [
     Credentials({
       credentials: {
@@ -108,6 +145,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             name: me.name || me.email,
             celmisToken: tok.access_token,
             celmisExpiresAt: tok.expires_at,
+            refreshToken: tok.refresh_token ?? undefined,
             isAdmin: me.is_admin,
             isSuperadmin: Boolean(me.is_superadmin),
           };
@@ -156,6 +194,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           name: me.name || me.email,
           celmisToken: tok.access_token,
           celmisExpiresAt: tok.expires_at,
+          refreshToken: tok.refresh_token ?? undefined,
           isAdmin: me.is_admin,
           isSuperadmin: Boolean(me.is_superadmin),
         });
@@ -165,12 +204,17 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         return full ? seatLimitUrl(full) : SSO_REJECTED_URL;
       }
     },
-    jwt: async ({ token, user }) => {
+    jwt: async ({ token, user, account }) => {
       // Initial sign-in: Credentials (authorize()) or Google/OIDC (signIn above).
       if (user && (user as { celmisToken?: string }).celmisToken) {
-        const u = user as { id: string; email: string; name: string; celmisToken: string; celmisExpiresAt: string; isAdmin: boolean; isSuperadmin?: boolean };
+        const u = user as { id: string; email: string; name: string; celmisToken: string; celmisExpiresAt: string; refreshToken?: string; isAdmin: boolean; isSuperadmin?: boolean };
         token.celmisToken = u.celmisToken;
         token.celmisExpiresAt = u.celmisExpiresAt;
+        token.refreshToken = u.refreshToken;
+        // Kept for sign-out at the identity provider (id_token_hint). Cookie
+        // only — the session callback below never copies it out.
+        token.idToken =
+          account?.provider === OIDC_PROVIDER_ID ? (account.id_token ?? undefined) : undefined;
         token.isAdmin = u.isAdmin;
         token.isSuperadmin = Boolean(u.isSuperadmin);
         token.userId = u.id;
@@ -180,26 +224,37 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         return token;
       }
 
-      // Stage 21 — silent session refresh. When the backend token is
-      // within 24h of expiry, exchange it for a fresh one via
-      // /api/auth/refresh (requires the CURRENT token to still be
-      // valid). On failure we keep the old token — the user gets logged
-      // out naturally at expiry instead of abruptly now.
+      // A session from before the short-lived token has a month-long API token
+      // and no refresh credential. It cannot be renewed and must not be kept:
+      // end it, so the person signs in again and gets the short one.
+      if (token.celmisToken && !token.refreshToken) {
+        return endSession(token);
+      }
+
+      // The API token lives an hour. Shortly before it ends, exchange the
+      // refresh credential (which only this server holds) for a new one. The
+      // credential is revoked by the API at sign-out and when the account is
+      // disabled or its password reset; a refusal here ends the session.
       const expiresAt = token.celmisExpiresAt as string | undefined;
-      if (token.celmisToken && expiresAt) {
+      if (token.celmisToken && token.refreshToken && expiresAt) {
         const msLeft = Date.parse(expiresAt) - Date.now();
-        const threshold = 24 * 60 * 60 * 1000; // 24h
-        if (Number.isFinite(msLeft) && msLeft > 0 && msLeft < threshold) {
+        if (!Number.isFinite(msLeft) || msLeft < renewBeforeMs()) {
           try {
-            const fresh = await api<TokenResponse>("/api/auth/refresh", {
+            const fresh = await api<TokenResponse>("/api/auth/session/refresh", {
               method: "POST",
-              token: token.celmisToken as string,
+              json: { refresh_token: token.refreshToken },
             });
             token.celmisToken = fresh.access_token;
             token.celmisExpiresAt = fresh.expires_at;
             token.meCheckedAt = 0; // re-read the user below with the new token
-          } catch {
-            // keep the old token — natural expiry will log the user out
+          } catch (err) {
+            // 401/403/404/410: the credential is dead, so is the session.
+            // Anything else (API restarting, network): keep what we hold and
+            // try again on the next call; the old token still works until it
+            // expires, and then the API itself answers 401.
+            if (err instanceof ApiError && [401, 403, 404, 410].includes(err.status)) {
+              return endSession(token);
+            }
           }
         }
       }

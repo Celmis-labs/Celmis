@@ -60,8 +60,9 @@ exactly as it is.
 WHAT AN ANONYMOUS CALLER MAY SEE
 --------------------------------
 It is read before sign-in, so most of the body is public. Included for
-everyone: the product name, the API version, a coarse edition label, and which
-feature modules are mounted. That is an installation fingerprint, and it is a
+everyone: the product name and which feature modules are mounted. The API
+version and the edition label are NOT (they were, until v3.1.19, and an audit
+flagged the pair as a fingerprint): they need a valid token, like the mode. That is an installation fingerprint, and it is a
 weaker one than this app already hands out for free — ``/openapi.json`` and
 ``/docs`` are mounted BEHIND A SESSION as of the same change that added this file.
 Nothing public here that is not already public there.
@@ -138,6 +139,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Header, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -564,11 +566,15 @@ class LicenseOut(BaseModel):
 class CapabilitiesOut(BaseModel):
     schema_version: int
     product: str
-    api_version: str
+    #: Version, edition and its source are an installation fingerprint (they
+    #: pick the CVE list for an attacker), so an anonymous caller is not given
+    #: them: the endpoint drops these three keys unless a valid token came with
+    #: the request. `None` here means "not disclosed", never "unknown".
+    api_version: str | None = None
     #: "community" | "enterprise" — or a label owned by `src.deployment`.
-    edition: str
+    edition: str | None = None
     #: "license" (read from the licence state), "src.deployment", "degraded".
-    edition_source: str
+    edition_source: str | None = None
     #: Every feature this edition should have is mounted.
     complete: bool
     license: LicenseOut
@@ -700,7 +706,12 @@ def build_capabilities(app: Any, *, authenticated: bool = False) -> Capabilities
         return _empty("build raised")
 
 
-@router.get("/capabilities", response_model=CapabilitiesOut)
+#: Keys withheld from a caller that did not present a valid token.
+_FINGERPRINT_KEYS = frozenset({"api_version", "edition", "edition_source"})
+
+
+@router.get("/capabilities", response_model=CapabilitiesOut,
+            response_model_exclude_none=False)
 def capabilities(
     request: Request,
     response: Response,
@@ -722,7 +733,16 @@ def capabilities(
     # shared cache must not hand one caller's document to the next.
     response.headers["Cache-Control"] = "no-store"
     response.headers["Vary"] = "Authorization"
-    return build_capabilities(request.app, authenticated=_is_authenticated(authorization))
+    authenticated = _is_authenticated(authorization)
+    doc = build_capabilities(request.app, authenticated=authenticated)
+    if authenticated:
+        return doc
+    # Dropped from the body rather than nulled, so a client cannot mistake
+    # "not disclosed" for a value. The three keys are the only difference.
+    return JSONResponse(  # type: ignore[return-value]
+        content=doc.model_dump(mode="json", exclude=set(_FINGERPRINT_KEYS)),
+        headers=dict(response.headers),
+    )
 
 
 __all__ = [

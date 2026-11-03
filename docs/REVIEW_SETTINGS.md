@@ -115,8 +115,64 @@ limit, or the check that the pull request has a diff to read.
 | `approve_when_clean` / `request_changes_on_critical` | off | Let the review approve a clean pull request or request changes on a critical finding. |
 | `status_feedback` | on | Show the review as a commit status or check. |
 | `committable_suggestions` | off | Use the provider's suggestion blocks where a fix is a few lines. |
+| `breaking_change_gate` | off | Post the commit status `celmis/breaking-change` on the pull request head: failure when a contract change has strong consumers in other repositories of the workspace, success otherwise. See [Breaking changes across repositories](#breaking-changes-across-repositories). |
 | `base_instruction` | none | A sentence every agent is given, such as "we use `Result` types, not exceptions". |
 | `message_started` / `message_finished_header` | built-in | Replace the wording of the two comments. |
+
+## Breaking changes across repositories
+
+**How links between repositories are found.** Indexing records, per
+repository, the routes it serves, the HTTP calls it makes, the packages it
+publishes and the external packages it imports (with the calls of the imported
+names). At review time, only the repositories of the same workspace are
+consulted (under `multi_tenant` nothing of another workspace is even loaded).
+
+- A route is consumed by a call with a compatible method and path
+  (`{id}`, `:id`, `<int:id>` and `*` are the same wildcard). The link is
+  **strong** when the called host belongs to the owning repository: a compose
+  service built from it, a host named like it, a `BILLING_URL` style variable,
+  or an entry in `IMPACT_HOST_MAP` (JSON, host to repository slug). A matching
+  path alone, or a call that carries a prefix the route does not, is **weak**.
+- A symbol is consumed by a repository that imports the package publishing its
+  file; it is strong when the importing file calls the changed name AND the
+  module it imported is the one that defines it. A Python package `__init__`
+  that re-exports the name counts (recorded at index time; reindex repositories
+  indexed before), a JS subpath or a Go package path must name the file or its
+  directory. An import of the same package through another module is weak.
+- A call whose path has no literal segment (`f"{BASE}/{endpoint}"`) is never strong.
+
+**What counts as breaking.** A removed public function, class, method or
+route; a removed parameter; a newly required parameter; reordered positional
+parameters; in Python also a renamed parameter (callers pass keywords); a
+route whose method or path changed. A change of the body only, a new optional
+parameter, a private name and a symbol moved to another changed file are not.
+Severity follows strong consumers only; weak links are informational.
+Repositories without recorded facts (indexed before the feature), a failed
+lookup, files compared from the diff alone and an unindexed changed repository
+are said in an informational finding ("N repositories not checked"). The status
+then reads **success** with the description "Contract change found; N
+repositories not checked", never "none found": a required check that stayed red
+or pending on an old index would block every merge. Strong consumers still fail
+it.
+
+**Making the status required.** With `breaking_change_gate` on, the review sets
+`celmis/breaking-change` on the head commit. Then add it as a required check:
+
+- GitHub: Settings, Branches, the rule for the target branch, "Require status
+  checks to pass", add `celmis/breaking-change`.
+- GitLab: the status appears on the merge request. GitLab has no branch rule
+  that requires an arbitrary commit status; use "Pipelines must succeed" only
+  if the status is part of your pipeline, or an external status check
+  (Ultimate) that reads it. Otherwise treat it as advisory.
+- Bitbucket Cloud: Repository settings, Branch restrictions, "Check last
+  commit for at least 1 successful build".
+
+The token that comments must also be allowed to write statuses: GitHub
+`repo:status` (classic) or "Commit statuses: Read and write" (fine-grained or
+app); GitLab `api` scope with the Developer role; Bitbucket `repository:write`
+(app password: Repositories, Write). If it is not, the review says so and
+carries on. When the check could not finish, no status is written, so a
+required check stays pending instead of showing a verdict nobody reached.
 
 ## When the model is down
 

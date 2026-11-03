@@ -51,6 +51,10 @@ export default async function RootLayout({
   // en and uk are in the client bundle; any other language is loaded here so
   // the HTML is already in it rather than English until a download ends.
   const dictionary = await serverDictionary(locale);
+  // The per-response nonce proxy.ts put in the Content-Security-Policy: the
+  // one inline script of the app (the theme, which has to run before the first
+  // paint) is allowed by it and nothing else inline is.
+  const nonce = headerStore.get("x-nonce") ?? undefined;
   return (
     <html
       lang={locale}
@@ -58,7 +62,7 @@ export default async function RootLayout({
       suppressHydrationWarning
     >
       <head>
-        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+        <script nonce={nonce} dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
       <body className="min-h-full">
         <ThemeSync />

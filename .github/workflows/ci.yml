@@ -57,6 +57,17 @@ jobs:
           # does locally, plus the dev extra that carries pytest and ruff.
           pip install -e ".[dev]"
 
+      # The Docker image installs from uv.lock (`uv sync --frozen`), so the lock
+      # has to say what pyproject says. Without this a dependency change that
+      # forgets `uv lock` goes green here and fails - or worse, ships an older
+      # set - in the image build. Fix a failure with `uv lock` (add --upgrade to
+      # take newer releases) and commit the result. The version is the one the
+      # Dockerfile installs.
+      - name: Lock file matches pyproject
+        run: |
+          python -m pip install "uv==0.13.7"
+          uv lock --check
+
       # Not `ruff check` outright: this repository carries 602 findings that
       # predate CI, and a build that is red on day one is a build everybody
       # learns to ignore. The ratchet fails when the number GROWS, so new code

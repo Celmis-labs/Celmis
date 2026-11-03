@@ -154,7 +154,7 @@ and nothing is written until you press "Run it" ("Cancel" leaves it).
 - Change a setting: «увімкни approve для репо X», «set the comment
   threshold to error for the workspace». Settings it can change:
   `approve_when_clean`, `request_changes_on_critical`, `run_on_drafts`,
-  `committable_suggestions`, `comment_min_severity`,
+  `committable_suggestions`, `breaking_change_gate`, `comment_min_severity`,
   `max_inline_comments`, `summary_enabled`, `review_language`,
   `disabled_agents` — the ones this installation does not have yet are
   refused by name. For the workspace it writes the "Global" scope of

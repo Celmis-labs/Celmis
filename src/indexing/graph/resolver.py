@@ -5,7 +5,10 @@ run. Strategy:
 
 1. **External deps** — `import axios from 'axios'` → in
    RepoContext.external_deps: tag as external, **we drop the edge** (the graph
-   does not go beyond the repo).
+   does not go beyond the repo). What leaves the repository is not lost: the
+   extractors record external imports, the calls of their names, routes and
+   HTTP calls as cross-repository facts (`src.indexing.graph.xrepo`) before
+   this resolver runs.
 
 2. **Path alias resolution** — `import x from '@/utils/foo'`:
    via RepoContext.path_aliases ('@/' → 'src/') → we look for

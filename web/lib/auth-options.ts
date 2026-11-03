@@ -26,3 +26,24 @@ export function oidcConfigured(): boolean {
 export function oidcProviderName(): string {
   return (process.env.AUTH_OIDC_NAME ?? "").trim() || "SSO";
 }
+
+/** The web session's life in seconds: CELMIS_WEB_SESSION_HOURS, 24 h at most.
+ *  It slides: the cookie is re-issued while the person keeps using the app. */
+export function sessionMaxAgeSeconds(): number {
+  const hours = Number.parseFloat(process.env.CELMIS_WEB_SESSION_HOURS ?? "");
+  const h = Number.isFinite(hours) && hours > 0 ? Math.min(hours, 24) : 24;
+  return Math.round(h * 3600);
+}
+
+/** Life of the API access token in seconds (the API clamps it to 60..3600). */
+export function accessTokenTtlSeconds(): number {
+  const raw = Number.parseInt(process.env.CELMIS_ACCESS_TOKEN_TTL_SECONDS ?? "", 10);
+  const v = Number.isFinite(raw) ? raw : 3600;
+  return Math.max(60, Math.min(3600, v));
+}
+
+/** How early before expiry the access token is renewed, in ms: five minutes,
+ *  or half its life when it is shorter than ten. */
+export function renewBeforeMs(): number {
+  return Math.min(5 * 60 * 1000, (accessTokenTtlSeconds() * 1000) / 2);
+}

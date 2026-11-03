@@ -423,6 +423,9 @@ class RepoReviewPolicy(Base, TimestampMixin):
     status_feedback: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     #: Render fixes as the provider's committable "suggestion" blocks.
     committable_suggestions: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    #: Post the `celmis/breaking-change` commit status (failure when a contract
+    #: change has strong consumers in other repositories). Built-in: off.
+    breaking_change_gate: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     #: Whether the severity threshold and inline cap apply to rule findings.
     apply_filters_to_rules: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     #: comment | description — `review_defaults.SETTING_CHOICES` for each.
@@ -555,6 +558,7 @@ class WorkspaceReviewDefaults(Base, TimestampMixin):
         Boolean, nullable=True)
     status_feedback: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     committable_suggestions: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    breaking_change_gate: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     apply_filters_to_rules: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     summary_target: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary_on_new_commits: Mapped[str | None] = mapped_column(Text, nullable=True)

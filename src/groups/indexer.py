@@ -318,6 +318,11 @@ class GroupIndexer:
 
         # Persist into the per-repo graph
         db_path = self.settings.repo_graph_path(slug)
+        # The old sidecar goes with the old graph: if the new facts cannot be
+        # written, the repository must read as "unknown", not as its past self.
+        from src.indexing.graph.xrepo import forget_facts
+
+        forget_facts(db_path)
         if db_path.exists():
             db_path.unlink()
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -330,6 +335,22 @@ class GroupIndexer:
             store.commit()
         finally:
             store.close()
+
+        # Cross-repository facts (routes, HTTP calls, packages, external
+        # imports) sit beside the graph, as the single-repository pipeline writes them.
+        try:
+            from src.indexing.graph.xrepo import FactSet, save_facts
+            from src.indexing.graph.xrepo.collect import finish as finish_facts
+            from src.indexing.graph.xrepo.collect import service_facts
+
+            xfacts = FactSet()
+            for res in extractions.values():
+                if res.facts is not None:
+                    xfacts.extend(res.facts)
+            xfacts.services = service_facts(all_symbols, all_edges)
+            save_facts(db_path, finish_facts(xfacts, sync_result.path))
+        except Exception as exc:  # noqa: BLE001 — facts are additive, never fail the index
+            logger.warning("xrepo_facts_not_saved repo=%s err=%s", slug, exc)
 
         files_processed = len(all_files) - files_skipped
 

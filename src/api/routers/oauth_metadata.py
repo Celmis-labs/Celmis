@@ -75,7 +75,7 @@ async def oauth_authorization_server(request: Request, response: Response) -> di
         "token_endpoint": f"{issuer}/oauth/token",
         "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
         "response_types_supported": ["code"],
-        "code_challenge_methods_supported": ["S256", "plain"],
+        "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": [
             "client_secret_post", "none",  # 'none' = public/PKCE-only clients
         ],

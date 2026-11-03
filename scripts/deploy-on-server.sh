@@ -31,7 +31,7 @@
 #      this box down.
 #   3. checking `alembic current` is at head. A migration that did not run is
 #      invisible until it fails somewhere else, as something unrelated.
-#   4. stamping the build, because `/api/capabilities` reads `api_version` from
+#   4. stamping the build, because the running version (`/api/capabilities`, signed in) reads from
 #      it — and the AGPL §13 footer links to the source AT THAT VERSION. An
 #      unstamped deploy offers the wrong source, which is the one thing that
 #      footer exists to get right.
@@ -328,5 +328,8 @@ done
 docker exec celmis-api alembic current 2>&1 | tail -1 | grep -q "(head)" \
   || fail "the database is not at head — a migration did not run"
 
-log "deployed: $(curl -fsS localhost/backend/api/capabilities 2>/dev/null \
-  | grep -o '"api_version":"[^"]*"' || echo 'api_version unavailable')"
+# /api/capabilities no longer names the version to an anonymous caller (it is a
+# fingerprint), so ask the running container instead.
+log "deployed: $(docker exec celmis-api python -c \
+  'from src.api.main import _version; print(_version())' 2>/dev/null \
+  || echo 'version unavailable')"

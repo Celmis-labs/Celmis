@@ -25,10 +25,11 @@ export type CapabilityFeature = { available: boolean; pages: string[] };
 export type Capabilities = {
   schema_version: number;
   product: string;
-  api_version: string;
+  /** The three fields below are sent only with a valid token (fingerprint). */
+  api_version?: string;
   /** "community" | "enterprise" (or a label owned by src.deployment). */
-  edition: string;
-  edition_source: string;
+  edition?: string;
+  edition_source?: string;
   complete?: boolean;
   license?: {
     features: string[];

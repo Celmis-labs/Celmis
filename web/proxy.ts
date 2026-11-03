@@ -1,5 +1,14 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/auth";
+import {
+  buildCsp,
+  cspHeader,
+  cspMode,
+  HSTS,
+  isHttps,
+  makeNonce,
+  STATIC_SECURITY_HEADERS,
+} from "@/lib/csp";
 
 /** Pages that only make sense when signed OUT — a signed-in visitor is sent
  * to the dashboard instead. */
@@ -22,6 +31,38 @@ const OPEN_PATHS = new Set(["/reset-password"]);
 const OPEN_PREFIXES = ["/invite/"];
 
 export default auth((req) => {
+  // One nonce per response. Next reads it back from the request's CSP header
+  // and stamps it on the scripts it injects; `x-nonce` is for our own layout.
+  const nonce = makeNonce();
+  const policy = buildCsp({
+    nonce,
+    isDev: process.env.NODE_ENV === "development",
+    oidcIssuer: process.env.AUTH_OIDC_ISSUER,
+    googleEnabled: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
+    apiBase: process.env.NEXT_PUBLIC_API_BASE,
+  });
+  const csp = cspHeader(cspMode(process.env.CELMIS_CSP), policy);
+
+  const requestHeaders = new Headers(req.headers);
+  if (csp) {
+    requestHeaders.set("x-nonce", nonce);
+    requestHeaders.set(csp[0], csp[1]);
+  }
+  const pass = () => NextResponse.next({ request: { headers: requestHeaders } });
+  const res = route(req, pass);
+
+  if (csp) res.headers.set(csp[0], csp[1]);
+  for (const [name, value] of STATIC_SECURITY_HEADERS) res.headers.set(name, value);
+  if (isHttps(req.nextUrl.href, req.headers.get("x-forwarded-proto"))) {
+    res.headers.set(HSTS[0], HSTS[1]);
+  }
+  return res;
+});
+
+function route(
+  req: Parameters<Parameters<typeof auth>[0]>[0],
+  pass: () => NextResponse,
+): NextResponse {
   const { pathname } = req.nextUrl;
   const isLoggedIn = Boolean(req.auth?.celmisToken);
   const isAuthPage = AUTH_PATHS.has(pathname);
@@ -33,7 +74,7 @@ export default auth((req) => {
       new URL(isLoggedIn ? "/dashboard" : "/login", req.nextUrl),
     );
   }
-  if (isOpen) return NextResponse.next();
+  if (isOpen) return pass();
   if (!isLoggedIn && !isAuthPage) {
     const url = new URL("/login", req.nextUrl);
     url.searchParams.set("from", pathname);
@@ -42,8 +83,8 @@ export default auth((req) => {
   if (isLoggedIn && isAuthPage) {
     return NextResponse.redirect(new URL("/dashboard", req.nextUrl));
   }
-  return NextResponse.next();
-});
+  return pass();
+}
 
 // Run middleware on all routes except API/auth/static
 export const config = {

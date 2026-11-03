@@ -38,6 +38,7 @@ from starlette.routing import Mount
 from src.api.routers import capabilities as caps
 
 #: Long enough for `issue_token`; deliberately not a placeholder marker.
+_BUILD_FACTS = ("api_version", "edition", "edition_source")
 SECRET = "test-capabilities-secret-0123456789abcdef"
 
 
@@ -393,12 +394,17 @@ def test_only_the_mode_depends_on_who_is_asking(client, token):
     ).json()
 
     def public(body: dict) -> dict:
-        out = {k: v for k, v in body.items() if k not in ("deployment", "license")}
+        out = {k: v for k, v in body.items()
+               if k not in ("deployment", "license", *_BUILD_FACTS)}
         out["license_features"] = body["license"]["features"]
         return out
 
     assert public(anon) == public(authed)
     assert anon["deployment"] != authed["deployment"]
+    # The build facts (version, edition) are for a signed-in caller only: a
+    # stranger must not be able to fingerprint the build.
+    assert not set(_BUILD_FACTS) & set(anon)
+    assert set(_BUILD_FACTS) <= set(authed)
 
 
 def test_the_licence_customer_is_told_only_to_a_signed_in_caller(client, token, app):
@@ -426,8 +432,8 @@ def test_the_payload_carries_nothing_outside_its_contract(client):
     body = client.get("/api/capabilities").json()
 
     assert set(body) == {
-        "schema_version", "product", "api_version", "edition", "edition_source",
-        "complete", "license", "deployment", "features", "pages", "degraded",
+        "schema_version", "product", "complete", "license", "deployment",
+        "features", "pages", "degraded",
     }
     assert set(body["deployment"]) == {"mode", "source"}
     assert set(body["license"]) == {"features", "customer", "expires_at"}

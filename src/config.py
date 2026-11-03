@@ -427,6 +427,13 @@ class Settings(BaseSettings):
     # list, so a compose file can forward the variable when it is unset.
     secret_path_globs_extra: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
+    # ─── Cross-repository impact ────────────────────────────────────
+    # JSON object `{"api.example.com": "billing-service"}`: a hostname (or a
+    # base URL's host) -> the slug of the repository that serves it. An HTTP
+    # call to such a host is a STRONG link to that repository; without a
+    # mapping the review falls back to compose services, images and names.
+    impact_host_map: str = ""
+
     # ─── Sync ────────────────────────────────────────────────────────
     git_clone_depth: int = 50
     git_clone_filter: str = "blob:none"

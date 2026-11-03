@@ -82,6 +82,31 @@ def _clear_settings() -> None:
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _web_session_table(tmp_path_factory):
+    """Every sign-in now stores a refresh credential in `oauth_refresh_tokens`.
+
+    A throwaway SQLite file stands in for Postgres so the many tests that
+    sign somebody up through a bare router need no database. A test that
+    installs its own engine still wins (it replaces `_ENGINE`).
+    """
+    from sqlalchemy import create_engine, event
+
+    import src.llm.budget as budget
+    from src.db.models import OAuthRefreshToken
+
+    engine = create_engine(f"sqlite:///{tmp_path_factory.mktemp('web-session-db') / 'c.db'}")
+    from tests.api.rbac_world import _sqlite_booleans
+
+    event.listen(engine, "connect", _sqlite_booleans)
+    OAuthRefreshToken.__table__.create(engine)
+    previous = budget._ENGINE
+    if previous is None:
+        budget._ENGINE = engine
+    yield
+    budget._ENGINE = previous
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _scratch_data_dirs(tmp_path_factory):
     """The vault, the workspace and the review cache are scratch folders for the whole run."""
     root = tmp_path_factory.mktemp("celmis-data")

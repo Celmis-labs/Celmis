@@ -1045,6 +1045,16 @@ class GitLabPRProvider(PullRequestProvider):
     def _project_url(self, repo: str) -> str:
         return f"{self.api_base}/projects/{self._project_path(repo)}"
 
+    status_scope_hint = "the `api` scope and the Developer role (or higher) on the project"
+
+    def _status_request(self, pr, *, state, description, target_url, context):  # noqa: ANN001, ANN202
+        params = {"state": "success" if state == "success" else "failed",
+                  "name": context, "description": description}
+        if target_url:
+            params["target_url"] = target_url
+        return self._http.post(
+            f"{self._project_url(pr.repo)}/statuses/{quote(pr.head_sha, safe='')}", params=params)
+
     def branch_head_sha(self, repo: str, branch: str) -> str:
         resp = self._http.get(
             f"{self._project_url(repo)}/repository/branches/{quote(branch, safe='')}")

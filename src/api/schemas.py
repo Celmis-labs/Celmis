@@ -70,6 +70,10 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_at: datetime
+    #: Renews the access token (POST /api/auth/session/refresh) and is ended
+    #: by POST /api/auth/logout. Meant for a server, never for page scripts:
+    #: the web app keeps it inside its encrypted session cookie.
+    refresh_token: str | None = None
 
 
 class UserOut(BaseModel):
@@ -926,6 +930,7 @@ class ReviewPolicyIn(BaseModel):
     request_changes_on_critical: bool | None = None
     status_feedback: bool | None = None
     committable_suggestions: bool | None = None
+    breaking_change_gate: bool | None = None
     apply_filters_to_rules: bool | None = None
     summary_target: str | None = Field(default=None, max_length=32)
     summary_on_new_commits: str | None = Field(default=None, max_length=32)
@@ -1083,6 +1088,8 @@ class ReviewPolicyOut(BaseModel):
     status_feedback_effective: bool = True
     committable_suggestions: bool | None = None
     committable_suggestions_effective: bool = False
+    breaking_change_gate: bool | None = None
+    breaking_change_gate_effective: bool = False
     apply_filters_to_rules: bool | None = None
     apply_filters_to_rules_effective: bool = True
     summary_target: str | None = None
@@ -1213,6 +1220,7 @@ class WorkspaceReviewDefaultsIn(BaseModel):
     request_changes_on_critical: bool | None = None
     status_feedback: bool | None = None
     committable_suggestions: bool | None = None
+    breaking_change_gate: bool | None = None
     apply_filters_to_rules: bool | None = None
     summary_target: str | None = Field(default=None, max_length=32)
     summary_on_new_commits: str | None = Field(default=None, max_length=32)
@@ -1280,6 +1288,7 @@ class WorkspaceReviewDefaultsOut(BaseModel):
     request_changes_on_critical: bool | None = None
     status_feedback: bool | None = None
     committable_suggestions: bool | None = None
+    breaking_change_gate: bool | None = None
     apply_filters_to_rules: bool | None = None
     summary_target: str | None = None
     summary_on_new_commits: str | None = None

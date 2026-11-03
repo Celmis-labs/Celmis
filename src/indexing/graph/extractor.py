@@ -53,6 +53,9 @@ class ExtractionResult:
     symbols: list[SymbolInfo] = field(default_factory=list)
     edges: list[EdgeInfo] = field(default_factory=list)
     parse_errors: list[str] = field(default_factory=list)
+    #: Routes, HTTP calls and external imports of the file (see
+    #: `src.indexing.graph.xrepo`); None for a language with no extractor.
+    facts: object | None = None
 
 
 class SymbolExtractor(ABC):

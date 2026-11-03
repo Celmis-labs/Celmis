@@ -164,6 +164,8 @@ export interface TokenResponse {
   access_token: string;
   token_type: string;
   expires_at: string;
+  /** Sent at sign-in only; kept server-side by auth.ts, never in the Session. */
+  refresh_token?: string | null;
 }
 
 export interface ConnectionStatus {
@@ -1017,6 +1019,8 @@ export type ReviewPolicy = {
   issues_announce_resolved_effective?: boolean;
   committable_suggestions?: boolean | null;
   committable_suggestions_effective?: boolean;
+  breaking_change_gate?: boolean | null;
+  breaking_change_gate_effective?: boolean;
   apply_filters_to_rules?: boolean | null;
   apply_filters_to_rules_effective?: boolean;
   summary_target?: "comment" | "description" | null;
@@ -1114,6 +1118,7 @@ type ReviewPolicyReadOnly =
   | "enabled_agents_effective" | "run_on_drafts_effective"
   | "approve_when_clean_effective" | "request_changes_on_critical_effective"
   | "status_feedback_effective" | "committable_suggestions_effective"
+  | "breaking_change_gate_effective"
   | "issues_auto_resolve_effective" | "issues_resolve_llm_verify_effective"
   | "issues_resolve_max_llm_effective" | "issues_announce_resolved_effective"
   | "apply_filters_to_rules_effective" | "summary_target_effective"
@@ -1293,6 +1298,7 @@ export type WorkspaceReviewDefaults = {
   issues_resolve_max_llm: number | null;
   issues_announce_resolved: boolean | null;
   committable_suggestions: boolean | null;
+  breaking_change_gate: boolean | null;
   apply_filters_to_rules: boolean | null;
   summary_target: "comment" | "description" | null;
   summary_on_new_commits: "nothing" | "append" | "replace" | null;
@@ -1357,6 +1363,7 @@ export type WorkspaceReviewDefaultsUpdate = Partial<Pick<WorkspaceReviewDefaults
   | "suppressed_rules" | "review_language"
   | "enabled_agents" | "run_on_drafts" | "approve_when_clean"
   | "request_changes_on_critical" | "status_feedback" | "committable_suggestions"
+  | "breaking_change_gate"
   | "issues_auto_resolve" | "issues_resolve_llm_verify" | "issues_resolve_max_llm"
   | "issues_announce_resolved"
   | "apply_filters_to_rules" | "summary_target" | "summary_on_new_commits"

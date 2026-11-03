@@ -215,6 +215,17 @@ def _run_incremental(
     )
     registry = build_default_registry(ctx=ctx, repo_root=repo_path, enabled=enabled)
 
+    # Cross-repository facts follow the same delta. A repository whose facts
+    # were never recorded (indexed before they existed) stays that way until a
+    # full reindex: a file of only the touched files would claim to be all of it.
+    from src.indexing.graph.xrepo import FactSet, forget_facts, load_facts, save_facts
+    from src.indexing.graph.xrepo.collect import finish as finish_facts
+    from src.indexing.graph.xrepo.collect import service_facts
+
+    facts = load_facts(graph_path)
+    if facts is not None:
+        facts.drop_files(set(deleted + added_or_modified))
+
     store = make_graph_store(str(graph_path))
     total_syms = total_edges = 0
     try:
@@ -237,6 +248,16 @@ def _run_incremental(
                 continue
             # Resolve edges against this file's own symbols (best-effort;
             # cross-file edges refresh on the next full rebuild).
+            if facts is not None:
+                try:
+                    fresh = res.facts if res.facts is not None else FactSet()
+                    fresh.services = service_facts(res.symbols, res.edges)
+                    facts.extend(fresh)
+                except Exception as exc:  # noqa: BLE001 - facts never fail the sync
+                    logger.warning("xrepo_facts_failed repo=%s path=%s err=%s - facts now unknown",
+                                   repo_slug, path, exc)
+                    facts = None
+                    forget_facts(graph_path)
             resolver = HeuristicResolver(ctx, res.symbols)
             resolved = resolver.resolve_edges(res.edges)
             total_syms += store.add_symbols_batch(res.symbols)
@@ -246,6 +267,12 @@ def _run_incremental(
         store.commit()
     finally:
         store.close()
+    if facts is not None:
+        try:
+            save_facts(graph_path, finish_facts(facts, repo_path))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("xrepo_facts_not_saved repo=%s err=%s - facts now unknown", repo_slug, exc)
+            forget_facts(graph_path)
 
     # ── Vault MD reverse-index — resolve which notes reference the
     # changed source files, drop their stale Qdrant points, and enqueue

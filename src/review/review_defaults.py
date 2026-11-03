@@ -117,6 +117,8 @@ INHERITABLE_FIELDS: tuple[str, ...] = (
     # an on-demand check may read a Confluence page of the Jira site.
     "requirements_check_mode",
     "task_urls_enabled",
+    # ── The opt-in `celmis/breaking-change` commit status (migration a3c5e7b91d24).
+    "breaking_change_gate",
 )
 
 #: The fields 2.3.0 added (migration f1a2b3c4d5e6) — one column of the same
@@ -292,6 +294,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "request_changes_on_critical": False,
     "status_feedback": True,
     "committable_suggestions": False,
+    "breaking_change_gate": False,
     "apply_filters_to_rules": True,
     "summary_target": "comment",
     "summary_on_new_commits": "replace",

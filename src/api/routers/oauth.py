@@ -31,7 +31,7 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -327,6 +327,23 @@ async def register_client(
 # ─── /authorize + consent ───────────────────────────────────────────
 
 
+def _pkce_method_refused(method: str) -> JSONResponse:
+    """RFC 7636 §4.3 / RFC 6749 §4.1.2.1: an unsupported challenge method is
+    ``invalid_request``. `plain` is refused on purpose: its challenge IS the
+    verifier, so anything that can read the authorize URL (history, a proxy
+    log, a referrer) can redeem the code. The S256 hash cannot be reversed."""
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "invalid_request",
+            "error_description": (
+                "code_challenge_method must be S256"
+                + (f" ({method!r} is not supported)" if method else "")
+            ),
+        },
+    )
+
+
 @router.get("/authorize", response_class=HTMLResponse)
 async def authorize(
     request: Request,
@@ -338,7 +355,7 @@ async def authorize(
     scope: str = Query(default=""),
     state: str = Query(default=""),
     session: AsyncSession = Depends(get_async_session),
-) -> HTMLResponse:
+) -> Response:
     """Render a minimal consent screen. On POST /consent the caller
     accepts and receives an auth code back via `redirect_uri?code=...`.
     We DO NOT run our own login here — user must already have a
@@ -347,8 +364,8 @@ async def authorize(
     """
     if response_type != "code":
         raise HTTPException(status_code=400, detail="only response_type=code supported")
-    if code_challenge_method not in ("S256", "plain"):
-        raise HTTPException(status_code=400, detail="unsupported code_challenge_method")
+    if code_challenge_method != "S256":
+        return _pkce_method_refused(code_challenge_method)
 
     client = await session.get(OAuthClient, client_id)
     if client is None:
@@ -392,12 +409,14 @@ async def authorize_consent(
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
-) -> RedirectResponse:
+) -> Response:
     """User consented (or the SPA auto-consented on their behalf).
     Mint an auth code + redirect back to client's redirect_uri.
 
     The code is bound to the workspace the person consented in, and so is
     every access token it turns into."""
+    if code_challenge_method != "S256":
+        return _pkce_method_refused(code_challenge_method)
     client = await session.get(OAuthClient, client_id)
     if client is None or redirect_uri not in (client.redirect_uris or []):
         raise HTTPException(status_code=400, detail="invalid client/redirect")
@@ -491,9 +510,10 @@ async def token_exchange(
         computed = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
         if computed != row.code_challenge:
             raise HTTPException(status_code=400, detail="pkce verification failed")
-    else:   # plain
-        if code_verifier != row.code_challenge:
-            raise HTTPException(status_code=400, detail="pkce plain mismatch")
+    else:
+        # Only S256 is ever stored now. A row left over from a release that
+        # still accepted `plain` (60 s lifetime) is refused, not compared.
+        raise HTTPException(status_code=400, detail="pkce method not supported")
 
     # Mark consumed BEFORE minting — race-safe against a double POST.
     row.consumed = True

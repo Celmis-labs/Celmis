@@ -6,7 +6,7 @@ licence:
 
   * AUTH_PASSWORD_LOGIN=false refuses signup, login and reset — but never the
     master key, the break-glass account for when the IdP is down;
-  * an SSO-only session is not renewed by /api/auth/refresh, so deprovisioning
+  * an SSO-only session is not renewed past a fixed end by /api/auth/session/refresh, so deprovisioning
     in the IdP takes effect. The account is created directly with an OIDC
     subject: an SSO user created under a licence must keep these rules after
     the licence lapses;
@@ -73,32 +73,33 @@ def test_the_oidc_endpoint_is_not_part_of_the_agpl_router(client):
 # ─── session renewal ────────────────────────────────────────────────
 
 
-def test_an_sso_only_session_is_not_renewed(client, users):
-    """Deprovisioning in the IdP must take effect: /refresh would otherwise
-    roll an SSO-only session forever without asking the IdP again."""
-    from src.api.deps import get_current_user
+def _renew(client, user, *, sliding: bool) -> int:
+    from src.api import web_session
 
+    raw = web_session.issue(user.id, sliding=sliding)
+    return client.post("/api/auth/session/refresh", json={"refresh_token": raw}).status_code
+
+
+def test_an_sso_only_session_is_not_renewed_past_its_fixed_end(client, users):
+    """Deprovisioning in the IdP must take effect: a sliding credential would
+    roll a session forever without asking the IdP again, so an SSO-only user
+    is given a fixed one. Handing such a user a sliding one is refused."""
     sso_user = _sso_user(users)
-    client.app.dependency_overrides[get_current_user] = lambda: sso_user
-    assert client.post("/api/auth/refresh").status_code == 401
+    assert _renew(client, sso_user, sliding=True) == 401
 
     pw = _password_user(users, email="pw@example.com")
-    client.app.dependency_overrides[get_current_user] = lambda: pw
-    assert client.post("/api/auth/refresh").status_code == 200
+    assert _renew(client, pw, sliding=True) == 200
 
 
 def test_sso_with_password_is_renewed_only_while_password_login_is_on(
         client, users, monkeypatch):
-    from src.api.deps import get_current_user
-
     linked = _password_user(users)
     linked.oidc_iss, linked.oidc_sub = ISSUER, "kc-subject-1"
     users.update(linked)
     linked = users.get_by_email("dev@example.com")
-    client.app.dependency_overrides[get_current_user] = lambda: linked
-    assert client.post("/api/auth/refresh").status_code == 200
+    assert _renew(client, linked, sliding=True) == 200
     monkeypatch.setenv("AUTH_PASSWORD_LOGIN", "false")
-    assert client.post("/api/auth/refresh").status_code == 401
+    assert _renew(client, linked, sliding=True) == 401
 
 
 # ─── password login switch ──────────────────────────────────────────

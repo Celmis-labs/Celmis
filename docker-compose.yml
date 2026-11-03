@@ -553,9 +553,26 @@ services:
       CELMIS_JWT_SECRET_PREVIOUS: "${CELMIS_JWT_SECRET_PREVIOUS:-}"
       MCP_JWT_SECRET_PREVIOUS: "${MCP_JWT_SECRET_PREVIOUS:-}"
       # 1 = read the client address from X-Forwarded-For (only behind a proxy you run).
-      CELMIS_TRUST_PROXY: "${CELMIS_TRUST_PROXY:-}"
+      # On by default HERE because this file always puts the bundled Caddy in
+      # front: without it every visitor shares one rate-limit bucket, the
+      # address of the proxy. Set it to 0 if the api is also reachable without
+      # the proxy.
+      CELMIS_TRUST_PROXY: "${CELMIS_TRUST_PROXY:-1}"
+      # Whose X-Forwarded-For / -Proto / -Host uvicorn believes (comma-separated
+      # IPs or CIDRs). Empty = the project's own network, minus the sandbox's,
+      # worked out at start (src/api/proxy_trust.py). Never `*`.
+      CELMIS_FORWARDED_ALLOW_IPS: "${CELMIS_FORWARDED_ALLOW_IPS:-}"
+      # Sign-in session: access token life (60..3600 s) and how long an idle
+      # web session survives (hours, at most 24).
+      CELMIS_ACCESS_TOKEN_TTL_SECONDS: "${CELMIS_ACCESS_TOKEN_TTL_SECONDS:-3600}"
+      CELMIS_WEB_SESSION_HOURS: "${CELMIS_WEB_SESSION_HOURS:-24}"
+      # Content-Security-Policy on API responses: enforce | report-only | off.
+      CELMIS_CSP: "${CELMIS_CSP:-enforce}"
       # Extra path globs the MCP tools treat as secret files (a JSON list).
       SECRET_PATH_GLOBS_EXTRA: '${SECRET_PATH_GLOBS_EXTRA:-}'
+      # Which host is which repository, for cross-repository breaking-change
+      # checks (JSON, host to repository slug). Optional.
+      IMPACT_HOST_MAP: '${IMPACT_HOST_MAP:-}'
       CELMIS_DISABLE_ISSUES_SWEEP: "${CELMIS_DISABLE_ISSUES_SWEEP:-}"
       CELMIS_ISSUES_SWEEP_INTERVAL_HOURS: "${CELMIS_ISSUES_SWEEP_INTERVAL_HOURS:-24}"
       CELMIS_ISSUES_SWEEP_FIRST_DELAY_SECONDS: "${CELMIS_ISSUES_SWEEP_FIRST_DELAY_SECONDS:-300}"
@@ -610,8 +627,11 @@ services:
                rm -f /workspace/data/secrets/users.db;
                mkdir -p /workspace/data && touch "/workspace/data/.reset-$$R";
              fi;
-             alembic upgrade head &&
-             uvicorn src.api.main:app --host 0.0.0.0 --port 8000'
+             alembic upgrade head && {
+               FA="$${CELMIS_FORWARDED_ALLOW_IPS:-$$(python -m src.api.proxy_trust)}";
+               exec uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+                 --forwarded-allow-ips "$${FA:-127.0.0.1}";
+             }'
     healthcheck:
       # /healthz, not /docs. The schema and the Swagger page now require
       # a session, so curl against /docs gets a 401 and `-fsS` treats
@@ -662,6 +682,12 @@ services:
       AUTH_OIDC_CLIENT_SECRET: "${AUTH_OIDC_CLIENT_SECRET:-}"
       AUTH_OIDC_NAME: "${AUTH_OIDC_NAME:-}"
       AUTH_PASSWORD_LOGIN: "${AUTH_PASSWORD_LOGIN:-}"
+      # Content-Security-Policy of the web app: enforce | report-only | off.
+      # `report-only` or `off` reverts a production breakage without a release.
+      CELMIS_CSP: "${CELMIS_CSP:-enforce}"
+      # Session life of the web app (hours, at most 24) and of the api token.
+      CELMIS_WEB_SESSION_HOURS: "${CELMIS_WEB_SESSION_HOURS:-24}"
+      CELMIS_ACCESS_TOKEN_TTL_SECONDS: "${CELMIS_ACCESS_TOKEN_TTL_SECONDS:-3600}"
     ports:
       # Same as api: Caddy already proxies to `web:3000`.
       - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"

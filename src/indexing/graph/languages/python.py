@@ -116,6 +116,10 @@ class PythonExtractor(SymbolExtractor):
         ctx.seen_ids.add(file_sym_id)
 
         self._walk_program(tree.root_node, ctx, result)
+        # Cross-repository facts: routes, HTTP calls, external imports.
+        from src.indexing.graph.xrepo.collect import file_facts
+
+        result.facts = file_facts("python", tree.root_node, source, rel)
 
         # DEFINED_IN edges from all symbols → file_module
         for sym in result.symbols:

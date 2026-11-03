@@ -234,6 +234,10 @@ FIELDS: tuple[UiField, ...] = (
     _f("committable_suggestions", _G, "Post fixes as suggestion blocks the "
        "author applies in one click, where the provider supports it.",
        default="off"),
+    _f("breaking_change_gate", _G, "Post a `celmis/breaking-change` commit "
+       "status on the pull request head: failure when a contract change has "
+       "strong consumers in other repositories of the workspace.",
+       default="off"),
     _f("started_comment_enabled", _G, "Post a short comment when the review "
        "begins and edit it into the result when it ends.", default="on"),
     _f("review_language", _G, "The language comments and the summary are "

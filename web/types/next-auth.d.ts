@@ -22,6 +22,12 @@ declare module "next-auth/jwt" {
   interface JWT {
     celmisToken?: string;
     celmisExpiresAt?: string;
+    /** Renews the API token. Lives only in the encrypted session cookie: it is
+     *  never copied into the Session object that the browser can read. */
+    refreshToken?: string;
+    /** The OIDC provider's id_token, kept for federated sign-out
+     *  (id_token_hint). Same rule: cookie only, never in the Session. */
+    idToken?: string;
     isAdmin?: boolean;
     isSuperadmin?: boolean;
     userId?: string;

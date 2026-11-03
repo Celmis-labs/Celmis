@@ -26,6 +26,25 @@ from src.review.scope import CommitInfo  # noqa: F401 — the provider API's com
 logger = logging.getLogger(__name__)
 
 
+#: The name of the commit status the breaking-change gate writes. A repository
+#: that wants the merge blocked marks exactly this context as required in its
+#: branch protection (see docs/REVIEW_SETTINGS.md).
+BREAKING_CHANGE_STATUS = "celmis/breaking-change"
+
+
+@dataclass(frozen=True)
+class StatusResult:
+    """What posting a commit status came to. Never an exception: a missing
+    permission is reported in the review, it does not fail it."""
+
+    posted: bool
+    state: str  # success | failure
+    #: A short sentence for the review and the log; never a provider's raw body.
+    error: str = ""
+    #: 401 / 403 / 404 - the token cannot write statuses on this repository.
+    permission_denied: bool = False
+
+
 class PullRequestProviderError(Exception):
     """Provider operation failed (auth/network/api error)."""
 
@@ -401,6 +420,53 @@ class PullRequestProvider(ABC):
                 f"{what} answered with a redirect (HTTP {code} to {where[:200]})"
             )
         raise PullRequestProviderError(f"{what} error {code}: {resp.text[:200]}")
+
+    # ─── Commit status (the pre-merge gate) ──────────────────────
+
+    #: What the token needs to write a status, named in the review when it
+    #: cannot. Overridden by each provider.
+    status_scope_hint: str = "write access to commit statuses"
+
+    def _status_request(self, pr: PullRequest, *, state: str, description: str,
+                        target_url: str, context: str):  # noqa: ANN202
+        """POST the status; returns the HTTP response. Provider specific."""
+        raise PullRequestProviderError(
+            f"{self.name or 'this provider'} cannot post a commit status")
+
+    def post_commit_status(self, pr: PullRequest, *, state: str, description: str,
+                           target_url: str = "",
+                           context: str = BREAKING_CHANGE_STATUS) -> StatusResult:
+        """Set `context` on the PR's head commit to `state` ("success" or
+        "failure"). Never raises."""
+        if state not in ("success", "failure"):
+            raise ValueError(f"state must be success or failure, not {state!r}")
+        if not pr.head_sha:
+            return StatusResult(False, state, "the pull request has no head commit")
+        try:
+            resp = self._status_request(
+                pr, state=state, description=description[:140],
+                target_url=target_url, context=context)
+        except PullRequestProviderError as exc:
+            logger.warning("commit_status_failed repo=%s pr=%s err=%s", pr.repo, pr.number, exc)
+            return StatusResult(False, state, "the provider cannot post a commit status")
+        except Exception as exc:  # noqa: BLE001 - a network error is not a review failure
+            logger.warning("commit_status_failed repo=%s pr=%s err_type=%s",
+                           pr.repo, pr.number, type(exc).__name__)
+            return StatusResult(False, state, f"the request failed ({type(exc).__name__})")
+        code = resp.status_code
+        if 200 <= code < 300:
+            return StatusResult(True, state)
+        if code in (401, 403, 404):
+            logger.warning(
+                "commit_status_permission repo=%s pr=%s http=%s - the token needs %s",
+                pr.repo, pr.number, code, self.status_scope_hint)
+            return StatusResult(
+                False, state,
+                f"the token cannot write commit statuses on this repository "
+                f"(HTTP {code}); it needs {self.status_scope_hint}",
+                permission_denied=True)
+        logger.warning("commit_status_refused repo=%s pr=%s http=%s", pr.repo, pr.number, code)
+        return StatusResult(False, state, f"the provider refused the status (HTTP {code})")
 
     # ─── Reading the target branch (the issues backlog) ──────────
     #

@@ -104,6 +104,9 @@ dependencies = [
     "python-dotenv>=1,<2",
     "structlog>=26.1,<27",          # JSON audit log
     "httpx>=0.28,<0.29",            # HTTP with egress allowlist
+    # Transitive (several clients pull it in), declared so that its FLOOR
+    # is ours: 2.7.0 had two HIGH advisories (HTTPS-proxy interception, DoS).
+    "urllib3>=2.8.0,<3",
     "pywebpush>=2.5,<3",            # Web Push (VAPID) — "your session finished"
     "tenacity>=9,<10",              # retry/backoff
 
@@ -135,6 +138,16 @@ dependencies = [
     "PyYAML>=6.0.3,<7",                 # docker-compose / CI yamls
 
     # Streamlit видалено (Phase 6 — мігровано у Next.js + FastAPI + Postgres)
+]
+
+[tool.uv]
+# Floors for packages we never import ourselves but that ride in with a
+# dependency (msgpack: pip-audit's cache layer). A constraint adds nothing to
+# the install; it only forbids the vulnerable releases (msgpack <1.2.3: DoS when
+# deserialising untrusted data).
+constraint-dependencies = [
+    "msgpack>=1.2.4",
+    "urllib3>=2.8.0",
 ]
 
 [project.optional-dependencies]

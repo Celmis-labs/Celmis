@@ -20,6 +20,140 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.19] — 2026-11-03
+
+### Added
+
+- **Cross-repository impact analysis.** Indexing now records, per repository,
+  the routes it exposes (FastAPI, Flask, Starlette, Express/Fastify, Next.js
+  `app/**/route.ts` and `pages/api`, Go `net/http`, gin, chi, echo, Spring
+  `@*Mapping`), the HTTP calls it makes (httpx, requests, aiohttp, fetch, axios,
+  Go `http.*`, RestTemplate, WebClient), the packages it publishes (pyproject,
+  package.json, go.mod, Maven) and the external packages it imports with the
+  calls of the imported names. They are kept in `graph.fdblite.xrepo.json`
+  beside each graph. `src/groups/impact.py` matches them across the
+  repositories of one workspace at review time (route to call, package to
+  import); a link is strong when the called host maps to the owning repository
+  and weak on a matching path alone. Optional `IMPACT_HOST_MAP` maps hosts to
+  repository slugs.
+- **Opt-in gate `celmis/breaking-change`.** A review setting
+  `breaking_change_gate` (off by default; API field, toggle in all 16 locales)
+  that posts a commit status on the pull request head: failure for a contract
+  change with strong consumers, success otherwise. GitHub, GitLab and
+  Bitbucket Cloud, with the token the review already comments with; a missing
+  permission is logged at WARNING and noted in the review, never fails it.
+
+### Changed
+
+- **The breaking-change agent compares contracts instead of guessing by name.**
+  It pairs old and new definitions (base and head file contents, else the diff)
+  and flags a removed public symbol or route, a removed or renamed parameter
+  (renames only in Python, where callers use keywords), a newly required
+  parameter, reordered positional parameters, and a changed route method or
+  path. A body-only change is no longer a finding. Consumers come from the
+  recorded facts of the workspace's other repositories, not from a same-name
+  search; severity follows strong consumers only (1 warning, 2 or more error,
+  5 or more critical), weak links are informational and never notify.
+  A strong import link needs the imported module to be the one defining the
+  symbol (or a re-exporting package `__init__`); a call path of only holes is
+  never strong. Repositories without facts, failed lookups and diff-only
+  comparisons are reported ("N repositories not checked") and the status says
+  so instead of "none found".
+
+### Security
+
+Fixes for the findings of an external security audit.
+
+- **Content-Security-Policy and security headers.** The web app sends a
+  per-response nonce CSP (`script-src 'self' 'nonce-…' 'strict-dynamic'`, no
+  `unsafe-eval` outside development, no `unsafe-inline` for scripts;
+  `frame-ancestors 'none'`, `object-src 'none'`, `base-uri 'self'`; `form-action`
+  includes the OIDC issuer, because a sign-in POST ends in a redirect to it;
+  `connect-src` includes `NEXT_PUBLIC_API_BASE` when it is another origin).
+  `style-src` keeps `'unsafe-inline'`: React renders `style` attributes into the
+  HTML and CSP cannot allow those by nonce. Web and API also send
+  `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`,
+  `X-Frame-Options: DENY` and, over https, `Strict-Transport-Security`.
+  `CELMIS_CSP=enforce|report-only|off` (default `enforce`) reverts a production
+  breakage with a variable instead of a release. `X-Powered-By` is gone.
+- **Sessions of at most 24 hours; the API token lives one hour.** The NextAuth
+  session was 30 days and carried a 30-day API Bearer that any script on the page
+  could read from `/api/auth/session`. The session now slides within 24 hours
+  (`CELMIS_WEB_SESSION_HOURS`), the API token expires in an hour
+  (`CELMIS_ACCESS_TOKEN_TTL_SECONDS`), and it is renewed by the web server with a
+  refresh credential that lives only in the encrypted session cookie, never in
+  the session object the browser reads. Signing out revokes the credential
+  (`POST /api/auth/logout`), as do a password reset and account deletion, so a
+  stolen access token is dead within the hour. `POST /api/auth/refresh` (a
+  Bearer renewing itself, which made a stolen token immortal) now answers 410;
+  `POST /api/auth/session/refresh` takes the credential instead. A single
+  sign-on-only user's credential does not slide, so the identity provider is
+  asked again within a day. Admin-issued MCP tokens are unchanged. Sign-in
+  answers gain a `refresh_token` field.
+- **API redirects keep https and `/backend`.** `GET /backend/mcp` answered
+  `307 Location: http://host/mcp/`, so a client that followed it repeated its
+  Authorization header over http, to a path that does not exist. Same-host
+  redirects are now rewritten onto the public address (`PUBLIC_BASE_URL`, the
+  proxy's `X-Forwarded-*` and `X-Forwarded-Prefix`). The bundled compose file
+  starts uvicorn with `--forwarded-allow-ips` set to the project's own Docker
+  network (never the sandbox's, never `*`; override with
+  `CELMIS_FORWARDED_ALLOW_IPS`) and defaults `CELMIS_TRUST_PROXY` to `1`, so the
+  rate limiter sees the real client instead of the proxy.
+- **Sign-out also ends the identity provider's session** (OpenID Connect
+  RP-Initiated Logout): the browser is sent to the provider's
+  `end_session_endpoint` from its discovery document with `id_token_hint`,
+  `client_id` and `post_logout_redirect_uri` (`<NEXTAUTH_URL>/login`, or
+  `AUTH_OIDC_POST_LOGOUT_REDIRECT_URI`). Skipped for password, master and Google
+  sign-in and for providers without an end-session endpoint.
+- **PKCE `plain` is refused.** The MCP OAuth server accepted
+  `code_challenge_method=plain`, whose challenge is the verifier. Only `S256` is
+  accepted; anything else is `invalid_request`, and the discovery document
+  advertises only `S256`.
+- **`/api/capabilities` no longer names the version or edition to an anonymous
+  caller**; they are returned to a signed-in one (the footer, the edition card).
+  `scripts/deploy-on-server.sh` reads the version from the container instead.
+- **Dependencies.** `urllib3` is floored at 2.8.0 (2.7.0: two HIGH advisories)
+  and `msgpack` at 1.2.4 (1.1.2: DoS on untrusted data). npm in the image is
+  12.2.1. osv-scanner is now compiled from its v2.7.0 tag with Go 1.27.3: every
+  published release is built with Go 1.27.0, whose standard library has
+  advisories fixed in 1.27.2. `uv.lock` is regenerated, the image installs from
+  it (`uv sync --frozen`, every file hash-checked), and CI runs `uv lock --check`.
+
+### Upgrade notes
+
+For whoever deploys this (a wrapper around the bundled compose file included):
+
+- Set `PUBLIC_BASE_URL=https://<your host>` if TLS is terminated in front of the
+  bundled Caddy; redirects and the MCP sign-in documents are built from it.
+- Everyone is signed out once: sessions from before this release hold a
+  month-long API token and no refresh credential, and are ended on first use.
+  To also kill the old month-long tokens at once, rotate `CELMIS_JWT_SECRET`
+  (`docs/KEY_ROTATION.md`); admin-issued MCP tokens are signed with the same
+  secret unless `MCP_JWT_SECRET` is set separately, and would be invalidated too.
+- With single sign-on, register `<NEXTAUTH_URL>/login` as a valid post-logout
+  redirect URI of the Celmis client at the provider, or set
+  `AUTH_OIDC_POST_LOGOUT_REDIRECT_URI`. Without it some providers show an error
+  page after sign-out; the Celmis session is already ended either way.
+- New variables, all optional: `CELMIS_CSP` (`enforce`), `CELMIS_WEB_SESSION_HOURS`
+  (`24`), `CELMIS_ACCESS_TOKEN_TTL_SECONDS` (`3600`), `CELMIS_FORWARDED_ALLOW_IPS`
+  (the project network), `CELMIS_TRUST_PROXY` (`1` in the bundled compose file),
+  `AUTH_OIDC_POST_LOGOUT_REDIRECT_URI`. Pass them to BOTH `api` and `web` if you
+  maintain your own compose file; the bundled one does.
+- If a page misbehaves after the upgrade, `CELMIS_CSP=report-only` on `web` (and
+  `api`) and a restart is the first thing to try.
+- Anything that read `api_version` or `edition` from `/api/capabilities`
+  without a token must send one, or read the version from the container.
+- A scripted client that renewed its token with `POST /api/auth/refresh` must
+  sign in again when the token expires (or use `refresh_token` from sign-in).
+- Repositories indexed before this release have no cross-repository facts.
+  They are reported in the review as "not checked" (never as "no consumers")
+  until they are reindexed: use "Index all" or the reindex job. Nothing
+  reindexes automatically. Incremental sync keeps facts current afterwards.
+- `breaking_change_gate` is off everywhere. To make it block merges, enable it
+  per repository (or workspace default) and mark `celmis/breaking-change` as a
+  required status check in the branch protection (see `docs/REVIEW_SETTINGS.md`).
+  A database migration adds the column; no manual step.
+
 ## [3.1.18] — 2026-11-03
 
 ### Added

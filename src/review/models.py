@@ -386,6 +386,8 @@ class PRActions:
     request_changes_on_critical: bool = False
     status_feedback: bool = True
     committable_suggestions: bool = False
+    #: Post the `celmis/breaking-change` commit status on the PR head.
+    breaking_change_gate: bool = False
     summary_target: str = "comment"
     summary_on_new_commits: str = "replace"
     summary_existing_description: str = "append"
@@ -462,6 +464,11 @@ class ReviewBatch:
     findings: list[Finding] = field(default_factory=list)
     summary: str = ""        # markdown summary for the top-level PR comment
     verdict: ReviewVerdict = ReviewVerdict.COMMENT
+    #: The breaking-change check ran to the end, so its silence is an answer.
+    #: Only then may the `celmis/breaking-change` status say "success".
+    breaking_change_checked: bool = False
+    #: Why that check was not complete ("2 repositories not checked"), or "".
+    breaking_change_incomplete: str = ""
 
     # Telemetry
     started_at: str = ""

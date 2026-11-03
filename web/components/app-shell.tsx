@@ -521,7 +521,7 @@ function RailAccount() {
           <button
             type="button"
             role="menuitem"
-            onClick={() => { forgetAgentSession(); void signOut({ callbackUrl: "/login" }); }}
+            onClick={() => { forgetAgentSession(); void endSession(); }}
             className="mt-1 flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors hover:bg-[var(--color-accent)]"
           >
             <LogOutIcon className="h-3.5 w-3.5" />
@@ -532,6 +532,22 @@ function RailAccount() {
       )}
     </>
   );
+}
+
+/** Sign out of Celmis and, when the person came in through the company
+ *  identity provider, of the provider as well. The provider's address is
+ *  fetched BEFORE the local session is cleared, because it is read from it. */
+async function endSession(): Promise<void> {
+  let providerUrl: string | null = null;
+  try {
+    const resp = await fetch("/api/auth/federated-logout", { method: "POST" });
+    if (resp.ok) providerUrl = ((await resp.json()) as { url?: string | null }).url ?? null;
+  } catch {
+    // The provider is optional; a local sign-out must always work.
+  }
+  forgetAgentSession();
+  await signOut({ redirect: false });
+  window.location.assign(providerUrl ?? "/login");
 }
 
 function matchesPage(pathname: string, page: TabDef) {
@@ -841,7 +857,7 @@ export function AppShell({
                   variant="ghost"
                   size="sm"
                   className="min-h-11 w-full justify-start sm:min-h-0"
-                  onClick={() => { forgetAgentSession(); void signOut({ callbackUrl: "/login" }); }}
+                  onClick={() => { forgetAgentSession(); void endSession(); }}
                 >
                   <LogOutIcon className="h-4 w-4" />
                   {t("shell.signOut")}

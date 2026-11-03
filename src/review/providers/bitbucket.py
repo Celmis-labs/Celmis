@@ -1452,6 +1452,18 @@ class BitbucketPRProvider(PullRequestProvider):
         ws, name = self._split_repo(repo)
         return f"{BITBUCKET_API_BASE}/repositories/{ws}/{name}"
 
+    status_scope_hint = ("the `repository:write` scope (access token / OAuth) or the "
+                         "`Repositories: Write` permission (app password)")
+
+    def _status_request(self, pr, *, state, description, target_url, context):  # noqa: ANN001, ANN202
+        body = {"key": context[:40], "name": context,
+                "state": "SUCCESSFUL" if state == "success" else "FAILED",
+                "description": description}
+        if target_url:
+            body["url"] = target_url
+        return self._post_comment(
+            f"{self._repo_api(pr.repo)}/commit/{quote(pr.head_sha, safe='')}/statuses/build", body)
+
     def branch_head_sha(self, repo: str, branch: str) -> str:
         resp = self._get_follow(
             f"{self._repo_api(repo)}/refs/branches/{quote(branch, safe='/')}")

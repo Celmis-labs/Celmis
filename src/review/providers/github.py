@@ -1379,6 +1379,18 @@ class GitHubPRProvider(PullRequestProvider):
 
     # ─── Reading the target branch (the issues backlog) ──────────
 
+    status_scope_hint = ("the `repo:status` scope (classic token) or `Commit statuses: "
+                         "Read and write` (fine-grained token / GitHub App)")
+
+    def _status_request(self, pr, *, state, description, target_url, context):  # noqa: ANN001, ANN202
+        owner, name = self._split_repo(pr.repo)
+        body: dict[str, str] = {"state": state, "context": context, "description": description}
+        if target_url:
+            body["target_url"] = target_url
+        return self._http.post(
+            f"{GITHUB_API_BASE}/repos/{owner}/{name}/statuses/{quote(pr.head_sha, safe='')}",
+            json=body)
+
     def branch_head_sha(self, repo: str, branch: str) -> str:
         owner, name = self._split_repo(repo)
         resp = self._http.get(

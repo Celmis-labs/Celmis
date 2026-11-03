@@ -125,6 +125,11 @@ export function GeneralSection() {
           description={t("reviewSettings.general.committableHint")}
         />
         <BooleanRow
+          field="breaking_change_gate"
+          label={t("reviewSettings.general.breakingGate")}
+          description={t("reviewSettings.general.breakingGateHint")}
+        />
+        <BooleanRow
           field="started_comment_enabled"
           label={t("reviewSettings.general.startedComment")}
           description={t("reviewSettings.general.startedCommentHint")}

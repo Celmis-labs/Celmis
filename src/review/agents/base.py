@@ -407,6 +407,9 @@ class AgentRunResult:
     #: reader to "check server logs" — an instruction a SaaS user cannot
     #: follow, for a timeout, a quota, a rejected key and a refusal alike.
     error_code: str | None = None
+    #: The breaking-change agent's completeness: contract changes found and how
+    #: much of the workspace could not be consulted (see `breaking_change.Coverage`).
+    coverage: dict[str, int] | None = None
     #: Parts of this agent's own work that did not happen — and it is the
     #: agent, not the orchestrator, that knows.
     #:

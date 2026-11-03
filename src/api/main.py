@@ -460,6 +460,12 @@ def build_app() -> FastAPI:
     except Exception as exc:  # noqa: BLE001
         logger.warning("metrics_middleware_failed err=%s", exc)
 
+    # Redirects and response headers. Registered before the sandbox guard so the
+    # guard (registered last = outermost) still answers first.
+    from src.api.edge import PublicRedirectMiddleware, SecurityHeadersMiddleware
+    app.add_middleware(PublicRedirectMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
+
     # Registered LAST so it runs FIRST — reverse order, as above. The point of
     # the guard is to answer before routing, because the route it closes is
     # /healthz, which has no dependencies to hang a check on.

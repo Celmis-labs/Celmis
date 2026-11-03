@@ -364,6 +364,8 @@ def _pr_actions(policy) -> PRActions:
         status_feedback=bool(_policy_value(policy, "status_feedback", True)),
         committable_suggestions=bool(
             _policy_value(policy, "committable_suggestions", False)),
+        breaking_change_gate=bool(
+            _policy_value(policy, "breaking_change_gate", False)),
         summary_target=_word("summary_target", SUMMARY_TARGETS, "comment"),
         summary_on_new_commits=_word(
             "summary_on_new_commits", SUMMARY_ON_NEW_COMMITS, "replace"),
@@ -1689,6 +1691,10 @@ class ReviewOrchestrator:
                 raise _BudgetExhausted
             from src.review.breaking_change import run_breaking_change
             bc_result = run_breaking_change(context)
+            batch.breaking_change_checked = not bc_result.error
+            from src.review.breaking_change import incomplete_reason
+
+            batch.breaking_change_incomplete = incomplete_reason(bc_result.coverage)
             if bc_result.findings:
                 batch.findings.extend(bc_result.findings)
                 batch.tokens_in += bc_result.tokens_in
@@ -2051,6 +2057,13 @@ class ReviewOrchestrator:
                 provider, batch, context=context, policy=policy,
             )
 
+        # ── The pre-merge gate: the `celmis/breaking-change` commit status.
+        # Before the review is posted, so a status the token cannot write is
+        # said IN the review. Opt-in per repository (default off).
+        if post_comments and not dry_run and batch.pr_actions.breaking_change_gate:
+            self._post_breaking_change_status(
+                provider, batch, checked=batch.breaking_change_checked, stages=stages)
+
         # ── Post comments ──
         posted = False
         provider_response: dict = {}
@@ -2101,6 +2114,70 @@ class ReviewOrchestrator:
         if description_result is not None and isinstance(provider_response, dict):
             provider_response["description"] = description_result
         return ReviewRunResult(batch=batch, posted=posted, provider_response=provider_response)
+
+    @staticmethod
+    def _post_breaking_change_status(provider, batch: ReviewBatch, *, checked: bool,
+                                     stages) -> None:  # noqa: ANN001
+        """Set `celmis/breaking-change` on the PR head. Never raises, never
+        fails the review: a missing permission is a WARNING in the log and a
+        sentence in the review.
+
+        When the check itself did not run to the end (budget, error) NO status
+        is written: "success" would be a statement nobody checked, and a
+        required check that is merely absent is the safe way to be wrong.
+        """
+        from src.review.breaking_change import has_strong_consumers
+        from src.review.providers.base import BREAKING_CHANGE_STATUS
+
+        pr = batch.pull_request
+        stages.begin("breaking_change_status", "Breaking-change status")
+        if not checked:
+            stages.end("breaking_change_status", "skipped",
+                       "The breaking-change check did not finish, so no status was set.")
+            return
+        poster = getattr(provider, "post_commit_status", None)
+        if not callable(poster):
+            stages.end("breaking_change_status", "skipped",
+                       "This provider cannot set a commit status.")
+            return
+        strong = [f for f in batch.findings
+                  if f.agent == "breaking_change" and f.rule_id.startswith("bc.strong.")]
+        if has_strong_consumers(batch.findings):
+            state = "failure"
+            description = (f"{len(strong)} breaking change(s) with consumers in other "
+                           f"repositories")
+        elif batch.breaking_change_incomplete:
+            # Success, worded so nobody reads it as "none found": a required
+            # check that never turns green on an old index would block every
+            # merge, while the review comment carries the INFO finding.
+            state = "success"
+            description = f"Contract change found; {batch.breaking_change_incomplete}"
+        else:
+            state, description = "success", "No breaking change with consumers found"
+        try:
+            from src.mcp_server.public_url import configured_public_base
+
+            base = configured_public_base().rstrip("/")
+        except Exception:  # noqa: BLE001
+            base = ""
+        link = f"{base}/reviews" if base.startswith(("http://", "https://")) else (pr.url or "")
+        try:
+            result = poster(pr, state=state, description=description, target_url=link,
+                            context=BREAKING_CHANGE_STATUS)
+        except Exception as exc:  # noqa: BLE001 - belt and braces; the provider already catches
+            logger.warning("breaking_change_status_failed pr=%s err_type=%s",
+                           pr.number, type(exc).__name__)
+            stages.end("breaking_change_status", "failed", "The status could not be set.")
+            return
+        if result.posted:
+            stages.end("breaking_change_status", "success",
+                       f"Set {BREAKING_CHANGE_STATUS} to {state}.")
+            return
+        stages.end("breaking_change_status", "failed",
+                   f"{BREAKING_CHANGE_STATUS} was not set: {result.error}")
+        note = (f"> **{BREAKING_CHANGE_STATUS}** could not be set: {result.error}. "
+                f"The review itself is unaffected.")
+        batch.summary = f"{batch.summary}\n\n{note}" if batch.summary else note
 
     def _write_description(self, provider, batch: ReviewBatch, *, context, policy) -> dict:
         """Put our overview + walkthrough into the PR description. Never raises.

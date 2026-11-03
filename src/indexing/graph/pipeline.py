@@ -27,6 +27,9 @@ from src.indexing.graph.graph_store import make_graph_store
 from src.indexing.graph.languages.factory import build_default_registry, walk_repo_files
 from src.indexing.graph.pagerank import write_ranks
 from src.indexing.graph.resolver import HeuristicResolver
+from src.indexing.graph.xrepo import FactSet, forget_facts, save_facts
+from src.indexing.graph.xrepo.collect import finish as finish_facts
+from src.indexing.graph.xrepo.collect import service_facts
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +112,7 @@ def index_repo_graph(
     all_files = walk_repo_files(src_root)
 
     all_symbols, all_edges = [], []
+    facts = FactSet()
     parse_failures = 0
     files_skipped = 0
     extractors_used: dict[str, int] = {}
@@ -127,6 +131,8 @@ def index_repo_graph(
             res = extractor.extract(f)
             all_symbols.extend(res.symbols)
             all_edges.extend(res.edges)
+            if res.facts is not None:
+                facts.extend(res.facts)
             if res.parse_errors:
                 parse_failures += 1
         except Exception as exc:  # noqa: BLE001
@@ -134,6 +140,16 @@ def index_repo_graph(
             logger.warning("extract_failed file=%s err=%s", f, exc)
 
     files_processed = len(all_files) - files_skipped
+
+    # Facts are taken from the UNRESOLVED edges: the resolver drops what leaves
+    # the repository, and that is exactly what a cross-repository check needs.
+    facts_ok = True
+    try:
+        facts.services = service_facts(all_symbols, all_edges)
+        finish_facts(facts, repo_path)
+    except Exception as exc:  # noqa: BLE001 - facts are additive: never fail the index
+        facts_ok = False
+        logger.warning("xrepo_facts_failed repo=%s err=%s - indexed without facts", repo_slug, exc)
 
     resolver = HeuristicResolver(ctx, all_symbols)
     resolved = resolver.resolve_edges(all_edges)
@@ -171,6 +187,17 @@ def index_repo_graph(
         db_path.replace(previous)
     build_path.replace(db_path)
     previous.unlink(missing_ok=True)
+    # After the swap, so a refused rebuild keeps the facts of the graph it kept.
+    # The swap replaced the graph: the old sidecar describes a graph that is
+    # gone, so it must not survive a failed write.
+    if facts_ok:
+        try:
+            save_facts(db_path, facts)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("xrepo_facts_not_saved repo=%s err=%s", repo_slug, exc)
+            forget_facts(db_path)
+    else:
+        forget_facts(db_path)
 
     elapsed = time.time() - t0
     result = GraphIndexResult(

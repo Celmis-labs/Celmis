@@ -1,6 +1,7 @@
 """JWT issuance + validation for Celmis session tokens.
 
-Tokens are short-lived (30 min) bearer JWTs signed HS256 with a server-side
+Access tokens are short-lived (one hour by default, never more: see
+``src.api.web_session``) bearer JWTs signed HS256 with a server-side
 secret. Contains user id + email + scopes claims.
 
 The secret is the whole of the authentication system: anyone who knows it can
@@ -45,7 +46,6 @@ JWT_ALGORITHM = "HS256"
 #: ops token already enforces (src/api/deps.py); `openssl rand -hex 32`, which
 #: every doc in this repo tells the operator to run, gives 64.
 JWT_SECRET_MIN_LENGTH = 16
-JWT_EXPIRE_MINUTES = 30 * 24 * 60  # 30 days — frontend session lifetime
 JWT_ISSUER = "celmis"
 JWT_AUDIENCE = "celmis-web"
 
@@ -191,7 +191,9 @@ def issue_token(
     Returns (token, expires_at).
     """
     now = datetime.now(UTC)
-    exp = now + timedelta(minutes=JWT_EXPIRE_MINUTES)
+    from src.api.web_session import access_ttl_seconds
+
+    exp = now + timedelta(seconds=access_ttl_seconds())
     payload = {
         "iss": JWT_ISSUER,
         "aud": JWT_AUDIENCE,
@@ -214,7 +216,8 @@ def _get_previous_secret() -> bytes | None:
         1. Set CELMIS_JWT_SECRET_PREVIOUS=<current secret>
         2. Set CELMIS_JWT_SECRET=<new secret>
         3. Restart. Existing sessions stay valid until natural expiry.
-        4. After the longest token TTL passes (30 days), unset _PREVIOUS.
+        4. After the longest token TTL passes (one hour for sessions; the
+           longest admin-issued MCP token if you want those kept), unset _PREVIOUS.
     """
     prev = os.environ.get("CELMIS_JWT_SECRET_PREVIOUS", "").strip()
     return prev.encode("utf-8") if prev else None

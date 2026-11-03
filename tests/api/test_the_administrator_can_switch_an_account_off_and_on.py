@@ -176,13 +176,16 @@ def test_switching_an_account_off_ends_every_way_in_and_switching_it_on_restores
     assert client.post("/api/auth/google", json={"id_token": "x"}).status_code == 200
     assert users.get_by_google_sub("g-alice") is not None
     uid = _id(users, 1)
+    from src.api import web_session
+    held = web_session.issue(uid)
 
     off = _off(client, master, uid)
     assert (off.status_code, off.json()) == (200, {"id": uid, "is_active": False})
 
     # the session she already holds
     assert client.get("/api/auth/me", headers=alice).status_code == 401
-    assert client.post("/api/auth/refresh", headers=alice).status_code == 401
+    assert client.post(
+        "/api/auth/session/refresh", json={"refresh_token": held}).status_code == 401
     # the password
     assert _login(client, 1).status_code == 401
     # Google
