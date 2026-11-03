@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.deps import client_ip, get_users, require_superadmin
 from src.api.memberships import change_membership
 from src.api.routers.users import PLATFORM_USER_IDS
+from src.api.workspace_provision import is_dead_personal, personal_owner_id
 from src.db.models import Workspace, WorkspaceMember
 from src.db.session import get_async_session
 from src.users import User, UserNotFoundError, UserStore, seats
@@ -63,6 +64,8 @@ class AdminWorkspaceOut(BaseModel):
     id: str
     name: str
     slug: str
+    #: `team` or `personal` (the one workspace every account owns, slug `u-<id>`).
+    kind: str = "team"
 
 
 class MembershipOut(BaseModel):
@@ -137,11 +140,26 @@ async def search_users(
 
 @router.get("/workspaces", response_model=list[AdminWorkspaceOut])
 async def all_workspaces(
+    include_dead: bool = Query(default=False),
     session: AsyncSession = Depends(get_async_session),
     _su: User = Depends(require_superadmin),
+    users: UserStore = Depends(get_users),
 ) -> list[AdminWorkspaceOut]:
-    rows = (await session.scalars(select(Workspace).order_by(Workspace.name))).all()
-    return [AdminWorkspaceOut(id=w.id, name=w.name, slug=w.slug) for w in rows]
+    """Every workspace somebody can still use, team ones first, then personal
+    ones, each group A-Z. A deleted workspace has no row at all; what is left out
+    here is the personal workspace of an erased or deactivated account
+    (`include_dead=true` lists those too)."""
+    rows = (await session.scalars(select(Workspace))).all()
+    active = {u.id: bool(u.is_active) for u in users.list(active_only=False)}
+    out = [
+        AdminWorkspaceOut(
+            id=w.id, name=w.name, slug=w.slug,
+            kind="personal" if personal_owner_id(w.slug) else "team")
+        for w in rows
+        if include_dead or not is_dead_personal(w.slug, active)
+    ]
+    out.sort(key=lambda w: (w.kind == "personal", w.name.casefold()))
+    return out
 
 
 async def _memberships(session: AsyncSession, user_id: str) -> list[MembershipOut]:

@@ -1270,6 +1270,24 @@ class Workspace(Base):
     created_by: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class DeletedPersonalWorkspace(Base):
+    """An admin deleted this person's personal workspace on purpose.
+
+    Login provisioning would otherwise create it again on the person's next
+    sign-in. While this row exists, sign-in leaves it deleted as long as the
+    person belongs to some other workspace; the no-membership fallback (which
+    keeps people out of the shared tenant) still provisions one and clears the row.
+    """
+
+    __tablename__ = "deleted_personal_workspaces"
+
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    deleted_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deleted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
 class WorkspaceMember(Base):
     __tablename__ = "workspace_members"
 

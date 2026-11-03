@@ -188,7 +188,7 @@ class GroupIndexer:
         path = self.settings.repo_path(slug)
         if not path.is_dir():
             raise CloneError(f"uploaded repository {slug!r} has no files on disk")
-        meta = read_upload_meta(slug) or {}
+        meta = read_upload_meta(slug, self.settings) or {}
         return SyncResult(
             repo_slug=slug, path=path, commit_sha=str(meta.get("sha256") or ""),
             changed=True,

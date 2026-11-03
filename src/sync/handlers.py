@@ -82,6 +82,71 @@ async def handle_index_repo_full(job: dict[str, Any]) -> None:
     logger.info("index_full_done repo=%s symbols=%d", result.repo_slug, result.symbols)
 
 
+# ─── a new version of an uploaded repository ───────────────────────
+# payload: {update_id, repo_slug, workspace_id, user_id, filename, uploaded_by}
+
+
+async def handle_upload_version(job: dict[str, Any]) -> None:
+    """Apply the archive an upload session handed over (see `upload_versions`).
+
+    A refusal or a failed index is the person's answer, not a fault of the job:
+    it is written to the status the page polls and the job completes — retrying
+    the same archive would only fail the same way."""
+    from src.repos import upload_sessions as us
+    from src.repos.upload import StoredArchive
+    from src.repos.upload_versions import UpdateError, apply_new_version
+
+    p = job["payload"]
+    uid = p["update_id"]
+    archive = us.pending_dir(uid) / "archive"
+
+    def run() -> dict[str, Any]:
+        import hashlib
+
+        digest = hashlib.sha256()
+        with open(archive, "rb") as f:
+            while chunk := f.read(1024 * 1024):
+                digest.update(chunk)
+        stored = StoredArchive(archive, digest.hexdigest(), archive.stat().st_size)
+        return apply_new_version(
+            stored, p["filename"], p["repo_slug"], uploaded_by=p.get("uploaded_by", ""),
+            workspace_id=p.get("workspace_id"),
+            progress=lambda phase: us.write_status(uid, state="running", phase=phase),
+        ).as_dict()
+
+    us.write_status(uid, state="running", phase="starting")
+    try:
+        result = await asyncio.to_thread(run)
+        us.write_status(uid, state="done", phase="done", result=result)
+        from src.security.audit import record_action
+
+        record_action(
+            action="repo.version_uploaded", actor=p.get("uploaded_by"),
+            actor_id=p.get("user_id"), workspace_id=p.get("workspace_id"),
+            target=p["repo_slug"],
+            detail={"version": result["version"]["version"],
+                    "sha256": result["version"]["sha256"],
+                    "bytes": result["version"]["size"], "added": result["added"],
+                    "removed": result["removed"], "changed": result["changed"]},
+        )
+        logger.info("upload_version_done repo=%s version=%s", p["repo_slug"],
+                    result["version"]["version"])
+    except UpdateError as exc:
+        us.write_status(uid, state="failed", phase="failed", error=str(exc), status=exc.status)
+        logger.info("upload_version_refused repo=%s why=%s", p["repo_slug"], exc)
+    except FileNotFoundError:
+        us.write_status(uid, state="failed", phase="failed",
+                        error="The uploaded archive is gone. Upload it again.", status=410)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("upload_version_failed repo=%s", p["repo_slug"])
+        us.write_status(uid, state="failed", phase="failed",
+                        error="The new version could not be applied. The previous "
+                              "version is still served.", status=500)
+        del exc
+    finally:
+        archive.unlink(missing_ok=True)
+
+
 # ─── ownership rebuild ───────────────────────────────────────────────
 # payload: {repo_slug, lookback_days?}
 

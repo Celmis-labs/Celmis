@@ -114,6 +114,16 @@ def _upload_display_name(cfg: RepoConfig) -> str | None:
     return str(meta.get("name") or "") or None
 
 
+def _upload_version_fields(cfg: RepoConfig) -> dict[str, Any]:
+    from src.repos.upload import is_upload_provider, read_upload_meta
+
+    if not is_upload_provider(cfg.provider):
+        return {}
+    meta = read_upload_meta(cfg.repo_slug) or {}
+    return {"upload_version": int(meta.get("version") or 1) if meta.get("sha256") else None,
+            "uploaded_at": str(meta.get("uploaded_at") or "") or None}
+
+
 def _workspace_repos(workspace_id: str) -> list[RepoOut]:
     from src.repos.index_state import read_index_states
 
@@ -164,6 +174,7 @@ def _workspace_repos(workspace_id: str) -> list[RepoOut]:
             up_to_date=st.up_to_date if st else None,
             webhook=_webhook_out(hooks.get(slug)),
             display_name=_upload_display_name(cfg),
+            **_upload_version_fields(cfg),
             target_branches=(branches[slug][0] if slug in branches else None),
             target_branches_source=(branches[slug][1] if slug in branches else None),
         ))
@@ -621,6 +632,8 @@ def complete_upload_session(
     from src.repos import upload_sessions as us
 
     s = _load_session(session_id, user, workspace_id)
+    if s.kind != "repo":
+        raise HTTPException(status_code=404, detail="Unknown upload session.")
     store, existing = _check_upload_target(s.slug, s.filename, workspace_id)
     try:
         stored = us.assemble(s)
@@ -648,6 +661,167 @@ def abort_upload_session(
     s = _load_session(session_id, user, workspace_id)
     us.discard(s.id)
     return Response(status_code=204)
+
+
+# A new version of an uploaded repository (same slug, new content).
+#
+# The identity is the slug: tokens, grants, shares, projects and chats name it, so
+# none of them is touched. Same people as the first upload (the workspace
+# superadmin); anyone who cannot see the repository gets the same 404 as every
+# other by-slug route. See src/repos/upload_versions.py for the swap.
+
+
+class VersionOut(BaseModel):
+    version: int
+    sha256: str = ""
+    uploaded_at: str = ""
+    uploaded_by: str = ""
+    filename: str = ""
+    size: int = 0
+    files: int = 0
+    added: int | None = None
+    removed: int | None = None
+    changed: int | None = None
+
+
+class VersionsOut(BaseModel):
+    current: VersionOut | None = None
+    #: Newest first.
+    history: list[VersionOut] = []
+
+
+class VersionUpdateOut(BaseModel):
+    update_id: str
+    state: str  # queued | running | done | failed
+    phase: str = ""
+    error: str | None = None
+    result: dict[str, Any] | None = None
+
+
+class VersionSessionIn(BaseModel):
+    filename: str = Field(..., max_length=300)
+    size: int = Field(..., ge=1)
+    sha256: str = Field("", max_length=64)
+
+
+def _require_upload_repo(slug: str, workspace_id: str) -> None:
+    from src.repos.upload import is_upload_provider
+
+    cfg = get_auto_review_store().get_in_workspace(workspace_id, slug)
+    if cfg is None or not is_upload_provider(cfg.provider):
+        raise HTTPException(status_code=404, detail="Repo not found")
+
+
+@router.get("/{slug}/versions", response_model=VersionsOut)
+def list_repo_versions(
+    slug: str,
+    _perm: User = Depends(require_repo_permission("admin")),
+    _admin: User = Depends(require_superadmin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> VersionsOut:
+    """The current version of an uploaded repository and its history."""
+    from src.repos.upload_versions import read_versions
+
+    _require_upload_repo(slug, workspace_id)
+    history = [VersionOut(**{k: v for k, v in rec.items() if k in VersionOut.model_fields})
+               for rec in read_versions(slug)]
+    history.reverse()
+    return VersionsOut(current=history[0] if history else None, history=history[:20])
+
+
+@router.post("/{slug}/versions/sessions", response_model=UploadSessionOut,
+             status_code=status.HTTP_201_CREATED)
+def open_version_session(
+    slug: str,
+    payload: VersionSessionIn,
+    _perm: User = Depends(require_repo_permission("admin")),
+    user: User = Depends(require_superadmin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> UploadSessionOut:
+    """Start a chunked upload of the next version. Parts go to the same
+    ``PUT /upload/sessions/{id}/parts/{n}`` route as a first upload."""
+    from src.repos import upload_sessions as us
+
+    _require_upload_repo(slug, workspace_id)
+    _check_upload_target(slug, payload.filename.strip(), workspace_id)
+    try:
+        s = us.create(user_id=user.id, workspace_id=workspace_id, slug=slug, name="",
+                      filename=payload.filename.strip(), size=payload.size,
+                      sha256=payload.sha256, kind="version")
+    except us.SessionError as exc:
+        raise _session_http(exc) from None
+    return UploadSessionOut(session_id=s.id, chunk_size=s.chunk_size, parts=s.parts,
+                            expires_at=s.expires_at)
+
+
+@router.post("/{slug}/versions/sessions/{session_id}/complete",
+             response_model=VersionUpdateOut, status_code=status.HTTP_202_ACCEPTED)
+def complete_version_session(
+    slug: str,
+    session_id: str,
+    request: Request,
+    _perm: User = Depends(require_repo_permission("admin")),
+    user: User = Depends(require_superadmin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> VersionUpdateOut:
+    """Join the parts, verify them, and queue unpacking + indexing + the swap.
+    The answer is "queued"; poll ``/versions/updates/{id}`` for the outcome."""
+    from src.repos import upload_sessions as us
+    from src.sync.queue import KIND_UPLOAD_VERSION, enqueue
+
+    _require_upload_repo(slug, workspace_id)
+    s = _load_session(session_id, user, workspace_id)
+    if s.kind != "version" or s.slug != slug:
+        raise HTTPException(status_code=404, detail="Unknown upload session.")
+    try:
+        stored = us.assemble(s)
+    except us.SessionError as exc:
+        raise _session_http(exc) from None
+    from src.repos.upload import upload_revision
+
+    # Byte-identical to what is served: say so now rather than through a job.
+    if stored.sha256 == upload_revision(slug):
+        us.discard(s.id)
+        raise HTTPException(status_code=409,
+                            detail="This archive is already the current version.")
+    try:
+        us.hand_over(s, stored)
+    finally:
+        us.discard(s.id)
+    us.forget_old_updates()
+    us.write_status(s.id, state="queued", phase="queued", slug=slug,
+                    workspace_id=workspace_id, user_id=user.id, filename=s.filename)
+    job = enqueue(
+        kind=KIND_UPLOAD_VERSION, dedup_key=f"upload_version:{workspace_id}:{slug}:{s.id}",
+        payload={"update_id": s.id, "repo_slug": slug, "workspace_id": workspace_id,
+                 "user_id": user.id, "filename": s.filename, "uploaded_by": user.email},
+        enqueued_by=user.email, max_attempts=1,
+    )
+    if job is None:
+        us.write_status(s.id, state="failed", error="Could not queue the update.")
+    logger.info("repo_version_queued ws=%s repo=%s bytes=%d by=%s",
+                workspace_id, slug, stored.size, user.email)
+    return VersionUpdateOut(update_id=s.id, state="queued" if job else "failed",
+                            phase="queued", error=None if job else "Could not queue the update.")
+
+
+@router.get("/{slug}/versions/updates/{update_id}", response_model=VersionUpdateOut)
+def get_version_update(
+    slug: str,
+    update_id: str,
+    _perm: User = Depends(require_repo_permission("admin")),
+    _admin: User = Depends(require_superadmin),
+    workspace_id: str = Depends(current_workspace_id),
+) -> VersionUpdateOut:
+    """Where an update stands, and what it did once it is done."""
+    from src.repos import upload_sessions as us
+
+    st = us.read_status(update_id)
+    if st is None or st.get("slug") != slug or st.get("workspace_id") != workspace_id:
+        raise HTTPException(status_code=404, detail="Unknown update.")
+    return VersionUpdateOut(
+        update_id=update_id, state=st.get("state", "queued"), phase=st.get("phase", ""),
+        error=st.get("error"), result=st.get("result"))
 
 
 async def _end_shares_of(workspace_id: str, slug: str, user: User) -> list[str]:

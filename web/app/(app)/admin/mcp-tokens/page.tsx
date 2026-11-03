@@ -17,7 +17,7 @@
  * reading here at once.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { toast } from "sonner";
@@ -32,7 +32,10 @@ import {
 } from "@/lib/sharing";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
+import { type PickerOption } from "@/lib/pickers";
 import { PageHeader, PageShell } from "@/components/page-shell";
+import { CheckList } from "@/components/check-list";
+import { Combobox } from "@/components/combobox";
 import { SectionTabs } from "@/components/section-tabs";
 import { PersonCell } from "@/components/sharing/share-detail";
 import { Badge } from "@/components/ui/badge";
@@ -64,6 +67,16 @@ function globMatches(pattern: string, name: string): boolean {
 
 const splitList = (text: string) =>
   text.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+
+/** `value`, but only after it has stopped changing for `ms`: one request per pause, not per key. */
+function useDebounced<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const h = window.setTimeout(() => setV(value), ms);
+    return () => window.clearTimeout(h);
+  }, [value, ms]);
+  return v;
+}
 
 function statusVariant(status: string) {
   return status === "active" ? "success" : status === "revoked" ? "destructive" : "outline";
@@ -378,9 +391,14 @@ function IssueForm({
   const t = useT();
   const token = useToken();
   const qc = useQueryClient();
+  // What is typed in the person field, and the person chosen (kept here so a new
+  // search, which replaces the matches, cannot lose them).
   const [q, setQ] = useState("");
-  const [userRef, setUserRef] = useState("");
-  const [workspace, setWorkspace] = useState("");
+  const [person, setPerson] = useState<PickerOption | null>(null);
+  const [wsOpt, setWsOpt] = useState<PickerOption | null>(null);
+  const userRef = person?.value ?? "";
+  const workspace = wsOpt?.value ?? "";
+  const asked = useDebounced(q.trim(), 250);
   const [picked, setPicked] = useState<string[]>([]);
   const [globs, setGlobs] = useState("");
   const [days, setDays] = useState("30");
@@ -390,15 +408,29 @@ function IssueForm({
   const [sharePicked, setSharePicked] = useState<string[]>([]);
 
   const users = useQuery({
-    queryKey: ["mcp-token-users", q],
-    queryFn: () => adminUsersApi.search(token!, q.trim()),
+    queryKey: ["mcp-token-users", asked],
+    queryFn: () => adminUsersApi.search(token!, asked),
     enabled: !!token,
+    placeholderData: (prev) => prev,
   });
   const workspaces = useQuery({
     queryKey: ["mcp-token-workspaces"],
     queryFn: () => adminUsersApi.workspaces(token!),
     enabled: !!token,
   });
+  const personOptions: PickerOption[] = useMemo(
+    () => (users.data ?? []).filter((u) => u.is_active)
+      .map((u) => ({ value: u.id, label: u.email, hint: u.name })),
+    [users.data],
+  );
+  const workspaceOptions: PickerOption[] = useMemo(
+    () => (workspaces.data ?? []).map((w) => ({
+      value: w.id, label: w.name,
+      hint: w.kind === "personal" ? t("mcpTokens.workspacePersonal") : w.slug,
+      keywords: [w.slug],
+    })),
+    [workspaces.data, t],
+  );
   const repos = useQuery({
     queryKey: ["mcp-token-repos", workspace],
     queryFn: () => mcpTokensApi.repos(token!, workspace),
@@ -458,35 +490,49 @@ function IssueForm({
         <div className="grid gap-3 md:grid-cols-2">
           <div className="space-y-1">
             <Label htmlFor="mcp-user-q">{t("mcpTokens.person")}</Label>
-            <Input id="mcp-user-q" value={q} onChange={(e) => setQ(e.target.value)}
-                   placeholder={t("mcpTokens.personSearch")} />
-            <Select className="w-full" value={userRef} onChange={setUserRef}
-                    placeholder={t("mcpTokens.personPick")}
-                    options={(users.data ?? []).filter((u) => u.is_active)
-                      .map((u) => ({ value: u.id, label: u.email, hint: u.name }))} />
+            <Combobox id="mcp-user-q" options={personOptions} selected={person}
+                      onSelect={setPerson} onQueryChange={setQ} filterLocally={false}
+                      loading={users.isFetching || q.trim() !== asked}
+                      format={(o) => (o.hint ? `${o.hint} · ${o.label}` : o.label)}
+                      placeholder={t("mcpTokens.personSearch")}
+                      emptyText={t("mcpTokens.personNone")} clearLabel={t("mcpTokens.clear")}
+                      moreText={(n) => t("mcpTokens.moreMatches", { count: String(n) })} />
           </div>
           <div className="space-y-1">
             <Label htmlFor="mcp-ws">{t("mcpTokens.workspace")}</Label>
-            <Select id="mcp-ws" className="w-full" value={workspace}
-                    onChange={(v) => { setWorkspace(v); setPicked([]); setSharePicked([]); }}
-                    placeholder={t("mcpTokens.workspacePick")}
-                    options={(workspaces.data ?? []).map((w) => ({ value: w.id, label: w.name }))} />
+            <Combobox id="mcp-ws" options={workspaceOptions} selected={wsOpt}
+                      onSelect={(o) => { setWsOpt(o); setPicked([]); setSharePicked([]); }}
+                      loading={workspaces.isLoading}
+                      placeholder={t("mcpTokens.workspacePick")}
+                      emptyText={t("mcpTokens.workspaceNone")} clearLabel={t("mcpTokens.clear")}
+                      moreText={(n) => t("mcpTokens.moreMatches", { count: String(n) })} />
           </div>
         </div>
 
         <div className="space-y-1">
           <Label>{t("mcpTokens.repos")}</Label>
-          <div className="max-h-44 space-y-1 overflow-y-auto rounded-md border border-[var(--color-border)] p-2">
-            {!workspace && (
-              <div className="text-xs text-[var(--color-muted-foreground)]">{t("mcpTokens.pickWorkspaceFirst")}</div>
-            )}
-            {(repos.data ?? []).map((r) => (
-              <label key={r.slug} className="flex cursor-pointer items-center gap-2 text-sm">
+          {!workspace && (
+            <div className="rounded-md border border-[var(--color-border)] p-2 text-xs text-[var(--color-muted-foreground)]">
+              {t("mcpTokens.pickWorkspaceFirst")}
+            </div>
+          )}
+          <CheckList
+            items={repos.data ?? []}
+            getId={(r) => r.slug}
+            searchText={(r) => `${r.full_name || ""} ${r.slug}`}
+            picked={picked}
+            onChange={setPicked}
+            selectAllLabel={t("mcpTokens.selectAll")}
+            counterLabel={(n, m) => t("mcpTokens.selectedOf", { count: String(n), total: String(m) })}
+            filterPlaceholder={t("mcpTokens.filterRepos")}
+            noMatchText={t("mcpTokens.noRepoMatch")}
+            renderItem={(r) => (
+              <label className="flex cursor-pointer items-center gap-2 text-sm">
                 <input type="checkbox" checked={picked.includes(r.slug)} onChange={() => toggle(r.slug)} />
                 <code className="text-xs">{r.full_name || r.slug}</code>
               </label>
-            ))}
-          </div>
+            )}
+          />
           <Input value={globs} onChange={(e) => setGlobs(e.target.value)}
                  placeholder={t("mcpTokens.globsPlaceholder")} />
           <p className="text-xs text-[var(--color-muted-foreground)]">
@@ -500,8 +546,19 @@ function IssueForm({
           <div className="space-y-2">
             <Label>{t("mcpTokens.shared.title")}</Label>
             <p className="text-xs text-[var(--color-muted-foreground)]">{t("mcpTokens.shared.hint")}</p>
-            <div className="max-h-56 space-y-2 overflow-y-auto rounded-md border border-[var(--color-border)] p-2">
-              {shares.map((s) => {
+            <CheckList
+              items={shares}
+              getId={(s) => s.share_id}
+              searchText={(s) => `${s.full_name || s.slug} ${s.owner_name}`}
+              picked={sharePicked}
+              onChange={setSharePicked}
+              canAdd={(s, cur) => canTick(s, cur, held.has(s.share_id))}
+              maxHeightClass="max-h-56"
+              selectAllLabel={t("mcpTokens.selectAll")}
+              counterLabel={(n, m) => t("mcpTokens.selectedOf", { count: String(n), total: String(m) })}
+              filterPlaceholder={t("mcpTokens.filterRepos")}
+              noMatchText={t("mcpTokens.noRepoMatch")}
+              renderItem={(s) => {
                 const ticked = sharePicked.includes(s.share_id);
                 const open = canTick(s, sharePicked, held.has(s.share_id));
                 return (
@@ -536,8 +593,13 @@ function IssueForm({
                     </span>
                   </label>
                 );
-              })}
-            </div>
+              }}
+            />
+            {sharePicked.length >= MAX_SHARES_PER_TOKEN && (
+              <p className="text-xs text-[var(--color-muted-foreground)]">
+                {t("mcpTokens.shared.tooMany", { max: MAX_SHARES_PER_TOKEN })}
+              </p>
+            )}
             <Callout tone="info">{t("mcpTokens.shared.untrusted")}</Callout>
             <p className="text-xs text-[var(--color-muted-foreground)]">{t("mcpTokens.shared.audit")}</p>
             {patterns.includes("*") && <Callout tone="warning">{t("mcpTokens.shared.warnStar")}</Callout>}
@@ -595,10 +657,20 @@ function SharedTab() {
     queryFn: () => adminUsersApi.workspaces(token!),
     enabled: !!token,
   });
-  const [chosen, setChosen] = useState("");
+  const [chosen, setChosen] = useState<PickerOption | null>(null);
+  const workspaceOptions: PickerOption[] = useMemo(
+    () => (workspaces.data ?? []).map((w) => ({
+      value: w.id, label: w.name,
+      hint: w.kind === "personal" ? t("mcpTokens.workspacePersonal") : w.slug,
+      keywords: [w.slug],
+    })),
+    [workspaces.data, t],
+  );
   // The workspace the superadmin is in unless they pick another one.
-  const workspace = chosen || me.data?.active_id || "";
-  const workspaceName = (workspaces.data ?? []).find((w) => w.id === workspace)?.name ?? workspace;
+  const active = workspaceOptions.find((o) => o.value === me.data?.active_id) ?? null;
+  const shown = chosen ?? active;
+  const workspace = shown?.value ?? me.data?.active_id ?? "";
+  const workspaceName = shown?.label ?? workspace;
   const shares = useQuery({
     queryKey: ["mcp-shares", workspace],
     queryFn: () => mcpTokensApi.shares(token!, workspace),
@@ -623,9 +695,11 @@ function SharedTab() {
       <CardContent className="space-y-3">
         <div className="max-w-xs space-y-1">
           <Label htmlFor="mcp-shared-ws">{t("mcpTokens.workspace")}</Label>
-          <Select id="mcp-shared-ws" className="w-full" value={workspace} onChange={setChosen}
-                  placeholder={t("mcpTokens.workspacePick")}
-                  options={(workspaces.data ?? []).map((w) => ({ value: w.id, label: w.name }))} />
+          <Combobox id="mcp-shared-ws" options={workspaceOptions} selected={shown}
+                    onSelect={setChosen} loading={workspaces.isLoading}
+                    placeholder={t("mcpTokens.workspacePick")}
+                    emptyText={t("mcpTokens.workspaceNone")} clearLabel={t("mcpTokens.clear")}
+                    moreText={(n) => t("mcpTokens.moreMatches", { count: String(n) })} />
         </div>
         <Callout tone="info">{t("mcpTokens.shared.untrusted")}</Callout>
         {shares.isLoading && <div className="text-sm">{t("mcpTokens.loading")}</div>}

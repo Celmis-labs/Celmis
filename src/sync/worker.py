@@ -49,6 +49,7 @@ def start_worker() -> None:
     register(jq.KIND_REVIEW, h.handle_review)
     register(jq.KIND_INDEX_REPO, h.handle_index_repo)
     register(jq.KIND_INDEX_REPO_FULL, h.handle_index_repo_full)
+    register(jq.KIND_UPLOAD_VERSION, h.handle_upload_version)
     register(jq.KIND_OWNERSHIP_REBUILD, h.handle_ownership_rebuild)
     register(jq.KIND_CROSS_REPO_MATERIALIZE, h.handle_cross_repo_materialize)
     register(jq.KIND_REINDEX_QDRANT, h.handle_reindex_qdrant)

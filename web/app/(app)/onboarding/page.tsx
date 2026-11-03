@@ -35,6 +35,7 @@ import {
 import { FirstProofStep } from "@/components/first-proof-step";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
+import { invalidateWorkspaceLists } from "@/lib/workspace-cache";
 import { SPOTLIGHT_KEY } from "@/lib/tour";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -357,7 +358,7 @@ function WorkspaceStep({
     onSuccess: () => {
       toast.success(t("onboarding.ws.created"));
       setName("");
-      qc.invalidateQueries({ queryKey: ["workspaces"] });
+      invalidateWorkspaceLists(qc);
       onDone();
     },
     onError: (e) => toast.error((e as Error).message),

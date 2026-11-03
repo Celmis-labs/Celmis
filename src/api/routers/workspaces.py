@@ -42,7 +42,7 @@ from src.api.memberships import (
     refuse_unless_can_change,
     revoke_workspace_tokens_sync,
 )
-from src.db.models import Workspace, WorkspaceMember
+from src.db.models import DeletedPersonalWorkspace, Workspace, WorkspaceMember
 from src.db.session import get_async_session
 from src.users import User
 from src.users.roles import (
@@ -262,6 +262,13 @@ async def delete_workspace(
         return ended, repo_shares.owner_workspaces(s, ended)
 
     ended_shares, share_owners = await session.run_sync(_end_shares)
+    # A personal workspace deleted on purpose stays deleted: sign-in would
+    # otherwise create it again (src/api/workspace_provision.py).
+    from src.api.workspace_provision import personal_owner_id
+
+    owner_id = personal_owner_id(ws.slug)
+    if owner_id is not None and await session.get(DeletedPersonalWorkspace, owner_id) is None:
+        session.add(DeletedPersonalWorkspace(user_id=owner_id, deleted_by=user.id))
     await session.delete(ws)
     await session.commit()
     for share_id in ended_shares:

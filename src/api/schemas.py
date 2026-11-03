@@ -212,6 +212,10 @@ class RepoOut(BaseModel):
     provider: str
     #: Name given at upload for an ``upload`` repository (None for git repos).
     display_name: str | None = None
+    #: Version number and upload time of an ``upload`` repository's current
+    #: archive (None for git repos and for archives older than versions).
+    upload_version: int | None = None
+    uploaded_at: str | None = None
     full_name: str  # owner/repo
     url: str
     indexed: bool

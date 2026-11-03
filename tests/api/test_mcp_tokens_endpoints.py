@@ -338,3 +338,67 @@ async def test_a_self_issued_token_is_a_self_kind_capped_by_its_holder(tokens, m
     r = await tokens.client.post("/api/mcp/token", json={"scopes": ["write:config"]},
                                  headers=tokens.h("member_a", "ws-a"))
     assert r.status_code == 403, "a member may not ask for a configuration scope"
+
+
+# ─── the workspace picker: nothing dead is offered, nothing dead is issued for ─
+
+
+async def _personal(w, slug, name):
+    from src.db.models import Workspace
+
+    async with w.factory() as s:
+        ws = Workspace(id=f"id-{slug}", name=name, slug=slug, description="")
+        s.add(ws)
+        await s.commit()
+    return f"id-{slug}"
+
+
+async def _picker(w):
+    r = await w.client.get("/api/admin/workspaces", headers=w.h("su"))
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+async def test_picker_omits_the_personal_workspace_of_an_erased_or_deactivated_account(tokens):
+    import src.users.store as users_mod
+
+    live = tokens.uid("member_a")
+    await _personal(tokens, f"u-{live}", "Alice's workspace")
+    await _personal(tokens, "u-erased-account", "Bob's workspace")
+    off = tokens.uid("viewer_a")
+    await _personal(tokens, f"u-{off}", "Carol's workspace")
+    assert users_mod._default_store.set_active(off, False)
+
+    slugs = [w["slug"] for w in await _picker(tokens)]
+    assert f"u-{live}" in slugs
+    assert "u-erased-account" not in slugs and f"u-{off}" not in slugs
+    # The opt-in still shows them, so nothing is hidden for good.
+    every = [w["slug"] for w in (await tokens.client.get(
+        "/api/admin/workspaces", params={"include_dead": "true"},
+        headers=tokens.h("su"))).json()]
+    assert "u-erased-account" in every and f"u-{off}" in every
+
+
+async def test_picker_lists_team_workspaces_before_personal_ones_alphabetically(tokens):
+    await _personal(tokens, f"u-{tokens.uid('member_a')}", "Aaron's workspace")
+    rows = await _picker(tokens)
+    kinds = [w["kind"] for w in rows]
+    assert kinds == sorted(kinds, key=lambda k: k == "personal")
+    assert kinds[-1] == "personal" and kinds[0] == "team"
+    team = [w["name"].casefold() for w in rows if w["kind"] == "team"]
+    assert team == sorted(team)
+
+
+async def test_no_token_is_issued_for_a_dead_personal_workspace(tokens):
+    import src.users.store as users_mod
+
+    gone = await _personal(tokens, "u-erased-account", "Bob's workspace")
+    r = await _issue(tokens, "su", workspace_id=gone)
+    assert r.status_code == 404, r.text
+    off = tokens.uid("viewer_a")
+    ws = await _personal(tokens, f"u-{off}", "Carol's workspace")
+    users_mod._default_store.set_active(off, False)
+    r = await _issue(tokens, "su", workspace_id=ws)
+    assert r.status_code == 404, r.text
+    # An ordinary workspace is unaffected.
+    assert (await _issue(tokens, "su")).status_code == 201

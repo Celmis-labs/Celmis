@@ -89,6 +89,8 @@ class Session:
     chunk_size: int
     created_at: float
     expires_at: float
+    #: "repo" adds a repository; "version" replaces the content of ``slug``.
+    kind: str = "repo"
 
     @property
     def parts(self) -> int:
@@ -120,7 +122,7 @@ def _free_bytes(path: Path) -> int:
 
 
 def create(*, user_id: str, workspace_id: str, slug: str, name: str, filename: str,
-           size: int, sha256: str = "") -> Session:
+           size: int, sha256: str = "", kind: str = "repo") -> Session:
     """Validate the declared upload and open a session. No bytes are accepted
     before this passes (extension, size, disk space, sha format)."""
     try:
@@ -146,7 +148,7 @@ def create(*, user_id: str, workspace_id: str, slug: str, name: str, filename: s
     s = Session(id=uuid.uuid4().hex, user_id=user_id, workspace_id=workspace_id,
                 slug=slug, name=name, filename=Path(filename).name[:200], size=size,
                 sha256=sha256.lower(), chunk_size=chunk_bytes(), created_at=now,
-                expires_at=now + session_ttl())
+                expires_at=now + session_ttl(), kind=kind)
     s.dir.mkdir(parents=True, exist_ok=True)
     (s.dir / "meta.json").write_text(json.dumps(s.__dict__), encoding="utf-8")
     return s
@@ -228,6 +230,63 @@ def _join_parts(s: Session, target: Path) -> StoredArchive:
         target.unlink(missing_ok=True)
         raise SessionError("The sha256 of the assembled archive does not match.", 422)
     return StoredArchive(target, digest.hexdigest(), total)
+
+
+# ─── a new version, applied by the worker ────────────────────────────
+#
+# Applying a version unpacks AND indexes the archive, which outlasts a request
+# (a proxy cuts those at ~100 s). `complete` therefore hands the assembled archive
+# to a job and the page polls ``status``. Archive and status sit beside the
+# sessions, outside the session directory, so the session's expiry cannot take
+# an archive out from under a queued job.
+
+
+def pending_dir(update_id: str) -> Path:
+    return root_dir().parent / "uploads-pending" / update_id
+
+
+def hand_over(s: Session, stored: StoredArchive) -> Path:
+    """Move the assembled archive out of the session into its own directory."""
+    target = pending_dir(s.id)
+    target.mkdir(parents=True, exist_ok=True)
+    os.replace(stored.path, target / "archive")
+    return target / "archive"
+
+
+def write_status(update_id: str, **fields) -> None:
+    target = pending_dir(update_id)
+    target.mkdir(parents=True, exist_ok=True)
+    path = target / "status.json"
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        current = {}
+    current.update(fields, updated_at=time.time())
+    tmp = target / f"status.json.{os.getpid()}"
+    tmp.write_text(json.dumps(current), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_status(update_id: str) -> dict | None:
+    if not _ID.match(update_id or ""):
+        return None
+    try:
+        return json.loads((pending_dir(update_id) / "status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def forget_old_updates(max_age: float = 7 * 86400) -> None:
+    base = root_dir().parent / "uploads-pending"
+    if not base.is_dir():
+        return
+    now = time.time()
+    for d in base.iterdir():
+        try:
+            if d.is_dir() and now - d.stat().st_mtime > max_age:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            continue
 
 
 def discard(session_id: str) -> None:

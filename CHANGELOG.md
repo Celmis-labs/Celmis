@@ -20,6 +20,62 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.17] — 2026-11-03
+
+### Added
+
+- **A new version of an uploaded repository.** A repository added from an
+  archive can now be updated with a newer archive instead of being removed and
+  added again: its name is unchanged, so every MCP token that names it (by name
+  or by pattern), every share to another workspace, repo grant, project, chat
+  and review setting keeps working with nothing re-issued. The new archive is
+  unpacked with the same checks as the first upload and indexed in a staging
+  area first; only then are the served files, graph and search index swapped in
+  together. An archive that is not acceptable, does not index, or holds no code
+  where the current version has some leaves the old version served and says why.
+  What the old version had and the new one lacks cannot be found afterwards
+  (symbols, graph and 1C data edges, the grep index, and generated notes of
+  deleted files). Every version is recorded (number, time, who, file name, size,
+  files, added/removed/changed); the repositories page shows `v<N>` and an
+  "Upload new version" dialog with the history, upload progress and the result,
+  and MCP answers print the version in the `idx:` line (`slug v3@abcd1234 …`).
+  Routes: `GET /api/repos/{slug}/versions`, `POST …/versions/sessions`,
+  `POST …/versions/sessions/{id}/complete` (queues the job),
+  `GET …/versions/updates/{id}`; parts go to the existing
+  `PUT /api/repos/upload/sessions/{id}/parts/{n}`. Same people as the first
+  upload (the superadmin); anyone who cannot see the repository gets 404.
+
+### Changed
+
+- Admin > MCP tokens, "Issue token": the person and the workspace are now one
+  searchable combobox each (type in the field, matches drop down under it; arrow
+  keys, Enter, Escape and a click work; the chosen value shows in the field with a
+  clear button). The person search waits for a pause in typing before asking the
+  server. Workspaces are listed team workspaces first, then personal ones, A-Z, and
+  can be found by name or slug.
+- The repository lists of the form, the workspace's own and "Shared with us", have a
+  tri-state "Select all" with an "N of M selected" counter, and a filter when the list
+  is long. "Select all" acts on the rows the filter shows; for shared repositories it
+  stops at the per-token limit and skips full shares. The "Shared with us" tab's
+  workspace field is the same combobox.
+
+### Fixed
+
+- Deleting someone's personal workspace now sticks. Sign-in used to create it again
+  on the person's next login, so it came back into the pickers. The delete leaves a
+  marker (table `deleted_personal_workspaces`, migration `e2b7c4d9a1f3`); sign-in leaves
+  a marked workspace deleted while the person belongs to another workspace. A person
+  with no workspace at all still gets a personal one (and the marker is cleared), so
+  nobody falls into the shared tenant.
+- Creating or deleting a workspace refreshes every cached workspace list (the Users,
+  Access requests and MCP tokens pickers kept offering a deleted workspace for up to
+  30 seconds).
+- `GET /api/admin/workspaces` (the workspace picker of the Users, Access requests and
+  MCP tokens pages) no longer lists the personal workspace of an account that was
+  erased or deactivated, and `POST /api/admin/mcp-tokens` and `/mcp-grants` answer
+  404 for such a workspace. `?include_dead=true` lists them again. Each row now
+  carries `kind` (`team` or `personal`).
+
 ## [3.1.15] — 2026-10-30
 
 ### Added

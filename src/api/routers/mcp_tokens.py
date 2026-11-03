@@ -285,6 +285,16 @@ def _resolve_workspace(session, ref: str):  # noqa: ANN001, ANN202
     ).scalars().first()
 
 
+def _refuse_dead_workspace(users: UserStore, ws) -> None:  # noqa: ANN001
+    """404 for the personal workspace of an erased or deactivated account: it is
+    not offered by the picker, and a token for it would have nobody behind it."""
+    from src.api.workspace_provision import is_dead_personal
+
+    active = {u.id: bool(u.is_active) for u in users.list(active_only=False)}
+    if is_dead_personal(ws.slug, active):
+        raise HTTPException(status_code=404, detail="No such workspace.")
+
+
 def _resolve_user(users: UserStore, ref: str) -> User | None:
     ref = ref.strip()
     user = users.get_by_id(ref)
@@ -402,6 +412,7 @@ def issue_token(
         ws = _resolve_workspace(s, payload.workspace_id)
         if ws is None:
             raise HTTPException(status_code=404, detail="No such workspace.")
+        _refuse_dead_workspace(users, ws)
         from src.db.models import WorkspaceMember
 
         member = s.get(WorkspaceMember, (ws.id, holder.id))
@@ -494,6 +505,7 @@ def issue_grant(
         ws = _resolve_workspace(s, payload.workspace_id)
         if ws is None:
             raise HTTPException(status_code=404, detail="No such workspace.")
+        _refuse_dead_workspace(users, ws)
         if s.get(WorkspaceMember, (ws.id, holder.id)) is None and not holder.is_admin:
             raise HTTPException(
                 status_code=422,

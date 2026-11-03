@@ -285,6 +285,11 @@ export interface RepoOut {
    *  answered" rather than as "nothing recorded". */
   last_indexed_sha?: string | null;
   last_indexed_at?: string | null;
+  /** Name given at upload (``upload`` repositories only). */
+  display_name?: string | null;
+  /** An uploaded repository's current version number and when it was uploaded. */
+  upload_version?: number | null;
+  uploaded_at?: string | null;
   last_full_rebuild_at?: string | null;
   last_index_error?: string | null;
   last_index_error_at?: string | null;
@@ -729,6 +734,113 @@ export async function uploadRepoArchive(
     // Best effort: free the parts on the server.
     void api<void>(base, { token, method: "DELETE" }).catch(() => undefined);
     throw e;
+  }
+}
+
+export interface RepoVersion {
+  version: number;
+  sha256: string;
+  uploaded_at: string;
+  uploaded_by: string;
+  filename: string;
+  size: number;
+  files: number;
+  added: number | null;
+  removed: number | null;
+  changed: number | null;
+}
+
+export interface RepoVersions {
+  current: RepoVersion | null;
+  /** Newest first. */
+  history: RepoVersion[];
+}
+
+export interface RepoVersionResult {
+  version: RepoVersion;
+  added: number;
+  removed: number;
+  changed: number;
+  symbols: number;
+  files_indexed: number;
+  removed_paths: string[];
+  notes_removed: number;
+}
+
+export interface RepoVersionUpdate {
+  update_id: string;
+  state: "queued" | "running" | "done" | "failed";
+  phase: string;
+  error: string | null;
+  result: RepoVersionResult | null;
+}
+
+export const repoVersionsApi = {
+  list: (token: string, slug: string) =>
+    api<RepoVersions>(`/api/repos/${encodeURIComponent(slug)}/versions`, { token }),
+  update: (token: string, slug: string, updateId: string) =>
+    api<RepoVersionUpdate>(
+      `/api/repos/${encodeURIComponent(slug)}/versions/updates/${updateId}`, { token }),
+};
+
+/**
+ * Superadmin only: replace the code of an uploaded repository with a newer
+ * archive. The repository keeps its name, so tokens, shares and projects that
+ * name it need no change. Same numbered parts as `uploadRepoArchive`; the
+ * server then unpacks, indexes and swaps in the new version in the background,
+ * so this polls until it is done (`onPhase` reports where it stands) and
+ * rejects with the server's reason if the old version was kept.
+ */
+export async function uploadRepoVersion(
+  token: string,
+  slug: string,
+  file: File,
+  opts: {
+    onProgress?: (fraction: number) => void;
+    onPhase?: (phase: string) => void;
+    signal?: AbortSignal;
+  } = {},
+): Promise<RepoVersionResult> {
+  const root = `/api/repos/${encodeURIComponent(slug)}/versions`;
+  const session = await api<UploadSession>(`${root}/sessions`, {
+    token, method: "POST", signal: opts.signal,
+    json: { filename: file.name, size: file.size },
+  });
+  let started: RepoVersionUpdate;
+  try {
+    for (let n = 0; n < session.parts; n++) {
+      const body = file.slice(n * session.chunk_size, (n + 1) * session.chunk_size);
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await api<void>(`/api/repos/upload/sessions/${session.session_id}/parts/${n}`, {
+            token, method: "PUT", body, signal: opts.signal,
+          });
+          break;
+        } catch (e) {
+          const final = attempt >= 3 || opts.signal?.aborted
+            || (e instanceof ApiError && e.status >= 400 && e.status < 500);
+          if (final) throw e;
+          await new Promise((r) => setTimeout(r, 500 * attempt));
+        }
+      }
+      opts.onProgress?.((n + 1) / session.parts);
+    }
+    started = await api<RepoVersionUpdate>(
+      `${root}/sessions/${session.session_id}/complete`, { token, method: "POST" });
+  } catch (e) {
+    void api<void>(`/api/repos/upload/sessions/${session.session_id}`, {
+      token, method: "DELETE",
+    }).catch(() => undefined);
+    throw e;
+  }
+  // Applying is the server's work now; leaving the page does not stop it.
+  for (;;) {
+    if (opts.signal?.aborted) throw new DOMException("Cancelled", "AbortError");
+    const u = await repoVersionsApi.update(token, slug, started.update_id);
+    opts.onPhase?.(u.phase);
+    if (u.state === "done" && u.result) return u.result;
+    if (u.state === "failed") throw new Error(u.error || "The update failed.");
+    await new Promise((r) => setTimeout(r, 2000));
   }
 }
 
@@ -2595,7 +2707,7 @@ export type AdminUser = {
   /** A membership other than the account's own personal workspace. */
   has_team_access?: boolean;
 };
-export type AdminWorkspace = { id: string; name: string; slug: string };
+export type AdminWorkspace = { id: string; name: string; slug: string; kind?: "team" | "personal" };
 export type UserMembership = {
   workspace_id: string; workspace_name: string; workspace_slug: string; role: string;
 };

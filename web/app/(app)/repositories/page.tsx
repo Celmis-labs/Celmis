@@ -43,6 +43,7 @@ import { Callout } from "@/components/ui/callout";
 
 import { WorkspaceBadge } from "@/components/workspace-badge";
 import { RepoFreshness } from "@/components/repo-freshness";
+import { RepoVersionButton } from "@/components/repo-versions";
 import { RepairOutdatedHooks, RepoWebhookControl } from "@/components/repo-webhook";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader,
@@ -292,6 +293,7 @@ function RepoRow({
   const token = useToken();
   const t = useT();
   const qc = useQueryClient();
+  const { data: session } = useSession();
   const [showPRs, setShowPRs] = useState(false);
   const [removeOpen, setRemoveOpen] = useState(false);
   const [purge, setPurge] = useState(false);
@@ -401,7 +403,15 @@ function RepoRow({
         <div className="flex items-start gap-3 min-w-0 flex-1 sm:items-center">
           <ProviderBadge provider={repo.provider as Provider} />
           <div className="min-w-0">
-            <div className="font-medium wrap-anywhere sm:truncate">{repo.full_name}</div>
+            <div className="font-medium wrap-anywhere sm:truncate">
+              {repo.full_name}
+              {repo.provider === "upload" && repo.upload_version != null && (
+                <Badge variant="outline" className="ml-2 px-1.5 py-0 align-middle"
+                  title={repo.uploaded_at ? formatDateTime(repo.uploaded_at) : undefined}>
+                  v{repo.upload_version}
+                </Badge>
+              )}
+            </div>
             {/* Wraps instead of widening the card: on a phone the badge, the
                 two work buttons, the branch chip and the link never fit one line. */}
             {/* Freshness first, because "is this current?" is the question a
@@ -544,6 +554,9 @@ function RepoRow({
           >
             <UsersIcon className="h-4 w-4" />
           </Button>
+          {repo.provider === "upload" && session?.isSuperadmin && (
+            <RepoVersionButton repo={repo} onDone={onChange} />
+          )}
           <Dialog open={removeOpen} onOpenChange={setRemoveOpen}>
             <DialogTrigger asChild>
               <Button

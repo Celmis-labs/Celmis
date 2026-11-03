@@ -31,6 +31,7 @@ import {
 } from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
+import { invalidateWorkspaceLists } from "@/lib/workspace-cache";
 import { canChangeMember, grantableRoles, roleLabel, roleOptions } from "@/lib/roles";
 import { copyText } from "@/lib/copy";
 import { PageShell } from "@/components/page-shell";
@@ -104,7 +105,7 @@ export default function WorkspacesPage() {
     },
     onSuccess: () => {
       setName(""); setDesc("");
-      qc.invalidateQueries({ queryKey: ["workspaces", "me"] });
+      invalidateWorkspaceLists(qc);
       toast.success(t("admin.workspaces.workspaceCreated"));
     },
     onError: (e) => toast.error(t("admin.workspaces.error", { message: (e as Error).message })),
@@ -226,7 +227,7 @@ function WorkspaceCard({ ws, activeId, isSuperadmin, myId }: {
   const del = useMutation({
     mutationFn: () => workspacesApi.remove(token!, ws.id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["workspaces", "me"] });
+      invalidateWorkspaceLists(qc);
       toast.success(t("admin.workspaces.workspaceDeleted"));
     },
     onError: (e) => toast.error(t("admin.workspaces.error", { message: (e as Error).message })),

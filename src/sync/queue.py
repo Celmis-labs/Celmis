@@ -55,6 +55,9 @@ KIND_INDEX_REPO = "index_repo"
 #: a repo nobody has cloned yet, which is exactly the case "Index all" exists
 #: to serve. This kind clones and indexes from scratch.
 KIND_INDEX_REPO_FULL = "index_repo_full"
+#: Unpack, index and swap in a new archive version of an uploaded repository
+#: (src/repos/upload_versions.py). A job because it outlasts a request.
+KIND_UPLOAD_VERSION = "upload_version"
 KIND_OWNERSHIP_REBUILD = "ownership_rebuild"
 KIND_CROSS_REPO_MATERIALIZE = "cross_repo_materialize"
 KIND_REINDEX_QDRANT = "reindex_qdrant"

@@ -222,6 +222,13 @@ def build_upload_index(slug: str) -> bool:
     return bool(sha and tree and upload_index(slug, tree, sha))
 
 
+def build_index_at(tree: Path, data_dir: Path, sha: str) -> bool:
+    """The search index of the archive ``sha`` unpacked at ``tree``, written into
+    ``data_dir`` (a staging copy of the repository's data directory) so it can be
+    swapped in with the files. Same index `upload_index` makes."""
+    return _build_index(tree, data_dir / _INDEX_DIR, sha)
+
+
 @dataclass(frozen=True)
 class GrepHit:
     path: str

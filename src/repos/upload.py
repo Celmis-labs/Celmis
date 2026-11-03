@@ -376,13 +376,21 @@ def install_archive(stored: StoredArchive, filename: str, slug: str, *,
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
+    from src.repos import upload_versions as uv
+
+    data_dir = settings.repo_data_path(slug)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    previous = read_upload_meta(slug) or {}
+    number = uv.next_number(slug)
     meta = {
         "sha256": stored.sha256, "size": stored.size, "filename": Path(filename).name[:200],
         "uploaded_at": datetime.now(UTC).isoformat(), "uploaded_by": uploaded_by,
+        "version": number, "files": uv.count_files(final),
     }
-    data_dir = settings.repo_data_path(slug)
-    data_dir.mkdir(parents=True, exist_ok=True)
+    if previous.get("name"):
+        meta["name"] = previous["name"]
     (data_dir / "upload.json").write_text(json.dumps(meta), encoding="utf-8")
+    uv.append_version(slug, uv.record_from_meta(meta))
     try:  # the search index of the new archive; grep builds it lazily if this fails
         from src.mcp_server.dev_profile import git_io
 
@@ -392,12 +400,15 @@ def install_archive(stored: StoredArchive, filename: str, slug: str, *,
     return final
 
 
-def read_upload_meta(slug: str) -> dict | None:
-    """What was last uploaded under ``slug`` (sha256, size, …), if anything."""
+def read_upload_meta(slug: str, settings=None) -> dict | None:  # noqa: ANN001
+    """What was last uploaded under ``slug`` (sha256, size, …), if anything.
+
+    ``settings`` names another workspace root — the staging tree a new version
+    is indexed in before it replaces the served one."""
     from src.config import get_settings
 
     try:
-        path = get_settings().repo_data_path(slug) / "upload.json"
+        path = (settings or get_settings()).repo_data_path(slug) / "upload.json"
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 — no record is a normal answer
         return None
