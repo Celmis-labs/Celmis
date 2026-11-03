@@ -2,36 +2,51 @@
 
 # Celmis
 
-**From the alert your monitoring already sent, to a pull request someone can review.**
-Self-hosted. One machine. Your model, your subscription, your network.
+**Understand, review, secure and fix your code, in one self-hosted place.**
+One machine. Your model, your network. The code never leaves the company.
 
 [**Website**](https://celmis-labs.github.io) · [Documentation](https://celmis-labs.github.io/docs/) · [Quick start](#quick-start) · [What's new](#whats-new-in-v3) · [Results](#results)
 
-![licence](https://img.shields.io/badge/licence-AGPLv3-0E5537) ![release](https://img.shields.io/github/v/release/Celmis-labs/Celmis?color=3DBE83) ![MCP tools](https://img.shields.io/badge/MCP%20tools-51-C08A3E) ![languages](https://img.shields.io/badge/languages%20parsed-23-0E5537)
+![licence](https://img.shields.io/badge/licence-AGPLv3-0E5537) ![release](https://img.shields.io/github/v/release/Celmis-labs/Celmis?color=3DBE83) ![MCP tools](https://img.shields.io/badge/MCP%20tools-51-C08A3E) ![languages](https://img.shields.io/badge/languages%20parsed-24-0E5537)
 
-![An alert becomes a pull request](docs/images/alert-to-fix.png)
+![One question answered across two repositories, with citations in both](docs/images/ask-the-code-cross-repo.png)
 
 </div>
 
-An alert arrives from a service you run. Celmis already knows which repository that
-service is and who owns it, so the fix starts there: an embedded Claude Code session,
-on *your* subscription and inside *your* installation, edits the code, and the runner
-commits, pushes a branch and opens a pull request. On one measured finding that took
-**220 seconds**, from whatever device the alert reached first.
+Celmis puts everything an engineering team needs to work with its code in one place.
+It indexes all of your repositories once, into a symbol graph built without a model,
+and every tool reads that same index:
 
-That loop closes because everything sits on **one index**: a symbol graph built once
-from your repositories, with no model involved in building it. Every other surface
-reads the same index.
+- **understand** code nobody documented: questions across repositories answered with
+  `file:line` citations, in the app or from a coding agent (Claude Code, Cursor, Codex)
+  over MCP, plus the team's own skills and checklists for the task at hand;
+- **review** pull requests with what the change touches beyond its own repository;
+- **secure** the dependencies: CVE audit, a CycloneDX SBOM and an evidence pack a third
+  party can verify;
+- **fix** what an alert or a finding points at: an embedded Claude Code session on
+  *your* subscription edits the code and the runner opens a pull request (220 seconds on
+  one measured finding). A person reviews and merges; Celmis never merges or deploys.
+
+It is built for the team that ships the code and answers for it in production. Instead
+of a separate tool for each of those jobs, each with its own access rules and its own
+copy of your code, one installation holds them all. The aim is a small team that can
+run several products and the integrations between them.
+
+**What "beyond its own repository" means today.** Before a merge, the review checks the
+other repositories for values the change removes that they still hardcode, for deploy
+files that point at the changed repository, and for code that calls a changed function
+by the same name, quoting both sides. These are checks, not a call graph between
+repositories; that graph is not built yet.
 
 ## What it does
 
 | | |
 |---|---|
-| **Fix from here** | An alert or a dependency finding becomes an embedded session, then a branch, then a pull request. A human reviews and merges; Celmis never merges. [Fix from here](#fix-from-here) · [Alerts](#alerts-and-fixing-from-a-phone) |
-| **Pull-request review** | Agents read the diff and, where the graph exists, who else calls what changed, across repositories. Talk to it with `@celmis`, teach it with `remember`, and it stays quiet when there is nothing to say. [Review](#pull-request-review) |
 | **Ask the code** | Questions across several repositories, answered with `file:line` citations on both sides of a call. [Ask the code](#ask-the-code) |
 | **Codebase and MCP** | 51 tools over MCP, a compact `/mcp/dev` profile for editors, a Claude Code plugin, and versioned knowledge packs of the skills your team already explains out loud. [MCP](#connect-claude-code-and-other-mcp-clients) · [Packs](docs/CODEBASE.md) |
+| **Pull-request review** | Agents read the diff and, where the graph exists, who else calls what changed, across repositories. Talk to it with `@celmis`, teach it with `remember`, and it stays quiet when there is nothing to say. [Review](#pull-request-review) |
 | **Evidence** | Dependency audit, CycloneDX SBOM and an evidence pack whose manifest a third party recomputes. [SBOM and evidence](#dependencies-sbom-and-the-evidence-pack) |
+| **Fix from here** | An alert or a dependency finding becomes an embedded session, then a branch, then a pull request. A human reviews and merges; Celmis never merges. [Fix from here](#fix-from-here) · [Alerts](#alerts-and-fixing-from-a-phone) |
 | **Access you can defend** | Repositories are closed by default, MCP tokens are issued per person, every call is audited, secrets are withheld at the source, and a repository can be shared with another workspace for a fixed time. [Who can see what](#who-can-see-what) · [Sharing](docs/SHARING.md) |
 
 ## Install
@@ -75,11 +90,8 @@ authentication. `GRAFANA_ADMIN_PASSWORD` is required.
 
 ## What that buys you that a diff-only tool cannot
 
-Ask a question that spans two repositories, and the answer quotes both:
-
-![Ask the code, answering across two repositories](docs/images/ask-the-code-cross-repo.png)
-
-That is not a search result. The gateway and the payments service are separate
+Ask a question that spans two repositories, and the answer quotes both, as in the
+screenshot at the top of this page. That is not a search result. The gateway and the payments service are separate
 repositories with no shared code, and the answer traces the call chain between
 them — then notices, unprompted, that the Kafka topic name is hardcoded in both
 and that changing one silently breaks the other.
@@ -355,7 +367,7 @@ calls, imports — what the review agents reason over) and embeddings in Qdrant
 (what Q&A retrieves). A 120k-symbol repository takes about a minute on four
 cores.
 
-Twenty-three languages parse into the graph. A file in a language without a
+Twenty-four languages parse into the graph, 1C:Enterprise among them. A file in a language without a
 parser is said so out loud rather than silently skipped — `analyzer graph-stats`
 lists what was and was not read.
 
