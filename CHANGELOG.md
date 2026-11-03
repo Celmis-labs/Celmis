@@ -20,6 +20,34 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.18] — 2026-11-03
+
+### Added
+
+- **Search in the repository list.** The Repositories page has a filter above
+  "Your repositories": type any part of a name, the owner, the slug, an uploaded
+  archive's name or the provider, words in any order, and the list narrows as
+  you type, with "N of M" beside the field and a plain message when nothing
+  matches. Escape clears it. It filters the list already loaded, so it adds no
+  request.
+
+### Fixed
+
+- **The "Index all" button, its note and its notices are translated.** They
+  were written into the page in English and showed in English in every
+  language.
+
+### Security
+
+- **The breaking-change check names only its own tenant's code.** It looked
+  for consumers of a changed symbol in every repository indexed on disk, and
+  put their slugs, file paths and caller names into the pull-request comment
+  and the workspace notification. Under `multi_tenant` that is every tenant's
+  code. It now reads only the repositories bound to the pull request's
+  workspace (none if the registry cannot be read), through the same
+  `tenancy.within_workspace` filter the deprecation consumer scan now uses.
+  `single_tenant` installations are unchanged.
+
 ## [3.1.17] — 2026-11-03
 
 ### Added

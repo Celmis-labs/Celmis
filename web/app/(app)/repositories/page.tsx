@@ -25,6 +25,7 @@ import { useToken } from "@/lib/use-token";
 import { useI18n, useT } from "@/lib/i18n";
 import { formatDateTime } from "@/lib/format";
 import { relativeTime } from "@/lib/review-stages";
+import { filterRepos } from "@/lib/repo-filter";
 import { useSpotlightOnMount } from "@/lib/tour";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -196,6 +197,9 @@ function ConnectedRepoList({
   const qc = useQueryClient();
   const repoList = query.data ?? [];
   const unindexed = repoList.filter((r) => !r.indexed).length;
+  const [search, setSearch] = useState("");
+  const searching = search.trim() !== "";
+  const shown = filterRepos(repoList, search);
 
   // Queued, not synchronous: nine repos at 5-60s each is far past a request's
   // patience. The queue gives retries and a cancel button, and the list below
@@ -209,9 +213,9 @@ function ConnectedRepoList({
       // one message: nothing needed doing, versus every job was rejected
       // because an earlier index for the same repo is still in the queue.
       if (r.queued > 0) {
-        toast.success(`${r.queued} queued for indexing.`);
+        toast.success(t("repositories.indexAllQueued", { count: r.queued }));
       } else if (r.skipped > 0) {
-        toast.info(`${r.skipped} already queued from an earlier run — nothing new to add.`);
+        toast.info(t("repositories.indexAllSkipped", { count: r.skipped }));
       } else {
         toast.info(t("repos.allIndexed"));
       }
@@ -243,7 +247,9 @@ function ConnectedRepoList({
               {indexAll.isPending
                 ? <Loader2Icon className="mr-1 h-3.5 w-3.5 animate-spin" />
                 : <CpuIcon className="mr-1 h-3.5 w-3.5" />}
-              {unindexed === 0 ? "All indexed" : `Index all (${unindexed})`}
+              {unindexed === 0
+                ? t("repositories.allIndexedButton")
+                : t("repositories.indexAllButton", { count: unindexed })}
             </Button>
           )}
         </div>
@@ -251,19 +257,48 @@ function ConnectedRepoList({
             the graph chat and search answer from; a vault is generated prose
             that costs model calls and is never required for either. */}
         <p className="mt-1 text-xs text-[var(--color-muted-foreground)]">
-          Builds the code graph only — no documentation is generated and no
-          model calls are made.
+          {t("repositories.graphOnlyNote")}
         </p>
       </CardHeader>
       <CardContent>
         <RepairOutdatedHooks repos={repoList} />
+        {/* Filters the list already loaded: every repository comes in one
+            response, so a long workspace means scrolling, not paging. */}
+        {(repoList.length > 1 || searching) && (
+          <div className="mb-3 flex items-center gap-3">
+            <div className="relative min-w-0 flex-1">
+              <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-muted-foreground)]" />
+              <Input
+                type="search"
+                autoComplete="off"
+                spellCheck={false}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Escape") setSearch(""); }}
+                className="pl-8"
+                placeholder={t("repositories.listSearchPlaceholder")}
+                aria-label={t("repositories.listSearchLabel")}
+              />
+            </div>
+            {searching && (
+              <span className="shrink-0 text-xs tabular-nums text-[var(--color-muted-foreground)]"
+                aria-live="polite">
+                {t("repositories.listSearchCount", { shown: shown.length, total: repoList.length })}
+              </span>
+            )}
+          </div>
+        )}
         <QueryState
           query={query}
           empty={{ icon: FolderGit2Icon, title: t("repositories.emptyList") }}
         >
-          {(repos) => (
+          {() => shown.length === 0 ? (
+            <p className="py-6 text-center text-sm text-[var(--color-muted-foreground)]">
+              {t("repositories.listSearchNone", { q: search.trim() })}
+            </p>
+          ) : (
             <ul className="flex flex-col gap-3">
-              {repos.map((r) => (
+              {shown.map((r) => (
                 <RepoRow
                   key={r.slug}
                   repo={r}

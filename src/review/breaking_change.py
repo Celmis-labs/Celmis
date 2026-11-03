@@ -92,7 +92,8 @@ def run_breaking_change(context: AgentContext) -> AgentRunResult:
     # a helper called five times inside its own file would be reported as
     # "5 consumers across other repositories" and escalate to CRITICAL,
     # with a notification, on a pull request that broke nothing.
-    consumers_by_symbol = _find_consumers_across_repos(pr.local_slug, symbols)
+    consumers_by_symbol = _find_consumers_across_repos(
+        pr.local_slug, symbols, context.workspace_id)
     findings: list[Finding] = []
     for sym in symbols:
         consumers = consumers_by_symbol.get(sym.name, [])
@@ -149,16 +150,21 @@ def run_breaking_change(context: AgentContext) -> AgentRunResult:
 
 
 def _find_consumers_across_repos(
-    current_repo: str, symbols: list[ChangedSymbol],
+    current_repo: str, symbols: list[ChangedSymbol], workspace_id: str | None,
 ) -> dict[str, list[dict]]:
     from src.mcp_server import tools as legacy
+    from src.mcp_server.tenancy import within_workspace
     consumers: dict[str, list[dict]] = {}
     try:
         repos = legacy.list_repos()
     except Exception:  # noqa: BLE001
         return consumers
+    # The consumers' slugs, files and callers go into a comment on the pull
+    # request and a notification to its workspace: under multi_tenant another
+    # tenant's repositories are not ours to name there.
+    repos = within_workspace(repos, workspace_id)
     other = [r for r in repos if r.slug != current_repo]
-    if len(other) == len(repos):
+    if repos and len(other) == len(repos):
         # Nothing was excluded, which means the caller handed an address this
         # listing is not keyed on. Better to find no consumers than to report
         # the repository's own as somebody else's.

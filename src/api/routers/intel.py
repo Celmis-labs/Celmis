@@ -349,11 +349,8 @@ def _scan_consumers(
         repos = legacy.list_repos()
     except Exception:  # noqa: BLE001
         return []
-    from src.deployment import is_multi_tenant
-    if is_multi_tenant():
-        from src.mcp_server.tenancy import workspace_slugs
-        own = workspace_slugs(workspace_id or "")
-        repos = [r for r in repos if r.slug in own]
+    from src.mcp_server.tenancy import within_workspace
+    repos = within_workspace(repos, workspace_id)
     for r in repos:
         try:
             res = legacy.find_callers(symbol_id=symbol, repo_slug=r.slug)

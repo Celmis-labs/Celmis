@@ -89,6 +89,25 @@ def workspace_slugs(workspace_id: str) -> set[str]:
         return set()
 
 
+def within_workspace(repos: list, workspace_id: str | None) -> list:
+    """``repos`` (anything with a ``slug``) narrowed to what a scan run for
+    ``workspace_id`` may read.
+
+    Under multi_tenant every repository indexed on disk is every tenant's code,
+    so only the slugs bound to this workspace alone remain — none for an empty
+    id or an unreadable registry. Under single_tenant the installation is one
+    organisation and the list comes back as it is. The cross-repository scans
+    (deprecation consumers, breaking-change consumers) both go through here so
+    the filter cannot be present in one and missing in the other again.
+    """
+    from src.deployment import is_multi_tenant
+
+    if not is_multi_tenant():
+        return list(repos)
+    own = workspace_slugs(workspace_id or "")
+    return [r for r in repos if r.slug in own]
+
+
 def caller_may_bind(caller) -> bool:  # noqa: ANN001
     """A caller that can own anything under multi_tenant at all."""
     return bool(
