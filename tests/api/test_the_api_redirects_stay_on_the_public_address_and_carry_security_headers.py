@@ -91,14 +91,12 @@ def test_every_response_carries_the_security_headers(client):
     for denied in ("camera=()", "microphone=()", "geolocation=()"):
         assert denied in h["permissions-policy"]
     assert "frame-ancestors 'none'" in h["content-security-policy"]
-    assert h["x-robots-tag"] == "noindex, nofollow, noarchive"
 
 
 def test_an_error_response_has_them_too(client):
     r = client.get("/api/auth/me")
     assert r.status_code == 401
     assert r.headers["x-content-type-options"] == "nosniff"
-    assert r.headers["x-robots-tag"] == "noindex, nofollow, noarchive"
 
 
 def test_hsts_only_over_https(client, monkeypatch):

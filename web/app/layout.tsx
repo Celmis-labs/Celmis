@@ -26,9 +26,6 @@ export const metadata: Metadata = {
   // instead — and being installed is what unlocks notifications there at all.
   appleWebApp: { capable: true, title: "Celmis", statusBarStyle: "black-translucent" },
   icons: { icon: "/icon-192.png", apple: "/icon-192.png" },
-  // Same promise as the X-Robots-Tag header (lib/csp.ts), for a crawler that
-  // reads the page but not its headers.
-  robots: { index: false, follow: false, nocache: true },
 };
 
 // viewportFit=cover lets the fixed nav drawer and the sticky top bar paint

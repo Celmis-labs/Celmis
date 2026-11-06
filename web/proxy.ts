@@ -97,9 +97,7 @@ export const config = {
   // breaking sign-in for agents: an MCP client looks for the OAuth discovery
   // documents there, with no session, and a redirect to /login gave it an HTML
   // page where it expected JSON. app/.well-known answers those requests itself.
-  //
-  // `robots.txt` is exempt so a crawler gets the file, not a redirect to /login.
   matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|robots\\.txt|sw\\.js|manifest\\.webmanifest|icon-\\d+\\.png|\\.well-known).*)",
+    "/((?!api|_next/static|_next/image|favicon.ico|sw\\.js|manifest\\.webmanifest|icon-\\d+\\.png|\\.well-known).*)",
   ],
 };

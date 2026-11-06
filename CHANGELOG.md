@@ -20,18 +20,6 @@ derives it from there.
 
 ## [Unreleased]
 
-## [3.1.20] — 2026-11-06
-
-### Added
-
-- **Search engines are told to leave the install out of their results.** Every
-  web page and API response carries `X-Robots-Tag: noindex, nofollow,
-  noarchive`, pages also carry the matching robots meta tag, and `/robots.txt`
-  is served as a file instead of a redirect to the sign-in page. It leaves
-  crawling allowed on purpose: a crawler that may not fetch a page never sees
-  its noindex, and a page already in an index would stay listed. Pages that
-  were indexed before drop out the next time a search engine visits them.
-
 ## [3.1.19] — 2026-11-03
 
 ### Added

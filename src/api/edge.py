@@ -31,12 +31,6 @@ from urllib.parse import urlsplit
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-#: Keep every response out of search results. The web app sends the same value
-#: (web/lib/csp.ts). robots.txt does NOT disallow crawling on purpose: a crawler
-#: that may not fetch a page never sees this header, and a page already in the
-#: index would stay there.
-ROBOTS_TAG = "noindex, nofollow, noarchive"
-
 _PERMISSIONS_POLICY = (
     "accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
     "magnetometer=(), microphone=(), payment=(), usb=()"
@@ -99,9 +93,6 @@ class SecurityHeadersMiddleware:
                 put("Referrer-Policy", "strict-origin-when-cross-origin")
                 put("Permissions-Policy", _PERMISSIONS_POLICY)
                 put("X-Frame-Options", "DENY")
-                # A self-hosted install is private: nothing it serves belongs in
-                # a search index, the API documents included.
-                put("X-Robots-Tag", ROBOTS_TAG)
                 if _is_https(scope, req_headers):
                     put("Strict-Transport-Security", "max-age=31536000")
                 mode = csp_mode()
