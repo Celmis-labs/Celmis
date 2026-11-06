@@ -96,6 +96,7 @@ describe("nonce and headers", () => {
     expect(h["X-Content-Type-Options"]).toBe("nosniff");
     expect(h["Referrer-Policy"]).toBe("strict-origin-when-cross-origin");
     expect(h["X-Frame-Options"]).toBe("DENY");
+    expect(h["X-Robots-Tag"]).toBe("noindex, nofollow, noarchive");
     for (const denied of ["camera=()", "microphone=()", "geolocation=()"]) {
       expect(h["Permissions-Policy"]).toContain(denied);
     }

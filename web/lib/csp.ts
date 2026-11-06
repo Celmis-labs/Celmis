@@ -115,6 +115,10 @@ export const STATIC_SECURITY_HEADERS: [string, string][] = [
     "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
   ],
   ["X-Frame-Options", "DENY"],
+  // A self-hosted install is private: no page of it, shares included, belongs
+  // in a search index. The API sends the same value (src/api/edge.py), and
+  // public/robots.txt leaves crawling allowed so a crawler can see this.
+  ["X-Robots-Tag", "noindex, nofollow, noarchive"],
 ];
 
 /** Only a response that went out over https says so: browsers ignore the

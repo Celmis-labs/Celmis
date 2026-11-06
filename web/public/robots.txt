@@ -1,0 +1,9 @@
+# This is a private, self-hosted Celmis install and none of it belongs in a
+# search index. Every page and API response says so with
+# "X-Robots-Tag: noindex" and a robots meta tag.
+#
+# Crawling is deliberately NOT disallowed here: a crawler that may not fetch a
+# page never sees its noindex, and a page that is already indexed would stay
+# in the results.
+User-agent: *
+Allow: /
