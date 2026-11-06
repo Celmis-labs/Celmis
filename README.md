@@ -32,11 +32,18 @@ of a separate tool for each of those jobs, each with its own access rules and it
 copy of your code, one installation holds them all. The aim is a small team that can
 run several products and the integrations between them.
 
-**What "beyond its own repository" means today.** Before a merge, the review checks the
-other repositories for values the change removes that they still hardcode, for deploy
-files that point at the changed repository, and for code that calls a changed function
-by the same name, quoting both sides. These are checks, not a call graph between
-repositories; that graph is not built yet.
+**What "beyond its own repository" means today.** Indexing records what each repository
+exposes and uses: the HTTP routes it serves and calls, the packages it publishes and
+imports (Python, TypeScript and JavaScript, Go, Java). When a pull request removes a
+route or a function, removes a parameter or makes one required, or changes a route's
+method or path, the review names every consumer in the workspace's other repositories,
+with file and line. A link is strong when the called host or the imported module maps to
+the repository that defines it, and only strong links raise severity; a repository
+without these facts is reported as not checked, never as safe. The review also flags
+values the change removes that other repositories still hardcode, and deploy files that
+point at the changed repository. These are links through contracts, not every function
+call: questions and the MCP `refs` tool still search other repositories by text, and say
+so.
 
 ## What it does
 
@@ -44,7 +51,7 @@ repositories; that graph is not built yet.
 |---|---|
 | **Ask the code** | Questions across several repositories, answered with `file:line` citations on both sides of a call. [Ask the code](#ask-the-code) |
 | **Codebase and MCP** | 51 tools over MCP, a compact `/mcp/dev` profile for editors, a Claude Code plugin, and versioned knowledge packs of the skills your team already explains out loud. [MCP](#connect-claude-code-and-other-mcp-clients) · [Packs](docs/CODEBASE.md) |
-| **Pull-request review** | Agents read the diff and, where the graph exists, who else calls what changed, across repositories. Talk to it with `@celmis`, teach it with `remember`, and it stays quiet when there is nothing to say. [Review](#pull-request-review) |
+| **Pull-request review** | Agents read the diff and name the other repositories that call a changed route or function, with file and line. Talk to it with `@celmis`, teach it with `remember`, and it stays quiet when there is nothing to say. [Review](#pull-request-review) |
 | **Evidence** | Dependency audit, CycloneDX SBOM and an evidence pack whose manifest a third party recomputes. [SBOM and evidence](#dependencies-sbom-and-the-evidence-pack) |
 | **Fix from here** | An alert or a dependency finding becomes an embedded session, then a branch, then a pull request. A human reviews and merges; Celmis never merges. [Fix from here](#fix-from-here) · [Alerts](#alerts-and-fixing-from-a-phone) |
 | **Access you can defend** | Repositories are closed by default, MCP tokens are issued per person, every call is audited, secrets are withheld at the source, and a repository can be shared with another workspace for a fixed time. [Who can see what](#who-can-see-what) · [Sharing](docs/SHARING.md) |
