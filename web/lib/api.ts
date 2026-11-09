@@ -2662,8 +2662,13 @@ export type OAuthClientSummary = {
   created_by: string | null;
 };
 
-export type OAuthClientRegistered = OAuthClientSummary & {
+/** What `POST /oauth/clients` answers (the one place a secret is shown). */
+export type OAuthClientRegistered = {
+  client_id: string;
   client_secret: string | null;
+  name: string;
+  redirect_uris: string[];
+  allowed_scopes: string[];
 };
 
 export const oauthClientsApi = {
@@ -2673,7 +2678,9 @@ export const oauthClientsApi = {
     name: string; redirect_uris: string[];
     allowed_scopes: string[]; public: boolean;
   }) =>
-    api<OAuthClientRegistered>("/oauth/register", {
+    // `/oauth/register` is the anonymous public-client registration (RFC 7591);
+    // an administrator's client, with or without a secret, is made here.
+    api<OAuthClientRegistered>("/oauth/clients", {
       token, method: "POST", json: p,
     }),
   remove: (token: string, client_id: string) =>
@@ -4016,6 +4023,30 @@ export type McpShare = {
   holders: number;
   max_people: number;
   status: string;
+};
+
+/** An app signed in to the MCP endpoint through the browser flow
+ *  (GET /oauth/connections): one per live session. */
+export interface OAuthConnection {
+  id: string;
+  client_id: string;
+  client_name: string;
+  redirect_host: string;
+  scopes: string[];
+  workspace_id: string | null;
+  workspace_name: string | null;
+  /** Who it belongs to; null when it is the caller's own. */
+  person: string | null;
+  mine: boolean;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string;
+}
+
+export const oauthConnectionsApi = {
+  list: (token: string) => api<OAuthConnection[]>("/oauth/connections", { token }),
+  revoke: (token: string, id: string) =>
+    api<void>(`/oauth/connections/${encodeURIComponent(id)}`, { token, method: "DELETE" }),
 };
 
 export const mcpTokensApi = {

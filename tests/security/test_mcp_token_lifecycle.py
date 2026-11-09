@@ -235,6 +235,7 @@ def oauth(mcp_world, tmp_path, monkeypatch):
     from src.api.routers import oauth as oauth_mod
     from src.db.models import OAuthClient
     from src.users import get_user_store
+    from tests.security import oauth_calls
     from tests.security.mcp_world import _sqlite_booleans
 
     class _NaiveUtc(_dt):
@@ -265,44 +266,36 @@ def oauth(mcp_world, tmp_path, monkeypatch):
             self.challenge = base64.urlsafe_b64encode(
                 hashlib.sha256(self.verifier.encode()).digest()).rstrip(b"=").decode()
 
-        async def consent(self, who: str):
+        async def consent(self, who: str) -> str:
             user = get_user_store().get_by_id(mcp_world.users[who])
             async with factory() as s:
-                return await oauth_mod.authorize_consent(
-                    request=None, client_id="ec_pub", redirect_uri="http://127.0.0.1/cb",
-                    code_challenge=self.challenge, code_challenge_method="S256",
-                    scope="read:graph", state="", session=s, user=user, workspace_id=WS_A)
+                return await oauth_calls.consent(
+                    oauth_mod, session=s, user=user, client_id="ec_pub",
+                    redirect_uri="http://127.0.0.1/cb", challenge=self.challenge, scope="read:graph")
 
         async def exchange(self, code: str):
             async with factory() as s:
-                return await oauth_mod.token_exchange(
-                    grant_type="authorization_code", code=code,
-                    redirect_uri="http://127.0.0.1/cb", client_id="ec_pub",
-                    client_secret=None, code_verifier=self.verifier, refresh_token=None,
-                    session=s)
+                return await oauth_calls.token(
+                    oauth_mod, session=s, grant_type="authorization_code", code=code,
+                    redirect_uri="http://127.0.0.1/cb", client_id="ec_pub", code_verifier=self.verifier)
 
         async def refresh(self, refresh_token: str):
             async with factory() as s:
-                return await oauth_mod.token_exchange(
-                    grant_type="refresh_token", code=None, redirect_uri=None,
-                    client_id="ec_pub", client_secret=None, code_verifier=None,
-                    refresh_token=refresh_token, session=s)
+                return await oauth_calls.token(
+                    oauth_mod, session=s, grant_type="refresh_token", client_id="ec_pub",
+                    refresh_token=refresh_token)
 
     yield Flow()
     asyncio.run(engine.dispose())
 
 
-def _code(redirect) -> str:
-    return redirect.headers["location"].split("code=", 1)[1].split("&", 1)[0]
-
-
 def test_oauth_consent_without_a_grant_is_refused(mcp_world, oauth):
-    from fastapi import HTTPException
+    from src.api.routers.oauth import OAuthRefusal
 
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(OAuthRefusal) as exc:
         asyncio.run(oauth.consent("mn"))
-    assert exc.value.status_code == 403
-    assert "superadmin" in str(exc.value.detail)
+    assert exc.value.status_code == 403 and exc.value.error == "access_denied"
+    assert "administrator" in exc.value.description
 
 
 def test_oauth_cannot_exceed_the_grant(mcp_world, oauth):
@@ -329,8 +322,7 @@ def test_narrowing_the_grant_narrows_the_oauth_token_at_once(mcp_world, oauth):
 
 
 def test_refresh_fails_after_the_grant_is_revoked(mcp_world, oauth):
-    from fastapi import HTTPException
-
+    from src.api.routers.oauth import OAuthRefusal
     from src.mcp_server import token_store
 
     _, grant = mcp_world.issue("mr", [GRANTED], kind="oauth_grant")
@@ -342,13 +334,13 @@ def test_refresh_fails_after_the_grant_is_revoked(mcp_world, oauth):
     # the access token already issued is refused at once ...
     assert _verify(renewed["access_token"]) is None
     # ... and the refresh token no longer buys a new one
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(OAuthRefusal) as exc:
         asyncio.run(oauth.refresh(renewed["refresh_token"]))
     assert exc.value.status_code == 400
 
 
 async def _exchange(flow, who: str) -> dict:
-    return await flow.exchange(_code(await flow.consent(who)))
+    return await flow.exchange(await flow.consent(who))
 
 
 # ─── the audit ───────────────────────────────────────────────────────

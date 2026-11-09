@@ -18,10 +18,10 @@
     },
     "celmis_token": {
       "type": "string",
-      "required": true,
+      "required": false,
       "sensitive": true,
       "title": "Celmis token",
-      "description": "The MCP token your Celmis administrator or the web app issued for you (shown once). Claude Code keeps it in secure storage (the macOS Keychain; elsewhere its own credentials file, readable only by you), never in a settings file."
+      "description": "Optional. Leave empty: Claude Code signs you in through your browser the first time it connects (/mcp, then Authenticate). Give a token only for the hints the plugin adds to a session; it is never sent to the server by this plugin. Claude Code keeps it in secure storage, never in a settings file."
     }
   }
 }

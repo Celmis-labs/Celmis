@@ -203,6 +203,8 @@ def _redact(value: object, *, key: object = None) -> object:
     """A validation error's `input`, with every secret-shaped value removed."""
     if key is not None and _looks_secret(key) and isinstance(value, str):
         return "[redacted]"
+    if isinstance(value, bytes | bytearray):
+        return "[redacted]"  # a raw body (a form posted to a JSON endpoint) is not JSON and may hold a secret
     if isinstance(value, dict):
         return {k: _redact(v, key=k) for k, v in value.items()}
     if isinstance(value, list):

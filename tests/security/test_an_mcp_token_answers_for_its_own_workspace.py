@@ -449,6 +449,7 @@ def test_the_oauth_flow_carries_the_consent_workspace_into_every_token(
     from src.db.models import OAuthClient
     from src.mcp_server import token_store
     from src.users import get_user_store
+    from tests.security import oauth_calls
 
     with Session(world.engine) as gs:
         grant = token_store.create_row(
@@ -471,27 +472,17 @@ def test_the_oauth_flow_carries_the_consent_workspace_into_every_token(
                 hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
             user = get_user_store().get_by_id("u-dana")
             async with factory() as s:
-                redirect = await oauth.authorize_consent(
-                    request=None, client_id="ec_pub",
-                    redirect_uri="http://127.0.0.1/cb", code_challenge=challenge,
-                    code_challenge_method="S256", scope="read:graph", state="",
-                    session=s, user=user, workspace_id=WS_A,
-                )
-            location = redirect.headers["location"]
-            code = location.split("code=", 1)[1].split("&", 1)[0]
+                code = await oauth_calls.consent(
+                    oauth, session=s, user=user, client_id="ec_pub", redirect_uri="http://127.0.0.1/cb",
+                    challenge=challenge, scope="read:graph")
             async with factory() as s:
-                issued = await oauth.token_exchange(
-                    grant_type="authorization_code", code=code,
-                    redirect_uri="http://127.0.0.1/cb", client_id="ec_pub",
-                    client_secret=None, code_verifier=verifier, refresh_token=None,
-                    session=s,
-                )
+                issued = await oauth_calls.token(
+                    oauth, session=s, grant_type="authorization_code", code=code,
+                    redirect_uri="http://127.0.0.1/cb", client_id="ec_pub", code_verifier=verifier)
             async with factory() as s:
-                refreshed = await oauth.token_exchange(
-                    grant_type="refresh_token", code=None, redirect_uri=None,
-                    client_id="ec_pub", client_secret=None, code_verifier=None,
-                    refresh_token=issued["refresh_token"], session=s,
-                )
+                refreshed = await oauth_calls.token(
+                    oauth, session=s, grant_type="refresh_token", client_id="ec_pub",
+                    refresh_token=issued["refresh_token"])
             return issued, refreshed
         finally:
             await engine.dispose()

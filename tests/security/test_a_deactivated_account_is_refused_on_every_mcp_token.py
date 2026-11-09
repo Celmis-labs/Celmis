@@ -167,9 +167,9 @@ def test_a_project_token_speaks_for_no_account_so_the_button_has_nothing_to_end(
 
 
 def _withdrawn(oauth_flow, refresh_token: str):
-    from fastapi import HTTPException
+    from src.api.routers.oauth import OAuthRefusal
 
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(OAuthRefusal) as exc:
         asyncio.run(oauth_flow.refresh(refresh_token))
     return exc.value
 
@@ -183,7 +183,7 @@ def test_a_switched_off_person_gets_no_new_access_token_from_a_refresh_token(mcp
     _off(mcp_world, "mr")
 
     refused = _withdrawn(oauth, renewed["refresh_token"])
-    assert (refused.status_code, refused.detail) == (400, "invalid_grant: access was withdrawn")
+    assert (refused.status_code, refused.error, refused.description) == (400, "invalid_grant", "access was withdrawn")
     # the chain is over: switching the person on again does not bring a spent chain back
     _on(mcp_world, "mr")
     again = _withdrawn(oauth, renewed["refresh_token"])
@@ -204,7 +204,8 @@ def test_the_refusal_for_a_switched_off_person_reads_like_a_withdrawn_grant(mcp_
     _off(mcp_world, "mn")
     by_account = _withdrawn(oauth, second["refresh_token"])
 
-    assert (by_account.status_code, by_account.detail) == (by_grant.status_code, by_grant.detail)
+    assert (by_account.status_code, by_account.error, by_account.description) == (
+        by_grant.status_code, by_grant.error, by_grant.description)
 
 
 def test_a_deleted_person_gets_no_new_access_token_from_a_refresh_token(mcp_world, oauth):  # noqa: F811

@@ -187,22 +187,76 @@ per-person grants" (a token that is expired, forged or unknown still gets a plai
 `CELMIS_MCP_LEGACY_TOKENS=accept` accepts them as read-only and default-deny;
 those calls are audited as `legacy`.
 
-## OAuth
+## Browser sign-in (OAuth)
 
-OAuth sign-in from an MCP client still works, with two conditions:
+An MCP client connects with the address alone, the way hosted MCP servers work:
 
-- The person needs an `oauth_grant`, created by the superadmin
-  (`POST /api/admin/mcp-grants`, with the repositories it covers). Without one
-  the consent step answers 403.
-- The access token is limited to that grant's repositories, and refresh stops
-  working as soon as the grant is revoked or expires.
+```bash
+claude mcp add --transport http celmis https://celmis.example.com/backend/mcp/
+```
 
-There is no dynamic client registration: clients are registered by a workspace
-admin. The `client_credentials` grant names a client, not a person, so its
-tokens are not accepted by the MCP server and never by `/mcp/dev`.
+Per client (the web app shows the same list under Settings, MCP, and on the Codebase
+Connect page):
 
-OAuth is not the recommended path for developers; a per-person token is simpler
-to reason about and to revoke.
+- **Claude Code (terminal).** Run the command above, then in Claude Code type `/mcp`,
+  choose `celmis`, press Authenticate. The browser opens; sign in and press Allow. Add
+  `--scope user` to use it in every project.
+- **Claude Code plugin `celmis-code`.** Update the plugin, then `/mcp`, `celmis`,
+  Authenticate. A token is no longer needed (a token already saved is no longer sent).
+- **claude.ai and Claude Desktop.** Settings, Connectors, Add custom connector: paste the
+  URL, then Connect. Leave the client id and secret empty. Claude Desktop uses the
+  connectors of the same claude.ai account.
+- **Other MCP clients (Cursor, VS Code, others).** Add a remote (HTTP) MCP server with
+  this address; clients that support MCP authorization open the browser by themselves.
+  A generic entry is `{"mcpServers": {"celmis": {"url": "https://celmis.example.com/backend/mcp/"}}}`;
+  the exact file and field names depend on the client.
+- **Headless or CI** keeps using a token (above).
+
+If the browser says the connection is not allowed, a workspace administrator must allow
+it (see "Who may connect" below). The client finds the server by itself (`/.well-known/oauth-protected-resource`,
+then `/.well-known/oauth-authorization-server`), registers, and sends the browser to
+`/oauth/authorize`, which forwards to the web app's consent page (`/oauth/consent`). The
+person signs in as usual (SSO or password), sees the app's name, the host it returns
+to and what it may do, picks a workspace, and presses Allow. The client gets an access
+token (1 hour) and a refresh token that rotates on every use. No token is copied.
+
+**Who may connect.** Browser sign-in follows the same gate as self-service tokens: it
+opens for a person when an `oauth_grant` exists for them (superadmin-issued, covering
+the repositories it names, and a ceiling for the session), or `CELMIS_MCP_SELF_SERVICE`
+is on, or the person may issue tokens (`CELMIS_MCP_TOKEN_ISSUERS`). Otherwise the
+consent page says to ask an administrator. With self-service on, the session is capped
+by the person's own access, like a self-service token, and runs under a grant row of its
+own that shows in **Settings, MCP, Connected apps**.
+
+**Scopes.** A client that asks for none gets read-only. Write scopes
+(`write:reviews`, `write:repos`, `write:config`) are granted only when the client asks
+for them and the person's role in the workspace may use them (table above); the consent
+page lists what is withheld. The token is bound to the MCP endpoint it was approved for
+(`resource`, RFC 8707): a token for `/mcp/dev/` does not open `/mcp/`.
+
+**Registration.** `POST /oauth/register` is open to anyone but only for public clients
+(no secret) whose redirect URI is `http://localhost`, `127.0.0.1` or `[::1]` on any port,
+or https on a host in `OAUTH_ALLOWED_REDIRECT_HOSTS` (default `claude.ai,claude.com`; a
+`*.example.com` entry allows subdomains). Other schemes, fragments and credentials in the
+URI are refused. It shares the strictest rate limit, and a registration that never
+completed a sign-in is deleted after 24 hours. Confidential clients are still registered
+by a workspace admin with `POST /oauth/clients`. Client metadata documents (CIMD) are not
+supported yet; clients that offer them fall back to registration.
+
+**Ending a connection.** Settings, MCP, Connected apps lists each connection (app,
+workspace, scopes, last used) with **Revoke**; a workspace admin sees the whole
+workspace's. Revoking, deleting the client, switching the account off or removing the
+person from the workspace stops the refresh token and the access token at once. A
+refresh token used twice revokes the whole chain.
+The access token names its session, and the MCP server checks on every call that the
+session was not revoked, so this holds also for a connection that runs under an
+administrator's shared grant (the grant itself stays, for the person's other apps). A
+code presented twice revokes the sessions it started.
+
+A connection made under self-service lasts at most `CELMIS_MCP_TOKEN_MAX_DAYS`; after
+that the client asks the person to sign in again. The `client_credentials` grant names
+a client, not a person, so its tokens are not accepted by the MCP server and never by
+`/mcp/dev`. A per-person token (above) remains the fallback for a setup with no browser.
 
 ## The call log
 
@@ -231,5 +285,6 @@ are deleted. Each call is also written to the general audit log as `mcp.call`.
 | `CELMIS_MCP_SELF_SERVICE` | `false` | Let any signed-in user issue their own token. |
 | `CELMIS_MCP_TOKEN_ISSUERS` | `superadmin` | `platform_admin` also lets global admins issue. |
 | `CELMIS_MCP_TOKEN_MAX_DAYS` | `90` | Longest lifetime of an issued token. |
+| `OAUTH_ALLOWED_REDIRECT_HOSTS` | `claude.ai,claude.com` | https hosts a self-registered (public) client may return to. Loopback is always allowed. |
 | `CELMIS_MCP_LEGACY_TOKENS` | `refuse` | `accept` takes pre-grant tokens as read-only. |
 | `CELMIS_MCP_AUDIT_RETENTION_DAYS` | `180` | How long call rows are kept. |

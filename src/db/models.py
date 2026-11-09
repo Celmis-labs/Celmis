@@ -1259,6 +1259,8 @@ class OAuthAuthCode(Base):
     scope: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     consumed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=func.false())
+    #: RFC 8707 resource the client asked the token for (None: not named).
+    resource: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Workspace(Base):
@@ -1325,6 +1327,10 @@ class OAuthRefreshToken(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     rotated_to: Mapped[str | None] = mapped_column(Text, nullable=True)
     revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=func.false())
+    #: The resource the session was granted for (RFC 8707); a refresh keeps it.
+    resource: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The ``mcp_tokens`` row behind the session; revoking it ends the session.
+    grant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index("ix_refresh_family", "family_id"),

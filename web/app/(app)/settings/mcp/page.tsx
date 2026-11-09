@@ -32,6 +32,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { InlineHelp } from "@/components/ui/inline-help";
+import { ConnectedApps } from "@/components/connected-apps";
 
 type McpToken = {
   token: string;
@@ -184,6 +185,9 @@ export default function McpPage() {
           {t("mcp.guideLink")}
         </Link>
       </Callout>
+
+      {/* The recommended way: the app signs in through the browser. */}
+      <ConnectedApps />
 
       {/* The person's own tokens: metadata and revoke, never a value. */}
       <Card>

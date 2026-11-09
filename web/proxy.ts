@@ -77,7 +77,9 @@ function route(
   if (isOpen) return pass();
   if (!isLoggedIn && !isAuthPage) {
     const url = new URL("/login", req.nextUrl);
-    url.searchParams.set("from", pathname);
+    // The query travels too: /oauth/consent is a page whose whole content is
+    // its query, and a sign-in that dropped it would land on an empty request.
+    url.searchParams.set("from", pathname + req.nextUrl.search);
     return NextResponse.redirect(url);
   }
   if (isLoggedIn && isAuthPage) {

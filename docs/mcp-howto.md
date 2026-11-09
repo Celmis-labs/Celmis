@@ -3,6 +3,11 @@
 `howto(topic, repo)` answers "how does this repo do X". Topics: `db`, `auth`,
 `config`, `http_client`, `logging`, `messaging`, `cache`.
 
+Connecting: run `claude mcp add --transport http celmis <address>/mcp/dev/` (or add the
+same URL as a claude.ai custom connector) and sign in in the browser; see "Browser sign-in"
+in `mcp-access.md`, which lists the steps per client (Claude Code, the plugin, claude.ai and
+Claude Desktop, others). No token is copied.
+
 The answer has code slices, the names of the environment variables and settings
 the code reads, and where each value comes from (file and line of the
 `.env.example` entry, compose service, `secretKeyRef`, CI variable). It never has a
@@ -10,7 +15,7 @@ value. The last lines say: copy this pattern, get the values from the sources
 listed, ask the user or ops.
 
 - Scope: `read:graph` on `/mcp/`, which every token kind carries (standard, personal access
-  token, OAuth); `read:code` on `/mcp/dev/`, the only scope a dev token has. A token limited
+  token, browser sign-in); `read:code` on `/mcp/dev/`, the only scope a dev token has. A token limited
   to other scopes does not see the tool. What a caller may read
   is decided by the access rules, not by the scope.
 - Access: only repos the caller may read as code are candidates, and `deny_globs`

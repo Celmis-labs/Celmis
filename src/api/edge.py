@@ -155,6 +155,8 @@ def _public_location(scope: Scope, location: str) -> str | None:
     elif not location.startswith("/"):
         return None  # relative to the current path: already resolves correctly
     path = parts.path or "/"
+    if path == "/oauth/consent":
+        return None  # a page of the web app, which sits beside the API prefix, not under it
     base = base_from_scope(scope)
     prefix = urlsplit(base).path.rstrip("/")
     if prefix and (path == prefix or path.startswith(prefix + "/")):

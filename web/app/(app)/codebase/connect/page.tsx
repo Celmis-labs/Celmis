@@ -31,6 +31,7 @@ import { codebaseApi, mcpTokensApi, publicMcpUrl, workspacesApi } from "@/lib/ap
 import { useT } from "@/lib/i18n";
 import { useToken } from "@/lib/use-token";
 import { CodeBlock } from "@/components/codebase/copy";
+import { McpConnectInstructions } from "@/components/mcp-connect-instructions";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import { WorkspaceBadge } from "@/components/workspace-badge";
@@ -182,6 +183,16 @@ export default function CodebaseConnectPage() {
         description={t("codebase.connect.subtitle")}
         tabs={<SectionTabs set="codebase" />}
       />
+
+      <Card className="max-w-4xl" data-testid="connect-browser">
+        <CardHeader>
+          <CardTitle className="text-base">{t("oauth.apps.connectTitle")}</CardTitle>
+          <CardDescription>{t("oauth.apps.connectBody")}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <McpConnectInstructions url={mcpUrl} />
+        </CardContent>
+      </Card>
 
       <Callout tone="info" className="flex max-w-4xl items-start gap-2">
         <BookMarkedIcon aria-hidden className="mt-0.5 size-4 shrink-0" />

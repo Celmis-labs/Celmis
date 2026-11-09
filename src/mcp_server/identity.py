@@ -294,6 +294,41 @@ def grant_claim(payload: dict | None) -> str | None:
     return None
 
 
+SESSION_ENDED = ("This connection was disconnected. Connect the app again.")
+
+
+def session_problem(payload: dict | None) -> str | None:
+    """Why the OAuth session behind a token has ended, or None.
+
+    A token issued by the browser flow names its refresh family. Disconnecting the
+    app revokes that family, and this is what stops the access token already in the
+    client's hands, including one that runs under an administrator's shared grant
+    (which disconnecting leaves in place). One indexed read per call; a token with
+    no such claim (a personal token, a client-credentials token) is not affected.
+    A database that cannot be read refuses.
+    """
+    family = (payload or {}).get("family")
+    if not isinstance(family, str) or not family:
+        return None
+    try:
+        from sqlalchemy import select
+        from sqlalchemy.orm import Session
+
+        from src.db.models import OAuthRefreshToken
+        from src.mcp_server import token_store
+
+        with Session(token_store._engine()) as s:
+            flags = s.scalars(
+                select(OAuthRefreshToken.revoked).where(OAuthRefreshToken.family_id == family)
+            ).all()
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        logger.warning("mcp_session_lookup_failed err=%s", type(exc).__name__)
+        return _UNVERIFIABLE
+    if not flags or any(flags):
+        return SESSION_ENDED
+    return None
+
+
 def resolve_grant(payload: dict, user_id: str) -> _Grant:
     """Judge a token by its row. Never raises: a row that cannot be read is a
     refusal, not an admission."""

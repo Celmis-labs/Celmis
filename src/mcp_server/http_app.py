@@ -205,7 +205,11 @@ class _ExplainRefusal:
 
         from src.mcp_server.auth import _REFUSAL
 
-        holder: dict = {"ip": _scope_ip(scope)}
+        # `path` is what the caller asked for, as the proxy forwarded it (the
+        # `/backend` prefix is already off), so a token bound to one endpoint
+        # (see `auth._resource_problem`) can be checked against it.
+        holder: dict = {"ip": _scope_ip(scope),
+                        "path": (scope.get("root_path") or "") + (scope.get("path") or "")}
         reset = _REFUSAL.set(holder)
         replaced = False
 

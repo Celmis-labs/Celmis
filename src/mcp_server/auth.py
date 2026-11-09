@@ -135,6 +135,7 @@ def issue_token(
     extra_claims: dict | None = None,
     jti: str | None = None,
     typ: str | None = None,
+    resource: str | None = None,
 ) -> str:
     """Generate a JWT for local development / testing.
 
@@ -148,6 +149,9 @@ def issue_token(
             without one is a *legacy* token (see ``CELMIS_MCP_LEGACY_TOKENS``).
         typ: ``pat`` | ``cli`` | ``self`` | ``oauth`` — which kind of grant
             the row is.
+        resource: the MCP endpoint the token was requested for (RFC 8707). It
+            becomes a second audience and a ``resource`` claim, and the HTTP
+            edge refuses the token anywhere that endpoint's path does not cover.
 
     Returns:
         Encoded JWT string ready for Authorization: Bearer <token>.
@@ -167,6 +171,9 @@ def issue_token(
         for k in ("iss", "aud", "sub", "iat", "exp", "scope", "jti", "typ"):
             extra_claims.pop(k, None)
         payload.update(extra_claims)
+    if resource:
+        payload["aud"] = [config.audience, resource]
+        payload["resource"] = resource
     if jti:
         payload["jti"] = jti
     if typ:
@@ -228,6 +235,36 @@ def _workspace_problem(payload: dict) -> str | None:
         logger.warning("jwt_workspace_check_failed err=%s", exc)
         return ("Could not confirm your membership of the workspace this MCP "
                 "token was issued for. Try again shortly.")
+
+
+def _resource_problem(payload: dict) -> str | None:
+    """Why a token bound to one MCP endpoint may not be used at THIS one, or None.
+
+    A token issued through the browser flow names the ``resource`` the client
+    asked for (RFC 8707). It is good at that endpoint's path and below, so a
+    token for the compact ``/mcp/dev`` profile does not open ``/mcp``. A token
+    without the claim, or a call that did not come through the HTTP edge (no
+    path in the per-request slot), is not judged here.
+    """
+    resource = payload.get("resource")
+    holder = _REFUSAL.get() or {}
+    here = holder.get("path")
+    if not isinstance(resource, str) or not resource or not here:
+        return None
+    from urllib.parse import urlsplit
+
+    # Compare from the `/mcp` segment on: the resource URL carries the public
+    # prefix (`/backend/mcp/dev`), the path the app sees does not.
+    want = urlsplit(resource).path.rstrip("/") or "/"
+    have = str(here).rstrip("/") or "/"
+    if "/mcp" in want:
+        want = want[want.rfind("/mcp"):]
+    if "/mcp" in have:
+        have = have[have.find("/mcp"):]
+    if have == want or have.startswith(want + "/"):
+        return None
+    return ("This MCP token was issued for a different endpoint "
+            f"({want}). Connect again to the address you want to use.")
 
 
 def _audit_refused(payload: dict, reason: str) -> None:
@@ -370,6 +407,22 @@ class JwtTokenVerifier(TokenVerifier):
             logger.warning("jwt_workspace_refused sub=%s", payload.get("sub"))
             note_refusal(problem)
             _audit_refused(payload, problem)
+            return None
+
+        mismatch = _resource_problem(payload)
+        if mismatch:
+            logger.warning("jwt_resource_refused sub=%s", payload.get("sub"))
+            note_refusal(mismatch)
+            _audit_refused(payload, mismatch)
+            return None
+
+        from src.mcp_server.identity import session_problem
+
+        ended = session_problem(payload)
+        if ended:
+            logger.warning("jwt_session_ended sub=%s", payload.get("sub"))
+            note_refusal(ended)
+            _audit_refused(payload, ended)
             return None
 
         # The grant behind the token: revoked, expired, unknown or legacy

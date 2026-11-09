@@ -17,6 +17,7 @@ import { Label } from "@/components/ui/label";
 import { LanguageSwitcher } from "@/components/language-switcher";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { isInAppHref } from "@/lib/in-app-href";
 import { useT } from "@/lib/i18n";
 import { SEAT_LIMIT_MESSAGE_KEY, isSeatLimitCode, type SeatLimitCode } from "@/lib/seats";
 import { SsoButton } from "@/ee/sso/sso-button";
@@ -65,8 +66,7 @@ function LoginInner({ passwordLogin, ssoName }: { passwordLogin: boolean; ssoNam
   // same-origin relative paths (no `//host` or absolute URLs) to avoid an
   // open redirect.
   const rawNext = params.get("next") || params.get("from") || "/dashboard";
-  const callback =
-    rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/dashboard";
+  const callback = isInAppHref(rawNext) ? rawNext : "/dashboard";
   const [pending, startTransition] = useTransition();
   // `mode=signup` opens the sign-up tab — the invite page's "Create account"
   // button sends it, so a newcomer does not land on a sign-in form first.

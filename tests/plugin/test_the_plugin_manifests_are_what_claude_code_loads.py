@@ -77,7 +77,7 @@ def test_the_plugin_declares_exactly_the_address_and_the_token_as_user_config() 
     config = _user_config()
     assert set(config) == {C.OPTION_URL, C.OPTION_TOKEN}
     assert config[C.OPTION_URL]["required"] is True
-    assert config[C.OPTION_TOKEN]["required"] is True
+    assert config[C.OPTION_TOKEN]["required"] is False, "the server signs in through the browser; no token is needed"
     assert config[C.OPTION_TOKEN]["sensitive"] is True, "the token goes to the keychain, not settings.json"
     assert not config[C.OPTION_URL].get("sensitive"), "the address is not a secret and is shown by /plugin"
     assert all(o["type"] == "string" for o in config.values())
@@ -112,8 +112,7 @@ def test_the_mcp_config_targets_the_dev_endpoint_through_the_saved_options() -> 
     assert cfg["type"] == "http"
     assert cfg["url"] == "${user_config." + C.OPTION_URL + "}" + C.DEV_PATH + "/"
     assert cfg["url"].endswith("/mcp/dev/")
-    assert cfg["headers"] == {"Authorization": "Bearer ${user_config." + C.OPTION_TOKEN + "}"}
-    assert set(cfg) == {"type", "url", "headers"}
+    assert set(cfg) == {"type", "url"}, "no headers: Claude Code then signs in through the browser (OAuth)"
 
 
 def test_the_mcp_config_names_only_declared_options_and_no_environment_variable() -> None:
@@ -122,14 +121,17 @@ def test_the_mcp_config_names_only_declared_options_and_no_environment_variable(
     (`Bearer ${CELMIS_TOKEN}`, or a helper reading it) lost its header. The saved
     options are the supported path; `claude plugin validate` fails on an undeclared one."""
     raw = (C.PLUGIN / ".mcp.json").read_text()
-    assert set(_PLACEHOLDER.findall(raw)) == set(_user_config()), \
-        "every declared option is used, and every option used is declared"
+    used = set(_PLACEHOLDER.findall(raw))
+    assert used == {C.OPTION_URL}, "the entry is the address alone: sign-in is OAuth in the browser"
+    assert used <= set(_user_config()), "every option used is declared"
+    assert "headers" not in json.loads(raw)["mcpServers"]["celmis"], (
+        "a configured Authorization header turns Claude Code's OAuth off")
     for gone in ("CELMIS_TOKEN", "CELMIS_URL", "headersHelper", "CLAUDE_PLUGIN_ROOT"):
         assert gone not in raw, f".mcp.json still mentions {gone}"
     assert re.sub(r"\$\{user_config\.\w+\}", "", raw).count("${") == 0
 
 
-def test_substituting_the_options_gives_the_url_and_header_claude_code_sends() -> None:
+def test_substituting_the_options_gives_the_url_claude_code_connects_to() -> None:
     """The substitution Claude Code does, redone with dummy values."""
     values = {C.OPTION_URL: "https://celmis.example.com/backend", C.OPTION_TOKEN: "dummy.token-123"}
 
@@ -138,7 +140,6 @@ def test_substituting_the_options_gives_the_url_and_header_claude_code_sends() -
 
     cfg = _mcp_entry()
     assert substitute(cfg["url"]) == "https://celmis.example.com/backend/mcp/dev/"
-    assert substitute(cfg["headers"]["Authorization"]) == "Bearer dummy.token-123"
 
 
 def test_the_option_variables_the_hooks_read_are_the_ones_claude_code_exports() -> None:

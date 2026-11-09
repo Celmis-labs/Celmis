@@ -101,4 +101,4 @@ def test_the_readme_says_the_shipped_entry_does_not_check_the_scheme():
     assert "must be `https://`" in text and "nothing in the plugin's entry checks the scheme" in text.lower()
     cfg = json.loads((C.PLUGIN / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["celmis"]
     assert "headersHelper" not in cfg, "if the entry gains a scheme guard, drop this warning"
-    assert cfg["headers"] == {"Authorization": "Bearer ${user_config.celmis_token}"}
+    assert "headers" not in cfg, "the plugin sends no token: the browser sign-in does"

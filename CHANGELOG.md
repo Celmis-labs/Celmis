@@ -20,6 +20,76 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.28] — 2026-11-09
+
+### Added
+
+- **Connect an MCP client with the URL alone.** `claude mcp add --transport http celmis
+  https://<host>/backend/mcp/`, or a claude.ai custom connector with empty client
+  id and secret: the browser opens on Celmis, the person signs in as usual (SSO or
+  password), picks a workspace, presses Allow, and the connection renews itself with
+  rotating refresh tokens. No token is copied.
+  - Anonymous dynamic client registration (`POST /oauth/register`) for public clients
+    only, with a loopback redirect URI (any port) or https on `OAUTH_ALLOWED_REDIRECT_HOSTS`.
+    Rate limited with the other sign-in endpoints; unused registrations are deleted
+    after 24 hours. Confidential clients move to `POST /oauth/clients` (workspace admin).
+  - A consent page in the web app (`/oauth/consent`, all 16 languages) behind the sign-in
+    guard; the API only validates and redirects. Allow and Deny are a bearer-authenticated
+    JSON call, not a form post.
+  - Tokens: PKCE S256, single-use codes, refresh rotation with reuse detection that
+    revokes the chain, `resource` binding (RFC 8707), `iss` in the response (RFC 9207).
+    Read-only unless a write scope is requested and the person's role allows it.
+  - Settings, MCP, **Connected apps**: name, workspace, scopes, last used, Revoke. A
+    workspace admin sees the workspace's connections.
+  - Migration `b4d8f2a6c1e7` adds `resource` and `grant_id` columns (nullable).
+  - Settings, MCP and the Codebase Connect page show one short section per client (Claude Code,
+    the `celmis-code` plugin, claude.ai and Claude Desktop, other MCP clients) with a copyable
+    snippet, in all 16 languages; `docs/mcp-access.md` has the same steps.
+
+### Security
+
+- Redirect URIs are read once. A loopback redirect with userinfo, a backslash, a
+  fragment, a control character or an encoded backslash (`http://evil.example\@localhost/cb`)
+  is refused, and the answer is built from the registered URI plus the integer port,
+  never from the caller's text. The consent page refuses the same forms.
+- Disconnecting an app now stops its access token even when it runs under an
+  administrator's shared `oauth_grant`: the token names its session (`family` claim)
+  and the MCP server checks that the session was not revoked, one indexed read per call.
+- Replaying an authorization code revokes the sessions it started (RFC 6749 4.1.2). A
+  PKCE verifier must be 43-128 characters of the RFC 7636 alphabet.
+- Anonymous registration: only clients nobody has used count toward the cap of 2000
+  (an approved client can no longer lock everyone out), and one address may register
+  at most 100 clients a day.
+
+### Fixed
+
+- Admin, OAuth clients: registering a client posts to `/oauth/clients` again (it hit
+  the anonymous endpoint, which refuses a confidential client).
+
+### Changed
+
+- The `/mcp` protected-resource document advertises read scopes only, so a client that
+  sends no scope does not ask for write access.
+- The plugin's server entry is the URL with no `Authorization` header (a configured
+  header turns Claude Code's OAuth off); `celmis_token` is optional.
+- A request that fails validation no longer echoes a raw (non-JSON) body.
+
+### Upgrade notes
+
+- New variable `OAUTH_ALLOWED_REDIRECT_HOSTS` (default `claude.ai,claude.com`): https
+  hosts a self-registered client may return to. Loopback is always allowed.
+- Browser connection follows the existing gate: it works for a person with an
+  administrator-issued `oauth_grant`, when `CELMIS_MCP_SELF_SERVICE=true`, or for
+  token issuers. Without one of these the consent page says to ask an administrator.
+  Turn on self-service if every member should be able to connect.
+- Self-service connections last at most `CELMIS_MCP_TOKEN_MAX_DAYS` (90 by default).
+- Plugin: update `celmis-code`, then in Claude Code run `/mcp`, choose `celmis`,
+  Authenticate. A token already saved is no longer sent by the plugin; to keep token
+  mode use your own server entry (plugin README).
+- Client metadata documents (CIMD) and RFC 7009 revocation are not implemented yet.
+- Existing admin scripts that registered clients on `POST /oauth/register` must use
+  `POST /oauth/clients`.
+
 ## [3.1.19] — 2026-11-03
 
 ### Added

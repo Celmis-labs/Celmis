@@ -17,6 +17,16 @@ The plugin ships:
 
 ## Install
 
+**Sign-in is in the browser.** The plugin's server entry is the address alone, with no
+header, so Claude Code signs you in the way it does for any hosted MCP server: run `/mcp`,
+choose `celmis`, then Authenticate. Your browser opens on Celmis, you sign in as usual
+(single sign-on or password), pick the workspace, press Allow, and the connection renews
+itself. Step 1 (a token) is only the fallback, for a server whose administrator has not
+enabled browser connections (see "Who may connect" in `docs/mcp-access.md`) or for a
+setup with no browser: use "Using your own server entry" below with the token in a
+`headersHelper`, and disable the plugin's own entry so the agent does not see two servers.
+The `celmis_token` option is optional now and is used only by the hooks.
+
 Four steps. The **Connect** page of the web app (Codebase section) shows the same list
 with your server's address filled in; this is the list with what to do when a step
 fails (see Troubleshooting at the end). Type each command on its own, one at a time.

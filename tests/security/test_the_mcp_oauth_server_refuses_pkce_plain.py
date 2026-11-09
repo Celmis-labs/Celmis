@@ -10,7 +10,6 @@ step for a row stored before the change.
 from __future__ import annotations
 
 import asyncio
-import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -59,13 +58,14 @@ def test_s256_gets_past_the_method_check(client):
 
 
 def test_the_consent_post_refuses_plain_too():
-    resp = asyncio.run(oauth.authorize_consent(
-        request=None, client_id="c", redirect_uri="http://127.0.0.1:9000/cb",
-        code_challenge="abc", code_challenge_method="plain", scope="", state="",
-        session=None, user=None, workspace_id="w",
-    ))
-    assert resp.status_code == 400
-    assert json.loads(resp.body)["error"] == "invalid_request"
+    """The consent POST is directly callable, so it re-runs the request check."""
+    with pytest.raises(oauth.OAuthRefusal) as refused:
+        asyncio.run(oauth._validated(
+            None, client_id="c", redirect_uri="http://127.0.0.1:9000/cb",
+            code_challenge="abc", method="plain", scope="", resource=None,
+            base="https://celmis.example.com/backend"))
+    assert refused.value.error == "invalid_request"
+    assert "S256" in refused.value.description
 
 
 def test_the_discovery_document_advertises_only_s256(client):

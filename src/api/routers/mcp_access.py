@@ -6,10 +6,12 @@ useless for the person the feature is for: connecting Celmis to Claude Code is
 a thing a developer does on their own laptop, and "ask an administrator to SSH
 in" is not an instruction, it is a description of a gap.
 
-The browser OAuth flow advertised in .well-known/oauth-authorization-server has
-not shipped — that endpoint says so itself. This is the bridge until it does:
-the user is already authenticated to the API, so the API can hand them a token
-for the resource server it also runs.
+This is the token route, for a setup with no browser or a client that cannot do
+OAuth. The preferred route is the browser sign-in in routers/oauth.py (Claude Code
+and the claude.ai connector register themselves, the person presses Allow, nothing
+is copied). Both are gated by the same policy and share the write-scope table
+below. Here the user is already authenticated to the API, so the API hands them a
+token for the resource server it also runs.
 
 A token is READ-ONLY by default. An MCP client is software on somebody's
 laptop that a language model drives, so a plain browser click mints a token

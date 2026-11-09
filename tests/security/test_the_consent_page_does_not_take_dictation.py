@@ -1,21 +1,12 @@
-"""The OAuth consent screen echoed the query string into HTML unescaped.
+"""The API no longer renders a consent page, and the client endpoints answer to their owner.
 
-`_render_consent` is an f-string building a page, and four of its values come
-straight from the query. `client_id`, `redirect_uri` and `scope` are checked
-against the registered client first — but `state` and `code_challenge` are
-not checked against anything, because they cannot be: they are the caller's
-own opaque data. Both land inside value="...".
+The consent screen used to be an f-string of HTML on the API's origin that echoed
+`state` and `code_challenge` from the query unescaped: a live element on the
+operator's own origin. The page now lives in the web app (React escapes what it
+renders) and the API builds no markup at all, which the first test pins so that
+a page is not quietly added back.
 
-Measured against a running box with `state='"><b id=probe>PWNED</b>'`:
-
-    <input type="hidden" name="state" value=""><b id=probe>PWNED</b>">
-
-a live element on the API's origin, which is also the web app's origin, so a
-script there runs as the signed-in operator. Reaching it needs a client_id and
-one of its redirect_uris; a client_id is not a secret — it is in the MCP
-configuration people paste around.
-
-The second half of this file is the pair of endpoints that made the client:
+The rest of this file is the pair of endpoints that made the client:
 registration takes a workspace admin, while listing and deleting took a
 platform admin, so whoever registered a client could not afterwards see it or
 revoke it.
@@ -27,61 +18,16 @@ import asyncio
 
 import pytest
 
-from src.api.routers.oauth import _render_consent, delete_client, list_clients
-
-BREAKOUT = '"><b id=celmis-probe>PWNED</b>'
-
-FIELDS = [
-    "client_name", "client_id", "redirect_uri",
-    "code_challenge", "code_challenge_method", "scope", "state",
-]
+from src.api.routers import oauth
+from src.api.routers.oauth import delete_client, list_clients
 
 
-def _render(**overrides) -> str:
-    base = {
-        "client_name": "ACME CI",
-        "client_id": "ec_0123456789abcdef",
-        "redirect_uri": "http://127.0.0.1:9000/cb",
-        "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-        "code_challenge_method": "S256",
-        "scope": "read:reviews",
-        "state": "opaque-state",
-    }
-    base.update(overrides)
-    return _render_consent(**base)
+def test_the_api_builds_no_html() -> None:
+    import inspect
 
-
-@pytest.mark.parametrize("field", FIELDS)
-def test_no_field_can_open_a_tag(field: str) -> None:
-    page = _render(**{field: BREAKOUT})
-    assert "<b id=celmis-probe>" not in page, (
-        f"{field} reached the page as markup — a script in its place runs on "
-        f"the operator's origin"
-    )
-    assert "&lt;b id=celmis-probe&gt;" in page, (
-        f"{field} did not arrive at all; the test is no longer looking at it"
-    )
-
-
-@pytest.mark.parametrize("field", FIELDS)
-def test_no_field_can_close_an_attribute(field: str) -> None:
-    """The quote is the boundary; escaping it is what keeps the value a value."""
-    page = _render(**{field: 'a" onmouseover="steal()'})
-    assert 'onmouseover="steal()' not in page, (
-        f"{field} escaped its attribute and became one"
-    )
-
-
-def test_the_page_still_says_what_it_is_for() -> None:
-    page = _render()
-    assert "Grant access to Celmis?" in page
-    assert "ACME CI" in page
-    assert "read:reviews" in page
-    assert 'name="state" value="opaque-state"' in page
-
-
-def test_an_empty_scope_still_reads_as_a_sentence() -> None:
-    assert "(no scopes requested)" in _render(scope="")
+    source = inspect.getsource(oauth)
+    assert "HTMLResponse" not in source
+    assert "<form" not in source and "<html" not in source
 
 
 # ─── who may see and revoke a client they registered ─────────────────
@@ -119,6 +65,7 @@ class _Session:
 class _User:
     def __init__(self, email: str, is_admin: bool = False) -> None:
         self.email = email
+        self.id = email
         self.is_admin = is_admin
 
 

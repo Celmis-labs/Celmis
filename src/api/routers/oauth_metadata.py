@@ -6,11 +6,10 @@ RFC-8414 / RFC-9728 documents so clients can discover:
     * `/.well-known/oauth-authorization-server` — issuer / authz / token URLs
     * `/.well-known/oauth-protected-resource` — audience + which authz servers issue for us
 
-The Celmis MCP server runs in **resource-server mode**: it does not
-issue tokens itself; users mint a JWT via the CLI (`analyzer mcp
-issue-token`) or through the future browser-based OAuth flow. This
-router exposes just enough metadata that clients like Claude Code /
-Cursor / Zed can validate our tokens without hand-configuration.
+The Celmis MCP server is its own authorization server: a client discovers it
+here, registers itself (`/oauth/register`), and the person signs in and approves
+in the web app (`/oauth/authorize` hands the browser to it). Tokens minted by the
+CLI (`analyzer mcp issue-token`) or in Settings keep working as a bearer header.
 
 Backed by `src.mcp_server.auth.JwtConfig` — same source of truth as the
 verifier the MCP server uses.
@@ -30,10 +29,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["oauth"])
 
+#: What a token may carry: the read scopes and the write scopes the grant model
+#: knows (`src.mcp_server.token_store`). The authorization server advertises all
+#: of them; whether a person may hand out a write scope is decided at consent.
 _FULL_SCOPES = [
-    "read:groups", "read:graph", "read:reviews",
-    "write:reviews", "write:policies", "write:repos",
+    "read:groups", "read:graph", "read:reviews", "read:code",
+    "write:reviews", "write:config", "write:repos",
 ]
+
+#: What the full endpoint advertises as ITS scopes. A client that sends no scope
+#: asks for "all of scopes_supported" (MCP authorization, scope selection), so
+#: this is the read-only set: the minimum for basic use, never a write scope. A
+#: client that wants one names it, and the person is asked.
+_RESOURCE_SCOPES = ["read:groups", "read:graph", "read:reviews"]
 
 
 def _issuer_from(request: Request) -> str:
@@ -56,16 +64,12 @@ def _never_cached(response: Response) -> None:
 
 @router.get("/.well-known/oauth-authorization-server")
 async def oauth_authorization_server(request: Request, response: Response) -> dict[str, Any]:
-    """RFC 8414 — advertises we behave as an authorization server just
-    enough for MCP clients to know how to obtain a token. Real OAuth
-    flow is out of band (CLI or admin-issued); we surface the endpoints
-    they would call.
+    """RFC 8414 — the authorization server an MCP client signs in with.
 
-    The endpoints exist, but a stock MCP client cannot complete a sign-in with
-    them: registration (`/oauth/register`) is for a signed-in workspace admin,
-    not an anonymous client, and the consent step needs the API's bearer token,
-    which a browser form does not carry. A client that tries registration is
-    told so in the RFC 7591 error shape (see `oauth.register_client`).
+    Public clients register themselves anonymously (`token_endpoint_auth_method`
+    `none`), authorize with PKCE S256 and the RFC 8707 `resource`, and keep the
+    session alive with rotating refresh tokens. Responses to the authorization
+    request carry `iss` (RFC 9207).
     """
     _never_cached(response)
     issuer = _issuer_from(request)
@@ -73,6 +77,7 @@ async def oauth_authorization_server(request: Request, response: Response) -> di
         "issuer": issuer,
         "authorization_endpoint": f"{issuer}/oauth/authorize",
         "token_endpoint": f"{issuer}/oauth/token",
+        "authorization_response_iss_parameter_supported": True,
         "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
         "response_types_supported": ["code"],
         "code_challenge_methods_supported": ["S256"],
@@ -81,15 +86,7 @@ async def oauth_authorization_server(request: Request, response: Response) -> di
         ],
         "registration_endpoint": f"{issuer}/oauth/register",
         "scopes_supported": list(_FULL_SCOPES),
-        # RFC 8414 says this member is a URL, so it is only a URL; prose in it
-        # is accepted by lenient parsers and refused by strict ones. The state
-        # of the flow goes in `note`, an extra member (RFC 8414 section 2 lets a
-        # server add them and a client ignore what it does not know).
         "service_documentation": f"{issuer}/docs",
-        "note": (
-            "Celmis runs in resource-server mode; the authorization endpoint "
-            "is a placeholder until the browser-based OAuth flow ships."
-        ),
     }
 
 
@@ -121,7 +118,7 @@ async def oauth_protected_resource(request: Request, response: Response) -> dict
     which is where the 401 challenge of the full endpoint points.
     """
     _never_cached(response)
-    return _protected_resource(request, "/mcp", list(_FULL_SCOPES))
+    return _protected_resource(request, "/mcp", list(_RESOURCE_SCOPES))
 
 
 @router.get("/.well-known/oauth-protected-resource/mcp/dev")

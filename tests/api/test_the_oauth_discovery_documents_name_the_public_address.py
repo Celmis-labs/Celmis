@@ -143,13 +143,13 @@ def test_reached_directly_without_a_proxy_a_document_names_the_address_it_was_fe
     assert r.json()["resource"] == "http://localhost:8000/mcp/dev"
 
 
-def test_service_documentation_is_a_bare_url_and_the_state_of_the_flow_is_a_separate_member():
+def test_service_documentation_is_a_bare_url():
     """RFC 8414: `service_documentation` is a URL. Prose appended to it was accepted by
     lenient parsers and refused by strict ones."""
     body = _get("/.well-known/oauth-authorization-server")
     assert body["service_documentation"] == f"{PUBLIC}/backend/docs"
     assert " " not in body["service_documentation"]
-    assert "resource-server mode" in body["note"]
+    assert "note" not in body, "a state-of-the-flow note no longer applies: the flow works"
 
 
 def test_the_authorization_server_document_passes_the_mcp_sdks_own_model():

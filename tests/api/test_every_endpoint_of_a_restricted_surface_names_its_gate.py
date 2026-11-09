@@ -46,7 +46,6 @@ SURFACES: dict[str, set[str]] = {
     # the workspace that OWNS it (the next test says which is which).
     "/api/sharing": {"require_workspace_admin", "require_share_admin"},
     "/oauth/clients": {"require_workspace_admin"},
-    "/oauth/register": {"require_workspace_admin"},
     # knowledge packs: a workspace role first (reader / author), or a login for
     # the invite-link routes; what a person may do to a PACK is its audience
     # and grants (tests/api/test_the_codebase_routes_answer_by_role_and_audience.py).
@@ -75,6 +74,12 @@ EXCEPTIONS: dict[tuple[str, str], set[str]] = {
     # Self-service token: a login, and the handler answers 403 unless
     # CELMIS_MCP_SELF_SERVICE is on (tests/api/test_mcp_tokens_endpoints.py).
     ("POST", "/api/mcp/token"): {"get_current_user"},
+    # The browser sign-in's consent page and the "Connected apps" list: a login,
+    # answering for the caller (and, for the list, a workspace's administrators)
+    # (tests/security/test_browser_oauth_flow.py).
+    ("GET", "/oauth/consent-info"): {"get_current_user"},
+    ("GET", "/oauth/connections"): {"get_current_user"},
+    ("DELETE", "/oauth/connections/{connection_id}"): {"get_current_user"},
     # Project-scoped MCP tokens live under their project's path; superadmin only.
     ("GET", "/api/projects/{project_id}/mcp-tokens"): {"require_superadmin"},
     ("POST", "/api/projects/{project_id}/mcp-tokens"): {"require_superadmin"},
@@ -93,6 +98,9 @@ PROTOCOL: set[tuple[str, str]] = {
     ("GET", "/oauth/authorize"),
     ("POST", "/oauth/authorize/consent"),
     ("POST", "/oauth/token"),
+    # Anonymous dynamic registration (RFC 7591): public clients only, nobody gets
+    # access from it (tests/security/test_browser_oauth_registration.py).
+    ("POST", "/oauth/register"),
 }
 
 #: Routes that write or remove a credential: owner/admin of the workspace.

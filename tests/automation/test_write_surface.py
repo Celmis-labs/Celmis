@@ -248,7 +248,7 @@ def test_a_workspace_owner_can_register_a_client_but_not_widen_themselves():
 
     oauth = (Path(__file__).resolve().parents[2]
              / "src" / "api" / "routers" / "oauth.py").read_text()
-    idx = oauth.find("async def register_client(")
+    idx = oauth.find("async def register_admin_client(")
     head = oauth[idx:idx + 1400]
     assert "require_workspace_admin" in head, "registration still needs a platform admin"
     assert "held_scopes" in head and "is_admin" in head, (

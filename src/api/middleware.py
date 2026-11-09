@@ -151,7 +151,9 @@ def _classify(path: str, method: str = "") -> str:
         return "pack_upload"
     if path.startswith("/api/repos/upload/sessions/") and "/parts/" in path:
         return "upload_part"
-    if path.startswith("/oauth/token") or path.startswith("/api/auth/login"):
+    # /oauth/register is anonymous by design, so it shares the strictest limit.
+    if (path.startswith("/oauth/token") or path.startswith("/oauth/register")
+            or path.startswith("/api/auth/login")):
         return "auth"
     if path.startswith("/api/reviews/trigger"):
         return "review"
