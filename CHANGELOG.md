@@ -20,6 +20,20 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.31] — 2026-11-11
+
+### Added
+
+- **`read_symbol` pages through a long body.** A body longer than `max_lines`
+  (at most 300 lines a page) or than the token budget is elided in the middle as
+  before, and the marker now carries a `cursor`: passing it back returns the next
+  lines, as many as fit, with a cursor while any are left, so a procedure of
+  1,200 lines is read to its last line. The cursor is pinned to the indexed
+  revision; after a push it answers page 1 and says so. A body that fitted the
+  line limit but not the budget used to be cut at the end with the callers list;
+  it is now elided with a cursor instead, and the callers list is what the budget
+  cuts.
+
 ## [3.1.30] — 2026-11-11
 
 ### Fixed

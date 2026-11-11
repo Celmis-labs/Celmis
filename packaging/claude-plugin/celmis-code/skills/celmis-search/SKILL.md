@@ -40,7 +40,8 @@ that part and tell the user. When `brief` finds nothing, carry on.
 3. `outline` - the symbols of one file, or the files of a directory, by line.
    Use it instead of reading a file to learn its shape.
 4. `read_symbol` - signature, docstring, body slice and location of one
-   symbol. Long bodies are elided; read the range it names if you need more.
+   symbol. Long bodies are elided; pass the cursor it prints to page through
+   the rest (or Read the range it names in a local checkout).
 5. `refs` - callers, callees or importers, grouped by repository. This is the
    tool with no local equivalent: it finds consumers in repositories you have
    not cloned.

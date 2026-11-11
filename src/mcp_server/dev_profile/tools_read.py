@@ -9,14 +9,18 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from src.mcp_server.dev_profile import common, emit, git_io
+from src.mcp_server.dev_profile import common, cursor, emit, git_io
 from src.mcp_server.dev_profile.access import RepoNotAccessible
+from src.mcp_server.dev_profile.freshness import idx_line
 from src.mcp_server.dev_profile.paths import is_unsafe_rel_path
 from src.mcp_server.dev_profile.signature import MAX_CHARS, derive_signature
 
 _GOOD_KINDS = ("class", "function", "method", "interface", "struct", "enum", "type")
 _TAIL_LINES = 10
+#: Lines of a body on one page; the cursor pages through the rest.
 MAX_BODY_LINES = 300
+#: Characters of a page kept for the shared-repository note, the marker and slack.
+_PAGE_RESERVE = 400
 
 
 def _clean_path(path: str) -> str | None:
@@ -175,17 +179,53 @@ def _pick(rows: list[dict], qualifier: str) -> list[dict]:
     return sorted(rows, key=key)
 
 
-def _elide(body: list[str], start: int, max_lines: int, rel: str, repo_arg: str):  # noqa: ANN202
-    """(lines, was_cut): the whole body, or head + marker + tail."""
-    if len(body) <= max_lines:
-        return body, False
-    tail = _TAIL_LINES if max_lines >= 20 else max(1, max_lines // 4)
-    head = max_lines - tail
-    cut = len(body) - head - tail
-    a, b = start + head, start + len(body) - tail - 1
-    marker = (f"… {cut} lines elided (read_symbol max_lines={min(len(body), MAX_BODY_LINES)}"
-              f" or Read {rel}:{a}-{b}) …")
-    return body[:head] + [marker] + body[len(body) - tail:], True
+def _chars(lines: list[str]) -> int:
+    return sum(len(x) + 1 for x in lines)
+
+
+def _fits(lines: list[str], room: int, cap_lines: int) -> int:
+    """How many of `lines`, from the first, fit in `room` characters and
+    `cap_lines` lines. At least one: a page always moves forward."""
+    used = n = 0
+    for ln in lines[:max(1, cap_lines)]:
+        if n and used + len(ln) + 1 > room:
+            break
+        used += len(ln) + 1
+        n += 1
+    return n
+
+
+def _first_page(body: list[str], start: int, max_lines: int, room: int, rel: str,
+                cursor_at) -> list[str]:  # noqa: ANN001
+    """The whole body, or head + marker + tail when it is longer than
+    `max_lines` or than `room` characters. The marker names the elided range
+    and a cursor that pages through the body from the first elided line."""
+    n = len(body)
+    if n <= max_lines and _chars(body) <= room:
+        return body
+    tail = body[n - min(n - 1, _TAIL_LINES if max_lines >= 20 else max(1, max_lines // 4)):]
+    while tail and _chars(tail) > room // 4:
+        tail = tail[1:]
+    head = _fits(body[:n - len(tail)], room - _chars(tail), max_lines - len(tail))
+    cut = n - head - len(tail)
+    if cut <= 0:
+        return body
+    a, b = start + head, start + n - len(tail) - 1
+    return [*body[:head],
+            f"… {cut} lines elided ({a}-{b}) · next page: cursor={cursor_at(head)}"
+            f" · or Read {rel}:{a}-{b} …", *tail]
+
+
+def _next_page(body: list[str], start: int, off: int, max_lines: int, room: int,
+               cursor_at) -> list[str]:  # noqa: ANN001
+    """Lines `off`.. of the body, as many as fit, and a cursor while any are left."""
+    k = _fits(body[off:], room, max_lines)
+    lines = body[off:off + k]
+    left = len(body) - off - k
+    if left > 0:
+        lines.append(f"… +{left} more lines ({start + off + k}-{start + len(body) - 1})"
+                     f" · cursor={cursor_at(off + k)}")
+    return lines
 
 
 def _unreadable(fresh, file: str, got):  # noqa: ANN001, ANN202
@@ -212,7 +252,8 @@ def _unreadable(fresh, file: str, got):  # noqa: ANN001, ANN202
 
 
 def read_symbol(repo: str, name: str, path: str = "", max_lines: int = 60,
-                include: str = "callers,callees", response_format: str = "concise") -> str:
+                include: str = "callers,callees", response_format: str = "concise",
+                cursor_: str = "") -> str:
     scope = common.begin()
     slug, fresh, err = _one_repo(scope, repo, need="code")
     if err:
@@ -263,23 +304,48 @@ def read_symbol(repo: str, name: str, path: str = "", max_lines: int = 60,
         span = emit.redact_text("\n".join(src)).split("\n")
     except Exception:  # noqa: BLE001 — fail closed
         return emit.withheld([fresh])
-    body, _cut = _elide(span, start, max_lines, file, repo)
+
+    # A page is a line offset into this symbol's span at this revision: a push
+    # that moves the index answers page 1 and says so (cursor.resolve).
+    h = cursor.fingerprint(tool="read_symbol", repo=slug, name=sym, path=rel)
+    pin = {slug: fresh.sha}
+    off, note = cursor.resolve(cursor_, h, pin)
+    if off and off >= len(span):
+        off, note = 0, cursor.MISMATCH_NOTE
+    budget = emit.BUDGETS["read_symbol"][1] if max_lines > 60 else None
+    room = (emit.budget_chars("read_symbol", detailed=detailed, budget_tokens=budget)
+            - len(idx_line([fresh])) - _PAGE_RESERVE)
+    title = f"{slug} {file}:{start}-{end} {best['kind']} {best['name']}"
+
+    def cursor_at(o: int) -> str:
+        return cursor.encode(h, o, pin)
+
+    if off:
+        head = [title, *([note] if note else []), f"lines {start + off}-… of {start}-{end}"]
+        page = _next_page(span, start, off, max_lines, room - _chars(head) - 8, cursor_at)
+        shown = len(page) - (1 if page[-1].startswith("… +") else 0)
+        head[-1] = f"lines {start + off}-{start + off + shown - 1} of {start}-{end}"
+        out = [*head, "---", *page, "---"]
+        return emit.render_text("read_symbol", [fresh], out, detailed=detailed,
+                                budget_tokens=budget)
 
     sig = emit.clip(best.get("signature") or "", MAX_CHARS) \
         or emit.clip(derive_signature(src, 1) or str(best["name"]), MAX_CHARS)
-    out = [f"{slug} {file}:{start}-{end} {best['kind']} {best['name']}", f"sig: {sig}"]
+    out = [title, *([note] if note else []), f"sig: {sig}"]
     if best.get("docstring"):
         out.append("doc: " + emit.clip(best["docstring"], 600 if detailed else 160))
     if others:
         also = [f"{o['file']}:{o.get('start_line')}" for o in others[:4]]
         out.append("also in: " + ", ".join(also))
+    room -= _chars(out) + 8
     out.append("---")
-    out.extend(body)
+    # The body comes before the neighbours: when the budget is short it is the
+    # callers/callees list that gets cut, never the cursor to the next page.
+    out.extend(_first_page(span, start, max_lines, room, file, cursor_at))
     out.append("---")
     out.extend(neighbours)
-    return emit.render_text(
-        "read_symbol", [fresh], out, detailed=detailed,
-        budget_tokens=emit.BUDGETS["read_symbol"][1] if max_lines > 60 else None)
+    return emit.render_text("read_symbol", [fresh], out, detailed=detailed,
+                            budget_tokens=budget)
 
 
 def _neighbours(scope, store, slug: str, row: dict, include: str) -> list[str]:  # noqa: ANN001

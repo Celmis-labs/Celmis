@@ -208,12 +208,15 @@ def build_dev_mcp():  # noqa: ANN201
     async def _outline(repo: str, path: str, depth: int = 1, response_format: Fmt = "concise") -> str:
         return await asyncio.to_thread(tools_read.outline, repo, path, depth, response_format)
 
-    @tool("read_symbol", "Signature, docstring, body slice (redacted), location and top "
-                         "callers/callees of one symbol, at the indexed sha.")
+    @tool("read_symbol", "Signature, docstring, body slice (redacted; cursor pages a long "
+                         "one), location and top callers/callees of one symbol, at the "
+                         "indexed sha.")
     async def _read_symbol(repo: str, name: str, path: str = "", max_lines: int = 60,
-                     include: str = "callers,callees", response_format: Fmt = "concise") -> str:
+                     include: str = "callers,callees", response_format: Fmt = "concise",
+                     cursor: str = "") -> str:
         return await asyncio.to_thread(
-            tools_read.read_symbol, repo, name, path, max_lines, include, response_format)
+            tools_read.read_symbol, repo, name, path, max_lines, include, response_format,
+            cursor)
 
     @tool("refs", "Who calls/imports a symbol (or what it calls), with hop counts; "
                   "cross-repo via text refs in group repos. 1C: reads/writes/readers/writers.")

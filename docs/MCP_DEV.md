@@ -25,7 +25,7 @@ call the full `/mcp` tools, and every call is audited (facts, never content).
 | `repos` | Which repositories you can read, at what level, how fresh. Call first. |
 | `find` | Ranked symbol search across your repos (exact, prefix, token, substring, fuzzy). |
 | `outline` | The symbols of a file, or files and top symbols of a directory. |
-| `read_symbol` | One symbol's body from the indexed commit, middle elided past `max_lines`. |
+| `read_symbol` | One symbol's body from the indexed commit, middle elided past `max_lines` or the token budget; the `cursor` it prints pages through the rest. |
 | `refs` | Callers, callees or importers; text mentions in sibling repos and across a share. |
 | `grep` | A literal or regex in committed text; secret files are never searched. |
 | `map` | The layout of a repository, ordered by how much code each directory holds. |
