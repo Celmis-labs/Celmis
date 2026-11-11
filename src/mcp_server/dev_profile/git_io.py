@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,7 +47,12 @@ _INDEX_BUILD_SECONDS = 120.0
 #: Bounds of the time one `git grep` may take, whatever the caller still has.
 MIN_GREP_SECONDS = 3.0
 MAX_GREP_SECONDS = 20.0
+#: A whole file held in memory (the preview cache, the outline): kept small.
 _MAX_FILE_BYTES = 2_000_000
+#: A line span is streamed, never held whole, so its file may be far larger.
+_DEFAULT_SPAN_FILE_BYTES = 64_000_000
+SPAN_READ_SECONDS = 20.0
+_BINARY_PROBE = 8000
 
 
 def clone_path(slug: str) -> Path | None:
@@ -143,6 +149,120 @@ def show_file(slug: str, sha: str, rel_path: str) -> list[str] | None:
     if b"\0" in proc.stdout[:8000]:
         return None
     return proc.stdout.decode("utf-8", errors="replace").split("\n")
+
+
+def max_span_file_bytes() -> int:
+    """The largest file `show_span` reads; `CELMIS_MAX_READ_FILE_BYTES` overrides."""
+    try:
+        value = int(os.environ.get("CELMIS_MAX_READ_FILE_BYTES", ""))
+    except ValueError:
+        return _DEFAULT_SPAN_FILE_BYTES
+    return value if value > 0 else _DEFAULT_SPAN_FILE_BYTES
+
+
+#: Why a span could not be read: `Span.problem`.
+MISSING, BINARY, TOO_BIG, NO_REVISION, TIMEOUT, UNSAFE = (
+    "missing", "binary", "too_big", "no_revision", "timeout", "unsafe")
+
+
+@dataclass(frozen=True)
+class Span:
+    """Lines ``start..end`` (1-based, inclusive) of a file, or the reason there are none."""
+    lines: list[str] | None = None
+    problem: str = ""
+    size: int = 0
+
+
+def _take(stream, start: int, end: int) -> list[str] | None:  # noqa: ANN001
+    """Lines ``start..end`` of a binary stream, read up to ``end`` only; None for
+    binary (a NUL in the first 8000 bytes, as `show_file` judges it)."""
+    out: list[str] = []
+    seen = 0
+    for n, raw in enumerate(stream, 1):
+        if seen < _BINARY_PROBE:
+            if b"\0" in raw[: _BINARY_PROBE - seen]:
+                return None
+            seen += len(raw)
+        if n >= start:
+            out.append(raw.rstrip(b"\n").decode("utf-8", errors="replace"))
+        if n >= end:
+            break
+    return out
+
+
+def _span_unpacked(tree: Path, rel_path: str, start: int, end: int) -> Span:
+    try:
+        target = (tree / rel_path).resolve(strict=True)
+        if not target.is_relative_to(tree.resolve()) or not target.is_file():
+            return Span(problem=MISSING)
+        size = target.stat().st_size
+        if size > max_span_file_bytes():
+            return Span(problem=TOO_BIG, size=size)
+        with target.open("rb") as fh:
+            lines = _take(fh, start, end)
+    except (OSError, ValueError):
+        return Span(problem=MISSING)
+    return Span(problem=BINARY, size=size) if lines is None else Span(lines, size=size)
+
+
+def _span_clone(path: Path, sha: str, rel_path: str, start: int, end: int) -> Span:
+    spec = f"{sha}:{rel_path}"
+    probe = _run(path, ["cat-file", "-s", spec], 10)
+    if probe is None:
+        return Span(problem=TIMEOUT)
+    if probe.returncode != 0:
+        gone = _run(path, ["cat-file", "-e", f"{sha}^{{commit}}"], 10)
+        if gone is None:
+            return Span(problem=TIMEOUT)
+        return Span(problem=MISSING if gone.returncode == 0 else NO_REVISION)
+    try:
+        size = int(probe.stdout.decode().strip())
+    except ValueError:
+        return Span(problem=MISSING)
+    if size > max_span_file_bytes():
+        return Span(problem=TOO_BIG, size=size)
+    try:
+        proc = subprocess.Popen(
+            ["git", "-c", "core.quotepath=off", "-C", str(path), "cat-file", "blob", spec],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env={**os.environ, **_ENV})
+    except OSError:
+        return Span(problem=TIMEOUT)
+    timed_out = threading.Event()
+
+    def _expire() -> None:
+        timed_out.set()
+        proc.kill()
+
+    timer = threading.Timer(SPAN_READ_SECONDS, _expire)
+    timer.start()
+    try:
+        lines = _take(proc.stdout, start, end)
+    finally:
+        timer.cancel()
+        proc.kill()
+        proc.stdout.close()
+        proc.wait()
+    if timed_out.is_set():
+        return Span(problem=TIMEOUT, size=size)
+    return Span(problem=BINARY, size=size) if lines is None else Span(lines, size=size)
+
+
+def show_span(slug: str, sha: str, rel_path: str, start: int, end: int) -> Span:
+    """Lines ``start..end`` of `rel_path` at `sha`, streamed: the file is read only
+    up to ``end`` and may be far bigger than `show_file` takes (64 MB by default)."""
+    start, end = max(int(start), 1), max(int(end), 1)
+    tree = _unpacked_at(slug, sha)
+    if tree is not None:
+        if is_unsafe_rel_path(rel_path):
+            return Span(problem=UNSAFE)
+        return _span_unpacked(tree, rel_path, start, end)
+    path = clone_path(slug)
+    if path is None or not _SHA.match(sha or ""):
+        return Span(problem=NO_REVISION)
+    if is_unsafe_rel_path(rel_path):
+        return Span(problem=UNSAFE)
+    return _span_clone(path, sha, rel_path, start, end)
 
 
 def _index_ready(gitdir: Path, sha: str) -> bool:

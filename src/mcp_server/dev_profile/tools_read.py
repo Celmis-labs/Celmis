@@ -188,6 +188,29 @@ def _elide(body: list[str], start: int, max_lines: int, rel: str, repo_arg: str)
     return body[:head] + [marker] + body[len(body) - tail:], True
 
 
+def _unreadable(fresh, file: str, got):  # noqa: ANN001, ANN202
+    """The error for a file `show_span` could not read, naming the real cause."""
+    sha = fresh.sha[:8]
+    why = got.problem
+    if why == git_io.TOO_BIG:
+        return emit.error(
+            [fresh], f"{file} is too big to read: {got.size:,} bytes, the limit is "
+            f"{git_io.max_span_file_bytes():,}",
+            "find, outline and grep work on it from the index; re-indexing does not help")
+    if why == git_io.BINARY:
+        return emit.error([fresh], f"{file} is a binary file", "it has no text to read")
+    if why == git_io.MISSING:
+        return emit.error([fresh], f"{file} is not in this repository at {sha}",
+                          "check the path with outline")
+    if why == git_io.TIMEOUT:
+        return emit.error([fresh], f"reading {file} timed out",
+                          "try again; if it repeats, grep finds the line without reading the file")
+    if why == git_io.UNSAFE:
+        return emit.error([fresh], f"{file} is not a readable path", "use a repo-relative path")
+    return emit.error([fresh], f"{file} is not readable at {sha}",
+                      "the clone no longer has that revision; ask an admin to re-index")
+
+
 def read_symbol(repo: str, name: str, path: str = "", max_lines: int = 60,
                 include: str = "callers,callees", response_format: str = "concise") -> str:
     scope = common.begin()
@@ -230,20 +253,20 @@ def read_symbol(repo: str, name: str, path: str = "", max_lines: int = 60,
     file = str(best["file"])
     start = int(best.get("start_line") or 1)
     end = int(best.get("end_line") or 0) or (start + max_lines - 1)
-    src = git_io.show_file(slug, fresh.sha, file)
-    if src is None:
-        return emit.error([fresh], f"{file} is not readable at {fresh.sha[:8]}",
-                          "the clone no longer has that revision; ask an admin to re-index")
+    got = git_io.show_span(slug, fresh.sha, file, start, end)
+    if got.lines is None:
+        return _unreadable(fresh, file, got)
+    src = got.lines
     # Redact the WHOLE span before slicing: a multi-line secret is only
     # recognisable whole, and elision must not leave half of one behind.
     try:
-        span = emit.redact_text("\n".join(src[start - 1:end])).split("\n")
+        span = emit.redact_text("\n".join(src)).split("\n")
     except Exception:  # noqa: BLE001 — fail closed
         return emit.withheld([fresh])
     body, _cut = _elide(span, start, max_lines, file, repo)
 
     sig = emit.clip(best.get("signature") or "", MAX_CHARS) \
-        or emit.clip(derive_signature(src, start) or str(best["name"]), MAX_CHARS)
+        or emit.clip(derive_signature(src, 1) or str(best["name"]), MAX_CHARS)
     out = [f"{slug} {file}:{start}-{end} {best['kind']} {best['name']}", f"sig: {sig}"]
     if best.get("docstring"):
         out.append("doc: " + emit.clip(best["docstring"], 600 if detailed else 160))

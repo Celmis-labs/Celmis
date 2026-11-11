@@ -20,6 +20,22 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.30] — 2026-11-11
+
+### Fixed
+
+- **`read_symbol` reads symbols in big source files, and says why when it cannot.**
+  A file over 2 MB (an uploaded 1C module of 27 MB, symbols past line 30000) was
+  not readable, and every failure was reported as "the clone no longer has that
+  revision; ask an admin to re-index", which cannot help. The span is now streamed
+  (an unpacked file is read up to its last line; a clone's blob through
+  `git cat-file`, stopped after it), for files up to 64 MB
+  (`CELMIS_MAX_READ_FILE_BYTES`). Redaction still covers the whole symbol span.
+  A file that cannot be read now names its cause: too big (with the size and the
+  limit), binary, not in the repository, timed out, or, only when the revision is
+  really absent from the clone, the re-index advice. Whole-file readers (the `find`
+  preview, `outline` signatures) keep their 2 MB limit.
+
 ## [3.1.28] — 2026-11-09
 
 ### Added
