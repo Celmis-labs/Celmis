@@ -32,8 +32,10 @@ BASE = os.environ.get("E2E_API_BASE", "http://api:8000").rstrip("/")
 PATH = "/mcp/dev/"
 STRICT = os.environ.get("CELMIS_E2E_STRICT") == "1"
 TOOLS = {"repos", "find", "outline", "read_symbol", "refs", "grep", "map", "ask", "howto",
-         "skills", "brief"}
-CORE = TOOLS - {"howto", "skills", "brief"}  # these ship with their own lanes
+         "inspect_external", "skills", "brief"}
+# howto/skills/brief ship with their own lanes; inspect_external is new in 3.1.33 and
+# a server before it must still pass
+CORE = TOOLS - {"howto", "skills", "brief", "inspect_external"}
 IDX = re.compile(r"^idx: .+", re.M)
 
 failures: list[str] = []

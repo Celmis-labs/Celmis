@@ -20,6 +20,48 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.33] — 2026-11-16
+
+### Added
+
+- **A 1C file outside any repository can be checked (`inspect_external`).** A
+  task that comes with one external report or data processor (`.erf`, `.epf`)
+  or a `Form.bin` could only be checked against a local copy of the
+  configuration. The new dev tool hands out a one-time upload link
+  (`curl -F file=@…`, 15 minutes, 20 MB); with the handle it describes the file
+  (object, synonym, comment, container dates, modules, ordinary forms and their
+  handlers, templates with areas and parameters), and with `repo=` it compares
+  it with that configuration — counterpart by name, diff by procedure, the
+  change markers (task ids and dates) the file lacks, a staleness verdict — and
+  runs static checks: block balance, own and common-module calls (exists,
+  exported, argument count with defaults), metadata objects, enum values and
+  predefined items, query fields, form handlers, templates and areas.
+  `outline`, `read_symbol` and `grep` read its code under `repo="ext/<handle>"`.
+  Every answer says the file is external and that nothing was run; managed forms
+  and data composition schemas are not checked yet. Uploads are kept 24 hours,
+  for their uploader only, and never indexed. See `docs/MCP_DEV.md`.
+- **The same in an agent session.** An attached `.erf`, `.epf` or `Form.bin` is
+  unpacked beside itself on the server, with a `REPORT.md` against the
+  session's repository; the agent is told to read it first.
+- **The module of an ordinary form is indexed.** Its code lives inside the
+  binary `Form.bin`; it is now read out of it and indexed under
+  `<...>/Ext/Form.bin/module`, so `find`, `outline`, `read_symbol` and `grep`
+  reach it.
+
+### Fixed
+
+- **An agent's push no longer carries the attachments.** A single-repo session
+  keeps `_attachments/` inside the clone and `git add -A` took the user's files
+  along with the agent's edits; they are now left out of the commit.
+
+- **Line numbers stay right after a padded line.** Redaction cut every run of
+  more than 64 whitespace characters to its first 64, line breaks included. A
+  comment padded with blanks, a CRLF and the next line's indentation make such
+  a run, so two lines were joined and every line number printed after them
+  (`read_symbol` pages, bodies, previews) was off by one. The cut now keeps
+  every line break inside the same 64 characters, so the rules see the same
+  gaps as before and the text keeps its lines.
+
 ## [3.1.31] — 2026-11-11
 
 ### Added

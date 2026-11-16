@@ -135,8 +135,88 @@ def has_commit(slug: str, sha: str) -> bool:
     return bool(proc and proc.returncode == 0)
 
 
+# ─── a file inside a 1C container (an ordinary form's `Form.bin`) ─────
+#
+# The indexer files the module of an ordinary form under `<...>/Form.bin/module`
+# (see `BslFormBinExtractor`). Reading that path reads the container blob at the
+# revision and takes the module out of it, so a body shown here is the text the
+# index was built from, line for line.
+
+_MEMBER_CACHE: dict[tuple[str, str, str], tuple[list[str] | None, str, int]] = {}
+_MEMBER_CACHE_SIZE = 16
+_MEMBER_LOCK = threading.Lock()
+
+
+def _member_split(rel_path: str) -> tuple[str, str] | None:
+    from src.indexing.graph.languages.onec import container_member
+
+    return container_member(rel_path)
+
+
+def _blob(slug: str, sha: str, rel_path: str, limit: int) -> tuple[bytes | None, str]:
+    """(bytes, "") of the committed file ``rel_path`` at ``sha``, or (None, problem)."""
+    tree = _unpacked_at(slug, sha)
+    if tree is not None:
+        try:
+            target = (tree / rel_path).resolve(strict=True)
+            if not target.is_relative_to(tree.resolve()) or not target.is_file():
+                return None, MISSING
+            if target.stat().st_size > limit:
+                return None, TOO_BIG
+            return target.read_bytes(), ""
+        except (OSError, ValueError):
+            return None, MISSING
+    path = clone_path(slug)
+    if path is None or not _SHA.match(sha or ""):
+        return None, NO_REVISION
+    probe = _run(path, ["cat-file", "-s", f"{sha}:{rel_path}"], 10)
+    if probe is None:
+        return None, TIMEOUT
+    if probe.returncode != 0:
+        return None, MISSING
+    try:
+        if int(probe.stdout.decode().strip()) > limit:
+            return None, TOO_BIG
+    except ValueError:
+        return None, MISSING
+    proc = _run(path, ["cat-file", "blob", f"{sha}:{rel_path}"], SPAN_READ_SECONDS)
+    if proc is None:
+        return None, TIMEOUT
+    return (proc.stdout, "") if proc.returncode == 0 else (None, MISSING)
+
+
+def _member_lines(slug: str, sha: str, rel_path: str) -> tuple[list[str] | None, str, int]:
+    """(lines, problem, size in bytes) of the file ``rel_path`` inside a container."""
+    from src.indexing.graph.languages.onec import FORM_BIN_MODULE
+    from src.onec.container import form_module
+
+    key = (slug, sha, rel_path)
+    with _MEMBER_LOCK:
+        hit = _MEMBER_CACHE.get(key)
+    if hit is not None:
+        return hit
+    container, member = _member_split(rel_path) or ("", "")
+    data, problem = _blob(slug, sha, container, max_span_file_bytes())
+    if data is None:
+        out: tuple[list[str] | None, str, int] = (None, problem, 0)
+    else:
+        text = form_module(data) if member == FORM_BIN_MODULE else None
+        out = ((None, MISSING, len(data)) if text is None
+               else (text.split("\n"), "", len(text.encode("utf-8"))))
+    with _MEMBER_LOCK:
+        if len(_MEMBER_CACHE) >= _MEMBER_CACHE_SIZE:
+            _MEMBER_CACHE.pop(next(iter(_MEMBER_CACHE)))
+        _MEMBER_CACHE[key] = out
+    return out
+
+
 def show_file(slug: str, sha: str, rel_path: str) -> list[str] | None:
     """The lines of `rel_path` at `sha`, or None (missing, binary, too big)."""
+    if _member_split(rel_path) is not None:
+        if is_unsafe_rel_path(rel_path):
+            return None
+        lines, problem, size = _member_lines(slug, sha, rel_path)
+        return None if problem or size > _MAX_FILE_BYTES else lines
     tree = _unpacked_at(slug, sha)
     if tree is not None:
         return None if is_unsafe_rel_path(rel_path) else _read_unpacked(tree, rel_path)
@@ -252,6 +332,13 @@ def show_span(slug: str, sha: str, rel_path: str, start: int, end: int) -> Span:
     """Lines ``start..end`` of `rel_path` at `sha`, streamed: the file is read only
     up to ``end`` and may be far bigger than `show_file` takes (64 MB by default)."""
     start, end = max(int(start), 1), max(int(end), 1)
+    if _member_split(rel_path) is not None:
+        if is_unsafe_rel_path(rel_path):
+            return Span(problem=UNSAFE)
+        lines, problem, size = _member_lines(slug, sha, rel_path)
+        if lines is None:
+            return Span(problem=problem, size=size)
+        return Span(lines[start - 1:end], size=size)
     tree = _unpacked_at(slug, sha)
     if tree is not None:
         if is_unsafe_rel_path(rel_path):
@@ -349,6 +436,156 @@ def build_index_at(tree: Path, data_dir: Path, sha: str) -> bool:
     return _build_index(tree, data_dir / _INDEX_DIR, sha)
 
 
+_MEMBERS_DIR = "form-modules"
+_MEMBERS_REV = ".rev"
+
+
+def _form_bins(slug: str, sha: str, tree: Path | None) -> list[str] | None:
+    """Paths of every `Form.bin` at ``sha``, or None when they cannot be listed."""
+    if tree is not None:
+        out = []
+        for base, dirs, files in os.walk(tree):
+            dirs[:] = [d for d in dirs if d != ".git"]
+            if "Form.bin" in files:
+                out.append(Path(base, "Form.bin").relative_to(tree).as_posix())
+        return out
+    path = clone_path(slug)
+    if path is None:
+        return None
+    proc = _run(path, ["ls-tree", "-r", "-z", "--name-only", sha], 60)
+    if proc is None or proc.returncode != 0:
+        return None
+    names = proc.stdout.decode("utf-8", errors="replace").split("\0")
+    return [n for n in names if n == "Form.bin" or n.endswith("/Form.bin")]
+
+
+def _blobs(slug: str, sha: str, tree: Path | None, paths: list[str]):  # noqa: ANN202
+    """(path, bytes or None) for each of ``paths`` at ``sha``: one `git cat-file
+    --batch` for a clone, plain reads for an unpacked archive."""
+    limit = max_span_file_bytes()
+    if tree is not None:
+        for rel in paths:
+            yield rel, _blob(slug, sha, rel, limit)[0]
+        return
+    path = clone_path(slug)
+    if path is None:
+        return
+    proc = subprocess.Popen(  # noqa: S603
+        ["git", "-c", "core.quotepath=off", "-C", str(path), "cat-file", "--batch"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={**os.environ, **_ENV})
+
+    def _ask() -> None:
+        try:
+            for rel in paths:
+                proc.stdin.write(f"{sha}:{rel}\n".encode())
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    writer = threading.Thread(target=_ask, daemon=True)
+    writer.start()
+    try:
+        for rel in paths:
+            head = proc.stdout.readline().split()
+            if len(head) != 3 or head[1] != b"blob":
+                yield rel, None
+                continue
+            size = int(head[2])
+            data = proc.stdout.read(size)
+            proc.stdout.read(1)
+            yield rel, data if size <= limit else None
+    finally:
+        proc.kill()
+        proc.wait()
+        writer.join(timeout=5)
+
+
+def _build_members(slug: str, sha: str, tree: Path | None, root: Path) -> bool:
+    """Write the module of every ordinary form at ``sha`` under ``root`` at its
+    indexed path (`<...>/Form.bin/module`), built aside and renamed in."""
+    from src.indexing.graph.languages.onec import FORM_BIN_MODULE
+    from src.onec.container import form_module
+
+    paths = _form_bins(slug, sha, tree)
+    if paths is None:
+        return False
+    import time
+
+    began = time.monotonic()
+    root.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f".{root.name}.tmp-", dir=root.parent))
+    try:
+        for rel, data in _blobs(slug, sha, tree, paths):
+            if time.monotonic() - began > _INDEX_BUILD_SECONDS:
+                logger.warning("dev_form_modules_timeout repo=%s forms=%d", slug, len(paths))
+                return False
+            text = form_module(data) if data else None
+            if text is None:
+                continue
+            target = tmp / rel / FORM_BIN_MODULE
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        (tmp / _MEMBERS_REV).write_text(sha, encoding="ascii")
+        old = root.with_name(f".{root.name}.old-{os.getpid()}")
+        if root.exists():
+            os.replace(root, old)
+        os.replace(tmp, root)
+        shutil.rmtree(old, ignore_errors=True)
+        return True
+    except OSError as exc:
+        logger.warning("dev_form_modules_failed repo=%s err=%s", slug, exc)
+        return False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def form_modules(slug: str, sha: str) -> Path | None:
+    """The directory holding the ordinary-form modules of ``slug`` at ``sha``,
+    built on first use (one per revision). None when there is nothing to search
+    or it cannot be built."""
+    from src.config import InvalidRepoSlug, get_settings
+
+    tree = _unpacked_at(slug, sha)
+    if tree is None and (clone_path(slug) is None or not _SHA.match(sha or "")):
+        return None
+    try:
+        data = get_settings().repo_data_path(slug)
+    except InvalidRepoSlug:
+        return None
+    root = data / _MEMBERS_DIR
+    if _index_ready_at(root, sha):
+        return root if _has_members(root) else None
+    try:
+        import fcntl
+
+        data.mkdir(parents=True, exist_ok=True)
+        with open(data / ".form-modules.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if not _index_ready_at(root, sha) and not _build_members(slug, sha, tree, root):
+                return None
+    except (OSError, ImportError) as exc:
+        logger.warning("dev_form_modules_failed repo=%s err=%s", slug, exc)
+        return None
+    return root if _has_members(root) else None
+
+
+def _has_members(root: Path) -> bool:
+    """Whether the built directory holds any module (a repository with no
+    ordinary form gets an empty one, which is not worth a second search)."""
+    try:
+        return any(p.name != _MEMBERS_REV for p in root.iterdir())
+    except OSError:
+        return False
+
+
+def _index_ready_at(root: Path, sha: str) -> bool:
+    try:
+        return (root / _MEMBERS_REV).read_text(encoding="ascii").strip() == sha
+    except OSError:
+        return False
+
+
 @dataclass(frozen=True)
 class GrepHit:
     path: str
@@ -436,6 +673,7 @@ def grep(
         args.append("-i")
     if word:
         args.append("-w")
+    flags = [a for a in args[1:] if a not in ("--no-index", "--exclude-standard")]
     args += ["-e", pattern, *([] if tree else [sha]), "--", *spec]
     try:
         proc = subprocess.Popen(  # noqa: S603
@@ -470,6 +708,57 @@ def grep(
                 continue
             hits.append(hit)
             if len(hits) >= max_hits:
+                break
+    finally:
+        timer.cancel()
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+    if len(hits) < max_hits and not (timed_out and slug in timed_out):
+        members = form_modules(slug, sha)
+        if members is not None:
+            if deadline is not None:
+                timeout = min(MAX_GREP_SECONDS, max(MIN_GREP_SECONDS, deadline - time.monotonic()))
+            hits += _stream_hits(
+                ["git", "-c", "core.quotepath=off", "-C", str(members), "grep", "--no-index",
+                 *flags, "-e", pattern, "--", *spec],
+                "", slug, pattern, regex, ignore_case, word, max_hits - len(hits),
+                timeout, timed_out)
+    return hits
+
+
+def _stream_hits(cmd: list[str], prefix: str, slug: str, pattern: str, regex: bool,
+                 ignore_case: bool, word: bool, room: int, timeout: float,
+                 timed_out: list | None) -> list[GrepHit]:
+    """Run a `git grep` and read at most ``room`` hits off its output."""
+    try:
+        proc = subprocess.Popen(  # noqa: S603
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env={**os.environ, **_ENV})
+    except OSError:
+        return []
+    hits: list[GrepHit] = []
+
+    def _expire() -> None:
+        if timed_out is not None:
+            timed_out.append(slug)
+        proc.kill()
+
+    timer = threading.Timer(timeout, _expire)
+    timer.start()
+    try:
+        assert proc.stdout is not None  # noqa: S101
+        for raw in proc.stdout:
+            line = raw.decode("utf-8", errors="replace").rstrip("\n")
+            if prefix and line.startswith(prefix):
+                line = line[len(prefix):]
+            m = _HIT_LINE.match(line)
+            if m is None:
+                continue
+            hit = GrepHit(m["path"], int(m["line"]), m["text"])
+            if not _match_survives_redaction(hit, pattern, regex, ignore_case, word):
+                continue
+            hits.append(hit)
+            if len(hits) >= room:
                 break
     finally:
         timer.cancel()

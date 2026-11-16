@@ -122,11 +122,29 @@ def manager_object(type_word: str, name: str) -> str | None:
     return f"{plural}.{name}" if plural in _DATA else None
 
 
+#: An ordinary form keeps its module inside the binary `Form.bin`; the indexer
+#: files that module under the path `<...>/Ext/Form.bin/module`, which names the
+#: same form as a managed form's `<...>/Ext/Form/Module.bsl`.
+FORM_BIN = "Form.bin"
+FORM_BIN_MODULE = "module"
+
+
+def container_member(rel: str) -> tuple[str, str] | None:
+    """(container path, member) when ``rel`` names a file inside a `Form.bin`."""
+    parts = rel.replace("\\", "/").split("/")
+    for i, part in enumerate(parts[:-1]):
+        if part == FORM_BIN:
+            return "/".join(parts[: i + 1]), "/".join(parts[i + 1:])
+    return None
+
+
 def _tail(rel: str) -> list[str] | None:
     """The path of ``rel`` from its metadata type directory on, without the
     ``Ext`` / ``Form`` folders Designer puts a module under, and with the file
     extension removed. None when no directory of the path is a metadata type."""
     parts = [p for p in rel.replace("\\", "/").split("/") if p]
+    if len(parts) >= 2 and parts[-2] == FORM_BIN and parts[-1] == FORM_BIN_MODULE:
+        parts = [*parts[:-2], "Form", "Module.bsl"]  # the module inside an ordinary form
     stem = parts[-1].rsplit(".", 1)[0]
     dirs = parts[:-1]
     start = next((i for i, p in enumerate(dirs) if p in TYPES), None)

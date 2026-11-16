@@ -31,7 +31,7 @@ try:  # pragma: no cover - which branch runs depends on integration state
 except ImportError:  # pragma: no cover
     DEV_PATH = "/mcp/dev"
     DEV_TOOLS = ("repos", "find", "outline", "read_symbol", "refs", "grep", "map",
-                 "ask", "howto")
+                 "ask", "howto", "inspect_external", "skills", "brief")
     HOWTO_TOPICS = ("db", "auth", "config", "http_client", "logging", "messaging", "cache")
     IDX_LINE_RE = r"^idx: (?P<entries>.+)$"
     IDX_ENTRY_RE = (r"(?P<slug>[A-Za-z0-9._/-]+) (?P<branch>\S+)@(?P<sha>[0-9a-f]{7,40}) "

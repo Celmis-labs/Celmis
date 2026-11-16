@@ -62,6 +62,7 @@ from src.indexing.graph.configs import RepoContext
 from src.indexing.graph.extractor import EdgeInfo, ExtractionResult, SymbolExtractor, SymbolInfo
 from src.indexing.graph.languages.bsl_dataflow import data_flow_edges
 from src.indexing.graph.languages.onec import (
+    FORM_BIN_MODULE,
     data_object,
     module_identity,
     owner_object,
@@ -351,3 +352,33 @@ class BslExtractor(SymbolExtractor):
             except (ValueError, OSError):
                 pass
         return file_path.as_posix()
+
+
+class BslFormBinExtractor(BslExtractor):
+    """The module of an ordinary form, read out of the form's binary `Form.bin`.
+
+    A Designer dump stores a managed form's module as `Ext/Form/Module.bsl` and
+    an ordinary form's inside `Ext/Form.bin`, a 1C container (`src/onec`). The
+    module is indexed exactly like a `.bsl` file under the path
+    `<...>/Ext/Form.bin/module`, which the dev tools read back through the same
+    container, so every line number matches the text they show.
+    """
+
+    language = "bsl"
+    extensions = ()
+
+    def extract(self, file_path: Path, source: bytes | None = None) -> ExtractionResult:
+        from src.onec.container import form_module
+
+        rel = self._relpath(file_path)
+        if source is None:
+            try:
+                if file_path.stat().st_size > MAX_BSL_BYTES:
+                    return ExtractionResult(parse_errors=[f"too_large file={rel}"])
+                source = file_path.read_bytes()
+            except OSError as e:
+                return ExtractionResult(parse_errors=[f"read_failed: {e}"])
+        text = form_module(source)
+        if text is None:  # a form without a module, or a file that is not a container
+            return ExtractionResult()
+        return super().extract(file_path / FORM_BIN_MODULE, text.encode("utf-8"))

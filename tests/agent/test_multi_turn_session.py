@@ -341,11 +341,17 @@ def test_an_attachment_lands_inside_the_sandbox():
     assert "Path(file.filename or" in body and ").name" in body
 
 
+def _attach_body() -> str:
+    """The source of the `attach` route, up to the next route."""
+    i = ROUTES.find("async def attach(")
+    end = ROUTES.find("\n@router", i)
+    return ROUTES[i:end if end > 0 else None]
+
+
 def test_the_agent_is_told_the_path_not_handed_the_bytes():
     """A two-megabyte log pasted into a turn is the context window gone, and
     the agent can read exactly the part it needs."""
-    i = ROUTES.find("async def attach(")
-    body = ROUTES[i:i + 3000]
+    body = _attach_body()
     assert "send_turn(" in body
     assert "Read it." in body
     assert "blob.decode" not in body
@@ -355,8 +361,7 @@ def test_attachments_are_capped():
     from src.api.routers.claude_code import MAX_ATTACHMENT_BYTES
 
     assert 0 < MAX_ATTACHMENT_BYTES <= 10 * 1024 * 1024
-    i = ROUTES.find("async def attach(")
-    assert "status_code=413" in ROUTES[i:i + 3000]
+    assert "status_code=413" in _attach_body()
 
 
 def test_the_session_root_is_only_exposed_for_a_live_session():

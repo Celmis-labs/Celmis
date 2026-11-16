@@ -38,7 +38,7 @@ def build_default_registry(
     registry = LanguageRegistry()
 
     # Lazy import — so a user can add/remove an extractor without circular deps
-    from src.indexing.graph.languages.bsl import BslExtractor
+    from src.indexing.graph.languages.bsl import BslExtractor, BslFormBinExtractor
     from src.indexing.graph.languages.ci_workflow import (
         CIWorkflowExtractor,
         is_ci_workflow_file,
@@ -140,6 +140,13 @@ def build_default_registry(
         name="bsl",
         priority=10,
         extensions=(".bsl", ".os"),
+    )
+    # The module of an ordinary form, inside the form's binary `Form.bin`.
+    registry.register(
+        BslFormBinExtractor(ctx=ctx, repo_root=repo_root),
+        name="bsl_form_bin",
+        priority=10,
+        filename_patterns=("Form.bin",),
     )
 
     # The metadata XML of a configuration dump (`Catalogs/<Object>.xml`): `.xml`

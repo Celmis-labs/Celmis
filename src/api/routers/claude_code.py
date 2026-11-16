@@ -682,7 +682,12 @@ _TEXT_SUFFIXES = {
 #: attach button useless for the case people reach for first.
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
-_ATTACH_SUFFIXES = _TEXT_SUFFIXES | _IMAGE_SUFFIXES
+#: 1C files (external reports and data processors, an ordinary form's
+#: `Form.bin`). Binary, so they are unpacked next to themselves into text the
+#: agent can Read, with a report of what they hold — see `src.onec.unpack`.
+_ONEC_SUFFIXES = {".erf", ".epf", ".bin"}
+
+_ATTACH_SUFFIXES = _TEXT_SUFFIXES | _IMAGE_SUFFIXES | _ONEC_SUFFIXES
 
 #: A log worth reading is not a log worth pasting whole. Past this it stops
 #: being context and starts being the whole context window.
@@ -692,10 +697,34 @@ MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024
 #: model sees a resized image, not the file. One cap for both would have
 #: rejected the ordinary case while claiming to support it.
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+#: A 1C file is unpacked, not read whole, so it gets the unpacker's own ceiling.
+MAX_ONEC_BYTES = 20 * 1024 * 1024
 #: Everything staged for one not-yet-started session. Without it the staging
 #: endpoint is an unbounded upload target that costs disk before any session
 #: exists to own it.
 MAX_STAGED_TOTAL_BYTES = 30 * 1024 * 1024
+
+
+def _ceiling(suffix: str) -> int:
+    if suffix in _IMAGE_SUFFIXES:
+        return MAX_IMAGE_BYTES
+    return MAX_ONEC_BYTES if suffix in _ONEC_SUFFIXES else MAX_ATTACHMENT_BYTES
+
+
+def _kind_label(suffix: str) -> str:
+    if suffix in _IMAGE_SUFFIXES:
+        return "Images"
+    return "1C files" if suffix in _ONEC_SUFFIXES else "Attachments"
+
+
+def session_repo_dirs(root: Path) -> list[Path]:
+    """The repository clones of a session's workspace (its git checkouts)."""
+    if (root / ".git").exists():
+        return [root]
+    try:
+        return sorted(p for p in root.iterdir() if (p / ".git").exists())
+    except OSError:
+        return []
 
 
 @router.post("/api/agent-sessions/{session_id}/attachments", status_code=201)
@@ -733,15 +762,15 @@ async def attach(
             detail=(f"{Path(name).suffix or 'That file type'} is not something "
                     f"the agent can open. Text works — logs, CSV, JSON, "
                     f"markdown, diffs — and so do screenshots: PNG, JPEG, GIF, "
-                    f"WebP."),
+                    f"WebP, and 1C files: .erf, .epf, Form.bin."),
         )
     suffix = Path(name).suffix.lower()
-    ceiling = MAX_IMAGE_BYTES if suffix in _IMAGE_SUFFIXES else MAX_ATTACHMENT_BYTES
+    ceiling = _ceiling(suffix)
     blob = await file.read(ceiling + 1)
     if len(blob) > ceiling:
         raise HTTPException(
             status_code=413,
-            detail=f"{'Images' if suffix in _IMAGE_SUFFIXES else 'Attachments'} "
+            detail=f"{_kind_label(suffix)} "
                    f"are capped at "
                    f"{ceiling // 1024 // 1024} MB.",
         )
@@ -761,12 +790,22 @@ async def attach(
     rel = f"_attachments/{name}"
     logger.info("agent_attachment session=%s file=%s bytes=%d by=%s",
                 session_id, rel, len(blob), user.email)
+    report = None
+    if suffix in _ONEC_SUFFIXES:
+        from src.onec.unpack import unpack
+
+        report = await asyncio.to_thread(unpack, target, session_repo_dirs(root))
     # The agent is told it exists rather than being handed the contents: a two
     # megabyte log pasted into a turn is the context window gone, and it can
     # read exactly the part it needs.
-    send_turn(session_id,
-              f"I attached a file at `{rel}` ({len(blob)} bytes). Read it.")
-    return {"ok": True, "path": rel, "bytes": len(blob)}
+    if report:
+        send_turn(session_id,
+                  f"I attached a 1C file at `{rel}` ({len(blob)} bytes). It is unpacked "
+                  f"beside it; read `{report}` first, then the code it points to.")
+    else:
+        send_turn(session_id,
+                  f"I attached a file at `{rel}` ({len(blob)} bytes). Read it.")
+    return {"ok": True, "path": rel, "bytes": len(blob), "report": report}
 
 
 # ─── SSE stream: replay + live tail ──────────────────────────────────
@@ -916,12 +955,12 @@ async def stage_attachment(
                     f"can open. Text works — logs, CSV, JSON, markdown, diffs — "
                     f"and so do screenshots: PNG, JPEG, GIF, WebP."),
         )
-    ceiling = MAX_IMAGE_BYTES if suffix in _IMAGE_SUFFIXES else MAX_ATTACHMENT_BYTES
+    ceiling = _ceiling(suffix)
     blob = await file.read(ceiling + 1)
     if len(blob) > ceiling:
         raise HTTPException(
             status_code=413,
-            detail=f"{'Images' if suffix in _IMAGE_SUFFIXES else 'Attachments'} "
+            detail=f"{_kind_label(suffix)} "
                    f"are capped at {ceiling // 1024 // 1024} MB.",
         )
 

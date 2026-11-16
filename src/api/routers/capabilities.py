@@ -270,7 +270,8 @@ FEATURES: tuple[Feature, ...] = (
 
     # Backend-only capabilities: no page of their own, but a client that knows
     # they are off can say so instead of offering a setup flow that dead-ends.
-    Feature("mcp", ("/api/mcp", "/mcp"), ("/settings/mcp",)),
+    # `/api/onec` takes the uploads of the dev tool `inspect_external`.
+    Feature("mcp", ("/api/mcp", "/mcp", "/api/onec"), ("/settings/mcp",)),
     Feature("oauth_provider", ("/oauth", "/.well-known"), ("/admin/oauth-clients",)),
     # The receiver and the setup endpoint that tells you where to point the
     # provider are one feature: a mounted receiver nobody can find the URL of

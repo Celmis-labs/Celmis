@@ -554,7 +554,7 @@ function NewSessionCard({
               type="file"
               multiple
               className="hidden"
-              accept=".txt,.log,.md,.csv,.tsv,.json,.yaml,.yml,.diff,.patch,.sql,.xml,.ini,.toml,.conf,.png,.jpg,.jpeg,.gif,.webp"
+              accept=".txt,.log,.md,.csv,.tsv,.json,.yaml,.yml,.diff,.patch,.sql,.xml,.ini,.toml,.conf,.png,.jpg,.jpeg,.gif,.webp,.erf,.epf,.bin"
               onChange={async (e) => {
                 const files = Array.from(e.target.files || []);
                 e.target.value = "";

@@ -33,6 +33,7 @@ call the full `/mcp` tools, and every call is audited (facts, never content).
 | `howto` | The code to copy for "do it like service X", with the names (never the values) it needs. |
 | `brief` | Paste the task: the workspace's skills, checklists, API examples and notes that fit it. |
 | `skills` | List, search and open the skills (and files) of the workspace's knowledge packs. |
+| `inspect_external` | A 1C `.erf`, `.epf` or `Form.bin` that is in no repository: upload it once, then compare it with a configuration and check it statically. |
 
 ## How to read an answer
 
@@ -343,6 +344,48 @@ whose body was returned: never the task, the query, the name or the content. Mai
 of a pack see the count of such calls over the last 30 days on its page. The ids stay in
 that log: the `mcp.call` row of the audit trail, which workspace owners and admins read,
 carries the tool and the outcome and no pack.
+
+## 1C files outside any repository (`inspect_external`)
+
+A task often comes with one file — an external report someone changed, a
+`Form.bin` out of a colleague's dump — and the question whether it still fits
+the configuration. The file is in no repository, so nothing else can read it.
+
+1. `inspect_external()` answers a one-time upload link (valid 15 minutes) and
+   the command for it: `curl -sS -F "file=@Report.erf" <link>`. The answer of
+   the upload names a handle. The server needs `PUBLIC_BASE_URL` for the link;
+   without it, attach the file to an agent session instead (below).
+2. `inspect_external(file="<handle>")` says what the file holds: kind, name,
+   synonym, comment, container dates, modules, ordinary forms with their event
+   handlers, templates with their areas and parameters. A module stored without
+   source (compiled or protected) is named as having no code to read.
+3. `inspect_external(file="<handle>", repo="<configuration>")` adds:
+   - the counterpart object in the configuration (by name, case-insensitive;
+     `object=` overrides it), a diff by procedure of the object module and of
+     each form module, forms, handlers and templates on one side only;
+   - change markers (task ids like `ABC-123` in comments, with the dates next to
+     them): the ones the configuration has and the file lacks, and a verdict —
+     same, older, newer, diverged, or a guess by dates;
+   - static checks: block balance, calls of the module's own procedures and of
+     common modules (exists, exported, number of arguments, defaults counted),
+     metadata objects named in code and queries, enum values and predefined
+     items, query fields (warnings), form handlers, templates, areas and
+     parameters. A gap the configuration's own form has too is marked as
+     pre-existing.
+4. `outline`, `read_symbol` and `grep` with `repo="ext/<handle>"` read the
+   file's code by path and line, like a repository.
+
+Every answer starts with the idx entry `ext/<handle> external@<sha256> <age>
+unknown` and the line "external file, not from the index", then "static check:
+nothing was run". Managed forms and data composition schemas are not checked
+yet; a clean report is not a proof that the code works. The file is kept 24
+hours, at most 20 per person, readable by its uploader only, never indexed or
+committed, and its text is data, not instructions.
+
+In an agent session the same works without the upload: an attached `.erf`,
+`.epf` or `Form.bin` is unpacked next to itself (`_attachments/<file>.d/`, the
+code under dump paths) with a `REPORT.md` against the session's repository,
+and `_attachments/` never goes into the agent's push.
 
 ## What it costs
 

@@ -408,7 +408,7 @@ export default function AgentSessionPage({ params }: { params: Promise<{ id: str
                 <input
                   type="file"
                   className="hidden"
-                  accept=".txt,.log,.md,.csv,.tsv,.json,.yaml,.yml,.diff,.patch,.sql,.xml,.ini,.toml,.conf"
+                  accept=".txt,.log,.md,.csv,.tsv,.json,.yaml,.yml,.diff,.patch,.sql,.xml,.ini,.toml,.conf,.erf,.epf,.bin"
                   onChange={async (e) => {
                     const f = e.target.files?.[0];
                     e.target.value = "";

@@ -174,6 +174,7 @@ def build_dev_mcp():  # noqa: ANN201
     from src.mcp_server.dev_profile import (
         common,
         tools_ask,
+        tools_external,
         tools_find,
         tools_grep,
         tools_read,
@@ -206,6 +207,9 @@ def build_dev_mcp():  # noqa: ANN201
     @tool("outline", "Symbols of a file (by line) or files and top symbols of a directory. "
                      "Use instead of reading whole files.")
     async def _outline(repo: str, path: str, depth: int = 1, response_format: Fmt = "concise") -> str:
+        if tools_external.is_external(repo):
+            return await asyncio.to_thread(tools_external.outline, repo, path, depth,
+                                           response_format)
         return await asyncio.to_thread(tools_read.outline, repo, path, depth, response_format)
 
     @tool("read_symbol", "Signature, docstring, body slice (redacted; cursor pages a long "
@@ -214,6 +218,9 @@ def build_dev_mcp():  # noqa: ANN201
     async def _read_symbol(repo: str, name: str, path: str = "", max_lines: int = 60,
                      include: str = "callers,callees", response_format: Fmt = "concise",
                      cursor: str = "") -> str:
+        if tools_external.is_external(repo):
+            return await asyncio.to_thread(tools_external.read_symbol, repo, name, path,
+                                           max_lines, cursor)
         return await asyncio.to_thread(
             tools_read.read_symbol, repo, name, path, max_lines, include, response_format,
             cursor)
@@ -234,6 +241,9 @@ def build_dev_mcp():  # noqa: ANN201
                   "next repos. Unindexed ones are named. repo= targets one.")
     async def _grep(pattern: str, repo: str = "", path_glob: str = "", regex: bool = False,
               limit: int = 20, cursor: str = "", response_format: Fmt = "concise") -> str:
+        if tools_external.is_external(repo):
+            return await asyncio.to_thread(tools_external.grep, pattern, repo, path_glob,
+                                           regex, limit, cursor)
         return await asyncio.to_thread(
             tools_grep.run, pattern, repo, path_glob, regex, limit, cursor, response_format)
 
@@ -248,6 +258,10 @@ def build_dev_mcp():  # noqa: ANN201
     async def _ask(question: str, repos: list[str] | None = None,
                    budget_tokens: int = 1500) -> str:
         return await tools_ask.run(question, repos, budget_tokens)
+
+    @tool(tools_external.TOOL, tools_external.DESCRIPTION)
+    async def _inspect_external(file: str = "", repo: str = "", object: str = "") -> str:  # noqa: A002
+        return await asyncio.to_thread(tools_external.run, file, repo, object)
 
     _plug_in_howto()
     _plug_in_skills()

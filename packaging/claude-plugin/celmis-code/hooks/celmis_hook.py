@@ -53,7 +53,7 @@ import tempfile
 
 # --- copies of src/mcp_server/dev_contract.py (checked by tests/plugin) -----
 DEV_TOOLS = ("repos", "find", "outline", "read_symbol", "refs", "grep", "map",
-             "ask", "howto", "skills", "brief")
+             "ask", "howto", "inspect_external", "skills", "brief")
 IDX_LINE_RE = r"^idx: (?P<entries>.+)$"
 IDX_ENTRY_RE = (r"(?P<slug>[A-Za-z0-9._/-]+) (?P<branch>\S+)@(?P<sha>[0-9a-f]{7,40}) "
                 r"(?P<age>\S+) (?P<state>fresh|STALE|unknown)")

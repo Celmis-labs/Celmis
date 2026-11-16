@@ -504,6 +504,22 @@ def staging_root(session_id: str) -> Path:
     return get_settings().workspace_dir / "agent_staging" / session_id
 
 
+def _described(target: Path, rel: str, ws: AgentWorkspace) -> str:
+    """``rel``, or for a 1C file the same with where its unpacked report is."""
+    from src.onec.unpack import SUFFIXES, describe_attachment, unpack
+
+    if target.suffix.lower() not in SUFFIXES:
+        return rel
+    try:
+        report = unpack(target, [r.path for r in ws.repos])
+    except Exception as exc:  # noqa: BLE001 - the file itself is still attached
+        logger.warning("staged_onec_unpack_failed session=%s file=%s err=%s",
+                       ws.session_id, target.name, exc)
+        return rel
+    return describe_attachment(rel, f"_attachments/{Path(report).parent.name}/"
+                                    f"{Path(report).name}" if report else None)
+
+
 def adopt_staged(session_id: str, ws: AgentWorkspace) -> list[str]:
     """Move anything staged before the session started into its workspace.
 
@@ -523,7 +539,7 @@ def adopt_staged(session_id: str, ws: AgentWorkspace) -> list[str]:
         try:
             target = dest / item.name
             item.replace(target)
-            moved.append(f"_attachments/{item.name}")
+            moved.append(_described(target, f"_attachments/{item.name}", ws))
         except Exception as exc:  # noqa: BLE001
             logger.warning("staged_attachment_move_failed session=%s file=%s err=%s",
                            session_id, item.name, exc)
@@ -533,6 +549,12 @@ def adopt_staged(session_id: str, ws: AgentWorkspace) -> list[str]:
         logger.info("staged_attachments_adopted session=%s count=%d",
                     session_id, len(moved))
     return moved
+
+
+#: The user's attachments live in `_attachments/`, which a single-repo session
+#: keeps inside the clone: they (and a 1C file's unpacked code) are input to
+#: the session, never part of the branch it pushes.
+_NOT_ATTACHMENTS = (".", ":(exclude)_attachments")
 
 
 def commit_and_push(ws: AgentWorkspace, *, summary: str = "",
@@ -552,12 +574,13 @@ def commit_and_push(ws: AgentWorkspace, *, summary: str = "",
     pushed: list[dict] = []
 
     for repo in ws.repos:
-        status = _run(_GIT_BASE + ["status", "--porcelain"], cwd=repo.path)
+        status = _run(_GIT_BASE + ["status", "--porcelain", "--", *_NOT_ATTACHMENTS],
+                      cwd=repo.path)
         if not status.stdout.strip():
             # Untouched repo. A session that reads three and edits one must
             # not leave two empty branches behind for a human to clean up.
             continue
-        _run(_GIT_BASE + ["add", "-A"], cwd=repo.path)
+        _run(_GIT_BASE + ["add", "-A", "--", *_NOT_ATTACHMENTS], cwd=repo.path)
         message = _commit_message(
             ws, repo, summary=summary, prompt=prompt,
             requested_by=requested_by, title=title,

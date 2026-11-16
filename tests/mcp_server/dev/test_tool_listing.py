@@ -24,11 +24,13 @@ def _listing(mcp) -> list:
 
 #: Nine tools fitted in 6,000 characters. `skills` and `brief` (the workspace's
 #: knowledge packs) add two tools with descriptions of about 150 characters each
-#: and a small schema, so the cap is 6,500: the cost of the two, no more.
-LISTING_CAP = 6500
+#: and a small schema, so the cap became 6,500: the cost of the two, no more.
+#: `inspect_external` (a 1C file outside any repository) costs 490 characters
+#: (a 172-character description and three string arguments), so the cap is 7,000.
+LISTING_CAP = 7000
 
 
-def test_the_whole_tool_listing_stays_under_sixty_five_hundred_characters(dev_mcp):
+def test_the_whole_tool_listing_stays_under_seven_thousand_characters(dev_mcp):
     tools = _listing(dev_mcp)
     wire = json.dumps([t.model_dump(mode="json", exclude_none=True) for t in tools])
     assert len(wire) <= LISTING_CAP, len(wire)
@@ -50,9 +52,9 @@ def test_every_tool_is_marked_read_only(dev_mcp):
         assert t.annotations is not None and t.annotations.readOnlyHint is True, t.name
 
 
-def test_the_eleven_profile_tools_are_listed_howto_skills_and_brief_included(dev_mcp):
+def test_the_twelve_profile_tools_are_listed_howto_skills_and_brief_included(dev_mcp):
     names = [t.name for t in _listing(dev_mcp)]
-    assert len(names) == len(set(names)) == 11
+    assert len(names) == len(set(names)) == 12
     assert set(names) == set(DEV_TOOLS)
     assert DEV_TOOLS[-2:] == ("skills", "brief")
 

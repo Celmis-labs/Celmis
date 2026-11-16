@@ -662,14 +662,36 @@ MAX_SECONDS = 5.0
 _WS_RUN = re.compile(r"\s{65,}")
 
 
-def bound_whitespace(text: str) -> str:
-    """Runs of more than 64 whitespace characters cut to 64.
+def _bound_run(m: re.Match[str]) -> str:
+    """One run cut to 64 characters, keeping every line break of it.
 
-    No rule looks across a longer gap than that, so the cut changes nothing a
-    rule could have matched, and it keeps every pattern's cost linear on a
-    hostile line (``Authorization:`` followed by a megabyte of blanks).
+    Dropping a line break joins two lines, and every line number printed after
+    it is then off by one (trailing blanks of a padded comment, CRLF and the
+    next line's indentation easily make 65). The breaks stay inside the budget:
+    the trailing blanks of the first line and blank lines' blanks go first, the
+    indentation of the next line last. Only a run of more than 64 line breaks
+    is longer than 64, and then it is nothing but line breaks.
     """
-    return _WS_RUN.sub(lambda m: m.group(0)[:64], text) if len(text) > 64 else text
+    run = m.group(0)
+    parts = run.split("\n")
+    breaks = len(parts) - 1
+    if not breaks:
+        return run[:64]
+    room = max(0, 64 - breaks)
+    indent = parts[-1][:room]
+    return parts[0][:room - len(indent)] + "\n" * breaks + indent
+
+
+def bound_whitespace(text: str) -> str:
+    """Runs of more than 64 whitespace characters cut to 64, line breaks kept.
+
+    No rule looks across a longer gap than that (every rule bounds its gaps to
+    ``\\s{0,64}``), so the cut changes nothing a rule could have matched, and it
+    keeps every pattern's cost linear on a hostile line (``Authorization:``
+    followed by a megabyte of blanks). Line breaks survive the cut so that the
+    redacted text has the same lines as the original (see :func:`_bound_run`).
+    """
+    return _WS_RUN.sub(_bound_run, text) if len(text) > 64 else text
 
 
 class RedactionTimeout(RuntimeError):

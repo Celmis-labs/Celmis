@@ -58,6 +58,10 @@ Other tools:
 - `map` - repository or module map, to orient in an unfamiliar repository.
 - `ask` - an LLM answer. Slow and billed; only when the tools above cannot
   assemble the answer.
+- `inspect_external` - a 1C `.erf`/`.epf`/`Form.bin` that is in no repository.
+  With no `file` it gives a one-time upload link and a `curl` line; then
+  `file=<handle>` describes it, `repo=` adds a diff against that configuration
+  and static checks, and `outline`/`grep` with `repo=ext/<handle>` read it.
 
 ## "Do it like service X"
 

@@ -18,7 +18,7 @@ from src.mcp_server.scopes import SCOPE_DEV  # one definition of the scope strin
 DEV_PATH = "/mcp/dev"
 DEV_TOOLS = (
     "repos", "find", "outline", "read_symbol", "refs", "grep", "map", "ask", "howto",
-    "skills", "brief",
+    "inspect_external", "skills", "brief",
 )
 HOWTO_TOPICS = ("db", "auth", "config", "http_client", "logging", "messaging", "cache")
 
