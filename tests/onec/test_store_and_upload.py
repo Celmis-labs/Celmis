@@ -5,6 +5,7 @@ is readable by that caller alone and kept for a day."""
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -14,10 +15,23 @@ from src.api.routers import onec_external
 from src.onec import store
 from tests.onec import acme
 
+_REAL_ROOT = store._root
+
 
 @pytest.fixture(autouse=True)
 def _scratch_store(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "_root", lambda: tmp_path / "onec-external")
+
+
+def test_the_store_lives_in_the_configured_workspace(monkeypatch):
+    from src.config import get_settings
+
+    monkeypatch.setattr(store, "_root", _REAL_ROOT)
+    root = store._root()
+    assert root == Path(get_settings().workspace_dir) / "onec-external"
+    saved = store.redeem(store.issue_ticket("u-9", "ws-9"), acme.report_file(), "a.erf")
+    assert saved.path.is_relative_to(root)
+    assert store.get(saved.handle, "u-9", "ws-9") is not None
 
 
 @pytest.fixture

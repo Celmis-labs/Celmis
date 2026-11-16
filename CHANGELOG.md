@@ -20,6 +20,16 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.34] — 2026-11-16
+
+### Fixed
+
+- **`inspect_external` answers instead of failing on import.** The upload store
+  read a module-level `settings` that `src.config` does not export, so every
+  call — with or without arguments — failed with "cannot import name
+  'settings'". The tests had replaced the store's folder and never ran that
+  line; they now use the real one.
+
 ## [3.1.33] — 2026-11-16
 
 ### Added

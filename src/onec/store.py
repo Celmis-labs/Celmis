@@ -54,9 +54,9 @@ class Stored:
 
 
 def _root() -> Path:
-    from src.config import settings
+    from src.config import get_settings
 
-    return Path(settings.workspace_dir) / "onec-external"
+    return Path(get_settings().workspace_dir) / "onec-external"
 
 
 def _digest(ticket: str) -> str:

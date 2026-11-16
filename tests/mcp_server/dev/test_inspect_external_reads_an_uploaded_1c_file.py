@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
 import subprocess
 
 import pytest
@@ -44,7 +45,9 @@ def acme_repo(tmp_path, monkeypatch, as_caller, freshness):
     sha = _git(root, "rev-parse", "HEAD")
     monkeypatch.setattr(git_io, "clone_path", lambda slug: root)
     monkeypatch.setattr(git_io, "_unpacked_at", lambda slug, s: None)
-    monkeypatch.setattr(store, "_root", lambda: tmp_path / "onec-external")
+    # The real store, in the workspace `world` points the settings at: patching
+    # `_root` hid that it imported a name `src.config` does not have.
+    shutil.rmtree(store._root(), ignore_errors=True)
     tools_external._CACHE.clear()
     as_caller({SHOP: "code"})
     freshness[SHOP]["sha"] = sha

@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.indexing.graph.languages.factory import build_default_registry
+from src.indexing.graph.languages.factory import build_default_registry, walk_repo_files
+from tests.onec import acme
 from tests.onec.container_writer import form_bin, form_description
 
 REL = "Reports/ОтчетАкме/Forms/Форма/Ext/Form.bin"
@@ -44,3 +45,18 @@ def test_a_form_bin_without_a_module_gives_nothing():
 def test_a_broken_form_bin_is_a_parse_error_not_a_crash():
     res = _extract(b"\xff\xff\xff\x7f garbage")
     assert not res.symbols
+
+
+def test_a_dump_on_disk_gets_its_form_modules_indexed(tmp_path: Path):
+    """What the pipeline does: walk the repository, match, extract from the file."""
+    root = acme.write_dump(tmp_path)
+    reg = build_default_registry(repo_root=root)
+    found = {}
+    for f in walk_repo_files(root):
+        ex = reg.match(f)
+        if ex is not None and f.name == "Form.bin":
+            for s in ex.extract(f).symbols:
+                found[s.name.rsplit(".", 1)[-1]] = s.file
+    member = f"Reports/{acme.REPORT}/Forms/ФормаОтчета/Ext/Form.bin/module"
+    assert found.get("ПриОткрытии") == member
+    assert found.get("ПриЗакрытии") == member
