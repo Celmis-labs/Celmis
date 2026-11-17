@@ -49,6 +49,8 @@ class Para:
     text: str
     #: body | note (muted, small — provenance lines) | callout (boxed)
     kind: str = "body"
+    #: A callout's colour cue: neutral | bad | warn | good (see TONE_COLOURS)
+    tone: str = "neutral"
 
 
 @dataclass(frozen=True)
@@ -146,6 +148,72 @@ def severity_of(cell: str) -> str | None:
     """The severity a cell consists of, if it is nothing but a severity word."""
     word = strip_inline(cell).strip().lower()
     return word if word in SEVERITIES else None
+
+
+# ─── blocks ↔ plain data (an API answer, a stored result) ────────────
+
+_KINDS: dict[str, type] = {
+    "title": Title, "heading": Heading, "para": Para, "bullets": Bullets, "table": Table,
+    "stats": Stats, "code": Code, "page_break": PageBreak,
+}
+
+
+def blocks_to_data(blocks: list[Block]) -> list[dict]:
+    """Blocks as JSON-ready dicts: `{"type": "para", "text": …, …}`."""
+    out: list[dict] = []
+    for b in blocks:
+        kind = next(k for k, c in _KINDS.items() if isinstance(b, c))
+        item: dict = {"type": kind}
+        if isinstance(b, Title):
+            item.update(text=b.text, meta=[list(m) for m in b.meta])
+        elif isinstance(b, Heading):
+            item.update(level=b.level, text=b.text)
+        elif isinstance(b, Para):
+            item.update(text=b.text, kind=b.kind, tone=b.tone)
+        elif isinstance(b, Bullets):
+            item.update(items=list(b.items), ordered=b.ordered)
+        elif isinstance(b, Table):
+            item.update(header=list(b.header), rows=[list(r) for r in b.rows],
+                        widths=list(b.widths), mono=list(b.mono))
+        elif isinstance(b, Stats):
+            item.update(items=[{"label": i.label, "value": i.value, "tone": i.tone}
+                               for i in b.items])
+        elif isinstance(b, Code):
+            item.update(lines=list(b.lines))
+        out.append(item)
+    return out
+
+
+def blocks_from_data(data: list[dict]) -> list[Block]:
+    """The inverse of :func:`blocks_to_data`; an unknown or malformed item is skipped."""
+    out: list[Block] = []
+    for d in data or []:
+        try:
+            t = d.get("type")
+            if t == "title":
+                out.append(Title(str(d["text"]), [(str(k), str(v)) for k, v in d.get("meta", [])]))
+            elif t == "heading":
+                out.append(Heading(int(d["level"]), str(d["text"])))
+            elif t == "para":
+                out.append(Para(str(d["text"]), str(d.get("kind", "body")),
+                                str(d.get("tone", "neutral"))))
+            elif t == "bullets":
+                out.append(Bullets([str(i) for i in d["items"]], bool(d.get("ordered"))))
+            elif t == "table":
+                out.append(Table([str(h) for h in d["header"]],
+                                 [[str(c) for c in r] for r in d["rows"]],
+                                 [float(w) for w in d.get("widths", [])],
+                                 tuple(int(i) for i in d.get("mono", []))))
+            elif t == "stats":
+                out.append(Stats([Stat(str(i["label"]), str(i["value"]), str(i.get("tone", "neutral")))
+                                  for i in d["items"]]))
+            elif t == "code":
+                out.append(Code([str(x) for x in d["lines"]]))
+            elif t == "page_break":
+                out.append(PageBreak())
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    return out
 
 
 # ─── markdown → blocks ───────────────────────────────────────────────
@@ -284,6 +352,7 @@ def to_markdown_text(blocks: list[Block]) -> str:
 
 __all__ = [
     "BAND", "HEADER_FILL", "SEVERITIES", "SEVERITY_COLOURS", "TONE_COLOURS", "Block", "Bullets", "Code", "Heading", "PageBreak", "Para",
-    "Run", "Stat", "Stats", "Table", "Title", "parse_inline", "parse_markdown",
+    "Run", "Stat", "Stats", "Table", "Title", "blocks_from_data", "blocks_to_data",
+    "parse_inline", "parse_markdown",
     "severity_of", "strip_inline", "to_markdown_text",
 ]

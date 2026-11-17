@@ -40,10 +40,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { QueryState } from "@/components/ui/query-state";
 import { Select, type SelectOption } from "@/components/ui/select";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { OnecCheckTab } from "@/components/onec-check/onec-check-tab";
 import { WorkspaceBadge } from "@/components/workspace-badge";
 
 export default function ClaudePage() {
+  const [view, setView] = useState("sessions");
   const t = useT();
   const token = useToken();
   const qc = useQueryClient();
@@ -102,6 +105,16 @@ export default function ClaudePage() {
         tabs={<SectionTabs set="agent" />}
       />
 
+      <Tabs value={view} onValueChange={setView}>
+        <TabsList>
+          <TabsTrigger value="sessions">{t("nav.sessions")}</TabsTrigger>
+          <TabsTrigger value="onec">{t("onecCheck.tab")}</TabsTrigger>
+        </TabsList>
+      </Tabs>
+
+      {view === "onec" && <OnecCheckTab />}
+
+      {view === "sessions" && (<>
       {prefill && conn.data && !connected && (
         <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
           <p className="font-medium">{t("claude.prefillNeedsConnection")}</p>
@@ -113,7 +126,9 @@ export default function ClaudePage() {
 
       {connected && (
         <NewSessionCard
-          repos={(repos.data ?? []).map((r) => ({ value: r.slug, label: r.slug }))}
+          repos={(repos.data ?? []).map((r) => ({
+            value: r.slug, label: r.slug, readOnly: r.provider === "upload",
+          }))}
           projects={projects.data ?? []}
           prefill={prefill}
           onCreated={() => qc.invalidateQueries({ queryKey: ["agent-sessions"] })}
@@ -138,6 +153,7 @@ export default function ClaudePage() {
           </QueryState>
         </CardContent>
       </Card>
+      </>)}
     </PageShell>
   );
 }
@@ -316,7 +332,7 @@ const MAX_SESSION_REPOS = 5;
 function NewSessionCard({
   repos, projects, prefill, onCreated,
 }: {
-  repos: { value: string; label: string }[];
+  repos: { value: string; label: string; readOnly?: boolean }[];
   projects: ProjectOut[];
   prefill: { prompt: string; repo: string; alert: string } | null;
   onCreated: () => void;
@@ -400,7 +416,11 @@ function NewSessionCard({
       group: t("nav.projects"),
       hint: t("claude.projectRepoCount", { count: p.repos.length }),
     })),
-    ...repos.map((r) => ({ ...r, group: t("nav.repositories") })),
+    ...repos.map(({ readOnly, ...r }) => ({
+      ...r,
+      group: t("nav.repositories"),
+      ...(readOnly ? { hint: t("claude.repoReadOnly") } : {}),
+    })),
   ];
 
   // Files attached BEFORE the session exists. They are uploaded straight away

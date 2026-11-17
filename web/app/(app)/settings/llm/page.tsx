@@ -191,6 +191,9 @@ export default function LLMConfigPage() {
               refinement of the model chosen there — each agent either inherits
               that model or replaces it for itself. */}
           <ReviewAgentsCard isAdmin={isAdmin} config={config.data} />
+          <ProfileCard isAdmin={isAdmin} surface="onec_check" icon={<WandIcon className="h-4 w-4" />}
+            title={t("settings.llm.onecCheckTitle")} description={t("settings.llm.onecCheckDescription")}
+            config={config.data} />
           <ProfileCard isAdmin={isAdmin} surface="embeddings" icon={<DatabaseIcon className="h-4 w-4" />}
             title={t("settings.llm.embeddingsTitle")}
             description={t("settings.llm.embeddingsDescription")}

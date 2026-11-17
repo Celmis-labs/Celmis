@@ -119,3 +119,27 @@ def test_a_handle_that_is_not_one_reads_nothing():
 ])
 def test_the_file_name_is_cleaned_for_display(sent, shown):
     assert store.clean_name(sent) == shown
+
+
+def test_a_review_is_kept_for_its_owner_only(tmp_path):
+    rid = store.save_result("u-1", "ws-1", {"blocks": [], "file_name": "a.erf"})
+    assert store.RESULT_RE.match(rid)
+    assert store.get_result(rid, "u-1", "ws-1") == {"blocks": [], "file_name": "a.erf"}
+    assert store.get_result(rid, "u-2", "ws-1") is None
+    assert store.get_result(rid, "u-1", "ws-2") is None
+    assert store.get_result("../x", "u-1", "ws-1") is None
+    meta = store._root() / "reviews" / rid / "meta.json"
+    old = time.time() - store.HANDLE_TTL - 5
+    import json
+    info = json.loads(meta.read_text())
+    info["created"] = old
+    meta.write_text(json.dumps(info))
+    assert store.get_result(rid, "u-1", "ws-1") is None
+
+
+def test_a_signed_in_upload_needs_no_ticket(tmp_path):
+    saved = store.add("u-1", "ws-1", acme.report_file(), "Отчет.erf")
+    assert store.get(saved.handle, "u-1", "ws-1").read() == acme.report_file()
+    assert store.get(saved.handle, "u-2", "ws-1") is None
+    with pytest.raises(store.StoreError):
+        store.add("u-1", "ws-1", b"", "x.erf")

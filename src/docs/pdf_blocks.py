@@ -45,6 +45,10 @@ from src.docs.blocks import (
 FONT_DIR = Path(__file__).parent / "fonts"
 SANS, MONO = "NotoSans", "NotoMono"
 
+#: callout tone -> (fill, left rule)
+_CALLOUT = {"neutral": ("F3F4F6", "6B7280"), "bad": ("FEE2E2", "B91C1C"),
+            "warn": ("FFEDD5", "EA580C"), "good": ("DCFCE7", "16A34A")}
+
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
@@ -57,9 +61,10 @@ def _clean(text: str) -> str:
 
 
 class _Report(FPDF):
-    def __init__(self, footer_label: str) -> None:
+    def __init__(self, footer_label: str, page_words: tuple[str, str] = ("Page", "of")) -> None:
         super().__init__(orientation="P", unit="mm", format="A4")
         self.footer_label = footer_label
+        self.page_words = page_words
         self.set_margins(15, 16, 15)
         self.set_auto_page_break(auto=True, margin=18)
         self.alias_nb_pages("{nb}")
@@ -77,7 +82,8 @@ class _Report(FPDF):
         self.set_draw_color(*_rgb("D1D5DB"))
         self.line(self.l_margin, self.get_y() - 1.5, self.w - self.r_margin, self.get_y() - 1.5)
         self.cell(self.epw * 0.7, 5, _clean(self.footer_label), align="L")
-        self.cell(0, 5, f"Page {self.page_no()} of {{nb}}", align="R")
+        page, of = self.page_words
+        self.cell(0, 5, f"{page} {self.page_no()} {of} {{nb}}", align="R")
 
     # ── inline text ──────────────────────────────────────────────────
     def runs(self, text: str, size: float, h: float, colour: str = "111827") -> None:
@@ -105,7 +111,7 @@ def _heading(pdf: _Report, b: Heading) -> None:
     pdf.ln(before)
     pdf.set_font(SANS, "B", size)
     pdf.set_text_color(*_rgb(colour))
-    pdf.multi_cell(0, size * 0.5, _clean(strip_inline(b.text)), new_x="LMARGIN", new_y="NEXT")
+    pdf.multi_cell(0, size * 0.5, _clean(strip_inline(b.text)), align="L", new_x="LMARGIN", new_y="NEXT")
     if b.level == 1:
         pdf.set_draw_color(*_rgb("D1D5DB"))
         pdf.line(pdf.l_margin, pdf.get_y() + 0.5, pdf.w - pdf.r_margin, pdf.get_y() + 0.5)
@@ -115,19 +121,26 @@ def _heading(pdf: _Report, b: Heading) -> None:
 
 
 def _title(pdf: _Report, b: Title) -> None:
+    text = _clean(strip_inline(b.text))
+    size = 21 if len(text) <= 40 else (17 if len(text) <= 75 else 14)
+    pdf.set_font(SANS, "B", size)
+    width = pdf.w - 2 * pdf.l_margin
+    lines = pdf.multi_cell(width, size * 0.45, text, dry_run=True, output="LINES")
+    band = max(30.0, 14 + len(lines) * size * 0.45)
     pdf.set_fill_color(*_rgb(HEADER_FILL))
-    pdf.rect(0, 0, pdf.w, 30, style="F")
-    pdf.set_xy(pdf.l_margin, 10)
-    pdf.set_font(SANS, "B", 21)
+    pdf.rect(0, 0, pdf.w, band, style="F")
+    pdf.set_xy(pdf.l_margin, 9)
     pdf.set_text_color(255, 255, 255)
-    pdf.cell(0, 10, _clean(strip_inline(b.text)))
-    pdf.set_y(36)
+    pdf.multi_cell(width, size * 0.45, text, align="L", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_y(band + 6)
     for key, value in b.meta:
         pdf.set_font(SANS, "B", 9)
         pdf.set_text_color(*_rgb("374151"))
+        start_y = pdf.get_y()
         pdf.cell(26, 5, _clean(f"{key}:"))
         pdf.set_font(SANS, "", 9)
-        pdf.multi_cell(0, 5, _clean(strip_inline(value)), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_xy(pdf.l_margin + 26, start_y)
+        pdf.multi_cell(0, 5, _clean(strip_inline(value)), align="L", new_x="LMARGIN", new_y="NEXT")
     pdf.set_text_color(0, 0, 0)
     pdf.ln(2)
 
@@ -136,16 +149,24 @@ def _para(pdf: _Report, b: Para) -> None:
     if b.kind == "note":
         pdf.set_font(SANS, "I", 8)
         pdf.set_text_color(*_rgb("6B7280"))
-        pdf.multi_cell(0, 4, _clean(strip_inline(b.text)), new_x="LMARGIN", new_y="NEXT")
+        pdf.multi_cell(0, 4, _clean(strip_inline(b.text)), align="L", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(1.5)
     elif b.kind == "callout":
-        pdf.set_fill_color(*_rgb("FFF7ED"))
-        pdf.set_draw_color(*_rgb("EA580C"))
-        pdf.set_font(SANS, "", 9.5)
-        pdf.set_text_color(*_rgb("111827"))
-        pdf.multi_cell(0, 5, _clean(strip_inline(b.text)), border="L", fill=True,
-                       new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
+        fill, accent = _CALLOUT.get(b.tone, ("FFF7ED", "EA580C"))
+        pdf.set_fill_color(*_rgb(fill))
+        pdf.set_draw_color(*_rgb(accent))
+        pdf.set_line_width(0.8)
+        pdf.keep_with_next(30)
+        # Inline marks (a bold "Conclusion:") are kept: runs() writes them, the
+        # box is the fill behind a multi_cell of the plain text.
+        pdf.set_font(SANS, "", 10)
+        text = "".join(
+            f"**{r.text}**" if r.bold else (f"__{r.text}__" if r.italic else r.text)
+            for r in parse_inline(_clean(b.text)))
+        pdf.multi_cell(0, 5.2, text, border="L", fill=True, align="L", new_x="LMARGIN", new_y="NEXT",
+                       padding=(2, 3, 2, 3), markdown=True)
+        pdf.set_line_width(0.2)
+        pdf.ln(2.5)
     else:
         pdf.runs(b.text, 9.5, 4.8)
         pdf.ln(5.6)
@@ -235,18 +256,19 @@ def _code(pdf: _Report, b: Code) -> None:
     pdf.set_font(MONO, "", 7.5)
     pdf.set_fill_color(*_rgb("F4F4F5"))
     for line in b.lines or [""]:
-        pdf.multi_cell(0, 3.8, _clean(line) or " ", fill=True, new_x="LMARGIN", new_y="NEXT")
+        pdf.multi_cell(0, 3.8, _clean(line) or " ", fill=True, align="L",
+                       new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
 
 
 def blocks_to_pdf(blocks: list[Block], *, footer: str = "", title: str = "",
-                  author: str = "Celmis") -> bytes:
+                  author: str = "Celmis", page_words: tuple[str, str] = ("Page", "of")) -> bytes:
     """Render blocks to PDF bytes (page numbers in the footer, fonts embedded)."""
     # fpdf2 logs a warning per missing glyph; a CJK report would flood the log.
     logging.getLogger("fpdf").setLevel(logging.ERROR)
     first = next((b for b in blocks if isinstance(b, Title)), None)
     title = title or (first.text if first else "")
-    pdf = _Report(footer or title)
+    pdf = _Report(footer or title, page_words)
     pdf.set_title(title)
     pdf.set_author(author)
     pdf.set_creator(author)

@@ -91,7 +91,7 @@ _LOCAL_SENTINEL_KEY = "local-no-key"
 # chat-shaped and goes through the same LiteLLM client as chat and review
 # (build_llm_client → resolve_profile → api_base), so it takes one too.
 # Embeddings are env-configured on purpose (see the seam note in get_config).
-_BASE_URL_SURFACES = ("chat", "review", "agent")
+_BASE_URL_SURFACES = ("chat", "review", "agent", "onec_check")
 # Providers LiteLLM can actually route EMBEDDINGS to — a strict subset of the
 # chat vendors. litellm.embedding() has no anthropic or groq branch at all,
 # and OpenRouter's catalog serves no embedding models, so a profile saved with

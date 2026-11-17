@@ -387,6 +387,24 @@ In an agent session the same works without the upload: an attached `.erf`,
 code under dump paths) with a `REPORT.md` against the session's repository,
 and `_attachments/` never goes into the agent's push.
 
+### The same check in the web app
+
+The web app has this check as a "Check a file" tab, on the chats page and on the
+agent page. Drop a `.erf`, `.epf` or `Form.bin`, choose a configuration you may read
+(or none), and get a report: a verdict, what it was compared with, blockers with code
+excerpts from both sides, how stale the version is, what was checked and is fine, the
+limits, and a recommendation. It downloads as PDF, DOCX or Markdown. A report is kept
+24 hours, visible only to the person who made it.
+
+Every table, number, name and code excerpt comes from the check. A model is optional
+and only words the explanations: pick one in the tab, or configure the `onec_check`
+surface in Settings > LLM to offer it as the default. A model that fails, or that
+names a number the check does not contain, leaves the template wording in place.
+
+API (`/api/onec/review`, covered by the `mcp` feature switch): `POST /files`,
+`GET /configs`, `GET /models`, `POST /` (`handle`, `config`, `model`, `lang`),
+`GET /{id}` and `GET /{id}/export?format=pdf|docx|md`.
+
 ## What it costs
 
 Every answer is cut to a token budget, so the cost is bounded: the tool list is about

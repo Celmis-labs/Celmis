@@ -25,7 +25,16 @@ from src.onec.external import ExternalFile, handlers_of
 
 #: A task id as trackers write them: `ABC-123`.
 DEFAULT_MARKER = r"(?<![\w-])([A-Z][A-Z0-9]{1,9}-\d{1,6})(?![\w-])"
-_DATE = re.compile(r"(?<!\d)(?:(\d{1,2})\.(\d{1,2})\.(\d{4}|\d{2})|(\d{4})-(\d{2})-(\d{2}))(?!\d)")
+_DATE = re.compile(
+    r"(?<!\d)(?:(\d{1,2})\.(\d{1,2})\.(\d{4}|\d{2})|(\d{4})[-.](\d{2})[-.](\d{2}))(?!\d)")
+#: A task number written without a prefix, after a word that says what it is:
+#: `задача 123456`, `task #123456`, `№123456`, `ticket: 123456`.
+NUMBER_MARKER = (r"(?i)(?:задач[аиіуеою]*|task|ticket|issue|заявк[аиіуою]*|тикет|incident|№|#)"
+                 r"\s*[:№#]?\s*(\d{4,8})(?!\d)")
+#: A bare number of five to eight digits standing alone in a comment that also
+#: carries a date (`//404242+ от 14.03.2025`): how people mark a change by hand.
+_BARE_NUMBER = re.compile(r"(?<![\w.,:/+-])(\d{5,8})(?![\w.,:/-]|\d)")
+_LOOSE_DATE = re.compile(r"(?<!\d)\d{1,2}\.\d{1,2}(?:\.\d{2,4})?(?!\d)")
 _OUTSIDE = "(module code outside procedures)"
 
 
@@ -39,6 +48,7 @@ class ProcChange:
     minus: int = 0     # lines the configuration has that the file does not
     file_start: int = 0
     config_start: int = 0
+    hunks: int = 1     # separate pieces that differ inside the procedure
 
 
 @dataclass
@@ -56,6 +66,7 @@ class Marker:
     id: str
     dates: list[datetime]
     where: list[str]  # "path:line"
+    numeric: bool = False  # a bare number in a marker comment ("task 123456"), not `ABC-123`
 
     @property
     def latest(self) -> datetime | None:
@@ -126,6 +137,35 @@ def markers_of(text: str, path: str, pattern: re.Pattern[str],
     return out
 
 
+_NUMBER = re.compile(NUMBER_MARKER)
+
+
+def number_markers_of(text: str, path: str, into: dict[str, Marker]) -> dict[str, Marker]:
+    """Bare task numbers in the comments (`// задача 404242 14.03.2025`)."""
+    for i, (_code, comment) in enumerate(split_lines(text)):
+        if not comment:
+            continue
+        nums = _NUMBER.findall(comment)
+        if _LOOSE_DATE.search(comment):
+            nums += [n for n in _BARE_NUMBER.findall(comment) if n not in nums]
+        if not nums:
+            continue
+        dates = [d for d in (_date(m) for m in _DATE.finditer(comment))
+                 if d is not None and 1990 <= d.year <= 2100]
+        for key in nums:
+            mk = into.setdefault(key, Marker(key, [], [], numeric=True))
+            mk.dates.extend(dates)
+            if len(mk.where) < 5:
+                mk.where.append(f"{path}:{i + 1}")
+    return into
+
+
+def all_markers_of(text: str, path: str, pattern: re.Pattern[str],
+                   into: dict[str, Marker] | None = None) -> dict[str, Marker]:
+    out = markers_of(text, path, pattern, into)
+    return number_markers_of(text, path, out)
+
+
 def _pieces(text: str) -> dict[str, tuple[Procedure | None, str]]:
     """lower-case name → (procedure, normalized text); the code outside the
     procedures is one more piece."""
@@ -162,14 +202,15 @@ def diff_modules(label: str, file_path: str, file_text: str,
             out.same += 1
             continue
         a, b = other[1].split("\n"), body.split("\n")
-        plus = minus = 0
+        plus = minus = hunks = 0
         for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
             if op != "equal":
                 minus += i2 - i1
                 plus += j2 - j1
+                hunks += 1
         out.changes.append(ProcChange(name, "changed", len(b), len(a), plus, minus,
                                       proc.start if proc else 0,
-                                      other[0].start if other[0] else 0))
+                                      other[0].start if other[0] else 0, hunks))
     for key, (proc, body) in theirs.items():
         if key not in mine:
             n = body.count("\n") + 1
@@ -204,7 +245,7 @@ def compare(ext: ExternalFile, cfg: Config, override: str = "",
     out = Comparison(cfg.label, None, file_saved=ext.saved)
     for path, text in ext.texts.items():
         if path.endswith(".bsl"):
-            markers_of(text, path, pattern, out.file_markers)
+            all_markers_of(text, path, pattern, out.file_markers)
     found = counterpart(ext, cfg, override)
     if found is None:
         out.reason = (f"no object named {override or ext.name} among "
@@ -221,7 +262,7 @@ def compare(ext: ExternalFile, cfg: Config, override: str = "",
     obj = next((m for m in ext.modules if m.owner == "object"), None)
     cfg_obj = cfg.module(kind, name, "ObjectModule")
     if cfg_obj:
-        markers_of(cfg_obj[1], cfg_obj[0], pattern, out.config_markers)
+        all_markers_of(cfg_obj[1], cfg_obj[0], pattern, out.config_markers)
     if obj is not None and obj.text is not None:
         out.modules.append(diff_modules("object module", obj.path, obj.text,
                                         cfg_obj[0] if cfg_obj else None,
@@ -239,7 +280,7 @@ def compare(ext: ExternalFile, cfg: Config, override: str = "",
             continue
         rel, text, description = got
         if text:
-            markers_of(text, rel, pattern, out.config_markers)
+            all_markers_of(text, rel, pattern, out.config_markers)
         mine = file_forms.get(key)
         if mine is None:
             out.forms_missing.append(real)

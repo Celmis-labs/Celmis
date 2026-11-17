@@ -32,7 +32,9 @@ logger = logging.getLogger(__name__)
 #: default in both directions: a workspace that points chat at a strong,
 #: expensive model pays that price for a JSON classification, and one that
 #: points chat at something cheap gets a planner that mis-reads sentences.
-PROFILE_NAMES = ("chat", "review", "embeddings", "agent")
+#: "onec_check" words the report on an external 1C file (/api/onec/review). Unset,
+#: the tab offers no default model: nothing is called unless a model is picked.
+PROFILE_NAMES = ("chat", "review", "embeddings", "agent", "onec_check")
 
 # Provider slug → LiteLLM prefix (google uses the native Gemini client for the
 # `chat`/`embeddings` surfaces, but LiteLLM prefix is `gemini` when routed).
@@ -65,6 +67,7 @@ _DEFAULTS = {
     "review":     ("google", None),
     "embeddings": ("google", None),   # model None → settings.gemini_embedding_model
     "agent":      ("google", None),   # falls back to the chat model
+    "onec_check": ("google", None),
 }
 
 _WORKSPACE_USER = "workspace"
@@ -209,7 +212,7 @@ def resolve_profile(surface: str, workspace_id: str = "default") -> Profile:
     if not model:
         if surface == "embeddings":
             model = s.gemini_embedding_model
-        elif surface in ("chat", "agent"):
+        elif surface in ("chat", "agent", "onec_check"):
             model = s.gemini_generation_model
         else:  # review
             model = s.gemini_generation_model

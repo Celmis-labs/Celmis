@@ -79,7 +79,7 @@ def _read_json(path: Path) -> dict | None:
 def cleanup(root: Path | None = None, now: float | None = None) -> None:
     root = root or _root()
     now = now or time.time()
-    for sub, ttl in (("tickets", TICKET_TTL), ("files", HANDLE_TTL)):
+    for sub, ttl in (("tickets", TICKET_TTL), ("files", HANDLE_TTL), ("reviews", HANDLE_TTL)):
         base = root / sub
         if not base.is_dir():
             continue
@@ -122,20 +122,36 @@ def redeem(ticket: str, data: bytes, file_name: str) -> Stored:
         if meta is None:
             raise StoreError("unknown or expired upload link")
         tpath.unlink(missing_ok=True)  # single use, whatever happens next
-        user, ws = meta.get("user_id", ""), meta.get("workspace_id", "")
-        mine = [s for s in _all(root) if s.user_id == user and s.workspace_id == ws]
-        if len(mine) >= MAX_PER_USER:
-            for old in sorted(mine, key=lambda s: s.created)[: len(mine) - MAX_PER_USER + 1]:
-                shutil.rmtree(old.path, ignore_errors=True)
-        handle = "x" + secrets.token_hex(8)
-        folder = root / "files" / handle
-        folder.mkdir(parents=True)
-        (folder / "file.bin").write_bytes(data)
-        info = {"handle": handle, "file_name": clean_name(file_name), "size": len(data),
-                "sha256": hashlib.sha256(data).hexdigest(), "created": time.time(),
-                "user_id": user, "workspace_id": ws}
-        _write_json(folder / "meta.json", info)
+        return _put(root, meta.get("user_id", ""), meta.get("workspace_id", ""), data, file_name)
+
+
+def _put(root: Path, user: str, ws: str, data: bytes, file_name: str) -> Stored:
+    mine = [s for s in _all(root) if s.user_id == user and s.workspace_id == ws]
+    if len(mine) >= MAX_PER_USER:
+        for old in sorted(mine, key=lambda s: s.created)[: len(mine) - MAX_PER_USER + 1]:
+            shutil.rmtree(old.path, ignore_errors=True)
+    handle = "x" + secrets.token_hex(8)
+    folder = root / "files" / handle
+    folder.mkdir(parents=True)
+    (folder / "file.bin").write_bytes(data)
+    info = {"handle": handle, "file_name": clean_name(file_name), "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(), "created": time.time(),
+            "user_id": user, "workspace_id": ws}
+    _write_json(folder / "meta.json", info)
     return _stored(info, folder)
+
+
+def add(user_id: str, workspace_id: str, data: bytes, file_name: str) -> Stored:
+    """Store ``data`` for a signed-in caller (the web tab), with no ticket.
+    Raises StoreError."""
+    if not data:
+        raise StoreError("the file is empty")
+    if len(data) > MAX_BYTES:
+        raise StoreError(f"the file is larger than {MAX_BYTES // (1024 * 1024)} MB")
+    root = _root()
+    with _LOCK:
+        cleanup(root)
+        return _put(root, user_id, workspace_id, data, file_name)
 
 
 def _stored(info: dict, folder: Path) -> Stored:
@@ -179,6 +195,53 @@ def mine(user_id: str, workspace_id: str) -> list[Stored]:
     return sorted((s for s in _all(root) if s.user_id == user_id
                    and s.workspace_id == workspace_id and now - s.created <= HANDLE_TTL),
                   key=lambda s: s.created, reverse=True)
+
+
+# ─── results of a review: kept like the files, for their owner alone ──
+
+RESULT_RE = re.compile(r"^r[0-9a-f]{16}$")
+MAX_RESULTS_PER_USER = 30
+
+
+def save_result(user_id: str, workspace_id: str, payload: dict) -> str:
+    """Keep a review's result (a JSON-ready dict) for 24 h; its id."""
+    root = _root()
+    with _LOCK:
+        cleanup(root)
+        base = root / "reviews"
+        base.mkdir(parents=True, exist_ok=True)
+        mine = []
+        for entry in base.iterdir():
+            meta = _read_json(entry / "meta.json")
+            if meta and meta.get("user_id") == user_id and meta.get("workspace_id") == workspace_id:
+                mine.append((meta.get("created", 0), entry))
+        for _c, old in sorted(mine)[: max(0, len(mine) - MAX_RESULTS_PER_USER + 1)]:
+            shutil.rmtree(old, ignore_errors=True)
+        rid = "r" + secrets.token_hex(8)
+        folder = base / rid
+        folder.mkdir()
+        (folder / "result.json").write_text(json.dumps(payload, ensure_ascii=False),
+                                            encoding="utf-8")
+        _write_json(folder / "meta.json", {"id": rid, "created": time.time(),
+                                           "user_id": user_id, "workspace_id": workspace_id})
+    return rid
+
+
+def get_result(rid: str, user_id: str, workspace_id: str) -> dict | None:
+    """The result ``rid`` of this caller, or None (unknown, expired or not theirs)."""
+    if not RESULT_RE.match(rid or ""):
+        return None
+    folder = _root() / "reviews" / rid
+    meta = _read_json(folder / "meta.json")
+    if meta is None:
+        return None
+    if time.time() - meta.get("created", 0) > HANDLE_TTL:
+        with _LOCK:
+            shutil.rmtree(folder, ignore_errors=True)
+        return None
+    if meta.get("user_id") != user_id or meta.get("workspace_id") != workspace_id:
+        return None
+    return _read_json(folder / "result.json")
 
 
 _NAME_BAD = re.compile(r"[^\w.\- ()]+")

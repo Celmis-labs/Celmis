@@ -57,6 +57,7 @@ from src.api.routers import models as models_router
 from src.api.routers import oauth as oauth_router
 from src.api.routers import oauth_metadata as oauth_metadata_router
 from src.api.routers import onec_external as onec_external_router
+from src.api.routers import onec_review as onec_review_router
 from src.api.routers import ops_gateway as ops_gateway_router
 from src.api.routers import ops_metrics as ops_metrics_router
 from src.api.routers import project_mcp_tokens as project_mcp_tokens_router
@@ -554,6 +555,7 @@ def build_app() -> FastAPI:
     # Embedded Claude Code agent (subscription auth)
     app.include_router(claude_code_router.router)
     app.include_router(onec_external_router.router)
+    app.include_router(onec_review_router.router)
     # Monitoring alert ingest + "Fix from here"
     app.include_router(alerts_router.router)
     # Dependency audit (versions + vulnerabilities)

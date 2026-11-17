@@ -39,11 +39,44 @@ class Finding:
     line: int
     message: str
     pre_existing: bool = False  # the configuration's counterpart has the same problem
+    #: What kind of finding this is, for a report that words it itself:
+    #: missing_object | missing_method | not_exported | arity | missing_enum_value |
+    #: missing_predefined | missing_template | unbalanced | no_end | handler | other.
+    code: str = "other"
+    subject: str = ""            # the name the finding is about (an object, a method)
+    data: dict = field(default_factory=dict)
+
+
+@dataclass
+class Stats:
+    """What the checks looked at, in numbers: a clean line of a report says "75
+    objects exist", not just "nothing found"."""
+
+    #: (type directory, lower-case name) → the configuration's spelling, or None when absent
+    refs: dict[tuple[str, str], str | None] = field(default_factory=dict)
+    ref_names: dict[tuple[str, str], str] = field(default_factory=dict)  # as written in code
+    calls_total: int = 0
+    calls_bad: int = 0
+    handlers_total: int = 0
+    handlers_missing: int = 0
+    #: module path → {"Процедура": (opened, closed), …} for procedures, functions and blocks
+    balance: dict[str, dict[str, tuple[int, int]]] = field(default_factory=dict)
+    areas_used: set[str] = field(default_factory=set)
+    areas_missing: set[str] = field(default_factory=set)
+    fields_checked: int = 0
+    fields_missing: int = 0
+
+    def ref(self, plural: str, written: str, real: str | None) -> None:
+        key = (plural, written.lower())
+        self.ref_names.setdefault(key, written)
+        if real is not None or key not in self.refs:
+            self.refs[key] = real
 
 
 @dataclass
 class CheckResult:
     findings: list[Finding] = field(default_factory=list)
+    stats: Stats = field(default_factory=Stats)
     checked: list[str] = field(default_factory=list)   # what was looked at
     skipped: list[str] = field(default_factory=list)   # what could not be
     truncated: int = 0
@@ -240,12 +273,21 @@ class Checker:
         raw = text.replace("\r\n", "\n").split("\n")
         for p in procs:
             last = stripped[p.end - 1].strip() if p.end - 1 < len(stripped) else ""
+            is_fn = p.kind.lower() in ("функция", "function")
+            bal = self.result.stats.balance.setdefault(path, {})
+            kind_name = "Функция" if is_fn else "Процедура"
+            o, c = bal.get(kind_name, (0, 0))
             if not re.match(r"(?:КонецПроцедуры|КонецФункции|EndProcedure|EndFunction)\b",
                             last, re.IGNORECASE):
+                bal[kind_name] = (o + 1, c)
                 self.result.add(Finding("error", path, p.start,
-                                        f"{p.name}: no КонецПроцедуры/КонецФункции"))
+                                        f"{p.name}: no КонецПроцедуры/КонецФункции",
+                                        code="no_end", subject=p.name))
                 continue
+            bal[kind_name] = (o + 1, c + 1)
             counts = {name: 0 for name, _o, _c in _BLOCKS}
+            opened = {name: 0 for name, _o, _c in _BLOCKS}
+            closed = {name: 0 for name, _o, _c in _BLOCKS}
             for i in range(p.start, p.end - 1):
                 code = stripped[i]
                 if code.lstrip().startswith("#"):
@@ -255,14 +297,20 @@ class Checker:
                     for name, opens, closes in _BLOCKS:
                         if lw in opens:
                             counts[name] += 1
+                            opened[name] += 1
                         elif lw in closes:
                             counts[name] -= 1
+                            closed[name] += 1
+            for name in counts:
+                o, c = bal.get(name, (0, 0))
+                bal[name] = (o + opened[name], c + closed[name])
             for name, n in counts.items():
                 if n:
                     self.result.add(Finding(
                         "error", path, p.start,
                         f"{p.name}: {abs(n)} {name} block(s) "
-                        + ("not closed" if n > 0 else "closed without being opened")))
+                        + ("not closed" if n > 0 else "closed without being opened"),
+                        code="unbalanced", subject=p.name, data={"block": name, "n": n}))
         depth = {name: 0 for name, _o, _c in _PREPROCESSOR}
         for ln in raw:
             word = ln.strip().split(" ")[0].split("\t")[0].lower()
@@ -274,7 +322,9 @@ class Checker:
         for name, n in depth.items():
             if n:
                 self.result.add(Finding("error", path, 1, f"module: {abs(n)} {name} "
-                                        + ("not closed" if n > 0 else "closed too often")))
+                                        + ("not closed" if n > 0 else "closed too often"),
+                                        code="unbalanced", subject=name,
+                                        data={"block": name, "n": n}))
 
     def _local_calls(self, path: str, joined: str, at: _Offsets,
                      local: dict[str, Procedure]) -> None:
@@ -302,21 +352,30 @@ class Checker:
             if procs is None:
                 self.result.skipped.append(f"common module {real}: its code could not be read")
                 continue
+            st = self.result.stats
+            st.calls_total += 1
             proc = procs.get(method.lower())
             if proc is None:
+                st.calls_bad += 1
                 self.result.add(Finding("error", path, line,
                                         f"{real}.{method}: no such method in common module "
-                                        f"{real}"))
+                                        f"{real}", code="missing_method",
+                                        subject=f"{real}.{method}", data={"module": real}))
                 continue
             if not proc.exported:
+                st.calls_bad += 1
                 self.result.add(Finding("error", path, line,
-                                        f"{real}.{proc.name}: the method is not exported"))
+                                        f"{real}.{proc.name}: the method is not exported",
+                                        code="not_exported", subject=f"{real}.{proc.name}"))
                 continue
             n = _args(joined, m.end() - 1)
             problem = _arity(proc, n) if n is not None else ""
             if problem:
+                st.calls_bad += 1
                 self.result.add(Finding("error", path, line, f"{real}.{proc.name}: {problem}; "
-                                        f"signature {proc.signature()}"))
+                                        f"signature {proc.signature()}", code="arity",
+                                        subject=f"{real}.{proc.name}",
+                                        data={"passed": n, "signature": proc.signature()}))
 
     def _manager_refs(self, path: str, joined: str, at: _Offsets) -> None:
         cfg = self.cfg
@@ -327,13 +386,17 @@ class Checker:
             name, member, call = m.group(2), m.group(3), m.group(4)
             line = at.line(m.start())
             real = cfg.find(plural, name)
+            if plural != "CommonModules":
+                self.result.stats.ref(plural, name, real)
             if real is None:
                 if plural == "CommonModules":
                     continue
                 self.result.add(Finding("error", path, line,
                                         f"{m.group(1)}.{name}: the configuration has no "
                                         f"{plural[:-1] if plural.endswith('s') else plural} "
-                                        f"named {name}"))
+                                        f"named {name}", code="missing_object",
+                                        subject=f"{m.group(1)}.{name}",
+                                        data={"plural": plural, "name": name, "where": "code"}))
                 continue
             if member is None:
                 continue
@@ -344,7 +407,9 @@ class Checker:
                 if values is not None and member.lower() not in values:
                     self.result.add(Finding("error", path, line,
                                             f"Перечисления.{real}.{member}: the enum has no "
-                                            "such value"))
+                                            "such value", code="missing_enum_value",
+                                            subject=f"{real}.{member}",
+                                            data={"enum": real, "value": member}))
                 continue
             if not call or member.lower() in _MANAGER_METHODS:
                 continue
@@ -411,11 +476,16 @@ class Checker:
                 at = line + value[:m.start()].count("\n")
                 if real is None and m.group(1).lower() in alias_words:
                     continue  # `… КАК Документ` makes `Документ.Номер` a field
+                self.result.stats.ref(plural, m.group(2), real)
                 if real is None:
                     self.result.add(Finding("error", path, at,
                                             f"{'query' if is_query else 'string'}: "
                                             f"{m.group(1)}.{m.group(2)}: the configuration has no "
-                                            f"such object"))
+                                            f"such object", code="missing_object",
+                                            subject=f"{m.group(1)}.{m.group(2)}",
+                                            data={"plural": plural, "name": m.group(2),
+                                                  "where": "query" if is_query else "string",
+                                                  "sub": m.group(3) or ""}))
                     continue
                 sub = m.group(3)
                 in_value = bool(re.search(r"(?:ЗНАЧЕНИЕ|VALUE)\s*\(\s*$", value[:m.start()],
@@ -444,11 +514,15 @@ class Checker:
                     continue  # virtual tables add fields (…Остаток, …Оборот) of their own
                 known = cfg.children(plural, real)
                 fld = m.group(2).lower()
+                if known:
+                    self.result.stats.fields_checked += 1
                 if known and fld not in known and fld not in _STANDARD_FIELDS:
+                    self.result.stats.fields_missing += 1
                     self.result.add(Finding("warning", path,
                                             line + value[:m.start()].count("\n"),
                                             f"query: {m.group(1)}.{m.group(2)}: {plural}.{real} "
-                                            "lists no such attribute"))
+                                            "lists no such attribute", code="missing_field",
+                                            subject=f"{real}.{m.group(2)}"))
 
     def _predefined(self, path: str, line: int, value: str) -> None:
         """`ЗНАЧЕНИЕ(Перечисление.X.Значение)`, `ЗНАЧЕНИЕ(Справочник.X.Предопределенный)`
@@ -467,7 +541,11 @@ class Checker:
                 what = "the enum has no such value" if plural == "Enums" else (
                     "no predefined item of that name")
                 self.result.add(Finding("error", path, line + value[:m.start()].count("\n"),
-                                        f"{m.group(1)}.{m.group(2)}.{item}: {what}"))
+                                        f"{m.group(1)}.{m.group(2)}.{item}: {what}",
+                                        code=("missing_enum_value" if plural == "Enums"
+                                              else "missing_predefined"),
+                                        subject=f"{real}.{item}",
+                                        data={"enum": real, "value": item}))
 
     def _templates(self, path: str, kept: str, at: _Offsets) -> None:
         own = {t.name.lower() for t in self.ext.templates}
@@ -482,16 +560,20 @@ class Checker:
                 real = self.cfg.find(plural, m.group(2) or "")
                 if real and name.lower() not in self.cfg.templates(plural, real):
                     self.result.add(Finding("error", path, line,
-                                            f"{plural}.{real} has no template {name}"))
+                                            f"{plural}.{real} has no template {name}",
+                                            code="missing_template", subject=name))
             elif not plural and name.lower() not in own:
                 self.result.add(Finding("error", path, line,
                                         f"ПолучитьМакет(\"{name}\"): the file has no template "
-                                        f"named {name}"))
+                                        f"named {name}", code="missing_template", subject=name))
         if not sheets:
             return
         for m in _GET_AREA.finditer(kept):
             for part in m.group(1).split("|"):
+                if part:
+                    self.result.stats.areas_used.add(part)
                 if part and part.lower() not in areas:
+                    self.result.stats.areas_missing.add(part)
                     self.result.add(Finding("warning", path, at.line(m.start()),
                                             f"ПолучитьОбласть(\"{m.group(1)}\"): no template of "
                                             f"the file has an area {part}"))
@@ -517,6 +599,7 @@ class Checker:
                 continue
             have = {p.name.lower() for p in procedures(module.text)}
             missing = [h for h in form.handlers if h.lower() not in have]
+            self.result.stats.handlers_total += len(form.handlers)
             if not missing:
                 continue
             theirs_missing: set[str] = set()
@@ -529,11 +612,13 @@ class Checker:
                     theirs_missing = {h for h in bound if h not in theirs}
             for h in missing:
                 pre = h.lower() in theirs_missing
+                self.result.stats.handlers_missing += 1
                 self.result.add(Finding(
                     "error", module.path, 1,
                     f"form {form.name}: handler {h} is bound to an event but the module has no "
                     "such procedure" + (" (the configuration's form has the same problem)"
-                                        if pre else ""), pre_existing=pre))
+                                        if pre else ""), pre_existing=pre,
+                    code="handler", subject=h, data={"form": form.name}))
 
 
 def check(ext: ExternalFile, cfg: Config | None) -> CheckResult:

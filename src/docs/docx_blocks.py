@@ -163,6 +163,9 @@ _STYLES = (
     + "</w:styles>"
 )
 
+_CALLOUT_FILL = {"neutral": ("F3F4F6", "6B7280"), "bad": ("FEE2E2", "B91C1C"),
+                 "warn": ("FFEDD5", "EA580C"), "good": ("DCFCE7", "16A34A")}
+
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
@@ -306,7 +309,7 @@ def _numbering(n_ordered: int) -> str:
     )
 
 
-def _footer(label: str) -> str:
+def _footer(label: str, page_words: tuple[str, str] = ("Page", "of")) -> str:
     def field(code: str) -> str:
         return (
             '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
@@ -317,7 +320,8 @@ def _footer(label: str) -> str:
         return f'<w:r><w:t xml:space="preserve">{_t(s)}</w:t></w:r>'
     return (
         f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="{W_NS}">'
-        + _p(text(f"{label}  ·  Page ") + field("PAGE") + text(" of ") + field("NUMPAGES"),
+        + _p(text(f"{label}  ·  {page_words[0]} ") + field("PAGE") + text(f" {page_words[1]} ")
+           + field("NUMPAGES"),
              "Footer")
         + "</w:ftr>"
     )
@@ -333,7 +337,8 @@ def _core(title: str, author: str) -> str:
     )
 
 
-def blocks_to_docx(blocks: list[Block], *, footer: str = "", author: str = "Celmis") -> bytes:
+def blocks_to_docx(blocks: list[Block], *, footer: str = "", author: str = "Celmis",
+                   page_words: tuple[str, str] = ("Page", "of")) -> bytes:
     """Render blocks to a .docx. `footer` is the left part of the page footer."""
     body: list[str] = []
     n_ordered = 0
@@ -358,7 +363,13 @@ def blocks_to_docx(blocks: list[Block], *, footer: str = "", author: str = "Celm
             body.append(_p(_runs_xml(b.text), f"Heading{min(max(b.level, 1), 4)}", before()))
         elif isinstance(b, Para):
             style = {"note": "Note", "callout": "Callout"}.get(b.kind)
-            body.append(_p(_runs_xml(b.text), style, before()))
+            extra = before()
+            if b.kind == "callout" and b.tone in _CALLOUT_FILL:
+                fill, rule = _CALLOUT_FILL[b.tone]
+                # a later <w:shd>/<w:pBdr> in the paragraph overrides the style's
+                extra += (f'<w:pBdr><w:left w:val="single" w:sz="24" w:space="6" '
+                          f'w:color="{rule}"/></w:pBdr>{_shd(fill)}')
+            body.append(_p(_runs_xml(b.text), style, extra))
         elif isinstance(b, Bullets):
             if b.ordered:
                 n_ordered += 1
@@ -396,7 +407,7 @@ def blocks_to_docx(blocks: list[Block], *, footer: str = "", author: str = "Celm
         z.writestr("word/_rels/document.xml.rels", _DOC_RELS)
         z.writestr("word/styles.xml", _STYLES)
         z.writestr("word/numbering.xml", _numbering(n_ordered))
-        z.writestr("word/footer1.xml", _footer(footer or title))
+        z.writestr("word/footer1.xml", _footer(footer or title, page_words))
         z.writestr("docProps/core.xml", _core(title, author))
         z.writestr("word/document.xml", document)
     return buf.getvalue()

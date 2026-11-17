@@ -48,6 +48,7 @@ class _FakeRepo:
     clean_url = "https://github.com/acme/widgets.git"
     push_url = "https://x-access-token:ghp_SECRET123%2Fx@github.com/acme/widgets.git"
     default_branch = "main"
+    read_only = False
 
 
 class _Calls:

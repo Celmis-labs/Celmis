@@ -1277,6 +1277,7 @@ const SURFACE_TITLES: Record<string, string> = {
   review: "settings.llm.reviewTitle",
   agent: "settings.llm.agentTitle",
   embeddings: "settings.llm.embeddingsTitle",
+  onec_check: "settings.llm.onecCheckTitle",
 };
 
 /** The surfaces a reply named, spelled for whoever is reading it.

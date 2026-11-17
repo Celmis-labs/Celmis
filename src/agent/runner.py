@@ -503,6 +503,7 @@ async def _run_session(session_id: str, *, resume: bool = False) -> None:
                 requested_by=_requester(row),
                 title=getattr(row, "title", "") or "",
                 verifications=exec_runs(row.id))
+            await _note_read_only_changes(session_id, workspace)
             if pushed:
                 if pushed.get("branch"):
                     pr = await asyncio.to_thread(
@@ -694,6 +695,22 @@ def _push_safely(workspace, *, summary: str = "", prompt: str = "",
         return {"push_error": str(exc)[:300]}
 
 
+async def _note_read_only_changes(session_id: str, workspace) -> None:
+    """Archive-upload repos have no remote: tell the user their edits were not
+    pushed (no branch, no PR) instead of staying silent."""
+    from src.agent.workspace import read_only_changes
+    try:
+        slugs = await asyncio.to_thread(read_only_changes, workspace)
+    except Exception:  # noqa: BLE001 - a note is not the work
+        return
+    if slugs:
+        await emit(session_id, "meta", {
+            "note": ("Not pushed (uploaded archive, no git remote): "
+                     + ", ".join(slugs)
+                     + ". Changes stay in this session's workspace only."),
+        })
+
+
 def _open_pr(row, workspace, pushed: dict) -> dict | None:
     """Best-effort PR/MR creation after a branch push — the user asked for
     'push to a separate branch AND open a PR'. Falls back silently to the
@@ -703,15 +720,25 @@ def _open_pr(row, workspace, pushed: dict) -> dict | None:
     from src.sync.git_providers import parse_repo_url
 
     try:
-        gitlab_base = getattr(workspace, "gitlab_base", None)
-        parsed = parse_repo_url(workspace.clean_url, gitlab_base_url=gitlab_base)
+        # The pushed repo, not blindly the first one: with an upload first in
+        # a multi-repo session the first repo has no remote at all.
+        repo = next((r for r in workspace.repos
+                     if r.slug == pushed.get("repo_slug")), None)
+        if repo is not None and repo.read_only:
+            return None
+        clean_url = repo.clean_url if repo is not None else workspace.clean_url
+        default_branch = (repo.default_branch if repo is not None
+                          else workspace.default_branch)
+        gitlab_base = (repo.gitlab_base if repo is not None
+                       else getattr(workspace, "gitlab_base", None))
+        parsed = parse_repo_url(clean_url, gitlab_base_url=gitlab_base)
         provider = parsed.provider.value
         creds = resolve_git_credential(provider, workspace_id=row.workspace_id)
         if creds is None:
             return None
         title = (row.title or row.prompt or "Celmis agent changes")[:120]
         branch = pushed["branch"]
-        base = workspace.default_branch or "main"
+        base = default_branch or "main"
         full = f"{parsed.owner}/{parsed.name}"
         client_kwargs: dict = {}
         gitlab_api = ""
@@ -1321,7 +1348,16 @@ def _build_options(workspace, auth_env: dict[str, str], mcp_token: str,
         system_prompt={
             "type": "preset", "preset": "claude_code",
             "append": (
-                (f"Your working directory holds {len(workspace.repos)} cloned "
+                ("Repositories marked read-only below come from an uploaded "
+                 "archive: they have no git remote, so edits to them are "
+                 "kept in this workspace only and are never pushed or opened "
+                 "as a PR. Read-only: "
+                 + ", ".join(r.path.name for r in workspace.repos
+                          if getattr(r, "read_only", False))
+                 + ". "
+                 if any(getattr(r, "read_only", False) for r in workspace.repos)
+                 else "")
+                + (f"Your working directory holds {len(workspace.repos)} cloned "
                  "repositories as sibling directories: "
                  + ", ".join(r.path.name for r in workspace.repos)
                  + ". You may read and edit across all of them; each is pushed "

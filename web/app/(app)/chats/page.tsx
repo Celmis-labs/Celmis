@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { MessagesSquareIcon } from "lucide-react";
@@ -11,12 +12,15 @@ import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { OnecCheckTab } from "@/components/onec-check/onec-check-tab";
 import { QueryState } from "@/components/ui/query-state";
 import { WorkspaceBadge } from "@/components/workspace-badge";
 
 export default function ChatsIndexPage() {
   const token = useToken();
   const t = useT();
+  const [view, setView] = useState("chats");
 
   // All chats (across projects + single-repo)
   const chats = useQuery({
@@ -35,7 +39,14 @@ export default function ChatsIndexPage() {
         tabs={<SectionTabs set="qa" />}
       />
 
-      <QueryState
+      <Tabs value={view} onValueChange={setView}>
+        <TabsList>
+          <TabsTrigger value="chats">{t("nav.chats")}</TabsTrigger>
+          <TabsTrigger value="onec">{t("onecCheck.tab")}</TabsTrigger>
+        </TabsList>
+      </Tabs>
+
+      {view === "onec" ? <OnecCheckTab /> : <QueryState
         query={chats}
         empty={{
           icon: MessagesSquareIcon,
@@ -54,7 +65,7 @@ export default function ChatsIndexPage() {
             ))}
           </div>
         )}
-      </QueryState>
+      </QueryState>}
     </PageShell>
   );
 }

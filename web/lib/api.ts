@@ -1816,7 +1816,7 @@ export type ProviderKeyStatus = {
 /** The surfaces that pick their own provider and model.
  *  "agent" is the Celmis agent's planner — a small exact call that used to
  *  borrow the chat profile and inherit whatever it was pointed at. */
-export type LLMSurface = "chat" | "review" | "embeddings" | "agent";
+export type LLMSurface = "chat" | "review" | "embeddings" | "agent" | "onec_check";
 
 /** The review agents an operator can point at their own model and budget.
  *
@@ -3830,6 +3830,48 @@ export async function downloadWithAuth(
   a.click();
   URL.revokeObjectURL(href);
 }
+
+/** One block of a 1C file report (`src/docs/blocks.py`, as JSON). */
+export type ReportBlock =
+  | { type: "title"; text: string; meta: [string, string][] }
+  | { type: "heading"; level: number; text: string }
+  | { type: "para"; text: string; kind: "body" | "note" | "callout"; tone: "neutral" | "bad" | "warn" | "good" }
+  | { type: "bullets"; items: string[]; ordered: boolean }
+  | { type: "table"; header: string[]; rows: string[][]; widths: number[]; mono: number[] }
+  | { type: "stats"; items: { label: string; value: string; tone: string }[] }
+  | { type: "code"; lines: string[] }
+  | { type: "page_break" };
+
+export type OnecFile = {
+  handle: string; file_name: string; size: number; sha256: string;
+  kind: string; object_name: string; synonym: string; forms: number; templates: number;
+};
+export type OnecConfig = { slug: string; name: string; ref: string; age: string; upload: boolean };
+export type OnecModels = {
+  default_available: boolean; default_provider: string; default_model: string;
+  models: { provider: string; model: string }[];
+};
+export type OnecReport = {
+  id: string; file_name: string; lang: "uk" | "en"; level: "bad" | "warn" | "good" | "unknown";
+  config: string; created: string; blocks: ReportBlock[];
+  model: { mode: string; used: boolean; label: string; failure: string };
+};
+
+/** The "Check a file" tab: a report on an uploaded .erf / .epf / Form.bin. */
+export const onecReviewApi = {
+  upload: (token: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return api<OnecFile>("/api/onec/review/files", { token, method: "POST", body: form });
+  },
+  configs: (token: string, q = "") =>
+    api<OnecConfig[]>(`/api/onec/review/configs?q=${encodeURIComponent(q)}`, { token }),
+  models: (token: string) => api<OnecModels>("/api/onec/review/models", { token }),
+  run: (token: string, body: { handle: string; config: string; model: string; lang: string }) =>
+    api<OnecReport>("/api/onec/review", { token, method: "POST", json: body }),
+  exportUrl: (id: string, format: "pdf" | "docx" | "md") =>
+    `${API_BASE}/api/onec/review/${id}/export?format=${format}`,
+};
 
 /** Rewrite specific vault notes, optionally with a different engine.
  *

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -91,6 +92,9 @@ class RepoCheckout:
     #: Self-hosted GitLab root this repo lives on (None otherwise): its
     #: address is re-checked and pinned, and its CA bundle applied, at push.
     gitlab_base: str | None = None
+    #: An archive upload: a local snapshot with no remote. Edits stay in the
+    #: workspace — nothing is pushed and no PR/MR is opened for it.
+    read_only: bool = False
 
 
 @dataclass
@@ -112,6 +116,8 @@ class AgentWorkspace:
     #: and passes the slug explicitly, which is why one shape worked and the
     #: other, the common one, did not.
     repo_slug: str = ""
+    #: The first repo is an archive upload (see `RepoCheckout.read_only`).
+    read_only: bool = False
     #: Every clone, in pick order. A single-repo session derives it from the
     #: fields above so the push loop has exactly one shape to handle.
     repos: list[RepoCheckout] = field(default_factory=list)
@@ -129,6 +135,7 @@ class AgentWorkspace:
                 slug=self.repo_slug or self.repo_dir.name, path=self.repo_dir,
                 clean_url=self.clean_url, push_url=self.push_url,
                 default_branch=self.default_branch, gitlab_base=self.gitlab_base,
+                read_only=self.read_only,
             )]
         if self.root_dir is None:
             self.root_dir = self.repo_dir
@@ -191,6 +198,91 @@ def _run(cmd: list[str], cwd: Path, timeout: int = 300,
     return proc
 
 
+#: Largest unpacked archive a session will copy into its workspace. Every
+#: session gets its own copy (the agent edits files), so this is per session.
+#: `CELMIS_AGENT_UPLOAD_COPY_MAX_BYTES` overrides it.
+DEFAULT_UPLOAD_COPY_MAX_BYTES = 512 * 1024 * 1024
+
+
+def _upload_copy_limit() -> int:
+    try:
+        return max(1, int(os.environ.get("CELMIS_AGENT_UPLOAD_COPY_MAX_BYTES",
+                                         DEFAULT_UPLOAD_COPY_MAX_BYTES)))
+    except ValueError:
+        return DEFAULT_UPLOAD_COPY_MAX_BYTES
+
+
+def _tree_bytes(path: Path, limit: int) -> int:
+    """Total file size under `path`, stopping as soon as it passes `limit`."""
+    total = 0
+    for dirpath, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(dirpath, name)).st_size
+            except OSError:
+                continue
+            if total > limit:
+                return total
+    return total
+
+
+def _is_upload_url(repo_url: str) -> bool:
+    return repo_url.startswith("upload:")
+
+
+def _prepare_upload_workspace(session_id: str, repo_url: str) -> AgentWorkspace:
+    """Copy an unpacked archive upload into the session as a local git repo.
+
+    There is no remote, so there is nothing to clone. The unpacked tree under
+    `repos_dir/<slug>` is copied (a real copy, not links: the agent edits
+    files and must never write through to the shared tree) and given a fresh
+    `git init` with one commit, "uploaded archive <sha[:12]>". That keeps
+    everything that asks git about the tree — status, diff of the agent's
+    changes, the commit message's file list — working unchanged, and the
+    commit is the baseline the diff is taken against. The result is read-only
+    as far as any remote goes: see `RepoCheckout.read_only`.
+    """
+    from src.config import get_settings
+    from src.repos.upload import is_checked_out, upload_revision
+
+    slug = repo_url.split(":", 1)[1]
+    source = get_settings().repo_path(slug)
+    revision = upload_revision(slug)
+    if revision is None or not is_checked_out(source):
+        raise RuntimeError(
+            f"The uploaded repository {slug!r} has no unpacked files on this "
+            "server — upload the archive again.")
+    limit = _upload_copy_limit()
+    if _tree_bytes(source, limit) > limit:
+        raise RuntimeError(
+            f"The uploaded repository {slug!r} is larger than "
+            f"{limit // 1024 // 1024} MB, the most an agent session copies. "
+            "Upload a smaller archive.")
+
+    root = agent_workspaces_root() / session_id
+    repo_dir = root / "repo"
+    home_dir = root / "home"
+    home_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    repo_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, repo_dir, symlinks=True,
+                    ignore=shutil.ignore_patterns(".git"))
+
+    _run(_GIT_BASE + ["init", "-q", "-b", "main"], cwd=repo_dir)
+    _run(_GIT_BASE + ["add", "-A"], cwd=repo_dir)
+    _run(_GIT_BASE + _AGENT_GIT_USER
+         + ["commit", "-q", "--allow-empty", "-m", f"uploaded archive {revision[:12]}"],
+         cwd=repo_dir)
+    _run(_GIT_BASE + ["checkout", "-q", "-b", f"celmis-agent/{session_id[:8]}"],
+         cwd=repo_dir)
+    logger.info("agent_workspace_ready session=%s repo=%s upload=%s",
+                session_id, slug, revision[:12])
+    return AgentWorkspace(
+        session_id=session_id, repo_dir=repo_dir, home_dir=home_dir,
+        clean_url=repo_url, push_url=repo_url, default_branch="main",
+        repo_slug=slug, read_only=True,
+    )
+
+
 def prepare_workspace(
     session_id: str, repo_url: str, workspace_id: str,
     branch: str | None = None,
@@ -203,6 +295,9 @@ def prepare_workspace(
 
     Blocking (5-60s) — call via asyncio.to_thread.
     """
+    if _is_upload_url(repo_url):
+        return _prepare_upload_workspace(session_id, repo_url)
+
     from src.credentials import resolve_git_credential
     from src.sync.git_providers import build_authenticated_url, parse_repo_url
 
@@ -557,6 +652,21 @@ def adopt_staged(session_id: str, ws: AgentWorkspace) -> list[str]:
 _NOT_ATTACHMENTS = (".", ":(exclude)_attachments")
 
 
+def _has_changes(path: Path) -> bool:
+    try:
+        status = _run(_GIT_BASE + ["status", "--porcelain", "--", *_NOT_ATTACHMENTS],
+                      cwd=path)
+    except Exception:  # noqa: BLE001 - "unknown" must not break the wrap-up
+        return False
+    return bool(status.stdout.strip())
+
+
+def read_only_changes(ws: AgentWorkspace) -> list[str]:
+    """Slugs of archive-upload repos the agent changed. Those edits are never
+    pushed, so the session tells the user they stay in the workspace."""
+    return [r.slug for r in ws.repos if r.read_only and _has_changes(r.path)]
+
+
 def commit_and_push(ws: AgentWorkspace, *, summary: str = "",
                     prompt: str = "", requested_by: str = "",
                     title: str = "",
@@ -572,8 +682,15 @@ def commit_and_push(ws: AgentWorkspace, *, summary: str = "",
     """
     branch = f"celmis-agent/{ws.session_id[:8]}"
     pushed: list[dict] = []
+    skipped: list[str] = []
 
     for repo in ws.repos:
+        if repo.read_only:
+            # An archive upload has no remote. Its edits are in the session
+            # workspace only; say so rather than push anywhere.
+            if _has_changes(repo.path):
+                skipped.append(repo.slug)
+            continue
         status = _run(_GIT_BASE + ["status", "--porcelain", "--", *_NOT_ATTACHMENTS],
                       cwd=repo.path)
         if not status.stdout.strip():
@@ -622,7 +739,10 @@ def commit_and_push(ws: AgentWorkspace, *, summary: str = "",
     # session card, the PR opener and the push notification all read
     # result["branch"]. `pushes` carries the rest.
     first = pushed[0]
-    return {**first, "pushes": pushed}
+    out = {**first, "pushes": pushed}
+    if skipped:
+        out["read_only_skipped"] = skipped
+    return out
 
 
 def _compare_url(clean_url: str, base: str, branch: str, *,
@@ -706,7 +826,7 @@ def prepare_multi_workspace(
         checkouts.append(RepoCheckout(
             slug=slug, path=target, clean_url=staged.clean_url,
             push_url=staged.push_url, default_branch=staged.default_branch,
-            gitlab_base=staged.gitlab_base,
+            gitlab_base=staged.gitlab_base, read_only=staged.read_only,
         ))
 
     first = checkouts[0]
@@ -715,6 +835,7 @@ def prepare_multi_workspace(
         clean_url=first.clean_url, push_url=first.push_url,
         default_branch=first.default_branch, repo_slug=first.slug,
         repos=checkouts, root_dir=repos_dir, gitlab_base=first.gitlab_base,
+        read_only=first.read_only,
     )
 
 

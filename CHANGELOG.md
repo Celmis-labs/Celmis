@@ -20,6 +20,37 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.36] — 2026-11-17
+
+### Added
+
+- **Check a 1C file in the web app.** "Ask" and the agent page get a *Check a
+  file* tab: drop an `.erf`, `.epf` or `Form.bin`, pick a configuration dump to
+  compare with (uploaded archives included) and get a report a person can
+  read — verdict, what was compared, blockers with the code from both sides,
+  how far the version is behind (sizes, change markers, missing procedures,
+  task markers the file lacks), what passed, limits and a recommendation. The
+  checks are static and the report is built from their facts; a model is
+  optional and only writes the prose (the workspace default for the new
+  *1C file check* setting, or one picked on the tab). It rewrites the
+  template's own wording, and a field that invents a number, a date or a task
+  id, or translates a 1C name, is dropped for the template's text. Download as PDF, DOCX or Markdown. *Connect to MCP* shows how to
+  run the same check from Claude Code, Codex or another MCP client with
+  `inspect_external`. API under `/api/onec/review`.
+- **Agent sessions work on uploaded archives.** A repository uploaded as an
+  archive is copied into the session (up to 512 MB,
+  `CELMIS_AGENT_UPLOAD_COPY_MAX_BYTES`) on a local base commit instead of
+  being cloned, so the session no longer fails on `upload:<slug>`. It is
+  read-only: nothing is pushed and no pull request is opened for it, and the
+  session says so when the agent changed it.
+
+### Changed
+
+- PDF and DOCX exports take the page label's words from the report's language
+  and no longer justify body text.
+- Web: Next.js 16.4.6 (16.4.3 was affected by a disclosure advisory fixed in
+  16.4.5).
+
 ## [3.1.34] — 2026-11-16
 
 ### Fixed
