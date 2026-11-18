@@ -4611,7 +4611,7 @@
   "onecCheck.configNone": "None (static checks only)",
   "onecCheck.configSearch": "Search a configuration…",
   "onecCheck.configEmpty": "No readable 1C configuration found. Add a repository with a configuration dump, or run without one.",
-  "onecCheck.configNotFound": "Rien trouvé. Un dépôt partagé par un autre espace de travail apparaît ici lorsque le partage figure sur votre jeton MCP.",
+  "onecCheck.configNotFound": "Rien trouvé. Un dépôt partagé avec cet espace de travail apparaît ici tant que le partage est actif (dans un espace comptant plus de membres que le partage n'en autorise, seulement avec le partage sur votre jeton MCP).",
   "onecCheck.sharedFrom": "partagé par {owner}",
   "onecCheck.modelLabel": "Model for the wording",
   "onecCheck.modelNone": "No model (template text)",

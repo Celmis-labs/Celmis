@@ -81,9 +81,9 @@ async def oauth_authorization_server(request: Request, response: Response) -> di
         "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
         "response_types_supported": ["code"],
         "code_challenge_methods_supported": ["S256"],
-        "token_endpoint_auth_methods_supported": [
-            "client_secret_post", "none",  # 'none' = public/PKCE-only clients
-        ],
+        # 'none' first: it is what anonymous registration gives (public, PKCE).
+        # client_secret_post is for clients an administrator registered.
+        "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
         "registration_endpoint": f"{issuer}/oauth/register",
         "scopes_supported": list(_FULL_SCOPES),
         "service_documentation": f"{issuer}/docs",

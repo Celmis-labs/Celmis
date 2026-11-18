@@ -1,9 +1,10 @@
-"""A configuration another workspace shares, in the web tab: on the same terms as MCP.
+"""A configuration another workspace shares, in the web tab.
 
-The share counts only when it is named on one of the person's own live read-only
-developer tokens in this workspace; a slug the workspace has itself stays its own;
-a model sees shared code only when the owner allowed asking; every report built
-on a share is noted by share id.
+A share counts when it is named on one of the person's own live read-only
+developer tokens in this workspace, or when membership opens it (the rule itself
+is tested against a database in tests/security/test_check_a_file_offers_a_share_by_membership.py); a slug the
+workspace has itself stays its own; a model sees shared code only when the owner
+allowed asking; every report built on a share is noted by share id.
 """
 
 from __future__ import annotations
@@ -53,13 +54,14 @@ def test_only_a_read_only_developer_token_of_mine_carries_a_share(monkeypatch, t
 @pytest.fixture()
 def world(monkeypatch):
     """Own repo `own`, shared repo `erp` (and `own` shared too, which must stay own)."""
-    state = {"held": {"sh-1": "t-ok"}, "ask": False}
+    state = {"held": {"sh-1": "t-ok"}, "members": [], "ask": False}
     own = {"own": RepoAccessDecision(repo_slug="own")}
     monkeypatch.setattr(effective, "effective_access", lambda p, w, repos=None: dict(own))
     monkeypatch.setattr(effective, "registered_repos",
                         lambda w: {"own": ("acme/own",)} if w == WS else {"erp": ("acme/erp",),
                                                                           "own": ("acme/own",)})
     monkeypatch.setattr(review, "_held_shares", lambda u, w: dict(state["held"]))
+    monkeypatch.setattr(review, "_member_shares", lambda s, u, w: list(state["members"]))
 
     def live(session, *, share_ids, workspace_id, user_id, slugs=None, now=None):
         if "sh-1" not in share_ids or workspace_id != WS:
@@ -94,9 +96,15 @@ def test_a_search_finds_a_shared_repository_by_its_name(world):
     assert [c.slug for c in review.list_configs(ME, False, WS, query="acme/erp")] == ["erp"]
 
 
-def test_without_the_share_on_a_token_nothing_shared_is_offered(world):
+def test_without_a_token_or_membership_opening_it_nothing_shared_is_offered(world):
     world["held"] = {}
     assert [c.slug for c in review.list_configs(ME, False, WS)] == ["own"]
+
+
+def test_membership_alone_offers_the_share_when_it_opens_it(world):
+    world["held"], world["members"] = {}, ["sh-1"]
+    rows = {c.slug: c for c in review.list_configs(ME, False, WS)}
+    assert set(rows) == {"own", "erp"} and rows["erp"].shared_from == "R&D"
 
 
 def test_an_unreadable_share_grants_nothing(world, monkeypatch):

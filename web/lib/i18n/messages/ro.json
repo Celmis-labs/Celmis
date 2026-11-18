@@ -4611,7 +4611,7 @@
   "onecCheck.configNone": "None (static checks only)",
   "onecCheck.configSearch": "Search a configuration…",
   "onecCheck.configEmpty": "No readable 1C configuration found. Add a repository with a configuration dump, or run without one.",
-  "onecCheck.configNotFound": "Nu s-a găsit nimic. Un depozit partajat de alt spațiu de lucru apare aici când partajarea este pe tokenul dvs. MCP.",
+  "onecCheck.configNotFound": "Nu s-a găsit nimic. Un depozit partajat cu acest spațiu de lucru apare aici cât timp partajarea este activă (într-un spațiu cu mai mulți membri decât permite partajarea, doar cu partajarea pe tokenul dvs. MCP).",
   "onecCheck.sharedFrom": "partajat de {owner}",
   "onecCheck.modelLabel": "Model for the wording",
   "onecCheck.modelNone": "No model (template text)",

@@ -20,6 +20,32 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.39] — 2026-11-18
+
+### Changed
+
+- **A shared configuration in *Check a file* is offered to the members of the
+  receiving workspace,** not only to the people whose MCP token names the share,
+  as long as the share's ceiling on people (`max_people`) covers every member the
+  owner has not switched off; a bigger workspace keeps the token rule, where the
+  ceiling is counted. Everything else the owner decided still applies: people
+  switched off read nothing, hidden paths stay hidden, and without permission to
+  ask no model sees the code. The empty-search hint says so.
+- The authorization server metadata lists `none` first in
+  `token_endpoint_auth_methods_supported`: it is what anonymous registration gives.
+
+### Fixed
+
+- **Dynamic client registration refused a client that asked for a secret.** A
+  client that picks `client_secret_post` because the metadata lists it got a 400
+  and stopped before the sign-in page (claude.ai: "couldn't register with the
+  server's sign-in service"). Such a request is now registered as a public client
+  and the answer says `none`; no secret is issued anonymously, as before (RFC 7591
+  section 3.2.1 lets the server replace requested metadata). Unsupported grant and
+  response types next to `authorization_code` / `code` are dropped instead of
+  refused, and a refused registration is logged with what was asked (redirect
+  URIs reduced to hosts).
+
 ## [3.1.38] — 2026-11-18
 
 ### Added

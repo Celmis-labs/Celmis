@@ -259,6 +259,28 @@ def _bad_request(error: str, description: str) -> OAuthRefusal:
     return OAuthRefusal(400, error, description)
 
 
+def _short(value: Any, limit: int = 80) -> str:
+    """A client-supplied value fit for one log line: printable, bounded."""
+    text = value if isinstance(value, str) else repr(value)
+    return "".join(c if c.isprintable() else "?" for c in text)[:limit]
+
+
+def _register_refused(error: str, description: str, payload: Any) -> OAuthRefusal:
+    """A refused registration, logged with what was asked, so a client that cannot
+    connect can be told why from the server side too. Redirect URIs are reduced to
+    their hosts; nothing here is a secret, and everything is bounded."""
+    from urllib.parse import urlsplit
+
+    asked = payload if isinstance(payload, dict) else {}
+    uris = asked.get("redirect_uris")
+    hosts = ([_short(urlsplit(u).hostname or "?", 40) for u in uris[:5] if isinstance(u, str)]
+             if isinstance(uris, list) else _short(uris, 40))
+    logger.info("oauth_register_refused error=%s reason=%s method=%s grants=%s responses=%s hosts=%s",
+                error, _short(description, 120), _short(asked.get("token_endpoint_auth_method")),
+                _short(asked.get("grant_types")), _short(asked.get("response_types")), hosts)
+    return _bad_request(error, description)
+
+
 def _no_store(payload: dict[str, Any], status_code: int = 200) -> JSONResponse:
     """A token response is never cached (RFC 6749 section 5.1)."""
     return JSONResponse(payload, status_code=status_code,
@@ -329,8 +351,9 @@ async def register_client(
     """Dynamic client registration for MCP clients (RFC 7591), anonymous.
 
     Open to anyone, which is why it can only create the least powerful thing: a
-    PUBLIC client. No secret exists, `token_endpoint_auth_method` has to be
-    `none`, and every redirect URI is loopback (any port) or https on an
+    PUBLIC client. No secret exists and `token_endpoint_auth_method` is always
+    `none` (a request for a secret method is registered as public, and the answer
+    says so), and every redirect URI is loopback (any port) or https on an
     operator-allowed host (`OAUTH_ALLOWED_REDIRECT_HOSTS`). A registration gives
     nobody access: a person still has to sign in and approve it, and sees the
     client's name and redirect host when they do. A client that never gets
@@ -341,33 +364,39 @@ async def register_client(
     workspace administrator at `POST /oauth/clients`.
     """
     if not isinstance(payload, dict):
-        raise _bad_request("invalid_client_metadata", "send a JSON object")
+        raise _register_refused("invalid_client_metadata", "send a JSON object", {})
 
+    # A client that asks for a secret gets a public registration instead (RFC 7591
+    # section 3.2.1 lets the server replace requested metadata) and reads that from
+    # the answer: no secret is ever issued here. Refusing outright stopped clients
+    # that pick a secret method because the metadata lists one, before the person
+    # ever saw a sign-in page.
     method = payload.get("token_endpoint_auth_method", "none")
     if method != "none":
-        raise _bad_request(
-            "invalid_client_metadata",
-            "only public clients can register themselves: token_endpoint_auth_method "
-            "must be 'none'. A workspace administrator registers a confidential client "
-            "at POST /oauth/clients.")
+        logger.info("oauth_register_public_instead requested=%s", _short(method))
 
     uris = payload.get("redirect_uris")
     if not isinstance(uris, list) or not uris or len(uris) > 5:
-        raise _bad_request("invalid_redirect_uri", "redirect_uris must list one to five URIs")
+        raise _register_refused("invalid_redirect_uri", "redirect_uris must list one to five URIs",
+                                payload)
     for uri in uris:
         problem = rules.redirect_problem(uri)
         if problem:
-            raise _bad_request("invalid_redirect_uri", problem)
+            raise _register_refused("invalid_redirect_uri", problem, payload)
 
-    grants = payload.get("grant_types") or ["authorization_code"]
-    if (not isinstance(grants, list) or not set(grants) <= _REGISTER_GRANTS
-            or "authorization_code" not in grants):
-        raise _bad_request(
+    # Grants and response types: what the client asked for that this server does,
+    # as long as that includes the authorization code flow at all.
+    asked = payload.get("grant_types") or ["authorization_code"]
+    if not isinstance(asked, list) or "authorization_code" not in asked:
+        raise _register_refused(
             "invalid_client_metadata",
-            "grant_types may be authorization_code and refresh_token")
+            "grant_types must include authorization_code (refresh_token is also supported)",
+            payload)
+    grants = [g for g in asked if g in _REGISTER_GRANTS]
     responses = payload.get("response_types") or ["code"]
-    if responses != ["code"]:
-        raise _bad_request("invalid_client_metadata", "response_types must be ['code']")
+    if not isinstance(responses, list) or "code" not in responses:
+        raise _register_refused("invalid_client_metadata", "response_types must include 'code'",
+                                payload)
 
     await _collect_unused_clients(session)
     if not _registration_allowed(_caller_address(request)):
@@ -404,7 +433,7 @@ async def register_client(
         "redirect_uris": row.redirect_uris,
         "grant_types": sorted(set(grants)),
         "response_types": ["code"],
-        "token_endpoint_auth_method": "none",
+        "token_endpoint_auth_method": "none",   # whatever was asked: see above
         "scope": " ".join(row.allowed_scopes),
     }, 201)
 

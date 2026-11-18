@@ -250,17 +250,46 @@ def test_anything_else_is_refused(world, uri):
     assert r.json()["error"] == "invalid_redirect_uri"
 
 
-def test_a_confidential_registration_is_refused_without_an_administrator(world):
-    r = _register(world, LOOPBACK, token_endpoint_auth_method="client_secret_post")
-    assert r.status_code == 400
-    assert r.json()["error"] == "invalid_client_metadata"
-    assert "POST /oauth/clients" in r.json()["error_description"]
+@pytest.mark.parametrize("method", ["client_secret_post", "client_secret_basic", "private_key_jwt"])
+def test_a_request_for_a_secret_is_registered_as_a_public_client(world, method):
+    """A client that picks a secret method because the metadata lists one is not
+    turned away before the person sees a sign-in page: it is registered PUBLIC,
+    the answer says so, and no secret exists (RFC 7591 section 3.2.1)."""
+    r = _register(world, "https://claude.ai/api/mcp/auth_callback", token_endpoint_auth_method=method)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["token_endpoint_auth_method"] == "none"
+    assert "client_secret" not in body
+    with Session(world.engine) as s:
+        from src.db.models import OAuthClient
+
+        assert s.get(OAuthClient, body["client_id"]).client_secret_hash is None
+
+
+def test_grants_and_response_types_keep_what_this_server_does(world):
+    r = _register(world, LOOPBACK, grant_types=["authorization_code", "refresh_token", "implicit"],
+                  response_types=["code", "token"])
+    assert r.status_code == 201, r.text
+    assert r.json()["grant_types"] == ["authorization_code", "refresh_token"]
+    assert r.json()["response_types"] == ["code"]
 
 
 def test_registration_needs_redirect_uris_and_a_json_object(world):
     assert world.http.post("/oauth/register", json={"client_name": "x"}).status_code == 400
     assert world.http.post("/oauth/register", json=["x"]).status_code == 400
     assert _register(world, LOOPBACK, grant_types=["client_credentials"]).status_code == 400
+    assert _register(world, LOOPBACK, response_types=["token"]).status_code == 400
+
+
+def test_a_refused_registration_says_why_in_the_log(world, caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="src.api.routers.oauth"):
+        r = _register(world, "https://evil.example/cb\n", token_endpoint_auth_method="client_secret_post")
+    assert r.status_code == 400
+    line = next(m for m in caplog.messages if m.startswith("oauth_register_refused"))
+    assert "error=invalid_redirect_uri" in line and "method=client_secret_post" in line
+    assert "hosts=['evil.example" in line and "\n" not in line
 
 
 def test_the_operator_allowlist_replaces_the_default(world, monkeypatch):
@@ -1084,10 +1113,12 @@ def test_an_administrator_registers_a_confidential_client_at_the_clients_endpoin
     assert r.status_code == 201
     assert set(r.json()) == {"client_id", "client_secret", "name", "redirect_uris", "allowed_scopes"}
     assert r.json()["client_secret"]
-    # The anonymous endpoint is not a way to the same thing.
+    # The anonymous endpoint is not a way to the same thing: asked for a secret, it
+    # registers a public client and issues none.
     anon = world.http.post("/oauth/register", json={
         "client_name": "CI", "redirect_uris": [LOOPBACK], "token_endpoint_auth_method": "client_secret_basic"})
-    assert anon.status_code == 400
+    assert anon.status_code == 201
+    assert "client_secret" not in anon.json() and anon.json()["token_endpoint_auth_method"] == "none"
     assert world.http.post("/oauth/clients", json={"name": "x"}).status_code in (401, 403)
 
 

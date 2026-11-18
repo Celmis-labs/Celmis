@@ -4611,7 +4611,7 @@
   "onecCheck.configNone": "None (static checks only)",
   "onecCheck.configSearch": "Search a configuration…",
   "onecCheck.configEmpty": "No readable 1C configuration found. Add a repository with a configuration dump, or run without one.",
-  "onecCheck.configNotFound": "Nič sa nenašlo. Repozitár zdieľaný z iného pracovného priestoru sa tu zobrazí, ak je zdieľanie na vašom tokene MCP.",
+  "onecCheck.configNotFound": "Nič sa nenašlo. Repozitár zdieľaný s týmto pracovným priestorom sa tu zobrazí, kým zdieľanie platí (v priestore s viac členmi, než zdieľanie dovoľuje, len so zdieľaním na vašom tokene MCP).",
   "onecCheck.sharedFrom": "zdieľa {owner}",
   "onecCheck.modelLabel": "Model for the wording",
   "onecCheck.modelNone": "No model (template text)",

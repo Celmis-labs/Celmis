@@ -5,10 +5,12 @@ a language into the report's blocks, kept for 24 h for their owner. What the
 caller may read of a configuration is exactly what an MCP call of theirs may:
 the workspace's access decision per repository, secret paths never.
 
-A repository another workspace shares is offered on the same terms as over MCP
-(:mod:`src.access.shares`): only when a share is named on one of the caller's own
-live read-only developer tokens in this workspace (C1, C2) and still holds (C3-C7).
-The web session never reads a share by itself being a member. A model sees the
+A repository another workspace shares is offered to the members of the receiving
+workspace while the share holds (C3-C7 of :mod:`src.access.shares`: live, the
+repository still the owner's, the person not switched off, hidden paths hidden),
+as long as the share's ceiling on people covers every member; a bigger workspace
+falls back to the MCP rule, a share named on one of the caller's own live
+read-only developer tokens here (C1, C2). A model sees the
 shared code only when the owner allowed asking (C8); otherwise the report is
 worded from the template. Every report built on a share is written to the
 receiving workspace's MCP call log by share id, which is where the owner reads
@@ -89,8 +91,46 @@ def _held_shares(user_id: str, workspace_id: str) -> dict[str, str]:
     return out
 
 
+def _member_shares(session, user_id: str, workspace_id: str) -> list[str]:  # noqa: ANN001
+    """Ids of the live shares to this workspace that membership alone opens here.
+
+    Being a member of the receiving workspace is enough in this tab, as long as it
+    cannot widen what the owner allowed: the share's ceiling on people
+    (``max_people``) must cover every member the owner has not switched off. A
+    workspace bigger than that keeps the token rule (:func:`_held_shares`), which
+    is where the ceiling is counted. A list of blocked people that cannot be read
+    opens nothing; per-person blocking itself is applied by ``live_grants``."""
+    from sqlalchemy import select
+
+    from src.access import shares
+    from src.db.models import RepoShare, WorkspaceMember
+
+    members = set(session.execute(
+        select(WorkspaceMember.user_id).where(WorkspaceMember.workspace_id == workspace_id)
+    ).scalars().all())
+    if user_id not in members:
+        return []
+    rows = session.execute(
+        select(RepoShare).where(
+            RepoShare.grantee_workspace_id == workspace_id,
+            RepoShare.revoked_at.is_(None),
+            RepoShare.expires_at > datetime.now(UTC),
+        )
+    ).scalars().all()
+    out: list[str] = []
+    for row in rows:
+        blocked = shares._string_list(row.blocked_user_ids)  # noqa: SLF001 — same reading as the module
+        if blocked is None:
+            continue
+        if len(members - set(blocked)) <= int(row.max_people or 0):
+            out.append(row.id)
+    return out
+
+
 def _shared(user_id: str, workspace_id: str, own: dict) -> dict:
-    """``{slug: decision}`` of the shared repositories the caller may read now.
+    """``{slug: decision}`` of the shared repositories the caller may read now:
+    the shares on the caller's own tokens and the ones membership opens
+    (:func:`_member_shares`), each still checked by ``live_grants`` (C3-C7).
     Anything unreadable grants nothing."""
     from sqlalchemy.orm import Session
 
@@ -98,11 +138,12 @@ def _shared(user_id: str, workspace_id: str, own: dict) -> dict:
     from src.access.resolver import _sync_engine
 
     try:
-        held = _held_shares(user_id, workspace_id)
-        if not held:
-            return {}
+        held = set(_held_shares(user_id, workspace_id))
         with Session(_sync_engine()) as s:
-            grants = shares.live_grants(s, share_ids=list(held), workspace_id=workspace_id,
+            held.update(_member_shares(s, user_id, workspace_id))
+            if not held:
+                return {}
+            grants = shares.live_grants(s, share_ids=sorted(held), workspace_id=workspace_id,
                                         user_id=user_id)
     except Exception as exc:  # noqa: BLE001 — refuse rather than grant
         logger.warning("onec_review_shares_unreadable ws=%s err=%s", workspace_id,
