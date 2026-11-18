@@ -4,6 +4,15 @@ One call turns a stored upload, a configuration the caller may read (or none) an
 a language into the report's blocks, kept for 24 h for their owner. What the
 caller may read of a configuration is exactly what an MCP call of theirs may:
 the workspace's access decision per repository, secret paths never.
+
+A repository another workspace shares is offered on the same terms as over MCP
+(:mod:`src.access.shares`): only when a share is named on one of the caller's own
+live read-only developer tokens in this workspace (C1, C2) and still holds (C3-C7).
+The web session never reads a share by itself being a member. A model sees the
+shared code only when the owner allowed asking (C8); otherwise the report is
+worded from the template. Every report built on a share is written to the
+receiving workspace's MCP call log by share id, which is where the owner reads
+the share's usage.
 """
 
 from __future__ import annotations
@@ -12,7 +21,7 @@ import logging
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from src.docs.blocks import blocks_to_data
 from src.onec import store
@@ -44,6 +53,8 @@ class ConfigChoice:
     ref: str
     age: str
     upload: bool
+    #: The owner workspace's name when another workspace shares this repository.
+    shared_from: str = ""
 
 
 # (slug, sha) → is it a configuration dump; the answer cannot change for a revision
@@ -51,10 +62,98 @@ _DUMP_CACHE: OrderedDict[tuple[str, str], bool] = OrderedDict()
 _DUMP_LOCK = threading.Lock()
 
 
-def _decisions(user_id: str, is_admin: bool, workspace_id: str) -> dict:
-    from src.access.effective import Principal, effective_access
+def _live_tokens(user_id: str, workspace_id: str) -> list:
+    """The caller's own live ``pat`` tokens in this workspace (``TokenView``)."""
+    from sqlalchemy.orm import Session
 
-    return effective_access(Principal(user_id=user_id, is_admin=is_admin), workspace_id)
+    from src.access.resolver import _sync_engine
+    from src.mcp_server import token_store
+
+    with Session(_sync_engine()) as s:
+        return token_store.list_rows(s, user_id=user_id, workspace_id=workspace_id,
+                                     status="active", kinds=["pat"])
+
+
+def _held_shares(user_id: str, workspace_id: str) -> dict[str, str]:
+    """``{share id: token id}`` for the shares named on the caller's own live tokens
+    in this workspace, counting only the tokens whose shares apply over MCP too: a
+    superadmin-issued read-only ``pat`` of the ``dev`` profile, issued to this
+    person for this workspace."""
+    out: dict[str, str] = {}
+    for view in _live_tokens(user_id, workspace_id):
+        if view.user_id != user_id or view.workspace_id != workspace_id:
+            continue
+        if view.problem() is None and view.shares_apply:
+            for share_id in view.shares:
+                out.setdefault(share_id, view.id)
+    return out
+
+
+def _shared(user_id: str, workspace_id: str, own: dict) -> dict:
+    """``{slug: decision}`` of the shared repositories the caller may read now.
+    Anything unreadable grants nothing."""
+    from sqlalchemy.orm import Session
+
+    from src.access import shares
+    from src.access.resolver import _sync_engine
+
+    try:
+        held = _held_shares(user_id, workspace_id)
+        if not held:
+            return {}
+        with Session(_sync_engine()) as s:
+            grants = shares.live_grants(s, share_ids=list(held), workspace_id=workspace_id,
+                                        user_id=user_id)
+    except Exception as exc:  # noqa: BLE001 — refuse rather than grant
+        logger.warning("onec_review_shares_unreadable ws=%s err=%s", workspace_id,
+                       type(exc).__name__)
+        return {}
+    # A slug the caller's own workspace has is the caller's own, whatever a share says.
+    return {slug: g.decision() for slug, g in grants.items() if slug not in own}
+
+
+def _decisions(user_id: str, is_admin: bool, workspace_id: str) -> dict:
+    from src.access.effective import Principal, effective_access, registered_repos
+
+    own = effective_access(Principal(user_id=user_id, is_admin=is_admin), workspace_id)
+    return {**own, **_shared(user_id, workspace_id, {**registered_repos(workspace_id), **own})}
+
+
+def _owner_names(decisions: dict) -> dict[str, str]:
+    """``{owner workspace id: name}`` for the shared decisions in ``decisions``."""
+    ids = sorted({d.data_workspace for d in decisions.values()
+                  if getattr(d, "via_share", None) and getattr(d, "data_workspace", None)})
+    if not ids:
+        return {}
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from src.access.resolver import _sync_engine
+    from src.db.models import Workspace
+
+    try:
+        with Session(_sync_engine()) as s:
+            return {w.id: w.name for w in s.execute(
+                select(Workspace).where(Workspace.id.in_(ids))).scalars().all()}
+    except Exception:  # noqa: BLE001 — a missing name is not a reason to hide the repository
+        return {}
+
+
+def _note_share_read(user_id: str, workspace_id: str, share_id: str) -> None:
+    """One row in the receiving workspace's MCP call log, by share id and never by
+    name: the owner's usage of a share is counted from that log. Never blocks."""
+    try:
+        from src.mcp_server import audit
+
+        token_id = _held_shares(user_id, workspace_id).get(share_id)
+        audit.write_row({
+            "ts": datetime.now(UTC), "workspace_id": workspace_id, "user_id": user_id,
+            "token_id": token_id, "kind": "web", "client_id": "web", "tool": "onec_check",
+            "profile": "web", "repos": [], "packs": [], "shares": [share_id], "status": "ok",
+            "result_bytes": 0, "result_items": 1, "duration_ms": 0, "args_hash": "",
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("onec_review_share_log_failed err=%s", type(exc).__name__)
 
 
 def _source(slug: str, sha: str, dec) -> Source | None:  # noqa: ANN001
@@ -106,7 +205,12 @@ def list_configs(user_id: str, is_admin: bool, workspace_id: str, query: str = "
     from src.repos.upload import read_upload_meta, upload_revision
 
     decisions = _decisions(user_id, is_admin, workspace_id)
-    registry = registered_repos(workspace_id)
+    registry = dict(registered_repos(workspace_id))
+    owners = _owner_names(decisions)
+    for owner in {d.data_workspace for d in decisions.values() if getattr(d, "via_share", None)}:
+        for slug, names in registered_repos(owner).items():
+            if slug in decisions and slug not in registry:
+                registry[slug] = names
     q = (query or "").strip().lower()
     slugs = [s for s, d in sorted(decisions.items())
              if d.code_visible and (not q or q in s.lower()
@@ -119,9 +223,12 @@ def list_configs(user_id: str, is_admin: bool, workspace_id: str, query: str = "
             continue
         meta = (read_upload_meta(slug) or {}) if upload_revision(slug) else {}
         names = registry.get(slug, ())
+        dec = decisions[slug]
+        shared_from = (owners.get(dec.data_workspace) or "?") if getattr(dec, "via_share", None) else ""
         out.append(ConfigChoice(
             slug=slug, name=str(meta.get("name") or (names[-1] if names else slug)),
-            ref=f"{info.branch}@{info.sha[:8]}", age=info.age, upload=bool(meta or upload_revision(slug))))
+            ref=f"{info.branch}@{info.sha[:8]}", age=info.age, upload=bool(meta or upload_revision(slug)),
+            shared_from=shared_from))
         if len(out) >= limit:
             break
     return out
@@ -141,7 +248,10 @@ def open_config(user_id: str, is_admin: bool, workspace_id: str,
     cfg = Config(src, label=f"{slug}@{info.sha[:8]}") if src is not None else None
     if cfg is None or not cfg.ok:
         raise ReviewError(422, "this repository is not a 1C configuration dump")
-    return cfg, {"label": slug, "ref": f"{info.branch}@{info.sha[:8]}", "age": info.age}
+    out = {"label": slug, "ref": f"{info.branch}@{info.sha[:8]}", "age": info.age}
+    if getattr(dec, "via_share", None):
+        out.update(share=dec.via_share, ask_ok=bool(getattr(dec, "ask_ok", False)))
+    return cfg, out
 
 
 def run_review(*, user_id: str, is_admin: bool, workspace_id: str, handle: str,
@@ -157,16 +267,29 @@ def run_review(*, user_id: str, is_admin: bool, workspace_id: str, handle: str,
         raise ReviewError(422, f"the file could not be read: {why}")
     lang = lang if lang in LANGS else DEFAULT_LANG
     cfg = info = comparison = None
+    share, ask_ok = "", True
     if (config_slug or "").strip():
         cfg, info = open_config(user_id, is_admin, workspace_id, config_slug.strip())
+        share, ask_ok = str(info.pop("share", "") or ""), bool(info.pop("ask_ok", True))
         comparison = compare(ext, cfg)
     checks = check(ext, cfg)
     facts = build_facts(ext, data, cfg, comparison, checks, config_info=info,
                         now=datetime.now())
     choice = parse_choice(model)
+    withheld = bool(share) and not ask_ok and choice.mode != "none"
+    if withheld:
+        # C8: the owner did not allow its code to reach the receiver's model provider.
+        choice = parse_choice("none")
+    if share:
+        _note_share_read(user_id, workspace_id, share)
     prose, label, failure = ask_prose(facts, lang, choice, workspace_id, user_id)
     note = ""
-    if prose is not None:
+    if withheld:
+        note = ("Пояснення побудовано за шаблоном: власник пошареної конфігурації не дозволив "
+                "надсилати її код моделі." if lang != "en" else
+                "The explanations come from the template: the owner of the shared configuration "
+                "did not allow sending its code to a model.")
+    elif prose is not None:
         note = (f"Пояснення сформульовано моделлю {label}; таблиці, числа й уривки коду взято з "
                 "перевірки без змін." if lang != "en" else
                 f"The explanations were worded by the model {label}; tables, numbers and code "

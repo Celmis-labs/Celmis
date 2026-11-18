@@ -135,6 +135,26 @@ class _T:
             return f"{self.n(size)} {_plural_uk(size, 'байт', 'байти', 'байтів')}"
         return f"{self.n(size)} bytes"
 
+    def ago(self, age: str) -> str:
+        """The index's compact age (``now``, ``25m``, ``3h``, ``14d``) as words:
+        "14 днів тому" / "14 days ago". "" for an unknown age, the input itself
+        for a shape it does not know."""
+        age = (age or "").strip()
+        if not age or age == "?":
+            return ""
+        if age == "now":
+            return "щойно" if self.uk else "just now"
+        m = re.fullmatch(r"(\d+)([mhd])", age)
+        if not m:
+            return age
+        n, unit = int(m.group(1)), m.group(2)
+        if self.uk:
+            words = {"m": ("хвилину", "хвилини", "хвилин"), "h": ("годину", "години", "годин"),
+                     "d": ("день", "дні", "днів")}[unit]
+            return f"{self.count(n, words, ('', ''))} тому"
+        words = {"m": ("minute", "minutes"), "h": ("hour", "hours"), "d": ("day", "days")}[unit]
+        return f"{self.count(n, ('', '', ''), words)} ago"
+
 
 def _span(a: int, b: int) -> str:
     return str(a) if a == b else f"{a}–{b}"
@@ -427,10 +447,10 @@ class _Builder:
                     f"last change marker in the code: {t.date(f.config_last_marker_date)} ({mk})"))
             rows.append([self.tr("Конфігурація", "Configuration") + f" ({f.config_label})",
                          what_c, "; ".join(bits) or "—"])
-            if f.config_ref or f.config_age:
+            ago = self.t.ago(f.config_age)
+            if f.config_ref or ago:
                 ref = f.config_ref
-                age = self.tr(f"індекс давності {f.config_age}", f"index age {f.config_age}") \
-                    if f.config_age else ""
+                age = self.tr(f"індекс оновлено {ago}", f"index updated {ago}") if ago else ""
                 rows.append([self.tr("Репозиторій", "Repository"), ref or "—", age or "—"])
         self.out.append(Table([self.tr("Джерело", "Source"), self.tr("Що це", "What it is"),
                                self.tr("Стан", "State")], rows, [1.2, 1.4, 2.2]))
@@ -912,9 +932,10 @@ class _Builder:
             "not visible to a static analysis.")]
         if f.has_config:
             age = ""
-            if f.config_age:
-                age = self.tr(f" Індекс конфігурації має давність {f.config_age}.",
-                              f" The configuration index is {f.config_age} old.")
+            ago = self.t.ago(f.config_age)
+            if ago:
+                age = self.tr(f" Індекс конфігурації оновлено {ago}.",
+                              f" The configuration index was updated {ago}.")
             items.append(self.tr(
                 "Вивантаження конфігурації може бути старішим за робочу базу: зміни, зроблені "
                 "після нього, в порівняння не потрапили." + age,

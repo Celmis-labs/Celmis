@@ -3846,7 +3846,11 @@ export type OnecFile = {
   handle: string; file_name: string; size: number; sha256: string;
   kind: string; object_name: string; synonym: string; forms: number; templates: number;
 };
-export type OnecConfig = { slug: string; name: string; ref: string; age: string; upload: boolean };
+export type OnecConfig = {
+  slug: string; name: string; ref: string; age: string; upload: boolean;
+  /** The owner workspace's name when another workspace shares this repository; "" for an own one. */
+  shared_from: string;
+};
 export type OnecModels = {
   default_available: boolean; default_provider: string; default_model: string;
   models: { provider: string; model: string }[];

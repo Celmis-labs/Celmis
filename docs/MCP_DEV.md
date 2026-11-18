@@ -396,6 +396,12 @@ excerpts from both sides, how stale the version is, what was checked and is fine
 limits, and a recommendation. It downloads as PDF, DOCX or Markdown. A report is kept
 24 hours, visible only to the person who made it.
 
+A configuration another workspace shares is offered there on the same terms as over
+MCP: only when the share is named on one of your own read-only developer tokens in
+this workspace and still holds. If its owner did not allow asking, no model sees its
+code and the report is worded from the template. Each such report is logged by share
+id, so the owner sees the use.
+
 Every table, number, name and code excerpt comes from the check. A model is optional
 and only words the explanations: pick one in the tab, or configure the `onec_check`
 surface in Settings > LLM to offer it as the default. A model that fails, or that

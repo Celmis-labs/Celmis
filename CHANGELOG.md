@@ -20,6 +20,38 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.38] — 2026-11-18
+
+### Added
+
+- **A shared configuration in *Check a file*.** A repository another workspace
+  shares is offered on the same terms as over MCP: only when the share is named
+  on one of the person's own live read-only developer tokens in this workspace
+  and still holds. Membership alone never reads a share. The list says whose it
+  is. When the owner did not allow asking, a chosen model is not called and the
+  report says why, so the shared code reaches no model provider. Each report
+  built on a share is written to the call log by share id, where the owner
+  reads the share's usage.
+
+### Changed
+
+- *Check a file*: one field finds and picks the configuration (type to search,
+  the matches open under it, arrows and Enter pick) instead of a search box
+  above a separate list.
+- The index age reads as words in the tab and in the report ("14 days ago",
+  "14 днів тому") instead of `14d`.
+- With no model connected in the workspace, the tab says so and links to
+  Settings → LLM instead of offering a list with one entry.
+
+### Fixed
+
+- **`/mcp/dev` without the trailing slash answered 404.** It fell through to
+  the `/mcp` mount, which has no `dev` route, although it is the resource the
+  OAuth metadata names and the address a claude.ai custom connector is given,
+  so adding the connector stopped at "not found". The bare `/mcp/dev` is now
+  served by the dev endpoint directly, without a redirect (bare `/mcp` already
+  redirected to `/mcp/`).
+
 ## [3.1.36] — 2026-11-17
 
 ### Added

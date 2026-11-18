@@ -299,6 +299,41 @@ def _challenge_sentence(scope, mount_path: str) -> str:  # noqa: ANN001
     return sentence
 
 
+class _SlashAlias:
+    """Serves ``<mount>`` exactly as ``<mount>/``, by dispatching again through the
+    app's router with the slash added, so that mount answers and not a sibling.
+
+    Not a redirect: an MCP client posting to the bare address need not follow one,
+    and the bare form is what people type into a connector form."""
+
+    def __init__(self, router) -> None:  # noqa: ANN001
+        self.router = router
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        scope = dict(scope)
+        scope["path"] = str(scope.get("path", "")) + "/"
+        raw = scope.get("raw_path")
+        if isinstance(raw, bytes | bytearray):
+            scope["raw_path"] = bytes(raw) + b"/"
+        await self.router(scope, receive, send)
+
+
+def _alias_bare_paths(app, paths) -> None:  # noqa: ANN001
+    """Answer each mount path without its trailing slash as well.
+
+    Without this ``/mcp/dev`` fell through to the ``/mcp`` mount, which has no
+    ``dev`` route, and came back 404, although it is the very resource the
+    OAuth metadata names (``resource_metadata`` of the 401) and the address a
+    claude.ai custom connector is given."""
+    from starlette.routing import Route
+
+    for path in paths:
+        bare = path.rstrip("/")
+        if bare:
+            app.router.routes.insert(
+                0, Route(bare, endpoint=_SlashAlias(app.router), include_in_schema=False))
+
+
 class _PublicChallenge:
     """Make the 401 of an MCP endpoint a usable invitation.
 
@@ -2339,6 +2374,10 @@ def mount_mcp(app: FastAPI, *, path: str = "/mcp") -> bool:
                 _ExplainInvalidHost(_ExplainRefusal(dev_app)), dev_path))
         app.mount(path, _PublicChallenge(
             _ExplainInvalidHost(_ExplainRefusal(sub_app)), path))
+        if dev is not None and dev_app is not None:
+            # Only the dev endpoint: bare `/mcp` matches no mount and gets the
+            # router's slash redirect, which keeps the public prefix (tested).
+            _alias_bare_paths(app, [dev_path])
         # Assert the endpoint is where we claim: a silent 404 here costs the
         # agent every mcp__celmis__* tool with no error anywhere.
         try:

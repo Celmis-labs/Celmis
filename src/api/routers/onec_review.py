@@ -54,6 +54,9 @@ class ConfigOut(BaseModel):
     ref: str
     age: str
     upload: bool
+    #: The owner workspace's name for a repository another workspace shares; "" for
+    #: one of this workspace's own.
+    shared_from: str = ""
 
 
 class ModelOut(BaseModel):
@@ -132,7 +135,8 @@ async def configs(q: str = Query(default="", max_length=100),
                   workspace_id: str = Depends(current_workspace_id)) -> list[ConfigOut]:
     rows = await asyncio.to_thread(service.list_configs, str(user.id),
                                    bool(getattr(user, "is_admin", False)), workspace_id, q)
-    return [ConfigOut(slug=r.slug, name=r.name, ref=r.ref, age=r.age, upload=r.upload)
+    return [ConfigOut(slug=r.slug, name=r.name, ref=r.ref, age=r.age, upload=r.upload,
+                      shared_from=r.shared_from)
             for r in rows]
 
 

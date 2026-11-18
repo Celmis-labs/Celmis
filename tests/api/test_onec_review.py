@@ -30,7 +30,10 @@ def client(tmp_path, monkeypatch):
     def fake_open(user_id, is_admin, workspace_id, slug):
         if slug == "forbidden":
             raise review.ReviewError(403, "you cannot read this repository")
-        return Config(DirSource(dump), "acme"), {"label": slug, "ref": "main@abcdef12", "age": "1 day"}
+        info = {"label": slug, "ref": "main@abcdef12", "age": "1d"}
+        if slug.startswith("shared"):
+            info.update(share="sh-1", ask_ok=slug == "shared-ask")
+        return Config(DirSource(dump), "acme"), info
 
     monkeypatch.setattr(review, "open_config", fake_open)
     monkeypatch.setattr(review, "list_configs", lambda *a, **k: [
@@ -115,3 +118,42 @@ def test_an_unreadable_repository_is_forbidden(client):
 
 def test_an_unknown_handle_is_not_found(client):
     assert client.post("/api/onec/review", json={"handle": "nope"}).status_code == 404
+
+
+@pytest.fixture()
+def spy(monkeypatch):
+    seen = {"choices": [], "shares": []}
+    real = review.ask_prose
+
+    def ask(facts, lang, choice, workspace_id, user_id=""):
+        seen["choices"].append(choice.mode)
+        return real(facts, lang, choice, workspace_id, user_id)
+
+    monkeypatch.setattr(review, "ask_prose", ask)
+    monkeypatch.setattr(review, "_note_share_read", lambda u, w, sid: seen["shares"].append((u, w, sid)))
+    return seen
+
+
+def test_a_shared_configuration_whose_owner_forbids_asking_never_reaches_a_model(client, spy):
+    handle = _upload(client)["handle"]
+    r = client.post("/api/onec/review", json={"handle": handle, "config": "shared",
+                                              "model": "google:gemini-x"})
+    assert r.status_code == 201
+    assert spy["choices"] == ["none"] and r.json()["model"]["used"] is False
+    md = client.get(f"/api/onec/review/{r.json()['id']}/export?format=md").text
+    assert "не дозволив надсилати її код моделі" in md
+    assert spy["shares"] == [("u-1", WS, "sh-1")]
+
+
+def test_a_shared_configuration_whose_owner_allows_asking_keeps_the_model(client, spy):
+    handle = _upload(client)["handle"]
+    r = client.post("/api/onec/review", json={"handle": handle, "config": "shared-ask",
+                                              "model": "nokey:model-x"})
+    assert r.status_code == 201 and spy["choices"] == ["model"]
+    assert spy["shares"] == [("u-1", WS, "sh-1")]
+
+
+def test_an_own_configuration_is_not_noted_as_a_share(client, spy):
+    handle = _upload(client)["handle"]
+    assert client.post("/api/onec/review", json={"handle": handle, "config": "acme"}).status_code == 201
+    assert spy["shares"] == []

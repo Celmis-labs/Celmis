@@ -39,7 +39,7 @@ def built(tmp_path_factory):
     ext = inspect_bytes(data, f"{acme.REPORT}.erf")
     cfg = Config(DirSource(root), "acme")
     facts = build_facts(ext, data, cfg, compare(ext, cfg), check(ext, cfg),
-                        config_info={"label": "acme", "ref": "main@abcdef12", "age": "2 days"},
+                        config_info={"label": "acme", "ref": "main@abcdef12", "age": "14d"},
                         now=datetime(2025, 6, 1))
     return ext, cfg, facts, data
 
@@ -114,6 +114,31 @@ def test_the_report_reads_in_english_too(built):
     assert "Conclusion: do not use this file." in md
     assert "## 2. Blockers" in md and "Do not connect this file." in md
     assert "Висновок" not in md
+
+
+def test_the_index_age_is_words_not_the_mcp_shorthand(built):
+    _e, _c, facts, _ = built
+    uk = _text(build_document(facts, lang="uk"))
+    en = _text(build_document(facts, lang="en"))
+    assert "індекс оновлено 14 днів тому" in uk and "оновлено 14 днів тому." in uk
+    assert "index updated 14 days ago" in en and "was updated 14 days ago." in en
+    assert "14d" not in uk and "14d" not in en
+
+
+@pytest.mark.parametrize(("age", "uk", "en"), [
+    ("now", "щойно", "just now"),
+    ("1m", "1 хвилину тому", "1 minute ago"),
+    ("3h", "3 години тому", "3 hours ago"),
+    ("21d", "21 день тому", "21 days ago"),
+    ("5d", "5 днів тому", "5 days ago"),
+    ("?", "", ""),
+    ("", "", ""),
+])
+def test_an_age_reads_in_both_languages(age, uk, en):
+    from src.onec.review_doc import _T
+
+    assert _T("uk").ago(age) == uk
+    assert _T("en").ago(age) == en
 
 
 def test_a_conclusion_is_coloured_by_its_level(built):

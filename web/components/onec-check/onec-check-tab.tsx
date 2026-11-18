@@ -6,21 +6,22 @@
  * One component, used as a tab on the Q&A page and on the agent page.
  */
 
-import { useRef, useState } from "react";
+import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { DownloadIcon, FileUpIcon, Loader2Icon } from "lucide-react";
 import { toast } from "sonner";
 
+import { ConfigPicker } from "@/components/onec-check/config-picker";
 import { ConnectMcpDialog } from "@/components/onec-check/connect-dialog";
 import { ReportView } from "@/components/onec-check/report-view";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, type SelectOption } from "@/components/ui/select";
-import { downloadWithAuth, onecReviewApi, type OnecFile, type OnecReport } from "@/lib/api";
+import { downloadWithAuth, onecReviewApi, type OnecConfig, type OnecFile, type OnecReport } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { useToken } from "@/lib/use-token";
 import { cn } from "@/lib/utils";
@@ -35,15 +36,23 @@ export function OnecCheckTab() {
   const [file, setFile] = useState<OnecFile | null>(null);
   const [dragging, setDragging] = useState(false);
   const [search, setSearch] = useState("");
-  const [config, setConfig] = useState("");
+  const [query, setQuery] = useState("");
+  const [picked, setPicked] = useState<OnecConfig | null>(null);
+  const config = picked?.slug ?? "";
   const [model, setModel] = useState("none");
   const [lang, setLang] = useState(locale === "uk" ? "uk" : "en");
   const [report, setReport] = useState<OnecReport | null>(null);
 
+  // One request per pause in typing, not per key.
+  useEffect(() => {
+    const id = setTimeout(() => setQuery(search.trim()), 250);
+    return () => clearTimeout(id);
+  }, [search]);
   const configs = useQuery({
-    queryKey: ["onec-configs", search],
-    queryFn: () => onecReviewApi.configs(token!, search),
+    queryKey: ["onec-configs", query],
+    queryFn: () => onecReviewApi.configs(token!, query),
     enabled: !!token,
+    placeholderData: (prev) => prev,
   });
   const models = useQuery({
     queryKey: ["onec-models"],
@@ -68,10 +77,6 @@ export function OnecCheckTab() {
 
   const pick = (f: File | undefined) => { if (f) upload.mutate(f); };
 
-  const configOptions: SelectOption[] = [
-    { value: "", label: t("onecCheck.configNone") },
-    ...(configs.data ?? []).map((c) => ({ value: c.slug, label: c.name, hint: `${c.ref} · ${c.age}` })),
-  ];
   const d = models.data;
   const modelOptions: SelectOption[] = [{ value: "none", label: t("onecCheck.modelNone") }];
   if (d?.default_available) {
@@ -83,6 +88,8 @@ export function OnecCheckTab() {
   for (const m of d?.models ?? []) {
     modelOptions.push({ value: `${m.provider}:${m.model}`, label: m.model, group: m.provider });
   }
+  // Nothing to pick: say so and where to fix it, instead of a select with one option.
+  const noModel = models.isSuccess && !d?.default_available && (d?.models.length ?? 0) === 0;
 
   const download = async (format: "pdf" | "docx" | "md") => {
     try {
@@ -144,19 +151,29 @@ export function OnecCheckTab() {
           <div className="grid gap-4 md:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="onec-config">{t("onecCheck.configLabel")}</Label>
-              <Input
-                value={search} onChange={(e) => setSearch(e.target.value)}
-                placeholder={t("onecCheck.configSearch")} aria-label={t("onecCheck.configSearch")}
+              <ConfigPicker
+                id="onec-config" value={config} selected={picked} onPick={setPicked}
+                query={search} onQuery={setSearch} options={configs.data ?? []}
+                loading={configs.isFetching}
               />
-              <Select id="onec-config" value={config} onChange={setConfig} options={configOptions} />
-              {configs.isSuccess && configs.data.length === 0 && !search && (
+              {configs.isSuccess && configs.data.length === 0 && !query && (
                 <p className="text-xs text-[var(--color-muted-foreground)]">{t("onecCheck.configEmpty")}</p>
               )}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="onec-model">{t("onecCheck.modelLabel")}</Label>
               <Select id="onec-model" value={model} onChange={setModel} options={modelOptions} />
-              <p className="text-xs text-[var(--color-muted-foreground)]">{t("onecCheck.modelHint")}</p>
+              {noModel ? (
+                <p className="text-xs text-[var(--color-muted-foreground)]" data-testid="onec-no-model">
+                  {t("onecCheck.modelNoneConnected")}{" "}
+                  <Link href="/settings/llm" className="underline underline-offset-2">
+                    {t("onecCheck.modelConnectLink")}
+                  </Link>
+                  .
+                </p>
+              ) : (
+                <p className="text-xs text-[var(--color-muted-foreground)]">{t("onecCheck.modelHint")}</p>
+              )}
               <Label htmlFor="onec-lang" className="pt-1">{t("onecCheck.langLabel")}</Label>
               <Select
                 id="onec-lang" value={lang} onChange={setLang}
