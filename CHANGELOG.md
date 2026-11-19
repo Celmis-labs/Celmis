@@ -20,6 +20,39 @@ derives it from there.
 
 ## [Unreleased]
 
+### Added
+
+- **Knowledge cards: a team's own markdown, imported into a repository's
+  documentation** ([docs/KNOWLEDGE_BASE.md](docs/KNOWLEDGE_BASE.md)). Cards are
+  processes, decisions, glossary entries and the like. Import them as `.md`
+  files or a `.zip` (drag and drop on **Documentation**), or from a folder of
+  the repository itself, re-imported after every push. The front matter is
+  kept whole. Celmis reads `type`, `id`, `status` (draft, verified,
+  needs-review), `domain`, `author`, `lang`, `tags`, `objects_1c`, `source`,
+  `related` and `replaces`, and every key filters the list, the search index
+  and the API. Only `verified` counts as checked. Every answer shows the
+  status, verified cards rank first, and a verified card hides the generated
+  note it `replaces`.
+- **1C objects on a card are checked against a configuration.** `Документ.X`,
+  `Document.X` and `Documents.X` name the same object. Objects missing from
+  the configuration's graph are reported. A card whose objects changed after
+  its `source` commit becomes `needs-review` at import time, and again after
+  every index of the configuration.
+- **Links between notes, and a change log.** `related`, markdown and `[[wiki]]`
+  links and `replaces` become a graph with back-links (the **Links** tab).
+  Every created, changed, removed or stale note is logged (the **Changes**
+  tab, `GET /api/kb/{repo}/changes`).
+- **MCP `docs` tool** in the developer profile: search, filter by front matter
+  (`where="object=… status=…"`), open by path or id, `changed_since=`. The
+  dev profile now has 13 tools.
+
+### Fixed
+
+- **The incremental index missed every change to a file with a non-ASCII
+  name.** `git diff` quoted such paths in octal escapes by default, so nothing
+  matched them, and a 1C dump is nearly all Cyrillic names. The diff now runs
+  with `core.quotepath=off`.
+
 ## [3.1.39] — 2026-11-18
 
 ### Changed

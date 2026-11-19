@@ -311,6 +311,13 @@ class Settings(BaseSettings):
     # max_graph_nodes_per_query bounds the explosion (500 — agreed with 5d).
     retrieval_min_score: float = 0.35  # Cosine similarity; below that — the LLM judges for itself
 
+    # ─── Imported knowledge (src/kb) ─────────────────────────────────
+    #: Markdown files one import keeps (the rest is refused with a reason).
+    kb_max_files: int = 3000
+    #: Size of one card, and of everything one upload carries.
+    kb_max_file_bytes: int = 1_000_000
+    kb_max_upload_bytes: int = 50_000_000
+
     # ─── Graph backend (FalkorDBLite, embedded) ──────────────────────
     graph_db_filename: str = "graph.fdblite"  # located in data_dir/{repo_slug}/
     graph_default_depth: int = 2

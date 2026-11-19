@@ -420,6 +420,9 @@ def apply_new_version(
     )
     say("cleaning")
     notes = prune_vault(slug, diff.removed_paths, workspace_id)
+    from src.kb.store import after_index
+
+    after_index(slug)  # its knowledge base, and the cards checked against it
     with contextlib.suppress(Exception):
         from src.groups.indexer import enqueue_materialize_for_repo
 

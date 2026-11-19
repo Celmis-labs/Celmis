@@ -25,6 +25,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     IsEmptyCondition,
+    MatchAny,
     MatchValue,
     PayloadField,
 )
@@ -55,6 +56,10 @@ class VaultHit:
     path: str | None = None  # for type=module — path relative to the repo (e.g. "src/auth")
     cross_refs: list[str] = field(default_factory=list)  # for type=feature/integration —
     # links to the members (e.g. ["modules/src-services-billing", ...])
+    #: An imported card's own fields as Celmis reads them (src/kb): id, status,
+    #: 1C objects, staleness. Empty for a generated note.
+    kb: dict = field(default_factory=dict)
+    title: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -111,8 +116,15 @@ class VaultRetriever:
         repo: str | None = None,
         note_type: str | None = None,
         top_k: int | None = None,
+        kb_filters: dict[str, str] | None = None,
+        repos: list[str] | None = None,
     ) -> list[VaultHit]:
         """Semantic search. The filters are optional.
+
+        ``kb_filters`` narrows to imported cards by their front matter
+        (:func:`kb_conditions`): ``status``, ``domain``, ``author``, ``lang``,
+        ``id``, ``tag``, ``object`` (a 1C object), ``card`` (any imported card),
+        and any other key of a card's own front matter.
 
         Raises `CollectionMissing` when the vault has never been generated —
         BEFORE the embedding call, which is the point of checking. A search
@@ -136,8 +148,13 @@ class VaultRetriever:
         must_conditions: list[FieldCondition] = list(self.scope.must_conditions())
         if repo:
             must_conditions.append(FieldCondition(key="repo", match=MatchValue(value=repo)))
+        if repos:
+            # Several repositories of one tenant in one query: one embedding
+            # of the question instead of one per repository.
+            must_conditions.append(FieldCondition(key="repo", match=MatchAny(any=list(repos))))
         if note_type:
             must_conditions.append(FieldCondition(key="type", match=MatchValue(value=note_type)))
+        must_conditions.extend(kb_conditions(kb_filters or {}))
 
         query_filter = Filter(must=must_conditions) if must_conditions else None
 
@@ -167,6 +184,8 @@ class VaultRetriever:
                     content=str(payload.get("content", "")),
                     path=payload.get("path"),
                     cross_refs=list(payload.get("cross_refs", []) or []),
+                    kb=dict(payload.get("kb") or {}) if isinstance(payload.get("kb"), dict) else {},
+                    title=str(payload.get("title") or ""),
                 )
             )
         logger.info("vault_search q_hash=%s hits=%d", hash(question) & 0xFFFF, len(hits))
@@ -357,6 +376,29 @@ class VaultRetriever:
             collection_name=self.settings.qdrant_collection,
             points_selector=Filter(must=must, should=should or None),
         )
+
+
+#: Card filters answered from Celmis's reading of the card (payload ``kb``);
+#: any other key is looked up in the card's front matter as written (``fm``).
+_KB_KEYS = {"status": "kb.effective_status", "domain": "kb.domain", "author": "kb.author",
+            "lang": "kb.lang", "id": "kb.id", "tag": "kb.tags", "object": "kb.objects"}
+
+
+def kb_conditions(filters: dict[str, str]) -> list[FieldCondition]:
+    """Qdrant conditions for card filters (empty values are ignored)."""
+    out: list[FieldCondition] = []
+    for key, value in filters.items():
+        if value in (None, ""):
+            continue
+        if key == "card":
+            out.append(FieldCondition(key="kb.origin", match=MatchValue(value="import")))
+            continue
+        if key == "object":
+            from src.kb.objects import canonical
+            value = canonical(str(value)) or str(value)
+        field_key = _KB_KEYS.get(key) or f"fm.{key}"
+        out.append(FieldCondition(key=field_key, match=MatchValue(value=str(value))))
+    return out
 
 
 def _build_qdrant_client(settings: Settings) -> QdrantClient:

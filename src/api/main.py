@@ -50,6 +50,7 @@ from src.api.routers import intel as intel_router_mod
 from src.api.routers import invites as invites_router
 from src.api.routers import issues as issues_router
 from src.api.routers import jobs as jobs_router
+from src.api.routers import kb as kb_router
 from src.api.routers import learning as learning_router
 from src.api.routers import llm as llm_router
 from src.api.routers import memories as memories_router
@@ -539,6 +540,7 @@ def build_app() -> FastAPI:
     # the next reader of an old branch knows where it went.
     app.include_router(usage_router.router)
     app.include_router(docs_router.router)
+    app.include_router(kb_router.router)
     # Stage 14
     app.include_router(compliance_router.router)
     app.include_router(teams_router.router)

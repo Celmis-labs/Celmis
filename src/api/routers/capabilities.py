@@ -240,7 +240,8 @@ FEATURES: tuple[Feature, ...] = (
     # documentation browser backed by `/api/docs`. Prefixes and pages are
     # different namespaces, so they cannot collide — but a reader deserves to
     # be told that once rather than work it out twice.
-    Feature("docs", ("/api/docs",), ("/docs",)),
+    # `/api/kb`: the cards a team imports into the same documentation (src/kb).
+    Feature("docs", ("/api/docs", "/api/kb"), ("/docs",)),
     Feature("dependencies", ("/api/deps",), ("/dependencies",)),
     Feature("intel", ("/api/intel",), ("/admin/intel",)),
     Feature("agent", ("/api/claude", "/api/agent-sessions"), ("/claude",)),

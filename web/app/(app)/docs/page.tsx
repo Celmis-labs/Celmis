@@ -18,11 +18,13 @@ import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
-  BookTextIcon, DownloadIcon, FileTextIcon, PrinterIcon, RefreshCwIcon,
+  BookTextIcon, DownloadIcon, FileTextIcon, FileUpIcon, PrinterIcon, RefreshCwIcon,
   SparklesIcon,
 } from "lucide-react";
 
-import { api, API_BASE, docsApi, downloadWithAuth, requestHeaders, type RepoOut } from "@/lib/api";
+import {
+  api, API_BASE, docsApi, downloadWithAuth, kbApi, requestHeaders, type KbFilters, type RepoOut,
+} from "@/lib/api";
 import { useToken } from "@/lib/use-token";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
@@ -32,10 +34,19 @@ import { SectionTabs } from "@/components/section-tabs";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
+import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Select } from "@/components/ui/select";
 import { WorkspaceBadge } from "@/components/workspace-badge";
+import {
+  filtersActive, KbCardPanel, KbChangesView, KbFilterBar, KbGraphView, KbImportPanel, StatusBadge,
+} from "@/components/docs/knowledge-base";
 
-type NoteSummary = { path: string; title: string; updated_at: string; words: number };
+type NoteSummary = {
+  path: string; title: string; updated_at?: string; words?: number;
+  /** A generated note's kind (module, feature, …) or an imported card's own type. */
+  type?: string; status?: string; card?: boolean;
+};
+type View = "notes" | "links" | "changes";
 type DocsOverview = { repo_slug: string; notes: NoteSummary[]; omitted: number };
 type NoteOut = { path: string; title: string; body: string; updated_at: string };
 
@@ -44,6 +55,9 @@ export default function DocsPage() {
   const token = useToken();
   const [repo, setRepo] = useState("");
   const [open, setOpen] = useState<string | null>(null);
+  const [view, setView] = useState<View>("notes");
+  const [showImport, setShowImport] = useState(false);
+  const [filters, setFilters] = useState<KbFilters>({});
 
   const repos = useQuery({
     queryKey: ["repos"],
@@ -55,6 +69,15 @@ export default function DocsPage() {
   const docs = useQuery({
     queryKey: ["docs", slug],
     queryFn: () => api<DocsOverview>(`/api/docs/${slug}`, { token }),
+    enabled: !!token && !!slug,
+  });
+
+  // The list narrowed by front matter (type, status, a 1C object, any key):
+  // the knowledge-base route, which reads the same vault with the cards' fields.
+  const filtering = filtersActive(filters);
+  const kbList = useQuery({
+    queryKey: ["kb", slug, filters],
+    queryFn: () => kbApi.list(token!, slug, filters),
     enabled: !!token && !!slug,
   });
 
@@ -85,7 +108,11 @@ export default function DocsPage() {
     }
   };
 
-  const notes = docs.data?.notes ?? [];
+  const allNotes: NoteSummary[] = docs.data?.notes ?? [];
+  const notes: NoteSummary[] = filtering ? (kbList.data?.notes ?? []) : allNotes;
+  const types = kbList.data?.types ?? [];
+  const openNote = (path: string) => { setOpen(path); setView("notes"); };
+  const openIsCard = !!open && (open.startsWith("kb/") || !!notes.find((n) => n.path === open)?.card);
 
   // Redo THIS document, optionally with the other engine.
   //
@@ -153,20 +180,24 @@ export default function DocsPage() {
       <div className="flex flex-wrap items-center gap-2 print:hidden">
         <Select
           value={slug}
-          onChange={(v) => { setRepo(v); setOpen(null); }}
+          onChange={(v) => { setRepo(v); setOpen(null); setFilters({}); }}
           options={(repos.data ?? []).map((r) => ({ value: r.slug, label: r.full_name }))}
           className="w-full sm:w-72"
           placeholder={t("docs.pickRepo")}
         />
-        <Button size="sm" variant="outline" disabled={!notes.length}
+        <Button size="sm" variant={showImport ? "default" : "outline"} disabled={!slug}
+                onClick={() => setShowImport((v) => !v)} data-testid="kb-toggle-import">
+          <FileUpIcon className="mr-1 h-3.5 w-3.5" /> {t("kb.importButton")}
+        </Button>
+        <Button size="sm" variant="outline" disabled={!allNotes.length}
                 onClick={() => void download("md")}>
           <DownloadIcon className="mr-1 h-3.5 w-3.5" /> {t("docs.exportMd")}
         </Button>
-        <Button size="sm" variant="outline" disabled={!notes.length}
+        <Button size="sm" variant="outline" disabled={!allNotes.length}
                 onClick={() => void download("docx")}>
           <FileTextIcon className="mr-1 h-3.5 w-3.5" /> {t("docs.exportDocx")}
         </Button>
-        <Button size="sm" variant="outline" disabled={!notes.length}
+        <Button size="sm" variant="outline" disabled={!allNotes.length}
                 onClick={() => window.print()}>
           <PrinterIcon className="mr-1 h-3.5 w-3.5" /> {t("docs.exportPdf")}
         </Button>
@@ -188,7 +219,34 @@ export default function DocsPage() {
         </Button>
       </div>
 
-      {slug && !docs.isLoading && notes.length === 0 && (
+      {showImport && slug && (
+        <KbImportPanel token={token} slug={slug} repos={repos.data ?? []} />
+      )}
+
+      {allNotes.length > 0 && (
+        <SegmentedControl<View>
+          value={view}
+          onValueChange={setView}
+          label={t("kb.views")}
+          semantics="tabs"
+          size="sm"
+          className="print:hidden"
+          segments={[
+            { value: "notes", label: t("kb.viewNotes") },
+            { value: "links", label: t("kb.viewLinks") },
+            { value: "changes", label: t("kb.viewChanges") },
+          ]}
+        />
+      )}
+
+      {view === "links" && allNotes.length > 0 && (
+        <KbGraphView token={token} slug={slug} onOpen={openNote} />
+      )}
+      {view === "changes" && allNotes.length > 0 && (
+        <KbChangesView token={token} slug={slug} onOpen={openNote} />
+      )}
+
+      {slug && !docs.isLoading && allNotes.length === 0 && (
         <EmptyState
           icon={BookTextIcon}
           title={t("docs.emptyTitle")}
@@ -201,29 +259,36 @@ export default function DocsPage() {
         />
       )}
 
-      {notes.length > 0 && (
+      {view === "notes" && allNotes.length > 0 && (
         <div className="grid gap-4 lg:grid-cols-[18rem_1fr]">
           <Card className="print:hidden">
-            <CardHeader className="pb-2">
+            <CardHeader className="space-y-3 pb-2">
               <CardTitle className="text-sm">
-                {t("docs.notesCount", { count: notes.length })}
+                {filtering
+                  ? t("kb.matching", { count: notes.length, total: allNotes.length })
+                  : t("docs.notesCount", { count: notes.length })}
               </CardTitle>
+              <KbFilterBar value={filters} onChange={setFilters} types={types} />
             </CardHeader>
             <CardContent className="max-h-[60vh] space-y-0.5 overflow-y-auto">
+              {filtering && notes.length === 0 && (
+                <p className="px-2 py-1.5 text-xs text-[var(--color-muted-foreground)]">{t("kb.noMatch")}</p>
+              )}
               {notes.map((n) => (
                 <button
                   key={n.path}
                   type="button"
                   onClick={() => setOpen(n.path)}
-                  className={`block w-full truncate rounded px-2 py-1.5 text-left text-xs hover:bg-[var(--color-accent)] ${
+                  className={`flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-xs hover:bg-[var(--color-accent)] ${
                     open === n.path ? "bg-[var(--color-accent)] font-medium" : ""
                   }`}
-                  title={n.path}
+                  title={n.type ? `${n.path} · ${n.type}` : n.path}
                 >
-                  {n.title}
+                  <span className="min-w-0 flex-1 truncate">{n.title}</span>
+                  {n.card && <StatusBadge status={n.status} />}
                 </button>
               ))}
-              {docs.data!.omitted > 0 && (
+              {!filtering && docs.data!.omitted > 0 && (
                 // Never a silent cap: a partial list that looks complete is
                 // how someone concludes a module was never documented.
                 <p className="px-2 pt-2 text-xs text-[var(--color-muted-foreground)]">
@@ -243,7 +308,7 @@ export default function DocsPage() {
                         inherited: the reason to redo one PRD is usually that
                         this particular one came out thin, which is an argument
                         about the engine, not about the workspace. */}
-                    <div className="flex items-center gap-2 print:hidden">
+                    {!openIsCard && <div className="flex items-center gap-2 print:hidden">
                       <Select
                         value={regenEngine}
                         onChange={setRegenEngine}
@@ -260,11 +325,12 @@ export default function DocsPage() {
                           regenerate.isPending && "animate-spin")} />
                         {t("docs.regenerate")}
                       </Button>
-                    </div>
+                    </div>}
                   </div>
                   <p className="mb-3 font-mono text-xs text-[var(--color-muted-foreground)]">
                     {note.data.path}
                   </p>
+                  <KbCardPanel token={token} slug={slug} path={note.data.path} onOpen={openNote} />
                   <Markdown text={note.data.body} />
                 </>
               ) : (

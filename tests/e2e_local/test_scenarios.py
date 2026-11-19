@@ -41,7 +41,9 @@ def test_no_secret_label_is_reported_for_any_tool(report) -> None:
 
 
 def test_the_tools_list_stays_small(report) -> None:
-    # Eleven tools with `skills` and `brief`; the profile's own cap is 6,500
-    # characters (tests/mcp_server/dev/test_tool_listing.py).
-    assert report.tools_list_count >= 11
-    assert report.tools_list_chars < 6500
+    # Thirteen tools with `inspect_external` and `docs`; the profile's own cap
+    # is 7,700 characters (tests/mcp_server/dev/test_tool_listing.py, which
+    # measures JSON with spaces; this report measures it compact, so it is
+    # smaller and the same cap holds it).
+    assert report.tools_list_count >= 13
+    assert report.tools_list_chars < 7700

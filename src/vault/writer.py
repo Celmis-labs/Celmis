@@ -124,6 +124,16 @@ class NoteMetadata:
         return d
 
 
+def _body_of(path: Path) -> str | None:
+    """The body of the note at ``path`` before a write; None when there is none."""
+    if not path.is_file():
+        return None
+    try:
+        return frontmatter.load(path).content
+    except Exception:  # noqa: BLE001 — an unreadable note is rewritten, and logged as changed
+        return ""
+
+
 class VaultWriter:
     """Writes into the vault and (optionally) syncs Qdrant."""
 
@@ -194,12 +204,28 @@ class VaultWriter:
                     stats.patterns_matched,
                 )
 
-        full_path = self.settings.repo_vault_path(repo) / relative_path
+        vault_root = self.settings.repo_vault_path(repo)
+        full_path = vault_root / relative_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
+        previous = _body_of(full_path)
 
         post = frontmatter.Post(content, **metadata.as_dict())
         full_path.write_text(frontmatter.dumps(post), encoding="utf-8")
         logger.info("vault_write path=%s bytes=%d", relative_path, full_path.stat().st_size)
+        is_card = bool(metadata.extra.get("kb"))
+        if previous is None or is_card or previous.strip() != content.strip():
+            # The log of changed notes (src/kb/changes.py): what a team keeping
+            # its own cards on top of the generated ones reads to know which
+            # documents moved. The body is compared, not the file, so a
+            # rewrite that only refreshes `analyzed_at` is not a change. A
+            # card is the exception: the import skips an unchanged one, so a
+            # card written is a card changed (its status may be all that moved).
+            from src.kb import changes
+            changes.record(
+                vault_root, relative_path, "created" if previous is None else "updated",
+                by="import" if is_card else "generate",
+                commit=metadata.commit or "",
+            )
 
         # Stage 20 — reverse-index cache is stale as soon as any MD is
         # written (new source_files/symbols may appear). Drop the cache
@@ -446,6 +472,20 @@ class VaultWriter:
             parts.append(f"Keywords: {', '.join(metadata.keywords)}")
         if metadata.symbols:
             parts.append(f"Symbols: {', '.join(metadata.symbols[:20])}")
+        kb = metadata.extra.get("kb") if isinstance(metadata.extra.get("kb"), dict) else None
+        if kb:
+            # An imported card says what it is and how far to trust it in the
+            # text every reader of a hit gets (Q&A puts this into the prompt):
+            # a draft must not read as a checked fact.
+            status = kb.get("effective_status") or kb.get("status") or ""
+            parts.append(f"Title: {metadata.extra.get('title', '')}")
+            parts.append(f"Card: {kb.get('id', '')}")
+            parts.append(f"Status: {status}" + ("" if status == "verified" else " (not verified)"))
+            for key in ("domain", "author", "lang"):
+                if kb.get(key):
+                    parts.append(f"{key.capitalize()}: {kb[key]}")
+            if kb.get("objects"):
+                parts.append(f"1C objects: {', '.join(kb['objects'][:30])}")
         parts.append("")
         # Max ~6000 chars from the content → roughly 1500-2000 tokens
         parts.append(content[:6000])

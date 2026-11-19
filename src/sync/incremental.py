@@ -122,6 +122,9 @@ def run_index(
         full_rebuild=result.get("mode") == "full",
         branch=clone_branch(repo_slug),
     )
+    from src.kb.store import after_index
+
+    after_index(repo_slug)  # its knowledge base, and the cards checked against it
 
     # Cross-repo edges tend to touch multiple repos — enqueue a
     # rematerialize for every group this repo belongs to. Enqueue-with-
@@ -460,8 +463,10 @@ def _git_diff(
     """
     try:
         r = subprocess.run(
-            ["git", "-C", str(repo_path), "diff", "--name-status", "-M",
-             f"{prior_sha}..{head_sha}"],
+            # quotepath off: a 1C dump is all Cyrillic paths, which git
+            # otherwise prints octal-escaped in quotes and no file matches.
+            ["git", "-c", "core.quotepath=off", "-C", str(repo_path), "diff",
+             "--name-status", "-M", f"{prior_sha}..{head_sha}"],
             capture_output=True, text=True, timeout=30, check=True,
         )
     except Exception as exc:  # noqa: BLE001

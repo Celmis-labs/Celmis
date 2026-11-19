@@ -34,6 +34,7 @@ call the full `/mcp` tools, and every call is audited (facts, never content).
 | `brief` | Paste the task: the workspace's skills, checklists, API examples and notes that fit it. |
 | `skills` | List, search and open the skills (and files) of the workspace's knowledge packs. |
 | `inspect_external` | A 1C `.erf`, `.epf` or `Form.bin` that is in no repository: upload it once, then compare it with a configuration and check it statically. |
+| `docs` | The documentation of your repositories, generated notes and the team's imported cards: search, filter by front matter, open one, what changed. Each line says a card's status. |
 
 ## How to read an answer
 
@@ -413,6 +414,28 @@ names a number the check does not contain, leaves the template wording in place.
 API (`/api/onec/review`, covered by the `mcp` feature switch): `POST /files`,
 `GET /configs`, `GET /models`, `POST /` (`handle`, `config`, `model`, `lang`),
 `GET /{id}` and `GET /{id}/export?format=pdf|docx|md`.
+
+## Documentation and cards (`docs`)
+
+`docs` reads the same documentation as the web page: the notes Celmis
+generated and the cards a team imported
+([KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md)). The arguments you give pick the mode:
+
+| Call | Answer |
+|---|---|
+| `docs query="how is an order reserved"` | Search by meaning. Verified cards rank first and drafts last. A generated note that a verified card in the same answer `replaces` is dropped. |
+| `docs where="object=Документ.ЗаказКлиента"` | Every note that names this 1C object, in any spelling (`Document.X`, `Documents.X`). |
+| `docs where="type=process status=verified domain=sales"` | A list filtered by front matter: `type`, `status`, `object`, `id`, `tag`, or any key of the team's own (`owner=ops`). |
+| `docs path=proc-order-reserve` | One note, by path or by a card's id. It shows the front matter, the objects (✓ when the graph has them, "(not in graph)" when it does not), staleness, links and back-links, then the text. |
+| `docs changed_since=7d` | Notes created, changed, removed or marked stale, newest first (`12h`, `30m` or an ISO date also work). |
+| `docs` | The list: cards first (verified, then needs-review, then drafts), then generated notes. |
+
+`repo=` narrows any of these to one repository. Each line carries the card's
+status. Only `verified` counts as checked, and a card whose objects changed
+after its source commit reads `needs-review`. Notes whose source path the
+access rules hide are never listed or opened. When the search index cannot
+answer (nothing embedded yet, no embedding key), search falls back to matching
+words and says so.
 
 ## What it costs
 

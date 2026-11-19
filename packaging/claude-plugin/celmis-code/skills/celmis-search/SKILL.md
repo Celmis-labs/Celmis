@@ -62,6 +62,12 @@ Other tools:
   With no `file` it gives a one-time upload link and a `curl` line; then
   `file=<handle>` describes it, `repo=` adds a diff against that configuration
   and static checks, and `outline`/`grep` with `repo=ext/<handle>` read it.
+- `docs` - the documentation: generated notes and the team's imported cards
+  (processes, decisions). `query=` searches by meaning,
+  `where="object=Документ.X status=verified"` filters by front matter,
+  `path=<path or id>` opens one with its 1C objects, staleness and links, and
+  `changed_since=7d` lists what moved. Only a `verified` card is a checked
+  fact; `draft` and `needs-review` are not.
 
 ## "Do it like service X"
 

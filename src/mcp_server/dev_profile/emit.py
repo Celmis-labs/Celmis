@@ -44,6 +44,7 @@ BUDGETS: dict[str, tuple[int, int]] = {
     "inspect_external": (2500, 4000),
     "skills": (800, 4000),
     "brief": (2000, 4000),
+    "docs": (1500, 4000),
 }
 WITHHELD = "output withheld: redaction failed"
 #: One line under the idx line of every answer that read through a share. The text

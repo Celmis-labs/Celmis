@@ -3917,6 +3917,74 @@ export const docsApi = {
     ),
 };
 
+/** A note as the knowledge-base routes list it (`src/kb/catalog.py::NoteInfo.summary`). */
+export type KbNote = {
+  path: string; title: string; type: string; card: boolean;
+  status?: string; id?: string; domain?: string; objects?: string[]; stale?: boolean;
+};
+export type KbBinding = {
+  source?: "upload" | "repo"; prefix?: string; follow?: boolean; code_repo?: string;
+  imported_at?: string; checked_at?: string; cards?: number;
+};
+export type KbList = { repo: string; binding: KbBinding; notes: KbNote[]; types: string[] };
+export type KbReport = {
+  repo: string; code_repo: string; created: string[]; updated: string[]; unchanged: number;
+  deleted: string[]; skipped: { path: string; reason: string }[];
+  warnings: { path: string; message: string }[];
+  missing_objects: { path: string; objects: string[] }[]; stale: string[];
+  embedded: number; embed_failures: string[];
+};
+export type KbLink = { path: string; title: string; kind: string };
+export type KbStaleness = { state: "fresh" | "stale" | "unknown"; reason?: string; changed?: string[]; head?: string };
+export type KbCard = {
+  path: string; title: string; type: string; card: boolean; status: string; body: string;
+  fm: Record<string, unknown>;
+  kb: {
+    id?: string; status?: string; effective_status?: string; source?: string; source_sha?: string;
+    code_repo?: string; not_objects?: string[]; staleness?: KbStaleness; [k: string]: unknown;
+  };
+  objects: { name: string; found: boolean | null }[];
+  links: { out: KbLink[]; back: KbLink[]; dangling: string[] };
+};
+export type KbGraph = {
+  nodes: KbNote[]; edges: { source: string; target: string; kind: string }[];
+  dangling: Record<string, string[]>; omitted: number;
+};
+export type KbChange = { path: string; change: string; at: string; by?: string; commit?: string };
+export type KbFilters = { type?: string; status?: string; object?: string; where?: string; cards_only?: boolean };
+
+/** Cards imported into a repository's documentation (`/api/kb`, `src/api/routers/kb.py`). */
+export const kbApi = {
+  list: (token: string, slug: string, f: KbFilters = {}) => {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(f)) if (v) q.set(k, String(v));
+    const qs = q.toString();
+    return api<KbList>(`/api/kb/${encodeURIComponent(slug)}${qs ? `?${qs}` : ""}`, { token });
+  },
+  /** Markdown files or zip archives; `replace` makes the upload the whole knowledge base. */
+  upload: (token: string, slug: string, files: File[], opts: { code_repo: string; replace: boolean }) => {
+    const form = new FormData();
+    for (const f of files) form.append("files", f, f.name);
+    form.append("code_repo", opts.code_repo);
+    form.append("replace", String(opts.replace));
+    return api<KbReport>(`/api/kb/${encodeURIComponent(slug)}/import`, { token, method: "POST", body: form });
+  },
+  /** The repository's own markdown; `follow` imports again after every index (a push). */
+  fromRepo: (token: string, slug: string, body: { prefix: string; code_repo: string; follow: boolean }) =>
+    api<KbReport>(`/api/kb/${encodeURIComponent(slug)}/import-repo`, { token, method: "POST", json: body }),
+  check: (token: string, slug: string) =>
+    api<KbReport>(`/api/kb/${encodeURIComponent(slug)}/check`, { token, method: "POST" }),
+  removeAll: (token: string, slug: string) =>
+    api<{ removed: number }>(`/api/kb/${encodeURIComponent(slug)}`, { token, method: "DELETE" }),
+  note: (token: string, slug: string, path: string) =>
+    api<KbCard>(`/api/kb/${encodeURIComponent(slug)}/note?path=${encodeURIComponent(path)}`, { token }),
+  graph: (token: string, slug: string) =>
+    api<KbGraph>(`/api/kb/${encodeURIComponent(slug)}/graph`, { token }),
+  changes: (token: string, slug: string, since = "30d") =>
+    api<{ repo: string; since: string; changes: KbChange[] }>(
+      `/api/kb/${encodeURIComponent(slug)}/changes?since=${encodeURIComponent(since)}`, { token }),
+};
+
 export const depsApi = {
   /** The CycloneDX file itself — what procurement asks for by name. */
   sbomUrl: (runId: string, repo?: string) =>

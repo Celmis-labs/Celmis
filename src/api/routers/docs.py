@@ -59,6 +59,11 @@ class NoteSummary(BaseModel):
     title: str
     updated_at: str = ""
     words: int = 0
+    #: The note's type (module, feature … or an imported card's own: process,
+    #: adr …) and, for an imported card, its status (src/kb).
+    type: str = ""
+    status: str = ""
+    card: bool = False
 
 
 class DocsOverview(BaseModel):
@@ -114,6 +119,11 @@ def _readable_vault(slug: str, user: User, workspace_id: str):
 def _concealed(post: frontmatter.Post, dec) -> bool:  # noqa: ANN001
     """True when ``dec`` hides the source path this note documents."""
     source = post.metadata.get("path") if isinstance(post.metadata, dict) else None
+    return _concealed_meta(str(source or ""), dec)
+
+
+def _concealed_meta(source: str, dec) -> bool:  # noqa: ANN001
+    """True when ``dec`` hides ``source``, the repository path a note documents."""
     return bool(source) and dec.path_denied(str(source))
 
 
@@ -308,11 +318,16 @@ def list_notes(
             continue
         if _concealed(post, dec):
             continue
+        kb = post.metadata.get("kb") if isinstance(post.metadata.get("kb"), dict) else {}
+        from src.kb.catalog import effective_status
         out.append(NoteSummary(
             path=str(path.relative_to(directory)),
             title=_title_of(post, path),
             updated_at=str(post.metadata.get("updated_at") or ""),
             words=len(post.content.split()),
+            type=str(post.metadata.get("type") or ""),
+            status=effective_status(kb) if kb else "",
+            card=bool(kb),
         ))
     return DocsOverview(
         repo_slug=slug, notes=out, omitted=max(0, len(files) - MAX_NOTES),

@@ -292,6 +292,10 @@ def index_repo_sync(
                 (cfg.branch or "").strip() or clone_branch(cfg.repo_slug)),
         )
 
+        from src.kb.store import after_index
+
+        after_index(cfg.repo_slug)  # its knowledge base, and the cards checked against it
+
         try:
             from src.groups.indexer import enqueue_materialize_for_repo
             enqueue_materialize_for_repo(
