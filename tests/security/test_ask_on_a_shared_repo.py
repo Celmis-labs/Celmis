@@ -707,14 +707,33 @@ def test_ask_code_refuses_a_closed_share_by_name_with_the_text_of_a_missing_repo
 
 
 def test_a_person_asking_with_their_own_rights_has_no_shares_to_ask_about(world):
+    """The web app builds its actor without shares: membership of the receiving
+    workspace alone is not a share there, whatever its owner allowed."""
     from src.automation.actions import ActionError, Actor
     from src.automation.actions_reviews import ask_code
 
-    share_id = make_share(world, allow_ask=True)
+    make_share(world, allow_ask=True)
     actor = Actor(user_id=world.users["admin"], email="admin@acme.io", workspace_id=WS_A,
-                  label="agent", token_filter=None, token_shares=(share_id,))
+                  label="agent", token_filter=None)
     with pytest.raises(ActionError, match="Not registered in this workspace"):
         asyncio.run(ask_code(actor, None, question="how?", repo_slugs=[SHARED]))
+
+
+def test_a_sign_in_through_the_browser_asks_about_a_share_its_holder_reads(world, pipeline):
+    """A self-service token carries the shares on its holder's developer token, so
+    `ask` answers about an open one as it does for that token."""
+    _bearer, _share = _holder(world, allow_ask=True, max_people=2)
+    world.as_(world.self_token("mn", profile="dev")[0])
+    out = _ask(repos=[SHARED])
+    assert "an answer" in out
+    assert SHARED_MARKER in pipeline.prompt
+
+
+def test_a_sign_in_through_the_browser_is_told_a_closed_share_is_closed(world, pipeline):
+    _holder(world, allow_ask=False, max_people=2)
+    world.as_(world.self_token("mn", profile="dev")[0])
+    assert CLOSED in _ask(repos=[SHARED])
+    _nothing_was_asked(pipeline)
 
 
 def _retrieve(world, *, repos, shares, filter_=(WILD,)):

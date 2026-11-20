@@ -92,39 +92,11 @@ def _held_shares(user_id: str, workspace_id: str) -> dict[str, str]:
 
 
 def _member_shares(session, user_id: str, workspace_id: str) -> list[str]:  # noqa: ANN001
-    """Ids of the live shares to this workspace that membership alone opens here.
-
-    Being a member of the receiving workspace is enough in this tab, as long as it
-    cannot widen what the owner allowed: the share's ceiling on people
-    (``max_people``) must cover every member the owner has not switched off. A
-    workspace bigger than that keeps the token rule (:func:`_held_shares`), which
-    is where the ceiling is counted. A list of blocked people that cannot be read
-    opens nothing; per-person blocking itself is applied by ``live_grants``."""
-    from sqlalchemy import select
-
+    """Ids of the live shares to this workspace that membership alone opens here
+    (:func:`src.access.shares.member_shares`, the rule MCP sign-ins use too)."""
     from src.access import shares
-    from src.db.models import RepoShare, WorkspaceMember
 
-    members = set(session.execute(
-        select(WorkspaceMember.user_id).where(WorkspaceMember.workspace_id == workspace_id)
-    ).scalars().all())
-    if user_id not in members:
-        return []
-    rows = session.execute(
-        select(RepoShare).where(
-            RepoShare.grantee_workspace_id == workspace_id,
-            RepoShare.revoked_at.is_(None),
-            RepoShare.expires_at > datetime.now(UTC),
-        )
-    ).scalars().all()
-    out: list[str] = []
-    for row in rows:
-        blocked = shares._string_list(row.blocked_user_ids)  # noqa: SLF001 — same reading as the module
-        if blocked is None:
-            continue
-        if len(members - set(blocked)) <= int(row.max_people or 0):
-            out.append(row.id)
-    return out
+    return shares.member_shares(session, user_id, workspace_id)
 
 
 def _shared(user_id: str, workspace_id: str, own: dict) -> dict:

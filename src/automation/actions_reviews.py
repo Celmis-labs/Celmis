@@ -136,10 +136,14 @@ async def _can_read(
 
     ``askable`` is the slugs of other workspaces' repositories this token may ask
     about (:func:`_ask_shares`): the one thing a token reads that is not in its own
-    workspace's registry. It matters to a token only; a person asking with their
-    own rights has no share to ask about."""
+    workspace's registry, already judged on this call. It matters to a token only
+    (a developer token, or a sign-in through the browser that reads what its holder
+    reads); a person asking in the web app has no share to ask about."""
     if slug in cache:
         return cache[slug]
+    if slug in askable:
+        cache[slug] = True
+        return True
     if actor.token_filter is not None:
         # A token with a repo list is authoritative: the superadmin who issued
         # it said which repositories it may read, team grants or not.
@@ -820,10 +824,10 @@ def _ask_shares(actor: Actor) -> dict[str, Any]:
     through one whose owner turned asking on (C8, :func:`shares.ask_targets`): the
     answer sends pieces of the owner's code to the receiving workspace's model
     provider and bills the receiving workspace. Every condition of reading is read
-    again here, from the database, on this call. Empty for a person asking with
-    their own rights (no token list) and for anything that cannot be read: an
-    unreadable share grants nothing."""
-    if actor.token_filter is None or not actor.token_shares:
+    again here, from the database, on this call. Empty for a caller without shares
+    (a person asking in the web app with their own rights) and for anything that
+    cannot be read: an unreadable share grants nothing."""
+    if not getattr(actor, "token_shares", ()):
         return {}
     try:
         from sqlalchemy.orm import Session

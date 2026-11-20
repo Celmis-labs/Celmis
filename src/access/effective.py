@@ -17,7 +17,8 @@ read path:
    ``code`` on the matching repositories of the token's workspace, team rules
    or not. Path-level ``deny_globs`` of any rule on the repo still conceal
    paths (secrets, crypto, connections) — a token never opens those.
-4. **A token with shares** (``mcp_tokens.shared_repos``, via
+4. **A token with shares** (``mcp_tokens.shared_repos`` of a developer token,
+   or what a read-only self-service token's holder already reads, via
    :attr:`Principal.share_ids`): on top of its own list, and never through it,
    ``code`` on the repositories other workspaces have shared with the token's
    workspace and that the owner's consent still covers on THIS call
@@ -68,11 +69,13 @@ class Principal:
     #: with their own rights, or a self-service token whose ceiling is the
     #: person's own access).
     repo_patterns: tuple[str, ...] | None = None
-    #: Ids of the shares the token carries (``mcp_tokens.shared_repos``). Only an
-    #: authoritative token (``repo_patterns`` set, possibly empty) can use them; a
-    #: person asking with their own rights has no such list. They are never
-    #: matched against anything: :func:`effective_access_sync` asks
-    #: :mod:`src.access.shares` whether each one still holds.
+    #: Ids of the shares the token carries: the column of a superadmin-issued
+    #: developer token (``mcp_tokens.shared_repos``), or, for a read-only
+    #: self-service token, the shares its holder already reads
+    #: (:func:`src.access.shares.opened_to`). A person asking in the web app
+    #: with their own rights has no such list. They are never matched against
+    #: anything: :func:`effective_access_sync` asks :mod:`src.access.shares`
+    #: whether each one still holds.
     share_ids: tuple[str, ...] = ()
 
 
@@ -182,7 +185,7 @@ def effective_access_sync(
     registry = registered_repos(workspace_id)
     patterns = principal.repo_patterns
     shared: dict = {}
-    if patterns is not None and principal.share_ids:
+    if principal.share_ids:
         from src.access import shares
 
         try:
@@ -211,16 +214,15 @@ def effective_access_sync(
         out.update({slug: grant.decision() for slug, grant in shared.items() if slug in out})
         return out
 
-    if not known:
-        return out
-
-    out.update(resolve_access_sync(
-        session,
-        user_id=principal.user_id,
-        is_admin=principal.is_admin,
-        workspace_id=workspace_id,
-        repos=known,
-    ))
+    if known:
+        out.update(resolve_access_sync(
+            session,
+            user_id=principal.user_id,
+            is_admin=principal.is_admin,
+            workspace_id=workspace_id,
+            repos=known,
+        ))
+    out.update({slug: grant.decision() for slug, grant in shared.items() if slug in out})
     return out
 
 

@@ -3,14 +3,17 @@
 A *share* (``repo_shares``) is one workspace's consent that ONE other workspace may
 read one of its repositories, for research, for a while. It is not a grant. A person
 in the receiving workspace reads the repository only when the superadmin has named
-the share on that person's MCP token (``mcp_tokens.shared_repos``) and every
-condition below still holds ON THE CALL, read from the database each time (the
-30 s token cache holds the token's list of ids and nothing else):
+the share on that person's MCP token (``mcp_tokens.shared_repos``), or the share's
+ceiling on people covers every member of the workspace, and every condition below
+still holds ON THE CALL, read from the database each time (the 30 s token cache
+holds the token's list of ids and nothing else):
 
   C1  the token is a ``pat`` of the ``dev`` profile that cannot write, alive, and
       its holder is still a member of the receiving workspace (decided by the
-      identity resolver, which hands this module the ids only for such a token);
-  C2  the share's id is on the token;
+      identity resolver, which hands this module the ids only for such a token),
+      or a read-only ``self`` token of that person (a sign-in through the
+      browser), which carries what :func:`opened_to` finds and nothing else;
+  C2  the share's id is on the token, or :func:`opened_to` finds it;
   C3  the share is for the token's workspace, and neither side is the built-in
       ``default`` workspace (:func:`_is_a_side`);
   C4  the share is not revoked and has not expired;
@@ -566,6 +569,80 @@ def has_room(session, share_id: str, user_id: str) -> bool:  # noqa: ANN001
         return False
     people = holders(session, share_id)
     return user_id in people or len(people) < int(share.max_people or DEFAULT_PEOPLE)
+
+
+
+def member_shares(session, user_id: str, workspace_id: str) -> list[str]:  # noqa: ANN001
+    """Ids of the live shares to ``workspace_id`` that membership alone opens.
+
+    Being a member of the receiving workspace is enough as long as it cannot widen
+    what the owner allowed: the share's ceiling on people (``max_people``) must cover
+    every member the owner has not switched off. A workspace bigger than that keeps
+    the token rule (:func:`held_shares`), which is where the ceiling is counted. A
+    list of blocked people that cannot be read opens nothing; per-person blocking
+    itself is applied by :func:`live_grants`."""
+    from sqlalchemy import select
+
+    from src.db.models import RepoShare, WorkspaceMember
+
+    members = set(session.execute(
+        select(WorkspaceMember.user_id).where(WorkspaceMember.workspace_id == workspace_id)
+    ).scalars().all())
+    if user_id not in members:
+        return []
+    rows = session.execute(
+        select(RepoShare).where(
+            RepoShare.grantee_workspace_id == workspace_id,
+            RepoShare.revoked_at.is_(None),
+            RepoShare.expires_at > _now(),
+        )
+    ).scalars().all()
+    out: list[str] = []
+    for row in rows:
+        blocked = _string_list(row.blocked_user_ids)
+        if blocked is None:
+            continue
+        if len(members - set(blocked)) <= int(row.max_people or 0):
+            out.append(row.id)
+    return out
+
+
+def held_shares(session, user_id: str, workspace_id: str) -> list[str]:  # noqa: ANN001
+    """Ids of the shares on ``user_id``'s own live tokens in ``workspace_id`` that a
+    share works on (C1: a superadmin-issued ``pat`` of the ``dev`` profile that
+    cannot write). The person already holds a place under ``max_people`` there."""
+    from sqlalchemy import select
+
+    from src.db.models import McpToken
+
+    rows = session.execute(
+        select(McpToken).where(
+            McpToken.workspace_id == workspace_id,
+            McpToken.user_id == user_id,
+            McpToken.kind == "pat",
+            McpToken.profile == "dev",
+            McpToken.revoked_at.is_(None),
+            McpToken.expires_at > _now(),
+        )
+    ).scalars().all()
+    out: list[str] = []
+    for token in rows:
+        if token.allow_write:
+            continue
+        out.extend(i for i in clean_ids(token.shared_repos) if i not in out)
+    return out
+
+
+def opened_to(session, user_id: str, workspace_id: str) -> list[str]:  # noqa: ANN001
+    """The shares a person reads with their OWN rights in a workspace: the ones on
+    their live developer token there and the ones membership opens. This is what a
+    self-service token (signed in through the browser) carries: it reaches no share
+    the person could not already read with the token the superadmin gave them, or as
+    a member of a workspace the share's ceiling covers. Ids only; every one is still
+    judged by :func:`live_grants` on the call (C3-C7)."""
+    out = held_shares(session, user_id, workspace_id)
+    out.extend(i for i in member_shares(session, user_id, workspace_id) if i not in out)
+    return out
 
 
 def describe(

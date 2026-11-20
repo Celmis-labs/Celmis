@@ -168,6 +168,13 @@ sees the page, so an admin of the receiving workspace who is not one sees none o
   `*` included, never matches a shared repository; there is no wildcard for shares.
 - Only a **read-only** `pat` token of the `dev` profile can carry one. A browser (OAuth)
   grant, a self-service token and a token that may write cannot.
+- A person who signs in to MCP **through the browser** (a read-only self-service token)
+  reads the shares they already read with their own rights: the ones on their own live
+  `dev` token in that workspace, and the ones whose `max_people` covers every member of
+  the workspace the owner has not blocked (the rule **Check a file** uses). Nothing is
+  written on the self-service token: both are read again on every call, so revoking the
+  `dev` token, blocking the person or ending the share applies on the next call. A
+  self-service token that may write reads no share.
 - A token carries at most 10 shares. `PATCH` with `shares` **replaces** that list, so
   adding and removing are the same call; the token's own repositories are not touched.
 - The person must be a member of the receiving workspace, the share must be live and for

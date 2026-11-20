@@ -310,7 +310,8 @@ def test_a_pattern_over_such_a_slug_reads_it_as_the_receivers_own_only_where_tha
 
 @pytest.mark.parametrize("kind", ["cli", "oauth_grant", "self", "internal"])
 def test_a_share_written_into_any_other_kind_of_token_is_ignored(world, kind):
-    s1 = make_share(world)
+    # one place for five members: membership opens nothing, only the column could
+    s1 = make_share(world, max_people=1)
     bearer, view = world.issue("mn", [WILD], kind=kind)
     baseline = _readable(world, bearer)
     tamper_token(world, view.id, shared_repos=[s1])
@@ -382,7 +383,10 @@ def test_a_developer_token_with_a_share_is_refused_by_the_full_servers_tools(wor
 
 @pytest.mark.parametrize("who", ["su", "owner", "admin", "mg", "mr", "mn"])
 def test_nobody_in_the_receiver_reads_it_by_role_or_by_a_self_service_token(world, who):
-    make_share(world)
+    # Four places for the five members of A: membership does not open it (see
+    # test_a_browser_sign_in_reads_the_shares_its_holder_already_reads.py for
+    # when it does), and being an owner, an admin or a superadmin never does.
+    make_share(world, max_people=4)
     assert SHARED not in _readable(world, world.self_token(who)[0])
 
 
@@ -664,8 +668,10 @@ def test_the_holders_repository_list_names_it_beside_their_own(world):
 
 
 def _non_holders(world) -> dict[str, str]:
-    """Credentials that must not read SHARED even though a live share exists."""
-    live = make_share(world, blocked=[world.users["mr"]])
+    """Credentials that must not read SHARED even though a live share exists. Its
+    ceiling (three) is below the four members it does not switch off, so no
+    self-service token reads it by membership."""
+    live = make_share(world, blocked=[world.users["mr"]], max_people=3)
     out = {
         "pat-star": world.issue("mn", ["*"], kind="pat", profile="dev")[0],
         "pat-glob-reaching-into-b": world.issue("mg", ["github_*"], kind="pat",
@@ -674,7 +680,7 @@ def _non_holders(world) -> dict[str, str]:
         "self-su": world.self_token("su", profile="dev")[0],
         "self-owner": world.self_token("owner", profile="dev")[0],
         "pat-admin": world.issue("admin", ["*"], kind="pat", profile="dev")[0],
-        "holder-of-another-share": holder_token(world, [make_share(world, slug=FOREIGN)],
+        "holder-of-another-share": holder_token(world, [make_share(world, slug=FOREIGN, max_people=1)],
                                                 own=[WILD], who="mr")[0],
         "holder-switched-off": holder_token(world, [live], who="mr")[0],
     }

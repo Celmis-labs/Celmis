@@ -86,9 +86,10 @@ class McpCaller:
     #: Write tools are refused unless the grant explicitly allows them.
     allow_write: bool = False
     #: Ids of the shares (``repo_shares``) the token may read, next to its repo
-    #: list. Set only for a read-only ``pat`` of the ``dev`` profile (see
-    #: :attr:`src.mcp_server.token_store.TokenView.shares_apply`); empty for every
-    #: other caller. An id here is a claim, not a grant: each one is judged again
+    #: list. Set for a read-only ``pat`` of the ``dev`` profile (its column, see
+    #: :attr:`src.mcp_server.token_store.TokenView.shares_apply`) and for a
+    #: read-only ``self`` token (what its holder already reads, see
+    #: :func:`_self_shares`); empty for every other caller. An id here is a claim, not a grant: each one is judged again
     #: on every call by :mod:`src.access.shares`.
     share_ids: tuple[str, ...] = ()
 
@@ -368,9 +369,32 @@ def resolve_grant(payload: dict, user_id: str) -> _Grant:
         allow_write=view.allow_write,
         workspace_id=view.workspace_id,
         # The column counts for a read-only developer `pat` and for nothing else,
-        # whatever is written in it.
-        shares=view.shares if view.shares_apply else (),
+        # whatever is written in it. A read-only self-service token (a sign-in
+        # through the browser) carries the shares its holder already reads with
+        # their own rights, never its column (:func:`_self_shares`).
+        shares=view.shares if view.shares_apply else _self_shares(view),
     )
+
+
+def _self_shares(view) -> tuple[str, ...]:  # noqa: ANN001
+    """The shares a read-only ``self`` token reads: the ones on its holder's own
+    developer token in the workspace, and the ones membership opens there
+    (:func:`src.access.shares.opened_to`). Read from the database on every call,
+    like the rest of the share; anything unreadable is no share."""
+    if view.kind != "self" or view.allow_write:
+        return ()
+    try:
+        from sqlalchemy.orm import Session
+
+        from src.access import shares
+        from src.access.resolver import _sync_engine
+
+        with Session(_sync_engine()) as s:
+            return tuple(shares.opened_to(s, view.user_id, view.workspace_id))
+    except Exception as exc:  # noqa: BLE001 — refuse rather than grant
+        logger.warning("mcp_self_shares_unreadable ws=%s err=%s",
+                       view.workspace_id, type(exc).__name__)
+        return ()
 
 
 def _project_caller(client_id: str) -> McpCaller:

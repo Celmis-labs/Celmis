@@ -20,6 +20,21 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.41] — 2026-11-20
+
+### Fixed
+
+- **Signing in to MCP through the browser showed none of the repositories another
+  workspace shares.** The self-service token it mints carried the person's own access
+  and no share, so a member of a workspace with nothing of its own but a share was
+  told "no repositories you can read", while the developer token the superadmin had
+  issued them would have read it. A read-only self-service token now reads the shares
+  on its holder's own developer token in that workspace and the ones whose ceiling on
+  people covers every member (the rule **Check a file** uses), `ask` included where
+  the owner allows it. Both are read again on every call, so revoking the developer
+  token, blocking the person or ending the share applies at once. A self-service token
+  that may write still reads no share.
+
 ## [3.1.40] — 2026-11-20
 
 ### Added

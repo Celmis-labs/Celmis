@@ -80,10 +80,14 @@ workspace (the receiver). The owner keeps the repository: it stays in the
 owner's registry, its graph, clone and notes stay under the owner's workspace,
 and nothing is copied.
 
-A share reaches a person in one way only. The superadmin lists the share, by id,
+A share reaches a person in two ways. The superadmin lists the share, by id,
 on a developer token issued for a person of the receiving workspace (`shares`
 beside the repository list, `GET /api/admin/mcp-shares?workspace=` lists the candidates).
-Only a read-only `pat` token with `profile=dev` can carry one. No pattern on the
+Only a read-only `pat` token with `profile=dev` can carry one. Or the share's ceiling
+on people covers every member of the receiving workspace the owner has not switched
+off. A read-only sign-in through the browser (a self-service token) reads both: the
+shares on its holder's own developer token there and the ones membership opens, read
+again on every call. No pattern on the
 repository list ever matches a shared repository, not even `*`, and the full
 `/mcp` profile, raw Cypher and the REST API do not see it at all.
 

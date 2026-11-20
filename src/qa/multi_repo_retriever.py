@@ -253,7 +253,9 @@ class MultiRepoRetriever:
             raise ValueError("repos list cannot be empty")
 
         # ── Stage 22: resolve research access for the target repos ────
-        if token_filter is not None:
+        # A token's list, or the shares of a sign-in through the browser (its
+        # holder's own rights plus what they already read of a share).
+        if token_filter is not None or token_shares:
             from src.access.effective import Principal, effective_access
 
             access = effective_access(

@@ -71,8 +71,10 @@ audit work: [MCP access](mcp-access.md).
   404, as for a pull request that does not exist.
 - Webhooks are verified (HMAC or token) before anything is read, and a delivery
   is bound to the workspace of the registered repository.
-- A repository shared by another workspace reaches a person in one way only: the
-  superadmin names the share on that person's read-only developer token. Being an
+- A repository shared by another workspace reaches a person in two ways: the
+  superadmin names the share on that person's read-only developer token, or the
+  share's ceiling on people covers every member of the receiving workspace. A
+  sign-in to MCP through the browser reads what either gives that person. Being an
   admin or owner of the receiving workspace gives no access to it and does not show
   that it exists; the share belongs to the workspace that gave it, and only that
   workspace's admins and owners (and the superadmin) see it, narrow it or end it.
