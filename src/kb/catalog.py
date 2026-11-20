@@ -40,13 +40,29 @@ class NoteInfo:
     fm: dict[str, Any] = field(default_factory=dict)
     source_path: str = ""  # the repository path a generated note documents
     cross_refs: list[str] = field(default_factory=list)
+    #: A module note's callers (``callers_modules``): the notes that call into it.
+    callers: list[str] = field(default_factory=list)
+    #: Every repository path a generated note was written from (a process note
+    #: spans several); a caller whose rules hide one of them does not see the note.
+    source_paths: list[str] = field(default_factory=list)
     updated_at: str = ""
     words: int = 0
+
+    @property
+    def generated(self) -> bool:
+        """Written by Celmis from the code (a process note), not by a person."""
+        return self.kb.get("origin") == "generate"
+
+    def denied_by(self, dec: Any) -> bool:  # noqa: ANN401
+        """Does ``dec`` (an access decision) hide a path this note documents?"""
+        paths = ([self.source_path] if self.source_path else []) + self.source_paths
+        return any(dec.path_denied(p) for p in paths)
 
     def summary(self) -> dict[str, Any]:
         d: dict[str, Any] = {"path": self.path, "title": self.title, "type": self.type, "card": self.card}
         if self.card:
             d.update({
+                "origin": self.kb.get("origin", ""),
                 "status": self.status, "id": self.kb.get("id", ""),
                 "domain": self.kb.get("domain", ""), "objects": self.kb.get("objects", []),
                 "stale": (self.kb.get("staleness") or {}).get("state") == "stale",
@@ -92,6 +108,10 @@ def load(directory: Path, full: Path) -> tuple[NoteInfo, str] | None:
         fm=fm,
         source_path=str(meta.get("path") or ""),
         cross_refs=[str(r) for r in refs] if isinstance(refs, list) else [],
+        callers=[str(r) for r in meta.get("callers_modules") or []]
+        if isinstance(meta.get("callers_modules"), list) else [],
+        source_paths=[str(p) for p in kb.get("files") or []]
+        if kb.get("origin") == "generate" and isinstance(kb.get("files"), list) else [],
         updated_at=str(meta.get("updated_at") or meta.get("analyzed_at") or ""),
         words=len(post.content.split()),
     )

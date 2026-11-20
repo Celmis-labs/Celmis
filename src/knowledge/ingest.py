@@ -57,15 +57,20 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 
+from src.knowledge import limits as limits_mod
+from src.knowledge.limits import PackLimits
 from src.knowledge.search import terms_for
 
 # ─── Limits ──────────────────────────────────────────────────────────
 
-MAX_ARCHIVE_BYTES = 5 * 1024 * 1024         # compressed; the request body cap
-MAX_FILES = 400                             # files KEPT
+# The five below are the BUILT-IN values of the configurable limits (see
+# ``src.knowledge.limits``); an upload is held to the limits of its workspace, passed as
+# ``limits=``, and to these only when none is given.
+MAX_ARCHIVE_BYTES = limits_mod.BUILTIN.archive_bytes     # compressed; the request body cap
+MAX_FILES = limits_mod.BUILTIN.max_files                 # files KEPT
 MAX_ENTRIES = 20_000                        # entries looked at, kept or not
-MAX_FILE_BYTES = 512 * 1024
-MAX_TOTAL_BYTES = 8 * 1024 * 1024           # uncompressed, all kept files
+MAX_FILE_BYTES = limits_mod.BUILTIN.file_bytes
+MAX_TOTAL_BYTES = limits_mod.BUILTIN.total_bytes         # uncompressed, all kept files
 MAX_PATH_CHARS = 300
 MAX_DEPTH = 10
 MAX_FRONT_MATTER_CHARS = 8 * 1024
@@ -120,6 +125,10 @@ class IngestedFile:
     repos: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     terms: dict[str, int] = field(default_factory=dict)
+    #: The whole front matter of a markdown file, JSON-safe (dates as ISO strings).
+    meta: dict[str, Any] = field(default_factory=dict)
+    #: ``status`` of the front matter, lower case ("" / absent -> None).
+    status: str | None = None
 
 
 @dataclass
@@ -204,11 +213,16 @@ _ZIP_ERRORS = (zipfile.BadZipFile, ValueError, OSError, struct.error, EOFError, 
                NotImplementedError, OverflowError)
 
 
-def ingest_zip(data: bytes) -> IngestResult:
+def _size(n: int) -> str:
+    return f"{n // (1024 * 1024)} MB" if n >= 1024 * 1024 else f"{max(1, n // 1024)} KB"
+
+
+def ingest_zip(data: bytes, limits: PackLimits | None = None) -> IngestResult:
     """Validate a zip archive (bytes) and return its kept files."""
-    if len(data) > MAX_ARCHIVE_BYTES:
+    lim = limits or limits_mod.BUILTIN
+    if len(data) > lim.archive_bytes:
         raise IngestError(
-            "archive_too_large", f"The archive is over {MAX_ARCHIVE_BYTES // (1024 * 1024)} MB.")
+            "archive_too_large", f"The archive is over {_size(lim.archive_bytes)}.")
     if not data:
         raise IngestError("bad_archive", "The archive is empty.")
     try:
@@ -223,7 +237,7 @@ def ingest_zip(data: bytes) -> IngestResult:
             entries = [_zip_entry(zf, i) for i in infos]
         except _ZIP_ERRORS as exc:
             raise IngestError("bad_archive", "The archive is damaged.") from exc
-        return _ingest(entries)
+        return _ingest(entries, lim)
 
 
 def _zip_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> _Entry:
@@ -250,7 +264,8 @@ def _zip_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> _Entry:
     )
 
 
-def ingest_files(files: Sequence[tuple[str, bytes]]) -> IngestResult:
+def ingest_files(files: Sequence[tuple[str, bytes]],
+                 limits: PackLimits | None = None) -> IngestResult:
     """Validate a folder upload: ``(relative path, bytes)`` pairs."""
     if len(files) > MAX_ENTRIES:
         raise IngestError("too_many_files", f"More than {MAX_ENTRIES} files were sent.")
@@ -259,10 +274,10 @@ def ingest_files(files: Sequence[tuple[str, bytes]]) -> IngestResult:
                lambda n, _d=data: _d[:n])
         for path, data in files
     ]
-    return _ingest(entries)
+    return _ingest(entries, limits)
 
 
-def ingest_directory(root: str | Path) -> IngestResult:
+def ingest_directory(root: str | Path, limits: PackLimits | None = None) -> IngestResult:
     """Validate a folder on disk (the CLI). Symbolic links are refused, hidden
     directories are not entered, nothing outside ``root`` is read."""
     base = Path(root)
@@ -297,7 +312,7 @@ def ingest_directory(root: str | Path) -> IngestResult:
                         "too_many_files", f"The folder has over {MAX_ENTRIES} files.")
     except OSError as exc:
         raise IngestError("bad_archive", "The folder could not be read.") from exc
-    return _ingest(entries)
+    return _ingest(entries, limits)
 
 
 def _read_file(path: Path, n: int) -> bytes:
@@ -305,7 +320,8 @@ def _read_file(path: Path, n: int) -> bytes:
         return fh.read(n)
 
 
-def _ingest(entries: Sequence[_Entry]) -> IngestResult:
+def _ingest(entries: Sequence[_Entry], limits: PackLimits | None = None) -> IngestResult:
+    lim = limits or limits_mod.BUILTIN
     ignored: list[str] = []
     ignored_total = 0
     candidates: list[tuple[str, _Entry]] = []
@@ -362,15 +378,15 @@ def _ingest(entries: Sequence[_Entry]) -> IngestResult:
             secret_paths[:MAX_HITS])
     if not candidates:
         raise IngestError("no_files", "No usable text files were found in the upload.")
-    if len(candidates) > MAX_FILES:
-        raise IngestError("too_many_files", f"More than {MAX_FILES} files; split the pack.")
+    if len(candidates) > lim.max_files:
+        raise IngestError("too_many_files", f"More than {lim.max_files} files; split the pack.")
     for path, entry in candidates:                      # the single file is the clearer reason
-        if entry.declared > MAX_FILE_BYTES:
+        if entry.declared > lim.file_bytes:
             raise IngestError("file_too_large",
-                              f"{path[:80]!r} is over {MAX_FILE_BYTES // 1024} KB.")
-    if sum(max(e.declared, 0) for _p, e in candidates) > MAX_TOTAL_BYTES:
+                              f"{path[:80]!r} is over {_size(lim.file_bytes)}.")
+    if sum(max(e.declared, 0) for _p, e in candidates) > lim.total_bytes:
         raise IngestError(
-            "total_too_large", f"The files add up to over {MAX_TOTAL_BYTES // (1024 * 1024)} MB.")
+            "total_too_large", f"The files add up to over {_size(lim.total_bytes)}.")
 
     # One shared top-level folder is the folder that was zipped, not part of the pack.
     top_dir = _common_top_dir([p for p, _e in candidates])
@@ -383,7 +399,7 @@ def _ingest(entries: Sequence[_Entry]) -> IngestResult:
             raise IngestError("too_deep", f"{path[:80]!r}: nested over {MAX_DEPTH} levels.")
     refuse_file_and_folder([p for p, _e in candidates])
 
-    loaded = _read_all(candidates)
+    loaded = _read_all(candidates, lim)
     allowed = _refuse_secrets(loaded)
     files, skills = _describe(loaded, top_dir)
     return IngestResult(files=files, ignored=sorted(ignored), skills=skills,
@@ -416,7 +432,8 @@ def _common_top_dir(paths: Sequence[str]) -> str:
     return ""
 
 
-def _read_all(candidates: Sequence[tuple[str, _Entry]]) -> list[tuple[str, str]]:
+def _read_all(candidates: Sequence[tuple[str, _Entry]],
+              lim: PackLimits) -> list[tuple[str, str]]:
     """Read and decode every kept file under the real byte caps."""
     from src.security.secret_files import classify
 
@@ -424,21 +441,21 @@ def _read_all(candidates: Sequence[tuple[str, _Entry]]) -> list[tuple[str, str]]
     total = 0
     sniffed: list[dict[str, Any]] = []
     for path, entry in candidates:
-        if entry.declared > MAX_FILE_BYTES:
+        if entry.declared > lim.file_bytes:
             raise IngestError("file_too_large",
-                              f"{path!r} is over {MAX_FILE_BYTES // 1024} KB.")
+                              f"{path!r} is over {_size(lim.file_bytes)}.")
         try:
-            data = entry.read(MAX_FILE_BYTES + 1)
+            data = entry.read(lim.file_bytes + 1)
         except OSError as exc:
             raise IngestError("bad_archive", f"{path!r} could not be read.") from exc
-        if len(data) > MAX_FILE_BYTES:
+        if len(data) > lim.file_bytes:
             raise IngestError("file_too_large",
-                              f"{path!r} is over {MAX_FILE_BYTES // 1024} KB.")
+                              f"{path!r} is over {_size(lim.file_bytes)}.")
         total += len(data)
-        if total > MAX_TOTAL_BYTES:
+        if total > lim.total_bytes:
             raise IngestError(
                 "total_too_large",
-                f"The files add up to over {MAX_TOTAL_BYTES // (1024 * 1024)} MB.")
+                f"The files add up to over {_size(lim.total_bytes)}.")
         # The whole file (at most MAX_FILE_BYTES), not its first 8 KiB: a key pasted at the end
         # of a long note is as much a key.
         if classify(path, data) == "deny":
@@ -616,6 +633,53 @@ def _string_list(path: str, meta: dict[str, Any], key: str, *, limit: int, each:
     return out
 
 
+_META_DEPTH = 6
+_META_STRING = 2000
+
+
+def _json_value(value: Any, depth: int = 0) -> Any:
+    """``value`` as JSON: dates as ISO strings, anything exotic as text, nesting and
+    long strings bounded."""
+    import datetime as _dt
+
+    if value is None or isinstance(value, bool | int):
+        return value
+    if isinstance(value, float):
+        return value if value == value and value not in (float("inf"), float("-inf")) else None
+    if isinstance(value, str):
+        return value[:_META_STRING]
+    if isinstance(value, _dt.datetime | _dt.date | _dt.time):
+        return value.isoformat()
+    if depth >= _META_DEPTH:
+        return str(value)[:_META_STRING]
+    if isinstance(value, dict):
+        return {str(k)[:100]: _json_value(v, depth + 1) for k, v in list(value.items())[:100]}
+    if isinstance(value, list | tuple | set | frozenset):
+        return [_json_value(v, depth + 1) for v in list(value)[:200]]
+    return str(value)[:_META_STRING]
+
+
+def _json_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    """The front matter kept on an item: JSON-safe and no larger than
+    :data:`MAX_FRONT_MATTER_CHARS` once serialised (later keys are dropped first)."""
+    import json
+
+    out: dict[str, Any] = {}
+    for key, value in list(meta.items())[:100]:
+        out[str(key)[:100]] = _json_value(value)
+        if len(json.dumps(out, ensure_ascii=False)) > MAX_FRONT_MATTER_CHARS:
+            del out[str(key)[:100]]
+    return out
+
+
+def _status_of(meta: dict[str, Any]) -> str | None:
+    for key, value in meta.items():
+        if key.casefold() == "status" and isinstance(value, str | int | float | bool):
+            text = str(value).strip().casefold()
+            return text[:64] or None
+    return None
+
+
 def _squash(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
@@ -732,6 +796,7 @@ def _describe(loaded: Sequence[tuple[str, str]], top_dir: str) -> tuple[list[Ing
             repos=_string_list(path, meta, "repos", limit=MAX_REPOS, each=300),
             tags=_string_list(path, meta, "tags", limit=MAX_TAGS, each=64),
             terms=terms_for(text),
+            meta=(kept := _json_meta(meta)), status=_status_of(kept),
         ))
     return files, sorted(skill_dirs.values())
 

@@ -125,6 +125,8 @@ def _families() -> dict[str, list[str]]:
         "codebase.connect.trouble.*.meaning": _array(APP / "connect" / "page.tsx", "TROUBLES"),
         "codebase.connect.trouble.*.fix": _array(APP / "connect" / "page.tsx", "TROUBLES"),
         "codebase.guide.*": who,
+        "codebase.limits.field.*": _array(COMPONENTS / "limits-panel.tsx", "FIELDS"),
+        "codebase.limits.source.*": _array(COMPONENTS / "limits-panel.tsx", "INHERITED_FROM"),
         "codebase.audience.*": audiences,
         "codebase.audience.*.short": audiences,
         "codebase.audience.*.desc": audiences,
@@ -258,7 +260,7 @@ def test_every_call_passes_exactly_the_placeholders_its_sentence_has():
     for key, passed in _calls():
         keys = ([key] if "$" not in key
                 else [k for k in _expand() if re.fullmatch(
-                    re.sub(r"\\\$\\\{[^}]*\\\}", r"[A-Za-z]+", re.escape(key)), k)])
+                    re.sub(r"\\\$\\\{[^}]*\\\}", r"[A-Za-z_]+", re.escape(key)), k)])
         assert keys, f"{key} matches no key"
         for k in keys:
             wanted = set(PLACEHOLDER.findall(en[k]))

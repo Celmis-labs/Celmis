@@ -3921,6 +3921,10 @@ export const docsApi = {
 export type KbNote = {
   path: string; title: string; type: string; card: boolean;
   status?: string; id?: string; domain?: string; objects?: string[]; stale?: boolean;
+  /** "generate": written by Celmis from the code (a process note), never a checked card. */
+  origin?: string;
+  /** A note of another repository, drawn in the graph of this one. */
+  external?: boolean; repo?: string; note_path?: string;
 };
 export type KbBinding = {
   source?: "upload" | "repo"; prefix?: string; follow?: boolean; code_repo?: string;
@@ -3934,10 +3938,10 @@ export type KbReport = {
   missing_objects: { path: string; objects: string[] }[]; stale: string[];
   embedded: number; embed_failures: string[];
 };
-export type KbLink = { path: string; title: string; kind: string };
+export type KbLink = { path: string; title: string; kind: string; repo?: string };
 export type KbStaleness = { state: "fresh" | "stale" | "unknown"; reason?: string; changed?: string[]; head?: string };
 export type KbCard = {
-  path: string; title: string; type: string; card: boolean; status: string; body: string;
+  path: string; title: string; type: string; card: boolean; status: string; origin?: string; body: string;
   fm: Record<string, unknown>;
   kb: {
     id?: string; status?: string; effective_status?: string; source?: string; source_sha?: string;
@@ -3947,7 +3951,7 @@ export type KbCard = {
   links: { out: KbLink[]; back: KbLink[]; dangling: string[] };
 };
 export type KbGraph = {
-  nodes: KbNote[]; edges: { source: string; target: string; kind: string }[];
+  nodes: KbNote[]; edges: { source: string; target: string; kind: string; repo?: string }[];
   dangling: Record<string, string[]>; omitted: number;
 };
 export type KbChange = { path: string; change: string; at: string; by?: string; commit?: string };
@@ -3983,6 +3987,47 @@ export const kbApi = {
   changes: (token: string, slug: string, since = "30d") =>
     api<{ repo: string; since: string; changes: KbChange[] }>(
       `/api/kb/${encodeURIComponent(slug)}/changes?since=${encodeURIComponent(since)}`, { token }),
+};
+
+/** One process of a repository's own list (`src/kb/processes.py`). */
+export type ProcessSpec = {
+  id: string; name: string; description: string; objects: string[]; domain?: string; tags?: string[];
+};
+export type ProcessRow = ProcessSpec & {
+  canonical_objects: string[]; other_targets: string[];
+  note?: {
+    path: string; status: string; effective_status: string; stale: boolean;
+    generated_at: string; objects_missing: string[];
+  };
+  result?: { status: "ok" | "failed"; path?: string; error?: string };
+};
+export type ProcessList = {
+  repo: string; processes: ProcessRow[];
+  limits: { processes: number; name: number; description: number; objects: number };
+  last_run: { job_id?: string | null; started_at?: string; finished_at?: string; engine?: string; language?: string };
+};
+
+/** A repository's own list of business processes, and the notes generated from it
+ *  (`/api/kb/{slug}/processes`, `src/api/routers/processes.py`). */
+export const processesApi = {
+  list: (token: string, slug: string) =>
+    api<ProcessList>(`/api/kb/${encodeURIComponent(slug)}/processes`, { token }),
+  /** Replaces the whole list. A refused list answers 400 with `detail.problems`. */
+  save: (token: string, slug: string, processes: ProcessSpec[]) =>
+    api<ProcessList>(`/api/kb/${encodeURIComponent(slug)}/processes`, { token, method: "PUT", json: { processes } }),
+  /** A .json / .yaml / .csv file; `replace` makes it the whole list, otherwise it is merged by id. */
+  upload: (token: string, slug: string, file: File, replace: boolean) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    form.append("replace", String(replace));
+    return api<ProcessList>(`/api/kb/${encodeURIComponent(slug)}/processes/upload`, { token, method: "POST", body: form });
+  },
+  remove: (token: string, slug: string, id: string) =>
+    api<{ removed: string; note_removed: boolean }>(
+      `/api/kb/${encodeURIComponent(slug)}/processes/${encodeURIComponent(id)}`, { token, method: "DELETE" }),
+  generate: (token: string, slug: string, body: { ids?: string[]; engine?: string; language?: string }) =>
+    api<{ ok: boolean; job_id: string | null; queued: boolean; engine: string; language: string; count?: number; detail: string }>(
+      `/api/kb/${encodeURIComponent(slug)}/processes/generate`, { token, method: "POST", json: body }),
 };
 
 export const depsApi = {
@@ -4414,6 +4459,22 @@ export type PackDiff = { added: string[]; removed: string[]; changed: string[] }
 export type PackItem = {
   id: string; path: string; kind: PackItemKind; skill: string | null; name: string;
   description: string; content: string; sha: string; size_bytes: number; version: number;
+  /** The front matter, whole (without `repos`), and its normalised `status`. */
+  meta?: Record<string, unknown>; status?: string | null;
+};
+
+/** The six pack limits, in bytes or counts (`src/knowledge/limits.py`). */
+export type PackLimitValues = {
+  archive_bytes: number; max_files: number; file_bytes: number; total_bytes: number;
+  packs_per_workspace: number; keep_versions: number;
+};
+export type PackLimitSource = "workspace" | "install" | "builtin";
+export type PackLimits = {
+  limits: PackLimitValues; sources: Record<keyof PackLimitValues, PackLimitSource>;
+  ceilings: PackLimitValues; defaults: PackLimitValues; builtin: PackLimitValues;
+  /** What this workspace sets itself; null inherits. */
+  overrides: Record<keyof PackLimitValues, number | null>;
+  can_edit: boolean;
 };
 
 export type PackInvite = {
@@ -4576,9 +4637,12 @@ export const codebaseApi = {
     api<{ pack_id: string; workspace_slug: string }>("/api/codebase/invites/redeem", {
       token, method: "POST", json: { token: inviteToken },
     }),
-  search: (token: string, q: string, limit = 20) =>
+  search: (token: string, q: string, limit = 20, where = "") =>
     api<{ hits: PackSearchHit[]; truncated?: boolean }>(
-      `/api/codebase/search${queryString({ q, limit })}`, { token }),
+      `/api/codebase/search${queryString({ q, limit, where: where || undefined })}`, { token }),
+  limits: (token: string) => api<PackLimits>("/api/codebase/limits", { token }),
+  setLimits: (token: string, body: Record<string, number | null>) =>
+    api<PackLimits>("/api/codebase/limits", { token, method: "PUT", json: body }),
   /** The text an agent gets for a task, exactly as the MCP `brief` tool builds it. */
   brief: (token: string, task: string) =>
     api<PackBrief>("/api/codebase/brief", { token, method: "POST", json: { task } }),

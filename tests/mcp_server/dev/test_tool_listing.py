@@ -29,7 +29,9 @@ def _listing(mcp) -> list:
 #: (a 172-character description and three string arguments), so the cap is 7,000.
 #: `docs` (generated notes and imported cards) costs 709: its filters ride in one
 #: `where` argument instead of one per front matter key, so the cap is 7,700.
-LISTING_CAP = 7700
+#: `skills` takes the same single `where` (a longer description naming it, one more string
+#: argument): 78 characters, so the cap is 7,800 (tests/e2e_local/test_scenarios.py agrees).
+LISTING_CAP = 7800
 
 
 def test_the_whole_tool_listing_stays_under_seven_thousand_seven_hundred_characters(dev_mcp):

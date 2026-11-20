@@ -46,15 +46,17 @@ from src.api.deps import (
     client_ip,
     code_readable_repo_slugs,
     current_workspace_id,
+    is_workspace_admin,
     require_codebase_reader,
     require_pack_author,
     require_pack_token,
     require_signed_in,
 )
-from src.db.models import Workspace
+from src.db.models import Workspace, WorkspacePackLimits
 from src.db.session import get_async_session
 from src.knowledge import brief as brief_mod
-from src.knowledge import ingest, store
+from src.knowledge import ingest, limits, store
+from src.knowledge import where as where_mod
 from src.knowledge.timestamps import iso_utc
 from src.knowledge.visibility import (
     PACK_NOT_FOUND,
@@ -162,6 +164,7 @@ class ItemBrief(BaseModel):
     description: str
     size_bytes: int
     sha: str
+    status: str | None = None
 
 
 class MemberOut(BaseModel):
@@ -395,7 +398,8 @@ async def get_pack(
     return PackDetail(
         **_pack_out(info).model_dump(),
         items=[ItemBrief(id=i.id, path=i.path, kind=i.kind, skill=i.skill, name=i.name,
-                         description=i.description, size_bytes=i.size_bytes, sha=i.sha)
+                         description=i.description, size_bytes=i.size_bytes, sha=i.sha,
+                         status=i.status)
                for i in items],
         members=members, usage=usage, created_by=_email(view.pack.created_by_id))
 
@@ -511,18 +515,21 @@ async def list_versions(
 
 
 async def _ingest_upload(archive: UploadFile | None, files: list[UploadFile] | None,
-                         paths: list[str] | None) -> ingest.IngestResult:
+                         paths: list[str] | None,
+                         lim: limits.PackLimits | None = None) -> ingest.IngestResult:
     """The upload of a version, from ONE zip (`archive`) or from files (`files`,
     each named by its relative path — or by the matching entry of `paths`, when
-    sent), checked by `ingest`. Raises the 422 an upload that is refused gets."""
+    sent), checked by `ingest` against the limits `lim` of the workspace (the built-in ones
+    when none is given). Raises the 422 an upload that is refused gets."""
+    lim = lim or limits.BUILTIN
     if (archive is None) == (not files):
         raise HTTPException(status_code=422, detail={
             "code": "bad_upload", "message": "Send either one archive or a list of files.",
             "hits": []})
     try:
         if archive is not None:
-            data = await archive.read(ingest.MAX_ARCHIVE_BYTES + 1)
-            return await asyncio.to_thread(ingest.ingest_zip, data)
+            data = await archive.read(lim.archive_bytes + 1)
+            return await asyncio.to_thread(ingest.ingest_zip, data, lim)
         names = list(paths or [])
         if names and len(names) != len(files or []):
             raise HTTPException(status_code=422, detail={
@@ -530,9 +537,9 @@ async def _ingest_upload(archive: UploadFile | None, files: list[UploadFile] | N
                 "hits": []})
         entries = []
         for index, part in enumerate(files or []):
-            body = await part.read(ingest.MAX_FILE_BYTES + 1)
+            body = await part.read(lim.file_bytes + 1)
             entries.append((names[index] if names else (part.filename or ""), body))
-        return await asyncio.to_thread(ingest.ingest_files, entries)
+        return await asyncio.to_thread(ingest.ingest_files, entries, lim)
     except ingest.IngestError as exc:
         raise _ingest_failure(exc) from None
     except HTTPException:
@@ -574,7 +581,8 @@ async def upload_version(
     """A new version from ONE zip (`archive`) or from files (`files`, each named
     by its relative path — or by the matching entry of `paths`, when sent)."""
     view = await _maintained(session, user, ws_id, pack_id)     # before any byte is read
-    result = await _ingest_upload(archive, files, paths)
+    lim = await limits.resolve(session, ws_id)
+    result = await _ingest_upload(archive, files, paths, lim)
     with _answers():
         version = await store.add_version(session, view, result, note)
     _audit("version_uploaded", user=user, ws_id=ws_id, request=request, target=view.pack.id,
@@ -642,7 +650,8 @@ async def read_item(
     return {"id": item.id, "path": item.path, "kind": item.kind, "skill": item.skill,
             "name": item.name, "description": item.description, "content": item.content,
             "repos": await _readable_pointers(user, ws_id, item.repos),
-            "sha": item.sha, "size_bytes": item.size_bytes, "version": number}
+            "sha": item.sha, "size_bytes": item.size_bytes, "version": number,
+            "meta": where_mod.visible_meta(item.meta), "status": item.status}
 
 
 # ─── Invite links ────────────────────────────────────────────────────
@@ -849,7 +858,8 @@ async def publish_version(
     files are exactly the current version's (a pipeline that pushes on every
     commit must not push the versions worth rolling back to out of the 20 kept)."""
     view = auth.view
-    result = await _ingest_upload(archive, files, paths)
+    lim = await limits.resolve(session, view.ws_id)
+    result = await _ingest_upload(archive, files, paths, lim)
     sha = ingest.version_sha(result.files)
     if _truthy(dry_run):
         return JSONResponse(status_code=200, content={
@@ -891,20 +901,33 @@ async def publish_archive(
 # ─── Search and the brief ────────────────────────────────────────────
 
 
+def _where(text: str) -> list[where_mod.Clause]:
+    try:
+        return where_mod.parse(text)
+    except where_mod.WhereError as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "bad_where", "message": str(exc), "hits": []}) from None
+
+
 @router.get("/search")
 async def search_packs(
     q: str = Query(default="", max_length=300),
     limit: int = Query(default=20, ge=1, le=SEARCH_LIMIT),
+    where: str = Query(default="", max_length=where_mod.MAX_WHERE),
     session: AsyncSession = Depends(get_async_session),
     user: User = Depends(require_codebase_reader),
     ws_id: str = Depends(current_workspace_id),
 ) -> dict[str, Any]:
+    """Ranked items (BM25 fused with a search by meaning where the install has embeddings).
+    `where=key=value ...` keeps items whose front matter matches (AND across keys)."""
+    clauses = _where(where)
     principal = await _principal(session, user, ws_id)
-    hits = await store.search(session, principal, ws_id, q, limit)
+    hits = await store.search(session, principal, ws_id, q, limit, where=clauses)
     return {"hits": [{
         "pack_id": h.pack.id, "pack_slug": h.pack.slug, "pack_title": h.pack.title,
         "item_id": h.item.id, "path": h.item.path, "kind": h.item.kind, "skill": h.item.skill,
-        "name": h.item.name, "snippet": h.snippet, "score": round(h.score, 4)} for h in hits],
+        "name": h.item.name, "status": h.item.status, "snippet": h.snippet,
+        "score": round(h.score, 4)} for h in hits],
         **_truncated(hits.truncated)}
 
 
@@ -932,6 +955,69 @@ async def brief(
         {"pack_slug": plan.meta[i][0].slug, "item_id": i, "path": plan.meta[i][2].path,
          "kind": plan.meta[i][2].kind, "name": plan.meta[i][2].name}
         for i in result.item_ids if i in plan.meta], **_truncated(ranking.truncated)}
+
+
+# ─── Limits ──────────────────────────────────────────────────────────
+
+
+class LimitsIn(_In):
+    """The workspace's overrides; a field left out or null inherits (the whole row is replaced)."""
+
+    archive_bytes: int | None = Field(default=None, ge=1)
+    max_files: int | None = Field(default=None, ge=1)
+    file_bytes: int | None = Field(default=None, ge=1)
+    total_bytes: int | None = Field(default=None, ge=1)
+    packs_per_workspace: int | None = Field(default=None, ge=1)
+    keep_versions: int | None = Field(default=None, ge=1)
+
+
+async def _limits_payload(session: AsyncSession, user: User, ws_id: str) -> dict[str, Any]:
+    row = await session.get(WorkspacePackLimits, ws_id)
+    out = limits.resolved_from(row).payload()
+    out["overrides"] = {n: getattr(row, n, None) if row is not None else None
+                        for n in limits.FIELDS}
+    out["can_edit"] = bool(is_workspace_admin(user, ws_id))
+    return out
+
+
+@router.get("/limits")
+async def get_limits(
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(require_codebase_reader),
+    ws_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """The limits that apply to this workspace, where each value comes from
+    (`workspace` | `install` | `builtin`) and the hard ceilings. Any member may read."""
+    return await _limits_payload(session, user, ws_id)
+
+
+@router.put("/limits")
+async def put_limits(
+    body: LimitsIn,
+    request: Request,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(require_codebase_reader),
+    ws_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """Set the workspace's limits (owner / admin). null = inherit. A value above its ceiling
+    is 422."""
+    if not is_workspace_admin(user, ws_id):
+        raise HTTPException(status_code=403, detail="Requires owner/admin on this workspace")
+    try:
+        values = limits.validate(body.model_dump())
+    except limits.LimitError as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "bad_limit", "message": str(exc), "hits": []}) from None
+    row = await session.get(WorkspacePackLimits, ws_id)
+    if row is None:
+        row = WorkspacePackLimits(workspace_id=ws_id)
+        session.add(row)
+    for name, value in values.items():
+        setattr(row, name, value)
+    await session.commit()
+    _audit("limits_changed", user=user, ws_id=ws_id, request=request, target=ws_id,
+           detail={"fields": sorted(n for n, v in values.items() if v is not None)})
+    return await _limits_payload(session, user, ws_id)
 
 
 __all__ = ["router"]

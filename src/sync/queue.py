@@ -63,6 +63,9 @@ KIND_CROSS_REPO_MATERIALIZE = "cross_repo_materialize"
 KIND_REINDEX_QDRANT = "reindex_qdrant"
 KIND_REGENERATE_NOTES = "regenerate_notes"
 KIND_GENERATE_VAULT = "generate_vault"
+#: One description note per business process of a repository's own list
+#: (src/generation/process_doc.py): one model call per process, so a job.
+KIND_GENERATE_PROCESSES = "generate_processes"
 KIND_DEPS_AUDIT = "deps_audit"
 #: Reading a sentence into a plan. It is here rather than in the request
 #: because a person who navigates away mid-thought should not lose the
@@ -688,7 +691,7 @@ def stats(*, workspace_id: str | None = None) -> dict[str, int]:
 __all__ = [
     "KIND_REVIEW", "KIND_INDEX_REPO", "KIND_OWNERSHIP_REBUILD",
     "KIND_CROSS_REPO_MATERIALIZE", "KIND_REINDEX_QDRANT",
-    "KIND_REGENERATE_NOTES", "KIND_PR_COMMAND",
+    "KIND_REGENERATE_NOTES", "KIND_GENERATE_PROCESSES", "KIND_PR_COMMAND",
     "JobCancelled",
     "JobDeferred", "STATUS_DEFERRED", "cancel_deferred", "is_deferred",
     "deferred_for_runs", "mark_deferred", "claim_due_deferred",

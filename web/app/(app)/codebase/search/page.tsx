@@ -41,6 +41,7 @@ export default function CodebaseSearchPage() {
   const token = useToken();
   const [input, setInput] = useState("");
   const [query, setQuery] = useState("");
+  const [where, setWhere] = useState("");
   const [task, setTask] = useState("");
 
   // `?q=` from the catalogue's search box pre-fills and runs the search; read
@@ -56,8 +57,8 @@ export default function CodebaseSearchPage() {
   }, []);
 
   const hits = useQuery({
-    queryKey: ["codebase", "search", query],
-    queryFn: () => codebaseApi.search(token!, query),
+    queryKey: ["codebase", "search", query, where],
+    queryFn: () => codebaseApi.search(token!, query, 20, where.trim()),
     enabled: !!token && query.length >= MIN_QUERY,
   });
 
@@ -98,6 +99,12 @@ export default function CodebaseSearchPage() {
                 <SearchIcon />{t("codebase.searchButton")}
               </Button>
             </form>
+            <Input
+              value={where} maxLength={300} className="max-w-xl font-mono text-xs"
+              onChange={(e) => setWhere(e.target.value)}
+              placeholder={t("codebase.search.wherePlaceholder")}
+              aria-label={t("codebase.search.where")}
+            />
 
             {query.length < MIN_QUERY && (
               <p className="text-xs text-[var(--color-muted-foreground)]">{t("codebase.search.hint")}</p>

@@ -31,6 +31,12 @@ from qdrant_client.models import (
 )
 
 from src.config import Settings, get_settings
+from src.retrieval.note_chunks import (
+    CHUNK_OVERFETCH,
+    chunk_point_ids,
+    collapse_chunks,
+    expand_note,
+)
 from src.retrieval.vector_store import (
     VECTOR_WORKSPACE_KEY,
     VectorScope,
@@ -158,16 +164,18 @@ class VaultRetriever:
 
         query_filter = Filter(must=must_conditions) if must_conditions else None
 
+        # A note is several points (chunks): over-fetch, then keep each note
+        # once with its best chunk's score.
         response = self.qdrant.query_points(
             collection_name=self.settings.qdrant_collection,
             query=query_vec,
             query_filter=query_filter,
-            limit=top_k,
+            limit=top_k * CHUNK_OVERFETCH,
             with_payload=True,
         )
 
         hits: list[VaultHit] = []
-        for point in response.points:
+        for point in collapse_chunks(response.points, top_k):
             if point.score < self.settings.retrieval_min_score:
                 continue
             payload = point.payload or {}
@@ -289,55 +297,55 @@ class VaultRetriever:
         note_id: str,
         content: str,
         payload: dict[str, Any],
+        full_content: str | None = None,
     ) -> None:
         """Add/update a single note in Qdrant. Used by the vault writer.
 
         The point is stamped with this retriever's workspace, so it is
-        searchable by that tenant and nobody else."""
-        from src.llm.completion import embed as _embed
-        vector = _embed(
-            content, task_type="RETRIEVAL_DOCUMENT", operation="embed_note", workspace_id=self.workspace_id,
-            )
-        from qdrant_client.models import PointStruct
-
-        self.ensure_collection(len(vector))
-        self.qdrant.upsert(
-            collection_name=self.settings.qdrant_collection,
-            points=[
-                PointStruct(
-                    id=note_id,
-                    vector=vector,
-                    payload=stamp_workspace(
-                        {**payload, "content": content}, self.workspace_id,
-                    ),
-                )
-            ],
-        )
+        searchable by that tenant and nobody else. With ``full_content`` the
+        note is stored as chunks (see :mod:`src.retrieval.note_chunks`)."""
+        self.upsert_notes_batch([(note_id, content, payload, full_content)])
 
     def upsert_notes_batch(
         self,
-        items: list[tuple[str, str, dict[str, Any]]],
+        items: list[tuple],
     ) -> None:
-        """Batch upsert: [(note_id, content, payload), ...]."""
+        """Batch upsert: [(note_id, embed_text, payload[, full_content]), ...].
+
+        An item with ``full_content`` becomes one point per chunk of the note
+        (chunk 0 = ``embed_text``, keeping the note's id); chunks a previous,
+        longer version left behind are removed. Without it: a single point."""
         if not items:
             return
         from src.llm.completion import embed_batch as _embed_batch
+
+        rows: list[tuple[str, str, dict[str, Any]]] = []
+        stale: list[str] = []
+        for item in items:
+            note_id, content, payload = item[0], item[1], item[2]
+            full = item[3] if len(item) > 3 else None
+            if full is None:
+                rows.append((note_id, content, payload))
+                continue
+            chunks = expand_note(note_id, content, payload, full)
+            rows.extend(chunks)
+            stale.extend(chunk_point_ids(note_id)[len(chunks):])
         vectors = _embed_batch(
-            [content for _, content, _ in items],
+            [content for _, content, _ in rows],
             task_type="RETRIEVAL_DOCUMENT", operation="embed_notes_batch",
             workspace_id=self.workspace_id,
         )
-        from qdrant_client.models import PointStruct
+        from qdrant_client.models import PointIdsList, PointStruct
 
         points = [
             PointStruct(
-                id=note_id,
+                id=point_id,
                 vector=vector,
                 payload=stamp_workspace(
                     {**payload, "content": content}, self.workspace_id,
                 ),
             )
-            for (note_id, content, payload), vector in zip(items, vectors, strict=True)
+            for (point_id, content, payload), vector in zip(rows, vectors, strict=True)
         ]
         if vectors:
             self.ensure_collection(len(vectors[0]))
@@ -346,6 +354,13 @@ class VaultRetriever:
             self.qdrant.upsert(
                 collection_name=self.settings.qdrant_collection,
                 points=points[i : i + batch_size],
+            )
+        if stale:
+            # By id, not by filter: a cheap call with no payload scan. The ids
+            # are derived from the note's id, so nothing else can match.
+            self.qdrant.delete(
+                collection_name=self.settings.qdrant_collection,
+                points_selector=PointIdsList(points=stale),
             )
 
     def delete_by_note_path(self, note_path: str, repo: str) -> None:

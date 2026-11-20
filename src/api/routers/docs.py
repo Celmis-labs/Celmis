@@ -64,6 +64,8 @@ class NoteSummary(BaseModel):
     type: str = ""
     status: str = ""
     card: bool = False
+    #: "generate" for a note Celmis wrote from the code (a process note).
+    origin: str = ""
 
 
 class DocsOverview(BaseModel):
@@ -119,7 +121,14 @@ def _readable_vault(slug: str, user: User, workspace_id: str):
 def _concealed(post: frontmatter.Post, dec) -> bool:  # noqa: ANN001
     """True when ``dec`` hides the source path this note documents."""
     source = post.metadata.get("path") if isinstance(post.metadata, dict) else None
-    return _concealed_meta(str(source or ""), dec)
+    if _concealed_meta(str(source or ""), dec):
+        return True
+    # A process note is written from the files of several modules: one hidden
+    # from the caller hides the note.
+    kb = post.metadata.get("kb") if isinstance(post.metadata, dict) else None
+    if isinstance(kb, dict) and kb.get("origin") == "generate" and isinstance(kb.get("files"), list):
+        return any(_concealed_meta(str(f), dec) for f in kb["files"])
+    return False
 
 
 def _concealed_meta(source: str, dec) -> bool:  # noqa: ANN001
@@ -328,6 +337,7 @@ def list_notes(
             type=str(post.metadata.get("type") or ""),
             status=effective_status(kb) if kb else "",
             card=bool(kb),
+            origin=str(kb.get("origin") or ""),
         ))
     return DocsOverview(
         repo_slug=slug, notes=out, omitted=max(0, len(files) - MAX_NOTES),

@@ -167,7 +167,7 @@ class VaultWriter:
         self.vault_retriever = vault_retriever  # lazy — if a Qdrant upsert is needed
         # Stage 18 — batching V1. None = pass-through (send per-note).
         # list = buffer active (in `batched_qdrant()` context).
-        self._qdrant_queue: list[tuple[str, str, dict]] | None = None
+        self._qdrant_queue: list[tuple[str, str, dict, str]] | None = None
         self._qdrant_depth: int = 0
         #: Notes successfully written into the vector store, and the reasons
         #: any batch failed. Read by the job handler, which used to have no
@@ -212,7 +212,9 @@ class VaultWriter:
         post = frontmatter.Post(content, **metadata.as_dict())
         full_path.write_text(frontmatter.dumps(post), encoding="utf-8")
         logger.info("vault_write path=%s bytes=%d", relative_path, full_path.stat().st_size)
-        is_card = bool(metadata.extra.get("kb"))
+        kb_block = metadata.extra.get("kb")
+        is_card = bool(kb_block) and not (
+            isinstance(kb_block, dict) and kb_block.get("origin") == "generate")
         if previous is None or is_card or previous.strip() != content.strip():
             # The log of changed notes (src/kb/changes.py): what a team keeping
             # its own cards on top of the generated ones reads to know which
@@ -271,13 +273,14 @@ class VaultWriter:
         # per note. The orchestrator wraps each generation loop in
         # `with writer.batched_qdrant():` — buffer drains on exit.
         if getattr(self, "_qdrant_queue", None) is not None:
-            self._qdrant_queue.append((note_id, embed_text, payload))
+            self._qdrant_queue.append((note_id, embed_text, payload, content))
             return
 
         self.vault_retriever.upsert_note(
             note_id=note_id,
             content=embed_text,
             payload=payload,
+            full_content=content,
         )
 
     # ─── Batching V1 (Stage 18) ─────────────────────────────────────

@@ -226,6 +226,7 @@ def _regenerate_notes_sync(
     reembedded = 0
     module_names: list[str] = []
     reembed_paths: list[str] = []
+    process_notes: dict[str, dict] = {}
 
     for note_path in note_paths:
         full = vault_root / note_path
@@ -237,8 +238,17 @@ def _regenerate_notes_sync(
             continue
         ntype = str(post.metadata.get("type", ""))
         module = post.metadata.get("module")
+        kb_meta = post.metadata.get("kb")
         if ntype == "module" and module:
             module_names.append(str(module))
+        elif (engine and ntype == "process" and isinstance(kb_meta, dict)
+              and kb_meta.get("origin") == "generate" and kb_meta.get("id")):
+            # Written from a team's list: redone from the spec the note carries —
+            # when a person asked for it (an engine is chosen). The incremental
+            # sync queues this job without one, and a push must not spend model
+            # calls on every process it touches: those notes are re-embedded and
+            # their staleness check (src/kb/processes.py) says they need review.
+            process_notes[str(kb_meta["id"])] = kb_meta
         else:
             reembed_paths.append(note_path)
 
@@ -285,6 +295,27 @@ def _regenerate_notes_sync(
                            "to re-embed", exc)
             reembed_paths.extend(f"modules/{n}.md" for n in module_names)
 
+    # ── Process notes — regenerated from their spec (the list's, else the note's own).
+    if process_notes:
+        try:
+            from src.generation.process_doc import generate_processes
+            from src.kb.processes import ProcessSpec
+
+            carried = {
+                pid: ProcessSpec(
+                    id=pid, name=str((kb.get("process") or {}).get("name") or pid),
+                    description=str((kb.get("process") or {}).get("description") or ""),
+                    objects=[str(o) for o in (kb.get("process") or {}).get("objects") or []])
+                for pid, kb in process_notes.items()}
+            res = generate_processes(
+                repo_slug, workspace_id=workspace_id, user_id=user_id, ids=list(carried),
+                engine=engine, language=language, spec_overrides=carried)
+            regenerated += len(res.ok)
+            reembed_paths.extend(f"processes/{pid}.md" for pid in res.failed)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("regen_processes_failed err=%s — falling back to re-embed", type(exc).__name__)
+            reembed_paths.extend(f"processes/{pid}.md" for pid in process_notes)
+
     # ── Everything else — re-embed from disk (content may be slightly
     # stale but retrieval stays consistent with what's on disk).
     if reembed_paths:
@@ -298,7 +329,7 @@ def _regenerate_notes_sync(
                 settings,
                 workspace_id=workspace_for_repo_slug(repo_slug),
             )
-            items: list[tuple[str, str, dict]] = []
+            items: list[tuple] = []
             for note in reader.list_notes(repo_slug):
                 if note.relative_path not in reembed_paths:
                     continue
@@ -311,7 +342,7 @@ def _regenerate_notes_sync(
                 ])
                 items.append((
                     VaultWriter._note_id(repo_slug, note.relative_path),
-                    embed_text, payload,
+                    embed_text, payload, note.content,
                 ))
             if items:
                 retriever.upsert_notes_batch(items)
@@ -356,7 +387,7 @@ async def handle_reindex_qdrant(job: dict[str, Any]) -> None:
     )
     retriever = VaultRetriever(settings, workspace_id=workspace_id)
     notes = reader.list_notes(p["repo_slug"])
-    items: list[tuple[str, str, dict]] = []
+    items: list[tuple] = []
     for note in notes:
         payload = {**note.metadata, "note_path": note.relative_path}
         embed_text = "\n".join([
@@ -367,7 +398,7 @@ async def handle_reindex_qdrant(job: dict[str, Any]) -> None:
             "",
             note.content[:6000],
         ])
-        items.append((VaultWriter._note_id(p["repo_slug"], note.relative_path), embed_text, payload))
+        items.append((VaultWriter._note_id(p["repo_slug"], note.relative_path), embed_text, payload, note.content))
     batch = int(__import__("os").environ.get("CELMIS_EMBED_BATCH_SIZE", "32"))
     for i in range(0, len(items), batch):
         await asyncio.to_thread(retriever.upsert_notes_batch, items[i:i + batch])
@@ -438,6 +469,35 @@ async def handle_generate_vault(job: dict[str, Any]) -> None:
                 len(getattr(result, "failures", [])),
                 getattr(result, "notes_embedded", 0),
                 str(result.summary())[:300])
+
+
+# ─── generate_processes (one note per process of the repo's own list) ─
+# payload: {repo_slug, workspace_id, user_id, ids?, engine?, language?}
+
+
+async def handle_generate_processes(job: dict[str, Any]) -> None:
+    """Write the note of each process on the repository's list.
+
+    One model call per process, so a job; cancel-aware between processes. A
+    process that fails is reported in the repository's ``last_run`` and does not
+    stop the others; the job fails only when NOT ONE note was written.
+    """
+    p = job["payload"]
+    from src.generation.process_doc import generate_processes
+    from src.sync.queue import is_cancel_requested
+
+    job_id = job["id"]
+    result = await asyncio.to_thread(
+        generate_processes, p["repo_slug"],
+        workspace_id=p.get("workspace_id", "default"), user_id=p.get("user_id"),
+        ids=p.get("ids"), engine=p.get("engine"), language=p.get("language"),
+        cancel_check=lambda: is_cancel_requested(job_id), job_id=str(job_id),
+    )
+    if result.results and not result.ok:
+        raise RuntimeError(
+            f"no process note was written for {p['repo_slug']}: "
+            + "; ".join(f"{k}: {v.get('error', '')}" for k, v in list(result.results.items())[:3]))
+    logger.info("generate_processes_done repo=%s %s", p["repo_slug"], result.summary())
 
 
 # ─── deps_audit (workspace dependency + vulnerability sweep) ─────────

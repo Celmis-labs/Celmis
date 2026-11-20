@@ -90,6 +90,8 @@ export function ItemViewer({
               </span>
             </div>
 
+            <FieldsList meta={data.meta} status={data.status} />
+
             {markdown && view === "rendered" && parts ? (
               <div className="max-h-[60dvh] space-y-3 overflow-y-auto rounded-lg border border-[var(--color-border)] p-3">
                 {parts.front !== null && (
@@ -118,5 +120,24 @@ export function ItemViewer({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** The front matter of the opened file as `key value` chips (a list shows its members). */
+function FieldsList({ meta, status }: { meta?: Record<string, unknown>; status?: string | null }) {
+  const t = useT();
+  const entries = Object.entries(meta ?? {}).filter(([, v]) => v !== null && v !== "");
+  if (entries.length === 0 && !status) return null;
+  const text = (v: unknown): string =>
+    Array.isArray(v) ? v.map(text).join(", ") : typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
+  return (
+    <dl aria-label={t("codebase.viewer.fields")} className="flex flex-wrap gap-1.5 text-xs">
+      {entries.map(([k, v]) => (
+        <div key={k} className="flex max-w-full gap-1 rounded-md border border-[var(--color-border)] px-1.5 py-0.5">
+          <dt className="text-[var(--color-muted-foreground)]">{k}</dt>
+          <dd className="min-w-0 break-words">{text(v)}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }

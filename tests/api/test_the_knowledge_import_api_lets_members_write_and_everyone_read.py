@@ -127,3 +127,22 @@ async def test_filters_one_card_with_its_links_and_the_change_log(tmp_path, monk
         or any(e["source"] == "kb/sales/reserve.md" and e["target"] == "kb/sales/ship.md" for e in edges)
     assert {e["path"] for e in log.json()["changes"]} == {"kb/sales/reserve.md", "kb/sales/ship.md"}
     assert escape.status_code == 404
+
+
+async def test_an_upload_adds_cards_and_removes_others_only_when_asked(tmp_path, monkeypatch):
+    """Dropping one card used to remove every other imported card: the form
+    defaulted to "the upload is the whole knowledge base"."""
+    one = _zip(**{"sales/extra.md": card(id="proc-extra", body="# Додаткова\n\nЩе одна.\n")})
+
+    async def drop(w, **form):
+        return await w.client.post(f"/api/kb/{A_REPO}/import", headers=w.h("member_a", "ws-a"),
+                                   files=[("files", ("one.zip", one, "application/zip"))], data=form)
+
+    async with world(tmp_path, monkeypatch, extra_routers=_extra()) as w:
+        await _readers(w)
+        assert (await _upload(w, "member_a")).status_code == 200
+        added = await drop(w)
+        snapshot = await drop(w, replace="true")
+    assert added.status_code == 200 and added.json()["created"] == ["kb/sales/extra.md"]
+    assert added.json()["deleted"] == []
+    assert sorted(snapshot.json()["deleted"]) == ["kb/sales/reserve.md", "kb/sales/ship.md"]

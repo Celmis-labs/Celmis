@@ -290,6 +290,8 @@ class Settings(BaseSettings):
     # ─── Qdrant ──────────────────────────────────────────────────────
     qdrant_collection: str = "code_analysis_vault"
     qdrant_symbols_collection: str = "code_analysis_symbols"
+    #: Chunks of knowledge-pack items for semantic search (src/knowledge/semantic.py).
+    qdrant_pack_collection: str = "code_analysis_packs"
     qdrant_upsert_batch_size: int = 64
 
     # ─── Token budgets ───────────────────────────────────────────────

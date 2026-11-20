@@ -71,6 +71,15 @@ def _migration():
     return module
 
 
+def _later_migration():
+    [path] = VERSIONS.glob("c7e1a9d4b2f8_*.py")
+    spec = importlib.util.spec_from_file_location("migration_c7e1a9d4b2f8_schema", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.fixture
 def migrated(tmp_path):
     engine = sa.create_engine(f"sqlite:///{tmp_path}/celmis.db")
@@ -83,13 +92,16 @@ def migrated(tmp_path):
         module.op = Operations(MigrationContext.configure(
             conn, opts={"target_metadata": Base.metadata}))
         module.upgrade()
+        later = _later_migration()      # the columns added after the packs' own revision
+        later.op = module.op
+        later.upgrade()
     yield engine
     engine.dispose()
 
 
 def _only_knowledge(obj, name, type_, reflected, compare_to):
     table = name if type_ == "table" else getattr(getattr(obj, "table", None), "name", "")
-    return str(table or "").startswith("knowledge_")
+    return str(table or "").startswith(("knowledge_", "workspace_pack_limits"))
 
 
 def _differences(engine):

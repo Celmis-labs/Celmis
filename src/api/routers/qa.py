@@ -94,14 +94,15 @@ async def available_repos(
         while True:
             points, next_offset = qc.scroll(
                 collection_name=settings.qdrant_collection,
-                with_payload=["repo"],
+                with_payload=["repo", "chunk"],
                 scroll_filter=scroll_filter,
                 limit=500,
                 offset=next_offset,
             )
             for p in points:
                 slug = (p.payload or {}).get("repo")
-                if slug:
+                # a note is several points; count it once (its chunk 0)
+                if slug and not (p.payload or {}).get("chunk"):
                     repos_seen[slug] = repos_seen.get(slug, 0) + 1
             if next_offset is None:
                 break

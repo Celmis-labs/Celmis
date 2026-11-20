@@ -69,6 +69,9 @@ def _point_home_defaults_at_scratch() -> Path:
 
 
 IMPORT_TIME_DATA_ROOT = _point_home_defaults_at_scratch()
+# Pack semantic indexing would call a real embedder after every pack upload; the tests of
+# that feature switch it on for themselves.
+os.environ.setdefault("CELMIS_PACK_SEMANTIC", "0")
 
 
 def _within(path: Path, root: Path) -> bool:

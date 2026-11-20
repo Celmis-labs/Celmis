@@ -43,6 +43,7 @@ from src.config import Settings, get_settings
 from src.llm.prompts.technical_answer import TECHNICAL_ANSWER_PROMPT, TECHNICAL_ANSWER_SYSTEM
 from src.qa import onec_context, query_terms
 from src.qa.query_terms import SymbolHit
+from src.retrieval.note_chunks import CHUNK_OVERFETCH, collapse_chunks
 from src.retrieval.tier1_vault import VaultRetriever
 from src.retrieval.vector_store import VECTOR_WORKSPACE_KEY, VectorScope
 from src.security.secret_files import SecretPathRefused, is_secret_path, safe_join
@@ -122,6 +123,11 @@ _NO_CODE_MARKER = (
     "(no file was read — the reason and what to do about it are described "
     "in the «Context is incomplete» block above)"
 )
+
+
+#: Characters of one vault hit shown to the model, and of all of them.
+VAULT_EXCERPT_CHARS = 1500
+VAULT_CONTEXT_CHARS = 6000
 
 
 @dataclass
@@ -1297,7 +1303,8 @@ class MultiRepoRetriever:
                 collection_name=self.settings.qdrant_collection,
                 query=embedding,
                 query_filter=qfilter,
-                limit=self.settings.retrieval_vector_topk,
+                # a note is several points (chunks): over-fetch, collapse below
+                limit=self.settings.retrieval_vector_topk * CHUNK_OVERFETCH,
                 with_payload=True,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1315,7 +1322,9 @@ class MultiRepoRetriever:
                            self.settings.qdrant_collection, exc)
             return []
         out: list[MultiRepoVaultHit] = []
-        for point in response.points:
+        for point in collapse_chunks(
+            response.points, self.settings.retrieval_vector_topk,
+        ):
             if point.score < self.settings.retrieval_min_score:
                 continue
             p = point.payload or {}
@@ -1706,11 +1715,19 @@ class MultiRepoRetriever:
     def _format_vault_hits(hits: Iterable[MultiRepoVaultHit]) -> str:
         if not hits:
             return "(no vault notes matched)"
+        # The text is the note's best-matching chunk (header + window). 300
+        # characters showed the header and little else, so a match deep in a
+        # long note reached the model as its title only.
         lines = []
+        left = VAULT_CONTEXT_CHARS
         for h in hits:
-            preview = h.content[:300] if h.content else ""
+            take = min(VAULT_EXCERPT_CHARS, max(0, left))
+            text = h.content or ""
+            shown = text[:take]
+            excerpt = shown + ("…" if len(text) > take else "")
+            left -= len(shown)
             lines.append(
-                f"- [[{h.repo}/{h.note_path}]] (score {h.score:.3f}): {preview}"
+                f"- [[{h.repo}/{h.note_path}]] (score {h.score:.3f}): {excerpt}"
             )
         return "\n".join(lines)
 

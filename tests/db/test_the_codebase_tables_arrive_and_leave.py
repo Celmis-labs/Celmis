@@ -43,6 +43,16 @@ def _run(engine, direction: str) -> None:
         getattr(module, direction)()
 
 
+def _run_later(engine) -> None:
+    [path] = VERSIONS.glob("c7e1a9d4b2f8_*.py")
+    spec = importlib.util.spec_from_file_location("migration_c7e1a9d4b2f8", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with engine.begin() as conn:
+        module.op = Operations(MigrationContext.configure(conn))
+        module.upgrade()
+
+
 @pytest.fixture
 def engine(tmp_path):
     e = sa.create_engine(f"sqlite:///{tmp_path}/celmis.db")
@@ -81,6 +91,7 @@ def test_every_table_holds_the_columns_its_model_reads(engine):
     from src.db import models
 
     _run(engine, "upgrade")
+    _run_later(engine)                      # the columns added since (meta, status, indexed_signature)
     for model in (
         models.KnowledgePack, models.KnowledgePackTeam, models.KnowledgePackMember,
         models.KnowledgePackVersion, models.KnowledgeItem, models.KnowledgePackInvite,

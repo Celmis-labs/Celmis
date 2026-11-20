@@ -45,7 +45,9 @@ Request size:
                                 (POST /api/repos/upload only: one-request archive upload)
         upload_part    chunk + 1 MB  CELMIS_UPLOAD_CHUNK_BYTES (default 32 MiB, under 100 MB)
                                 (PUT /api/repos/upload/sessions/{id}/parts/{n})
-        pack_upload    5 MB     CELMIS_MAX_BODY_BYTES_LARGE (the knowledge-pack upload: a zip or
+        pack_upload    5 MB     the LARGE cap, or the pack archive CEILING plus 1 MB once the
+                                operator raises it (CELMIS_PACK_MAX_ARCHIVE_CEILING_BYTES); the
+                                router holds each workspace to its own limit (5 MB by default). The knowledge-pack upload: a zip or
                                 the files of a pack; POST /api/codebase/packs/{id}/versions and
                                 POST /api/codebase/publish), rate-limited like `upload`
                                 (CELMIS_RL_UPLOAD); the GETs of the publish routes (status,
@@ -117,7 +119,17 @@ def _body_caps() -> dict[str, int]:
     return {"auth": small, "default": small, "llm_test": small,
             "review": large, "mcp": large,
             "upload": _upload_cap(), "upload_part": _part_cap(),
-            "pack_upload": large}
+            "pack_upload": _pack_cap()}
+
+
+def _pack_cap() -> int:
+    """The large-body cap (5 MB), or the archive CEILING plus the envelope once the operator
+    raised it: the router holds each workspace to its own, smaller, limit."""
+    from src.knowledge.limits import body_cap
+
+    large = int(os.environ.get("CELMIS_MAX_BODY_BYTES_LARGE", str(5 * 1024 * 1024)))
+    raised = body_cap()
+    return max(large, raised) if raised else large
 
 
 def _upload_cap() -> int:

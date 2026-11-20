@@ -33,14 +33,15 @@ from typing import Any
 
 from src.knowledge import brief as brief_mod
 from src.knowledge import search, store
+from src.knowledge import where as where_mod
 from src.mcp_server import callctx
 from src.mcp_server.dev_profile import access, common, emit, pack_access
 from src.mcp_server.dev_profile import cursor as cursor_mod
 from src.mcp_server.dev_profile.freshness import idx_line
 
 SKILLS_DESCRIPTION = (
-    "Workspace knowledge packs. No args: list skills. query= searches. name=pack/skill opens "
-    "one, path= a file of it. Every answer names its pack@vN source."
+    "Workspace knowledge packs. No args: list skills. query= searches; where='status=verified lang=uk' "
+    "filters by front matter. name=pack/skill opens one, path= a file. Answers name pack@vN."
 )
 BRIEF_DESCRIPTION = (
     "Paste the task: skills, checklists, API examples, notes and documents of your workspace's packs that "
@@ -116,6 +117,21 @@ def _clean_path(path: str) -> str:
     return path.lstrip("/")
 
 
+_META_SHOWN_ELSEWHERE = frozenset({"name", "description", "repos"})
+
+
+def _fields_line(item: Any) -> list[str]:
+    """``fields: status=verified lang=uk ...`` - the front matter of the opened item."""
+    line = where_mod.compact(getattr(item, "meta", None), _META_SHOWN_ELSEWHERE)
+    if not line:
+        return []
+    try:
+        line = emit.redact_text(line)
+    except Exception:  # noqa: BLE001 - fail closed: leave the line out
+        return []
+    return ["fields: " + line]
+
+
 def _repos_line(item: Any) -> list[str]:
     """``repos: a, b:path`` for the pointers of ``item`` the caller may read."""
     pointers = list(getattr(item, "repos", None) or ())
@@ -137,9 +153,13 @@ def _emit_lines(head: list[str], lines: list[str], *, off: int, h: str, pin: dic
 
 
 def run(query: str = "", name: str = "", path: str = "", detailed: bool = False,
-        cursor_: str = "") -> str:
+        cursor_: str = "", where: str = "") -> str:
     access.require_dev_scope()
     query, name, path = (query or "").strip(), (name or "").strip(), (path or "").strip()
+    try:
+        clauses = where_mod.parse(where)
+    except where_mod.WhereError as exc:
+        return emit.error(None, str(exc), "where='key=value key2=a|b' (AND across keys)")
     if len(query) > MAX_QUERY:
         return emit.error(None, f"query is too long ({MAX_QUERY} characters at most)")
     principal, ws = pack_access.caller_principal()
@@ -149,12 +169,14 @@ def run(query: str = "", name: str = "", path: str = "", detailed: bool = False,
         return emit.error(None, "path needs name",
                           'open a file with skills name="pack/skill" path="file"')
     if query:
-        return _search(principal, ws, query, bool(detailed), cursor_)
-    return _catalogue(principal, ws, bool(detailed), cursor_)
+        return _search(principal, ws, query, bool(detailed), cursor_, clauses, where)
+    return _catalogue(principal, ws, bool(detailed), cursor_, clauses, where)
 
 
-def _catalogue(principal: Any, ws: str, detailed: bool, cursor_: str) -> str:
-    rows = store.visible_current_items_sync(principal, ws, with_terms=False) if ws else []
+def _catalogue(principal: Any, ws: str, detailed: bool, cursor_: str,
+               clauses: list[where_mod.Clause] | None = None, where: str = "") -> str:
+    rows = (store.visible_current_items_sync(principal, ws, with_terms=False, where=clauses)
+            if ws else [])
     packs: dict[str, tuple[Any, int, list[Any]]] = {}
     for pack, number, item in rows:
         packs.setdefault(pack.id, (pack, number, []))[2].append(item)
@@ -171,7 +193,7 @@ def _catalogue(principal: Any, ws: str, detailed: bool, cursor_: str) -> str:
         if parts:
             lines.append((pack.id, f"{pack.slug}: " + ", ".join(parts)))
     pin = {p.id: str(n) for p, n, _items in packs.values()}
-    h = cursor_mod.fingerprint(tool="skills", q="")
+    h = cursor_mod.fingerprint(tool="skills", q="", where=where or "")
     off, note = cursor_mod.resolve(cursor_, h, pin)
     page = lines[off:off + PAGE]
     callctx.note_packs([pid for pid, _t in page])
@@ -181,11 +203,12 @@ def _catalogue(principal: Any, ws: str, detailed: bool, cursor_: str) -> str:
         note=note, empty=EMPTY, more_hint="query=", detailed=detailed, pin=pin)
 
 
-def _search(principal: Any, ws: str, query: str, detailed: bool, cursor_: str) -> str:
-    ranking = (store.rank_current_sync(principal, ws, query, limit=RANK_POOL) if ws
-               else store.NO_RANKING)
+def _search(principal: Any, ws: str, query: str, detailed: bool, cursor_: str,
+            clauses: list[where_mod.Clause] | None = None, where: str = "") -> str:
+    ranking = (store.rank_current_sync(principal, ws, query, limit=RANK_POOL, where=clauses)
+               if ws else store.NO_RANKING)
     meta, hits, pin = ranking.meta, ranking.hits, ranking.pins
-    h = cursor_mod.fingerprint(tool="skills", q=query)
+    h = cursor_mod.fingerprint(tool="skills", q=query, where=where or "")
     off, note = cursor_mod.resolve(cursor_, h, pin)
     page = hits[off:off + PAGE]
     words = search.tokenize(query)
@@ -202,7 +225,12 @@ def _search(principal: Any, ws: str, query: str, detailed: bool, cursor_: str) -
         if hit.item.description:
             line += f" — {emit.clip(hit.item.description, 140)}"
         if detailed and texts.get(hit.item.id):
-            snip = search.snippet(_view(hit.item.path, texts[hit.item.id]), words, SNIPPET_CHARS)
+            if hit.item.id in ranking.chunks:               # found by meaning: show that chunk
+                snip = emit.clip(" ".join(emit.redact_text(ranking.chunks[hit.item.id]).split()),
+                                 SNIPPET_CHARS)
+            else:
+                snip = search.snippet(_view(hit.item.path, texts[hit.item.id]), words,
+                                      SNIPPET_CHARS)
             if snip:
                 line += f"\n  {snip}"
         lines.append(line)
@@ -258,7 +286,8 @@ def _show_skill(bundle: Any, detailed: bool, cursor_: str) -> str:
     if off == 0:
         if item.description:
             title += f" — {emit.clip(item.description, 200)}"
-        head = [title, f"source: {_tag(pack, number)} — {SOURCE_NOTE}", *_repos_line(item)]
+        head = [title, f"source: {_tag(pack, number)} — {SOURCE_NOTE}", *_fields_line(item),
+                *_repos_line(item)]
         prefix = f"{bundle.directory}/" if bundle.directory else ""
         files = [(f.path[len(prefix):] if f.path.startswith(prefix) else f.path, f.size_bytes)
                  for f in bundle.files if f.id != item.id]
@@ -310,7 +339,8 @@ def _show_file(pack: Any, number: int, item: Any, content: str, label: str, deta
     if off == 0:
         if item.description:
             title += f" — {emit.clip(item.description, 200)}"
-        head = [title, f"source: {_tag(pack, number)} — {SOURCE_NOTE}", *_repos_line(item)]
+        head = [title, f"source: {_tag(pack, number)} — {SOURCE_NOTE}", *_fields_line(item),
+                *_repos_line(item)]
     else:
         head = [title + " — continued"]
     return _body(head, _view(item.path, content), off=off, h=h, pin=pin, note=note,
@@ -415,8 +445,8 @@ def run_brief(task: str = "", repos: str = "") -> str:
 
 
 async def skills(query: str = "", name: str = "", path: str = "", detailed: bool = False,
-                 cursor: str = "") -> str:
-    return await asyncio.to_thread(run, query, name, path, detailed, cursor)
+                 cursor: str = "", where: str = "") -> str:
+    return await asyncio.to_thread(run, query, name, path, detailed, cursor, where)
 
 
 async def brief(task: str, repos: str = "") -> str:

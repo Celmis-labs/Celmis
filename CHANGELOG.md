@@ -20,7 +20,43 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.40] — 2026-11-20
+
 ### Added
+
+- **Knowledge packs: configurable limits.** Archive size, files per version, file
+  size, total size, packs per workspace and versions kept can be set per workspace
+  (owners and admins, **Codebase**, *Limits*; `GET`/`PUT /api/codebase/limits`) or
+  install-wide (`CELMIS_PACK_MAX_ARCHIVE_BYTES`, `CELMIS_PACK_MAX_FILES`,
+  `CELMIS_PACK_MAX_FILE_BYTES`, `CELMIS_PACK_MAX_TOTAL_BYTES`, `CELMIS_PACK_MAX_PACKS`,
+  `CELMIS_PACK_KEEP_VERSIONS`), up to hard ceilings (archive 5 MB until the operator raises
+  `CELMIS_PACK_MAX_ARCHIVE_CEILING_BYTES`, 5000 files, 4 MB a
+  file, 200 MB in all, 2000 packs, 100 versions). The upload form reads the limits in
+  force instead of fixed numbers.
+- **Knowledge packs: search by meaning.** Where embeddings are configured, pack items
+  are chunked and embedded into their own Qdrant collection (`QDRANT_PACK_COLLECTION`)
+  and every search fuses BM25 with the vector order (`skills query=`, `brief`,
+  `GET /api/codebase/search`). Without embeddings or an index it is BM25 as before.
+  Existing packs are indexed in the background at start-up or with
+  `analyzer codebase index`; `CELMIS_PACK_SEMANTIC=0` switches it off.
+- **Knowledge packs keep their front matter and can be filtered by it.** The whole YAML
+  front matter of a markdown file is stored on the item (and a normalised `status`);
+  `skills where='status=verified lang=uk'` and `GET /api/codebase/search?where=` filter by
+  it; opened items show their fields.
+- **Processes from your own list**
+  ([docs/KNOWLEDGE_BASE.md](docs/KNOWLEDGE_BASE.md#processes-from-your-own-list)).
+  A team hands Celmis its list of business processes (name, description,
+  starting objects: 1C objects in any spelling, or code symbols and paths), as
+  `.json`, `.yaml` or `.csv` or typed on **Documentation > Processes**. One
+  draft note per process is generated from the call graph into
+  `processes/<id>.md`, rechecked after every index and regenerated on request.
+  New job kind `generate_processes` and routes under `/api/kb/{repo}/processes`.
+- **Cards can replace or relate to notes of another repository.** In
+  `replaces` and `related`, a plain path is looked up in the card's own
+  repository and then in its code repository, or write `<repo>:<path>`. The MCP
+  `docs` tool hides a generated note when a verified card replaces it, the graph
+  shows external nodes, a note lists back-links from bound repositories, and a
+  module note's callers appear as `called-by` links.
 
 - **Knowledge cards: a team's own markdown, imported into a repository's
   documentation** ([docs/KNOWLEDGE_BASE.md](docs/KNOWLEDGE_BASE.md)). Cards are
@@ -46,7 +82,25 @@ derives it from there.
   (`where="object=… status=…"`), open by path or id, `changed_since=`. The
   dev profile now has 13 tools.
 
+### Changed
+
+- `skills` takes one more argument, `where`; the dev tool listing cap is 7,800 characters
+  (was 7,700). The request-body cap of a pack upload stays 5 MB; once the operator
+  raises the archive ceiling it becomes that ceiling plus 1 MB, and each workspace is
+  still held to its own archive limit.
+- Importing cards on **Documentation** adds and updates cards and removes none unless
+  **The upload is the whole knowledge base** is ticked (the API's `replace` now
+  defaults to false too). Dropping one card used to remove every other imported card.
+- A note's link in the body to a note its front matter already names is one edge of
+  the graph, of the declared kind, not two.
+- An answer now sees up to 1,500 characters of each matching note (6,000 in all),
+  was 300: a match deep in a long note reached the model as the note's title only.
+
 ### Fixed
+
+- **Code links in generated notes pointed a few lines above the code they named.**
+  A snippet is read with context lines above it, and its `#L` anchor was the first
+  context line. It is now the line asked for.
 
 - **The incremental index missed every change to a file with a non-ASCII
   name.** `git diff` quoted such paths in octal escapes by default, so nothing
@@ -56,6 +110,15 @@ derives it from there.
 ## [3.1.39] — 2026-11-18
 
 ### Changed
+
+- **Long notes are indexed in chunks.** The vector index kept one point per
+  note (its start and the first 6000 characters), so the rest of a long card or
+  module note could not be found by meaning. Now the rest follows in windows of
+  about 4500 characters on paragraph boundaries (up to 12 points per note), and
+  every chunk carries the note's whole front matter, so card filters match the
+  tail too. Search, Q&A and the MCP `docs` tool still return a note once, scored
+  by its best chunk. Notes already indexed keep working; re-embedding the
+  repository rebuilds them in chunks (more embedding calls for long notes).
 
 - **A shared configuration in *Check a file* is offered to the members of the
   receiving workspace,** not only to the people whose MCP token names the share,

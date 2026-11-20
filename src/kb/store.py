@@ -560,5 +560,10 @@ def after_index(slug: str) -> None:
             if target_ws != ws:
                 continue  # a binding never reaches into another workspace's configuration
             recheck(target, workspace_id=target_ws, by="sync")
+        # The process notes Celmis wrote from a team's list live in this
+        # repository's own vault and are checked against its own clone.
+        from src.kb import processes
+
+        processes.after_index(slug)
     except Exception as exc:  # noqa: BLE001 — an index must not fail on its knowledge base
         logger.warning("kb_after_index_failed repo=%s err=%s", slug, type(exc).__name__)

@@ -39,9 +39,13 @@ class CodeSnippet:
     content: str  # already redacted
     symbol_name: str | None = None
     tokens: int = 0
+    # The line that was asked for. ``start_line`` includes the context read
+    # above it, so a link built from it lands a few lines early.
+    anchor_line: int | None = None
 
     def as_markdown_block(self) -> str:
-        header = f"### 📍 [{self.file}:{self.start_line}]({self.file}#L{self.start_line})"
+        line = self.anchor_line or self.start_line
+        header = f"### 📍 [{self.file}:{line}]({self.file}#L{line})"
         return f"{header}\n\n```{self.language}\n{self.content}\n```\n"
 
 
@@ -192,6 +196,7 @@ class CodeReader:
             end_line=snippet_end,
             language=_language_for_file(fp),
             content=snippet,
+            anchor_line=min(max(1, start), snippet_end),
         )
 
 

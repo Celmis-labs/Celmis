@@ -60,7 +60,7 @@ export function KbImportPanel({ token, slug, repos }: {
   const [dragging, setDragging] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [codeRepo, setCodeRepo] = useState<string | null>(null);
-  const [replace, setReplace] = useState(true);
+  const [replace, setReplace] = useState(false);
   const [prefix, setPrefix] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
   const [report, setReport] = useState<KbReport | null>(null);
@@ -306,6 +306,7 @@ export function KbCardPanel({ token, slug, path, onOpen }: {
       {c.card && (
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={c.status} />
+          {c.origin === "generate" && <Badge variant="info" data-testid="kb-generated-note">{t("kb.generatedNote")}</Badge>}
           {c.kb.status && c.kb.status !== c.status && (
             <span className="text-[var(--color-muted-foreground)]">{t("kb.writtenAs", { status: c.kb.status })}</span>
           )}
@@ -357,13 +358,20 @@ export function KbCardPanel({ token, slug, path, onOpen }: {
           <p className="mb-1 font-medium">{t("kb.links")}</p>
           <ul className="space-y-0.5">
             {links.map((l) => (
-              <li key={`${l.dir}-${l.kind}-${l.path}`}>
+              <li key={`${l.dir}-${l.kind}-${l.repo ?? ""}-${l.path}`}>
                 <span className="mr-1 text-[var(--color-muted-foreground)]">
                   {l.dir === "out" ? "→" : "←"} {t(`kb.kind.${l.kind}`)}
                 </span>
-                <button type="button" className="underline-offset-2 hover:underline" onClick={() => onOpen(l.path)}>
-                  {l.title || l.path}
-                </button>
+                {l.repo ? (
+                  <span data-testid="kb-foreign-link" title={t("kb.graphExternal")}>
+                    <span className="font-mono text-[var(--color-muted-foreground)]">{l.repo}: </span>
+                    {l.title || l.path}
+                  </span>
+                ) : (
+                  <button type="button" className="underline-offset-2 hover:underline" onClick={() => onOpen(l.path)}>
+                    {l.title || l.path}
+                  </button>
+                )}
               </li>
             ))}
             {c.links.dangling.map((d) => (
@@ -437,7 +445,7 @@ export function KbGraphView({ token, slug, onOpen }: {
               return (
                 <line key={`${e.source}>${e.target}>${e.kind}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                       stroke={lit ? "var(--color-primary)" : "var(--color-border-strong)"}
-                      strokeWidth={lit ? 1.8 : 1} strokeDasharray={e.kind === "replaces" ? "4 3" : undefined}
+                      strokeWidth={lit ? 1.8 : 1} strokeDasharray={e.kind === "replaces" ? "4 3" : e.kind === "called-by" ? "1 3" : undefined}
                       markerEnd="url(#kb-arrow)" />
               );
             })}
@@ -447,15 +455,18 @@ export function KbGraphView({ token, slug, onOpen }: {
               return (
                 <g key={n.path} transform={`translate(${p.x},${p.y})`} className="cursor-pointer"
                    onMouseEnter={() => setHover(n.path)} onMouseLeave={() => setHover(null)}
-                   onClick={() => onOpen(n.path)}>
+                   data-testid={n.external ? "kb-graph-external" : undefined}
+                   onClick={() => { if (!n.external) onOpen(n.path); }}>
                   <circle r={n.card ? 7 : 5}
                           fill={n.card ? NODE_FILL[n.status ?? ""] ?? "var(--color-info)" : "var(--color-card)"}
-                          stroke={n.card ? "none" : "var(--color-info)"} strokeWidth={1.5} />
+                          stroke={n.external ? "var(--color-primary)" : n.card ? "none" : "var(--color-info)"}
+                          strokeWidth={1.5} strokeDasharray={n.external ? "2 2" : undefined} />
                   <text x={10} y={4} fontSize={11} fill="var(--color-foreground)"
                         opacity={hover && hover !== n.path ? 0.45 : 1}>
+                    {n.external && n.repo ? `${n.repo}: ` : ""}
                     {n.title.length > 32 ? `${n.title.slice(0, 31)}…` : n.title}
                   </text>
-                  <title>{`${n.title}\n${n.path}${n.status ? `\n${n.status}` : ""}`}</title>
+                  <title>{`${n.title}\n${n.path}${n.status ? `\n${n.status}` : ""}${n.external ? `\n${t("kb.graphExternal")}` : ""}`}</title>
                 </g>
               );
             })}

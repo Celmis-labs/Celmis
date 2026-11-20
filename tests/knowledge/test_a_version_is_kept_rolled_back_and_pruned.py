@@ -10,6 +10,7 @@ someone who may see the pack.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import zipfile
 
@@ -17,7 +18,7 @@ import pytest
 from sqlalchemy import select
 
 from src.db.models import KnowledgeItem, KnowledgePackVersion
-from src.knowledge import store
+from src.knowledge import limits, store
 from src.knowledge.ingest import ingest_zip, version_sha
 from src.knowledge.visibility import PackNotAccessible
 from tests.knowledge.pack_rig import A, upload
@@ -109,7 +110,7 @@ async def test_activating_a_version_that_is_not_there_is_refused(world):
 
 
 async def test_the_newest_twenty_versions_are_kept_and_older_items_go(world, monkeypatch):
-    monkeypatch.setattr(store, "KEEP_VERSIONS", 3)
+    monkeypatch.setattr(limits, "BUILTIN", dataclasses.replace(limits.BUILTIN, keep_versions=3))
     pid = await pack(world)
     for n in range(1, 6):
         await put(world, pid, ("notes/a.md", f"# v{n}\n"))
@@ -126,10 +127,9 @@ async def test_pruning_never_drops_the_version_that_is_current(world, monkeypatc
         await put(world, pid, ("notes/a.md", f"# v{n}\n"))
     async with world.session() as s:
         await store.activate_version(s, await view(s, world, pid), 1)
-    monkeypatch.setattr(store, "KEEP_VERSIONS", 2)
     async with world.session() as s:
         v = await view(s, world, pid)
-        await store._prune_versions(s, v.pack)
+        await store._prune_versions(s, v.pack, 2)
         await s.commit()
     async with world.session() as s:
         v = await view(s, world, pid)

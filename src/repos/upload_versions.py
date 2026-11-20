@@ -215,7 +215,9 @@ def prune_vault(slug: str, removed: list[str], workspace_id: str | None = None) 
             victims.append((note, str(note.relative_to(vault))))
     if not victims:
         return 0
-    ids = [VaultWriter.note_id(slug, rel) for _n, rel in victims]
+    from src.retrieval.note_chunks import chunk_point_ids
+
+    ids = [pid for _n, rel in victims for pid in chunk_point_ids(VaultWriter.note_id(slug, rel))]
     try:
         from qdrant_client.models import PointIdsList
 

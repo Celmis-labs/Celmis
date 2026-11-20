@@ -55,7 +55,10 @@ from src.db.models import (
     Team,
     WorkspaceMember,
 )
+from src.knowledge import limits as limits_mod
 from src.knowledge import search as search_mod
+from src.knowledge import semantic
+from src.knowledge import where as where_mod
 from src.knowledge.visibility import (
     MAINTAIN,
     PackNotAccessible,
@@ -76,11 +79,12 @@ logger = logging.getLogger(__name__)
 
 # ─── Limits ──────────────────────────────────────────────────────────
 
-MAX_PACKS_PER_WORKSPACE = 200
+#: Built-in values of two configurable limits - a workspace is held to ``limits.resolve``.
+MAX_PACKS_PER_WORKSPACE = limits_mod.BUILTIN.packs_per_workspace
 MAX_ACTIVE_INVITES = 20
 MAX_MEMBERS = 500
 MAX_TEAM_GRANTS = 100
-KEEP_VERSIONS = 20
+KEEP_VERSIONS = limits_mod.BUILTIN.keep_versions
 MAX_ACTIVE_TOKENS = 10
 MAX_LABEL = 80
 DEFAULT_TOKEN_DAYS = 90
@@ -200,6 +204,8 @@ class ItemRef(NamedTuple):
     repos: list
     tags: list
     terms: dict
+    meta: dict = {}                # the front matter of a markdown file
+    status: str | None = None
 
 
 class SkillBundle(NamedTuple):
@@ -306,7 +312,7 @@ _ITEM_COLUMNS = (
     KnowledgeItem.id, KnowledgeItem.pack_id, KnowledgeItem.version_id, KnowledgeItem.path,
     KnowledgeItem.kind, KnowledgeItem.skill, KnowledgeItem.name, KnowledgeItem.description,
     KnowledgeItem.size_bytes, KnowledgeItem.sha, KnowledgeItem.repos, KnowledgeItem.tags,
-    KnowledgeItem.terms,
+    KnowledgeItem.terms, KnowledgeItem.meta, KnowledgeItem.status,
 )
 
 
@@ -314,7 +320,8 @@ def _item_ref(row: Any) -> ItemRef:
     return ItemRef(row.id, row.pack_id, row.version_id, row.path, row.kind, row.skill,
                    row.name, row.description or "", row.size_bytes or 0, row.sha,
                    list(row.repos or []), list(row.tags or []),
-                   dict(getattr(row, "terms", None) or {}))
+                   dict(getattr(row, "terms", None) or {}),
+                   dict(getattr(row, "meta", None) or {}), getattr(row, "status", None))
 
 
 def _version_info(row: Any, current_id: str | None) -> VersionInfo:
@@ -545,8 +552,9 @@ async def create_pack(session: AsyncSession, principal: PackPrincipal, ws_id: st
     grants = await _team_grants(session, ws_id, teams)
     total = await session.scalar(
         select(func.count()).select_from(KnowledgePack).where(KnowledgePack.workspace_id == ws_id))
-    if (total or 0) >= MAX_PACKS_PER_WORKSPACE:
-        raise LimitReached(f"A workspace holds at most {MAX_PACKS_PER_WORKSPACE} packs.")
+    cap = (await limits_mod.resolve(session, ws_id)).packs_per_workspace
+    if (total or 0) >= cap:
+        raise LimitReached(f"A workspace holds at most {cap} packs.")
     # A clash with a pack the caller cannot see answers like one they can.
     if await session.scalar(select(KnowledgePack.id).where(
             KnowledgePack.workspace_id == ws_id, KnowledgePack.slug == slug)):
@@ -640,6 +648,7 @@ async def delete_pack(session: AsyncSession, view: PackView) -> None:
     require_maintainer(view)
     await _delete_pack_rows(session, [view.pack.id])
     await session.commit()
+    semantic.schedule([view.pack.id])                       # its points go
 
 
 # ─── Explicit members ────────────────────────────────────────────────
@@ -742,7 +751,7 @@ async def remove_member(session: AsyncSession, view: PackView, user_id: str) -> 
 async def add_version(session: AsyncSession, view: PackView, result: Any,
                       note: str = "") -> KnowledgePackVersion:
     """Store ``result`` (an ``IngestResult``) as the pack's next version and make
-    it the current one; versions past the newest :data:`KEEP_VERSIONS` go."""
+    it the current one; versions past the newest ``keep_versions`` of the workspace go."""
     from src.knowledge.ingest import version_sha
 
     require_maintainer(view)
@@ -767,19 +776,22 @@ async def add_version(session: AsyncSession, view: PackView, result: Any,
         version_id=version.id, pack_id=pack.id, workspace_id=view.ws_id, path=f.path,
         kind=f.kind, skill=f.skill, name=f.name, description=f.description, content=f.content,
         sha=f.sha, size_bytes=f.size_bytes, repos=list(f.repos), tags=list(f.tags),
-        terms=dict(f.terms)) for f in files)
+        terms=dict(f.terms), meta=dict(getattr(f, "meta", None) or {}),
+        status=getattr(f, "status", None)) for f in files)
     pack.current_version_id = version.id
     await session.flush()
-    await _prune_versions(session, pack)
+    await _prune_versions(session, pack, (await limits_mod.resolve(session, view.ws_id)).keep_versions)
     await session.commit()
     await session.refresh(version)
+    semantic.schedule([pack.id])                            # index it, drop the old points
     return version
 
 
-async def _prune_versions(session: AsyncSession, pack: KnowledgePack) -> None:
+async def _prune_versions(session: AsyncSession, pack: KnowledgePack,
+                          keep_versions: int = KEEP_VERSIONS) -> None:
     keep = (await session.scalars(
         select(KnowledgePackVersion.id).where(KnowledgePackVersion.pack_id == pack.id)
-        .order_by(KnowledgePackVersion.number.desc()).limit(KEEP_VERSIONS))).all()
+        .order_by(KnowledgePackVersion.number.desc()).limit(keep_versions))).all()
     keep_ids = set(keep)
     if pack.current_version_id:
         keep_ids.add(pack.current_version_id)
@@ -832,6 +844,7 @@ async def activate_version(session: AsyncSession, view: PackView, number: int) -
     version = await _version(session, view, number)         # looked up under the lock
     view.pack.current_version_id = version.id
     await session.commit()
+    semantic.schedule([view.pack.id])
 
 
 async def diff_versions(session: AsyncSession, view: PackView, number: int,
@@ -938,9 +951,24 @@ class Ranking(NamedTuple):
     meta: dict[str, tuple[PackRef, int]]           # item id -> (pack, version number)
     pins: dict[str, str]                           # pack id -> version number, per pack read
     truncated: bool                                # the scan hit MAX_RANKED_ITEMS
+    #: item id -> the best chunk, for items found ONLY by meaning (no query word in them),
+    #: so that a hit has something to show.
+    chunks: dict[str, str] = {}
 
 
 NO_RANKING = Ranking([], {}, {}, False)
+
+
+def _clauses(where: Any) -> list[where_mod.Clause]:
+    """``where`` (text or already parsed) as clauses; a bad text is :class:`where_mod.WhereError`."""
+    if not where:
+        return []
+    return where_mod.parse(where) if isinstance(where, str) else list(where)
+
+
+def _passes(row: Any, clauses: list[where_mod.Clause]) -> bool:
+    return not clauses or where_mod.matches(getattr(row, "meta", None),
+                                            getattr(row, "status", None), clauses)
 
 _LIGHT_COLUMNS = tuple(c for c in _ITEM_COLUMNS if c is not KnowledgeItem.terms)
 
@@ -1005,15 +1033,17 @@ def _current_of(s: Session, packs: Sequence[KnowledgePack]):
 
 
 def _items_core(s: Session, packs: Sequence[KnowledgePack], *, with_terms: bool = True,
-                skill: str | None = None) -> Scanned:
-    """``[(pack, version_number, item)]`` for the current version of ``packs``."""
+                skill: str | None = None, where: Any = None) -> Scanned:
+    """``[(pack, version_number, item)]`` for the current version of ``packs``
+    (only items whose front matter satisfies ``where``, when given)."""
+    clauses = _clauses(where)
     current, numbers, refs = _current_of(s, packs)
     out = Scanned()
     scan = _Scan(s, list(current.values()), with_terms=with_terms, skill=skill)
     for rows in scan.batches():
         for row in rows:
             ref = refs.get(row.pack_id)
-            if ref is not None:
+            if ref is not None and _passes(row, clauses):
                 out.append((ref, numbers.get(row.version_id, 0), _item_ref(row)))
     out.truncated = scan.truncated
     return out
@@ -1047,8 +1077,22 @@ def _bm25(wanted: Sequence[str], c: _Candidate, n_docs: int, avg: float,
     return score
 
 
+#: Reciprocal-rank-fusion constant: how fast a rank's weight falls off.
+RRF_K = 60
+
+
+class _Fused(NamedTuple):
+    score: float
+    position: int
+    item_id: str
+    pack_id: str
+    kind: str
+    path: str
+    name: str
+
+
 def _rank_core(s: Session, packs: Sequence[KnowledgePack], query: str, limit: int,
-               per_kind: Mapping[str, int] | None) -> Ranking:
+               per_kind: Mapping[str, int] | None, where: Any = None) -> Ranking:
     """Rank every current item of ``packs`` against ``query``, a batch at a time.
 
     The result equals ``search.rank`` over all the items (BM25 needs the whole
@@ -1056,7 +1100,13 @@ def _rank_core(s: Session, packs: Sequence[KnowledgePack], query: str, limit: in
     stream past and only the figures of items that match are kept). What is
     returned is bounded: the best ``limit`` items and, for each kind in
     ``per_kind``, the best ``n`` of that kind (the brief fills a section per
-    kind), loaded by id at the end."""
+    kind), loaded by id at the end.
+
+    When the pack index holds vectors for the visible packs, the BM25 order is fused with
+    the order of the best-matching chunks by reciprocal rank (see ``semantic``); with none
+    (or any failure there) the answer is BM25 alone. ``where`` keeps only items whose front
+    matter satisfies it."""
+    clauses = _clauses(where)
     wanted = sorted(set(search_mod.tokenize(query)))
     current, numbers, refs = _current_of(s, packs)
     if not wanted or not current or (limit <= 0 and not per_kind):
@@ -1067,6 +1117,8 @@ def _rank_core(s: Session, packs: Sequence[KnowledgePack], query: str, limit: in
     matched: list[_Candidate] = []
     for rows in scan.batches():
         for row in rows:
+            if not _passes(row, clauses):
+                continue
             doc = search_mod.document(row)
             n_docs += 1
             total_length += doc.length
@@ -1084,6 +1136,11 @@ def _rank_core(s: Session, packs: Sequence[KnowledgePack], query: str, limit: in
     def order(pair: tuple[float, _Candidate]) -> tuple:
         return (-pair[0], pair[1].path, pair[1].name, pair[1].position)
 
+    vec = (semantic.search(s, packs[0].workspace_id, query, list(current.values()))
+           if packs else [])
+    if vec:
+        return _fuse(s, scored, vec, current, numbers, refs, pins, scan.truncated, limit,
+                     per_kind, clauses)
     chosen = {c.item_id: (score, c) for score, c in heapq.nsmallest(max(limit, 0), scored, key=order)}
     for kind, count in (per_kind or {}).items():
         for score, c in heapq.nsmallest(
@@ -1106,28 +1163,88 @@ def _rank_core(s: Session, packs: Sequence[KnowledgePack], query: str, limit: in
     return Ranking(hits, meta, pins, scan.truncated)
 
 
+def _fuse(s: Session, scored: list, vec: list, current: Mapping[str, str],
+          numbers: Mapping[str, int], refs: Mapping[str, PackRef], pins: dict[str, str],
+          truncated: bool, limit: int, per_kind: Mapping[str, int] | None,
+          clauses: list[where_mod.Clause]) -> Ranking:
+    """BM25 ``scored`` and the vector hits ``vec`` as one ranking (reciprocal rank fusion)."""
+    live_versions = list(current.values())
+    bm = sorted(scored, key=lambda pair: (-pair[0], pair[1].path, pair[1].name, pair[1].position))
+    bm_rank = {c.item_id: i for i, (_sc, c) in enumerate(bm)}
+    vec_rank = {h.item_id: i for i, h in enumerate(vec)}
+    # Re-check every vector hit against what the caller may read NOW: its item must sit in a
+    # current version of a visible pack (the BM25 side loads rows the same way).
+    only = [i for i in vec_rank if i not in bm_rank]
+    loaded = {r.id: r for r in s.execute(select(*_ITEM_COLUMNS).where(
+        KnowledgeItem.id.in_(only), KnowledgeItem.version_id.in_(live_versions))).all()
+        if _passes(r, clauses)} if only else {}
+    fused: dict[str, _Fused] = {}
+    for i, (_sc, c) in enumerate(bm):
+        fused[c.item_id] = _Fused(1.0 / (RRF_K + i + 1), c.position, c.item_id, c.pack_id,
+                                  c.kind, c.path, c.name)
+    chunks: dict[str, str] = {}
+    for item_id, rank in vec_rank.items():
+        weight = 1.0 / (RRF_K + rank + 1)
+        if item_id in fused:
+            old = fused[item_id]
+            fused[item_id] = old._replace(score=old.score + weight)
+        elif item_id in loaded:
+            r = loaded[item_id]
+            fused[item_id] = _Fused(weight, 1_000_000 + rank, item_id, r.pack_id, r.kind,
+                                    r.path, r.name)
+            chunks[item_id] = vec[rank].text
+
+    def order(f: _Fused) -> tuple:
+        return (-f.score, f.path, f.name, f.position)
+
+    everyone = sorted(fused.values(), key=order)
+    chosen = {f.item_id: f for f in everyone[:max(limit, 0)]}
+    for kind, count in (per_kind or {}).items():
+        for f in [f for f in everyone if f.kind == kind][:count]:
+            chosen[f.item_id] = f
+    ordered = sorted(chosen.values(), key=order)
+    if not ordered:
+        return Ranking([], {}, pins, truncated)
+    rows = {r.id: r for r in s.execute(select(*_ITEM_COLUMNS).where(
+        KnowledgeItem.id.in_([f.item_id for f in ordered]),
+        KnowledgeItem.version_id.in_(live_versions))).all()}
+    hits, meta = [], {}
+    for f in ordered:
+        row, ref = rows.get(f.item_id), refs.get(f.pack_id)
+        if row is None or ref is None:
+            continue
+        item = _item_ref(row)
+        hits.append(search_mod.Hit(f.score, item))
+        meta[item.id] = (ref, numbers.get(row.version_id, 0))
+    return Ranking(hits, meta, pins, truncated,
+                   {k: v for k, v in chunks.items() if k in meta})
+
+
 async def visible_current_items(session: AsyncSession, principal: PackPrincipal,
-                                ws_id: str) -> Scanned:
+                                ws_id: str, *, where: Any = None) -> Scanned:
     """``[(pack, version_number, item)]`` of the CURRENT version of every pack the
     principal may see (read in batches; ``.truncated`` says whether the scan
     stopped at the safety cap)."""
     views = await list_views(session, principal, ws_id)
-    return await session.run_sync(_items_core, [v.pack for v in views])
+    return await session.run_sync(
+        lambda s: _items_core(s, [v.pack for v in views], where=where))
 
 
 async def rank_current(session: AsyncSession, principal: PackPrincipal, ws_id: str, query: str,
-                       *, limit: int = 20, per_kind: Mapping[str, int] | None = None) -> Ranking:
+                       *, limit: int = 20, per_kind: Mapping[str, int] | None = None,
+                       where: Any = None) -> Ranking:
     """The best ``limit`` current items of visible packs for ``query`` (and the
     best of each kind in ``per_kind``), best first — see :func:`_rank_core`."""
     views = await list_views(session, principal, ws_id)
-    return await session.run_sync(_rank_core, [v.pack for v in views], query, limit, per_kind)
+    return await session.run_sync(
+        lambda s: _rank_core(s, [v.pack for v in views], query, limit, per_kind, where))
 
 
 async def search(session: AsyncSession, principal: PackPrincipal, ws_id: str, query: str,
-                 limit: int = 20) -> Scanned:
+                 limit: int = 20, where: Any = None) -> Scanned:
     """Ranked items of the current versions of visible packs, each with the
     paragraph that matched (``.truncated``: the scan stopped at the safety cap)."""
-    ranking = await rank_current(session, principal, ws_id, query, limit=limit)
+    ranking = await rank_current(session, principal, ws_id, query, limit=limit, where=where)
     out = Scanned()
     out.truncated = ranking.truncated
     if not ranking.hits:
@@ -1136,9 +1253,16 @@ async def search(session: AsyncSession, principal: PackPrincipal, ws_id: str, qu
         KnowledgeItem.id.in_([h.item.id for h in ranking.hits])))).tuples().all())
     words = search_mod.tokenize(query)
     out.extend(SearchHit(ranking.meta[h.item.id][0], ranking.meta[h.item.id][1], h.item, h.score,
-                         search_mod.snippet(texts.get(h.item.id, ""), words))
+                         _clip_chunk(ranking.chunks[h.item.id]) if h.item.id in ranking.chunks
+                         else search_mod.snippet(texts.get(h.item.id, ""), words))
                for h in ranking.hits)
     return out
+
+
+def _clip_chunk(text: str, limit: int = 400) -> str:
+    """The best chunk of a hit found by meaning, as a one-line snippet."""
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= limit else flat[:limit - 1] + "…"
 
 
 async def item_contents(session: AsyncSession, principal: PackPrincipal, ws_id: str,
@@ -1701,7 +1825,7 @@ def visible_pack_ids_sync(principal: PackPrincipal, ws_id: str) -> frozenset[str
 
 def visible_current_items_sync(principal: PackPrincipal, ws_id: str, *,
                                slug: str | None = None, skill: str | None = None,
-                               with_terms: bool = True) -> Scanned:
+                               with_terms: bool = True, where: Any = None) -> Scanned:
     """``[(pack, version_number, item)]`` for the CURRENT version of every pack
     the principal may see (only the pack ``slug``, only the items of ``skill``,
     when given; ``with_terms=False`` leaves out the ranking terms). A principal
@@ -1711,18 +1835,19 @@ def visible_current_items_sync(principal: PackPrincipal, ws_id: str, *,
         with _sync_session() as s:
             packs = [p for p in _visible_packs_sync(s, principal, ws_id)
                      if slug is None or p.slug == slug]
-            return _items_core(s, packs, with_terms=with_terms, skill=skill)
+            return _items_core(s, packs, with_terms=with_terms, skill=skill, where=where)
     except Exception as exc:  # noqa: BLE001 — fail closed
         logger.warning("pack_read_failed err=%s", type(exc).__name__)
         return Scanned()
 
 
 def rank_current_sync(principal: PackPrincipal, ws_id: str, query: str, *, limit: int = 20,
-                      per_kind: Mapping[str, int] | None = None) -> Ranking:
+                      per_kind: Mapping[str, int] | None = None, where: Any = None) -> Ranking:
     """:func:`rank_current` for the MCP tools. Any failure ranks nothing."""
     try:
         with _sync_session() as s:
-            return _rank_core(s, _visible_packs_sync(s, principal, ws_id), query, limit, per_kind)
+            return _rank_core(s, _visible_packs_sync(s, principal, ws_id), query, limit, per_kind,
+                              where)
     except Exception as exc:  # noqa: BLE001 — fail closed
         logger.warning("pack_read_failed err=%s", type(exc).__name__)
         return NO_RANKING

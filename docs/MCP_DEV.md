@@ -312,6 +312,11 @@ versions. Two tools put them in front of the agent.
   `name="pack/skill"` (or a bare skill name that only one pack has) opens a skill, `path=`
   one of its files, and `name="pack"` with `path=` a file of the pack. A long body is paged
   with `cursor=` like every other answer.
+  `where='status=verified lang=uk type=process'` keeps only the items whose front matter
+  matches (AND across keys, `a|b` for either, a list field matches by membership,
+  case-insensitive); it works on the catalogue and on `query=`. An opened skill or file shows
+  its front-matter fields on a `fields:` line. `query=` also finds items by meaning (no shared
+  word needed) when the install has embeddings; see [CODEBASE.md](CODEBASE.md#search-and-the-brief).
 
 Who sees what is decided on every call from live rows, never from the token:
 

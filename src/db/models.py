@@ -2672,6 +2672,9 @@ class KnowledgePackVersion(Base):
     total_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     #: sha256 over the sorted ``path\0sha\n`` lines of the version's files.
     sha: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    #: The embeddings signature this version's items were indexed under for
+    #: semantic search (NULL = not indexed). A changed signature re-indexes.
+    indexed_signature: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("pack_id", "number", name="uq_knowledge_pack_versions_pack_number"),
@@ -2705,11 +2708,33 @@ class KnowledgeItem(Base):
     tags: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
     #: term → count, the 400 most frequent terms of the file (for ranking).
     terms: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    #: The whole YAML front matter of a markdown file (JSON-safe; {} for none).
+    meta: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    #: Normalised ``status`` from the front matter (lower case), if present.
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index("ix_knowledge_items_version", "version_id"),
         Index("ix_knowledge_items_pack", "pack_id"),
     )
+
+
+class WorkspacePackLimits(Base):
+    """Per-workspace overrides of the knowledge-pack limits. NULL = inherit the
+    install default (``CELMIS_PACK_*``), then the built-in; every value is held
+    to the hard ceilings in ``src.knowledge.limits``."""
+
+    __tablename__ = "workspace_pack_limits"
+
+    workspace_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    archive_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    max_files: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    file_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    packs_per_workspace: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    keep_versions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class KnowledgePackInvite(Base):

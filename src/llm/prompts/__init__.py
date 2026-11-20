@@ -5,6 +5,7 @@ from src.llm.prompts.feature import FEATURE_PROMPT, FEATURE_SYSTEM
 from src.llm.prompts.integration import INTEGRATION_PROMPT, INTEGRATION_SYSTEM
 from src.llm.prompts.module_prd import MODULE_PRD_PROMPT, MODULE_PRD_SYSTEM
 from src.llm.prompts.overview import OVERVIEW_PROMPT, OVERVIEW_SYSTEM
+from src.llm.prompts.process import PROCESS_PROMPT, PROCESS_SYSTEM
 from src.llm.prompts.technical_answer import TECHNICAL_ANSWER_PROMPT, TECHNICAL_ANSWER_SYSTEM
 
 __all__ = [
@@ -14,6 +15,8 @@ __all__ = [
     "FEATURE_SYSTEM",
     "INTEGRATION_PROMPT",
     "INTEGRATION_SYSTEM",
+    "PROCESS_PROMPT",
+    "PROCESS_SYSTEM",
     "OVERVIEW_PROMPT",
     "OVERVIEW_SYSTEM",
     "TECHNICAL_ANSWER_PROMPT",

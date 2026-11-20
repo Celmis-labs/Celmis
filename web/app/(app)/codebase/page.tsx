@@ -26,6 +26,7 @@ import { PACK_AUTHOR_ROLES, roleLabel } from "@/lib/roles";
 import { useToken } from "@/lib/use-token";
 import { AudienceBadge } from "@/components/codebase/audience";
 import { CreatePackDialog } from "@/components/codebase/create-pack";
+import { LimitsPanel } from "@/components/codebase/limits-panel";
 import { PageHeader, PageShell } from "@/components/page-shell";
 import { SectionTabs } from "@/components/section-tabs";
 import { WorkspaceBadge } from "@/components/workspace-badge";
@@ -97,6 +98,8 @@ export default function CodebasePage() {
           </>
         )}
       </QueryState>
+
+      <LimitsPanel />
 
       <CreatePackDialog open={creating} onOpenChange={setCreating} />
     </PageShell>

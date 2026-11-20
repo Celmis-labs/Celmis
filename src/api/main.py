@@ -61,6 +61,7 @@ from src.api.routers import onec_external as onec_external_router
 from src.api.routers import onec_review as onec_review_router
 from src.api.routers import ops_gateway as ops_gateway_router
 from src.api.routers import ops_metrics as ops_metrics_router
+from src.api.routers import processes as processes_router
 from src.api.routers import project_mcp_tokens as project_mcp_tokens_router
 from src.api.routers import projects as projects_router
 from src.api.routers import pull_requests as pull_requests_router
@@ -541,6 +542,7 @@ def build_app() -> FastAPI:
     app.include_router(usage_router.router)
     app.include_router(docs_router.router)
     app.include_router(kb_router.router)
+    app.include_router(processes_router.router)
     # Stage 14
     app.include_router(compliance_router.router)
     app.include_router(teams_router.router)
@@ -736,6 +738,14 @@ def build_app() -> FastAPI:
             await _asyncio.to_thread(migrate_workspace_prompt_overrides)
         except Exception as exc:  # noqa: BLE001 — never block the API on it
             logger.warning("agent_prompt_migration_failed err=%s", exc)
+
+        # Knowledge packs created before search by meaning existed (or indexed under another
+        # embeddings model) are indexed in the background; a no-op without embeddings.
+        try:
+            from src.knowledge.semantic import start_backfill
+            start_backfill()
+        except Exception as exc:  # noqa: BLE001 - never block the API on it
+            logger.warning("pack_semantic_backfill_start_failed err=%s", exc)
 
         # Start polling background task if not disabled
         if os.environ.get("CELMIS_DISABLE_POLLER", "").strip() != "1":

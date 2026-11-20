@@ -103,9 +103,9 @@ On **Documentation**, pick the repository, click **Import cards**, then do one
 of the following:
 
 - **Files**: drop `.md` files or a `.zip`. Folders inside the zip are kept
-  under `kb/`. By default the upload is the whole knowledge base, so imported
-  cards it does not contain are removed. Untick the option to add cards
-  without removing any.
+  under `kb/`. By default the upload adds and updates cards and removes none.
+  Tick **The upload is the whole knowledge base** to remove the imported
+  cards it does not carry.
 - **From this repository**: the markdown under a folder of the repository
   itself (for example `docs/kb`). With **Import again after every push**,
   every index of the repository re-imports it, the same as the webhook
@@ -144,6 +144,14 @@ Through the API, with the same roles:
 - **Search and Q&A** see cards like any note. The embedded text carries the
   title, type, status and objects, so a question about `Документ.ЗаказКлиента`
   finds the cards that name it.
+  A long note is indexed in chunks: the first point is the note's start, the
+  rest of the text follows in windows of about 4500 characters (up to 12 points
+  per note, about 55,000 characters). Every chunk carries the note's whole front
+  matter, so a filter on `status`, `domain`, `tag` or any front matter key
+  matches the tail of a document too, and a note is returned once, scored by
+  its best chunk. Notes indexed before this change keep working as one point;
+  **Re-embed** (the re-index job, or `analyzer reindex-qdrant`) rebuilds them
+  in chunks. Long notes cost more embedding calls when re-embedded.
 - **MCP**: the `docs` tool of the developer profile (see
   [MCP_DEV.md](MCP_DEV.md#documentation-and-cards-docs)).
 
@@ -155,11 +163,56 @@ A link is any of these:
 - a markdown link to another `.md` (`[text](../ship.md)`);
 - a wiki link (`[[proc-order-ship]]` or `[[proc-order-ship|text]]`);
 - an entry in `replaces`;
-- for generated notes, their cross-references.
+- for generated notes, their cross-references, and for a module note the
+  modules that call it (shown as `called-by`).
 
 A link resolves by id, by relative path, by path under `kb/`, by file name, or
 by title. A link that resolves to nothing is listed as dangling, on the card
 and under the graph.
+
+A card in a knowledge-base repository can point at a note of the code
+repository it is bound to. In `replaces` and `related`, write a plain path
+(`processes/reserve`): Celmis looks in the card's own repository first, then in
+the code repository. Write `<repo>:<path>` (`orders:processes/reserve.md`) to
+name the repository. Only repositories of the same workspace that the reader
+may read count. Anything else is as good as absent. The graph draws such a note
+as a dashed external node, and the code repository's note lists the cards that
+point at it.
+
+## Processes from your own list
+
+A team that documents a legacy system can hand Celmis its own list of
+processes. Each process has a name, a description and starting objects. For a 1C
+repository the objects are 1C objects in any spelling (`Document.Order`,
+`Документ.Заказ`, `Documents.Order`). For any other repository they are code
+symbols or paths. Celmis writes ONE note per process, built from the call graph
+around those objects: what reads and writes them, the code that does it, and
+the other processes sharing an object.
+
+Open **Documentation**, then **Processes**, to edit the list, import it as
+`.json`, `.yaml` or `.csv`, and generate all or selected processes with the
+engine and language you choose. The same is available through
+`GET/PUT /api/kb/{repo}/processes`, `POST .../processes/upload`,
+`POST .../processes/generate` and `DELETE .../processes/{id}`. Members may
+write, anyone who can read the repository may read. A list holds up to 200
+processes, a name up to 200 characters, a description up to 4000 and up to 50
+objects per process. A refused list names the offending row.
+
+```yaml
+processes:
+  - name: Reserve goods for an order
+    description: Stock is reserved when the order is confirmed.
+    objects: [Document.Order, AccumulationRegister.Reserve]
+```
+
+The note is `processes/<id>.md` in the code repository's documentation, type
+`process`, shaped like a draft card. It is never a verified card: its status
+is `draft`, and it reads `needs-review` once the code it covers changes. It
+appears in the catalog, in `docs`, in reverse lookups by object, and its change
+log entries say `generate`. A push re-embeds the note but spends no model call.
+Regenerate it (engine given) to redo it from the list. A verified card of a
+knowledge-base repository that `replaces` the note hides it from the MCP `docs`
+tool.
 
 ## The change log
 
@@ -172,7 +225,5 @@ caller may see the source path it documented.
 
 ## Not included
 
-- **Generating documentation from your own list of processes.** The generator
-  documents the code it finds. A list of processes is written as cards.
 - **Limits and search inside knowledge packs.** Packs (`skills`, `brief`) are a
   separate feature, and these cards are not packs.

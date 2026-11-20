@@ -60,6 +60,8 @@ SPECIFIED = {
     ("POST", "/invites/preview"),
     ("POST", "/invites/redeem"),
     ("GET", "/search"),
+    ("GET", "/limits"),
+    ("PUT", "/limits"),
     ("POST", "/brief"),
 }
 

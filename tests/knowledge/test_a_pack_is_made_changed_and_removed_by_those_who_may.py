@@ -9,6 +9,8 @@ every row it owned — nothing relies on a database cascade.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from src.db.models import (
@@ -19,7 +21,7 @@ from src.db.models import (
     KnowledgePackTeam,
     KnowledgePackVersion,
 )
-from src.knowledge import store
+from src.knowledge import limits, store
 from src.knowledge.visibility import PACK_NOT_FOUND, PackNotAccessible
 from tests.knowledge.pack_rig import TEAM_A, TEAM_B, A, B, upload
 
@@ -107,7 +109,7 @@ async def test_the_same_slug_may_live_in_two_workspaces(world):
 
 
 async def test_a_workspace_holds_at_most_two_hundred_packs(world, monkeypatch):
-    monkeypatch.setattr(store, "MAX_PACKS_PER_WORKSPACE", 2)
+    monkeypatch.setattr(limits, "BUILTIN", dataclasses.replace(limits.BUILTIN, packs_per_workspace=2))
     await make(world, slug="one")
     await make(world, slug="two")
     async with world.session() as s:

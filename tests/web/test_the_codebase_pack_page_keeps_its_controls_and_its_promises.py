@@ -126,8 +126,8 @@ def test_the_upload_rejects_with_the_error_class_the_pages_already_handle():
 
 def test_the_dialog_refuses_what_the_server_would_before_sending_it():
     code = _code(COMPONENTS / "upload-version.tsx")
-    assert "const tooBig = bytes > UPLOAD_LIMITS.archiveBytes" in code
-    assert "(folder?.kept ?? 0) > UPLOAD_LIMITS.files" in code     # only files the server keeps count
+    assert "const tooBig = bytes > limits.archiveBytes" in code
+    assert "(folder?.kept ?? 0) > limits.files" in code     # only files the server keeps count
     assert "disabled={!picked || tooBig || tooMany || !token}" in code, (
         "Upload must be unavailable for an oversize pick, not merely warn about it")
 

@@ -121,8 +121,15 @@ description: Raise and correct an invoice     # SKILL.md: required
 kind: note                # optional: api | checklist | note | doc
 repos: [billing, orders:src/queue.py:40]      # repository slugs or slug:path[:line] pointers
 tags: [billing, finance]
+status: verified          # any other field is kept too (id, lang, type, links, dates ...)
 ---
 ```
+
+The **whole** front matter of a markdown file is kept on the item (bounded by the
+8 KB front-matter limit; dates become ISO strings), plus a normalised lower-case
+`status`. Opening an item (`GET /packs/{id}/items/{item_id}`, `skills name=...`)
+shows its fields. `repos` is kept but never shown or filterable here: pointers to
+repositories reach a reader only through the repository access gate.
 
 - The kind of a file comes from its folder (or from `kind:`); everything else is
   a `doc`, and the other files of a skill belong to the skill.
@@ -135,16 +142,44 @@ tags: [billing, finance]
 
 | Limit | Value |
 | --- | --- |
-| Archive (compressed) and request body | 5 MB |
-| Files kept per version | 400 |
-| One file | 512 KB |
-| All files, uncompressed | 8 MB |
+| Archive (compressed) and request body | 5 MB (configurable) |
+| Files kept per version | 400 (configurable) |
+| One file | 512 KB (configurable) |
+| All files, uncompressed | 8 MB (configurable) |
 | Path length / depth | 300 characters / 10 folders |
 | Front matter | 8 KB |
-| Packs per workspace | 200 |
-| Versions kept per pack | the newest 20 (the current one is never pruned) |
+| Packs per workspace | 200 (configurable) |
+| Versions kept per pack | the newest 20 (configurable; the current one is never pruned) |
 | Active invite links per pack | 20 |
 | People named on a pack | 500 |
+
+#### Changing the limits
+
+The six "configurable" limits resolve per workspace:
+`workspace override > install default > built-in` (the values above), and no layer
+can exceed a hard ceiling:
+
+| Limit | Install variable | Ceiling |
+| --- | --- | --- |
+| Archive bytes | `CELMIS_PACK_MAX_ARCHIVE_BYTES` | 5 MB until the operator raises `CELMIS_PACK_MAX_ARCHIVE_CEILING_BYTES` |
+| Files kept per version | `CELMIS_PACK_MAX_FILES` | 5000 |
+| One file | `CELMIS_PACK_MAX_FILE_BYTES` | 4 MB |
+| All files, uncompressed | `CELMIS_PACK_MAX_TOTAL_BYTES` | 200 MB |
+| Packs per workspace | `CELMIS_PACK_MAX_PACKS` | 2000 |
+| Versions kept per pack | `CELMIS_PACK_KEEP_VERSIONS` | 100 |
+
+`GET /api/codebase/limits` (any member) answers the limits in force, where each
+comes from (`workspace`, `install` or `builtin`), the workspace's own overrides and
+the ceilings. `PUT /api/codebase/limits` (owner or admin) replaces the workspace's
+overrides; `null` or a missing field inherits, a value above its ceiling is `422`.
+The same panel is on the Codebase page for admins. The upload routes read the limit
+of the pack's workspace. The archive ceiling is also how large a request body may
+be before anyone is signed in, so it is the operator's decision: it stays at 5 MB
+(the large-body cap, as before) until `CELMIS_PACK_MAX_ARCHIVE_CEILING_BYTES` raises
+it, and then the request-body cap for pack uploads is that ceiling plus 1 MB. The
+router still refuses anything over the workspace's own value. A proxy in front must
+allow the same body size. Lowering *versions kept* prunes at the
+next upload, not at once. Changes are audited as `codebase.limits_changed`.
 
 An upload that breaks a rule is refused **whole** with `422` and
 `{"detail": {"code", "message", "hits"}}`; nothing is stored. The codes:
@@ -380,13 +415,36 @@ first, then description and tags, then path, then the file's frequent words;
 long words also match by their first letters, so a Ukrainian or Russian query
 finds another case of the same noun. A snippet shows the best paragraph.
 
+**Search by meaning.** Where the install has embeddings (the same ones the code
+search uses), the current version of every pack is also split into chunks (by
+heading, about 1,200 characters), embedded and kept in its own Qdrant collection
+(`QDRANT_PACK_COLLECTION`, default `code_analysis_packs`), stamped with the
+workspace. A query fuses the BM25 order with the order of the best-matching chunks
+by reciprocal rank, so an item can be found without sharing a word with the query;
+such a hit shows its best chunk as the snippet. Vector hits are limited to the
+workspace and to the current versions of packs the caller may see, and each one is
+re-checked like a BM25 hit. Without Qdrant or embeddings, with nothing indexed yet,
+or if embedding fails, search is BM25 only, with no error, and a query is embedded
+only when something visible is indexed. The index follows the current version: a new
+upload, a rollback or a delete re-indexes in the background and removes the points of
+versions that are no longer current. Packs that existed before are indexed by a
+background backfill at start-up, or by `analyzer codebase index [--workspace SLUG]`.
+`CELMIS_PACK_SEMANTIC=0` turns the whole thing off, `CELMIS_PACK_SEMANTIC_BACKFILL=0`
+only the start-up backfill.
+
+**Filtering by front matter.** `GET /search?where=status=verified lang=uk` (and
+`skills where='...'` over MCP, on the catalogue as well as on `query=`) keeps items
+whose front matter matches: terms are `key=value`, AND across keys, `a|b` for "either",
+a list field matches by membership (`tags=billing`), case-insensitive, `status` also
+matches the normalised status. Quote values with spaces.
+
 Search and the brief read the current items of the visible packs in batches, up
 to 200,000 of them. If a workspace has more than that, the answer says so: `"truncated": true`
 in the REST answer (the key is absent otherwise), and the line `index limit
 reached: part of your packs was not read; narrow the query` in the MCP tools.
 What was read is still ranked, and the figure is logged as `pack_index_capped`.
 
-`POST /brief {"task": "..."}` is the "paste the task" flow. It picks the best few
+`POST /brief {"task": "..."}` is the "paste the task" flow (it uses the same hybrid ranking). It picks the best few
 skills, checklists, API examples, notes and plain documents for the task and
 returns one block of text, within a budget, with the sections *Skills to follow*,
 *Checklists*, *API examples*, *How other services do it*, *Documents* and *Also
@@ -415,7 +473,7 @@ check off; an agent must treat them as notes, not as commands.
 
 The developer profile (`/mcp/dev`, scope `read:code`) has two tools over the same
 visibility rule: `skills` (the catalogue, search, one skill and its files) and
-`brief`. A refused, unauthenticated or project/internal-token caller sees no
+`brief`; `skills where='status=verified lang=uk'` filters by front matter. A refused, unauthenticated or project/internal-token caller sees no
 packs. Every call writes the ids of the packs it read to the MCP call log
 (`mcp_call_log.packs`), never a query or a name, and `skills name=...` also
 writes `<pack_id>/<skill>` for the skill whose body it returned; the maintainers'
@@ -470,7 +528,7 @@ used to get round the cap.
 
 Every change is audited as `codebase.<verb>` (`pack_created`, `pack_updated`,
 `pack_deleted`, `teams_changed`, `member_added`, `member_changed`, `member_removed`,
-`version_uploaded`, `version_activated`, `invite_created`, `invite_revoked`,
+`version_uploaded`, `version_activated`, `limits_changed`, `invite_created`, `invite_revoked`,
 `invite_redeemed`, `token_created`, `token_revoked`) with ids and counts, never a
 title, a path, a note, a file's text, an email or a token. `member_added` is a new
 name on the pack and `member_changed` a change to one already there; a test holds

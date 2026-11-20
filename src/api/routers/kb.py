@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from pydantic import BaseModel, Field
 
 from src.api.deps import ISSUE_WRITE_ROLES, current_workspace_id, get_current_user, workspace_role
-from src.api.routers.docs import _concealed_meta, _readable_vault, _resolve, _vault_dir
+from src.api.routers.docs import _readable_vault, _resolve, _vault_dir
 from src.kb import catalog, changes, links, store
 from src.users import User
 
@@ -68,10 +68,45 @@ def _visible(slug: str, user: User, workspace_id: str) -> tuple[list, list]:
         if got is None:
             continue
         info, _body = got
-        if info.source_path and dec.path_denied(info.source_path):
+        if info.denied_by(dec):
             continue
         pairs.append(got)
     return [i for i, _ in pairs], pairs
+
+
+def _foreign(user: User, workspace_id: str):  # noqa: ANN202
+    """Another repository's notes the caller may read, or None: a repository of
+    another workspace, one that does not exist, or one the access rules hide is
+    as good as absent (a link into it is dangling, never a way to learn of it)."""
+    cache: dict[str, list | None] = {}
+
+    def foreign(repo: str) -> list | None:
+        if repo not in cache:
+            try:
+                cache[repo] = _visible(repo, user, workspace_id)[0]
+            except HTTPException:
+                cache[repo] = None
+        return cache[repo]
+
+    return foreign
+
+
+def _bound_notes(slug: str, user: User, workspace_id: str) -> dict[str, list]:
+    """Notes of the knowledge bases bound to ``slug`` as their code repository,
+    for the ones the caller may read."""
+    out: dict[str, list] = {}
+    for other in store.bindings_to(slug):
+        if other == slug:
+            continue
+        try:
+            out[other] = _visible(other, user, workspace_id)[1]
+        except HTTPException:
+            continue
+    return out
+
+
+def _code_repo_of(slug: str) -> str:
+    return str((store.load_binding(slug) or {}).get("code_repo") or "")
 
 
 class ImportRepoIn(BaseModel):
@@ -86,7 +121,7 @@ def import_upload(
     slug: str,
     files: list[UploadFile] = File(...),
     code_repo: str = Form(default=""),
-    replace: bool = Form(default=True),
+    replace: bool = Form(default=False),
     user: User = Depends(get_current_user),
     workspace_id: str = Depends(current_workspace_id),
 ) -> dict:
@@ -204,7 +239,7 @@ def read_card(
     directory, dec = _readable_vault(slug, user, workspace_id)
     full = _resolve(directory, path)
     got = catalog.load(directory, full)
-    if got is None or _concealed_meta(got[0].source_path, dec):
+    if got is None or got[0].denied_by(dec):
         raise HTTPException(status_code=404, detail="Note not found")
     info, body = got
     _, pairs = _visible(slug, user, workspace_id)
@@ -215,10 +250,12 @@ def read_card(
         objects.append({"name": name, "found": None if "objects_missing" not in kb else name not in missing})
     return {
         "path": info.path, "title": info.title, "type": info.type, "card": info.card,
-        "status": info.status, "body": body, "fm": info.fm,
+        "status": info.status, "origin": kb.get("origin", ""), "body": body, "fm": info.fm,
         "kb": {k: v for k, v in kb.items() if k not in ("fm",)},
         "objects": objects,
-        "links": links.neighbours(info.path, pairs),
+        "links": links.neighbours(info.path, pairs, repo=slug, code_repo=_code_repo_of(slug),
+                                  foreign=_foreign(user, workspace_id),
+                                  bound=_bound_notes(slug, user, workspace_id)),
     }
 
 
@@ -229,7 +266,8 @@ def note_graph(
     workspace_id: str = Depends(current_workspace_id),
 ) -> dict:
     _, pairs = _visible(slug, user, workspace_id)
-    return links.graph(pairs)
+    return links.graph(pairs, repo=slug, code_repo=_code_repo_of(slug),
+                       foreign=_foreign(user, workspace_id))
 
 
 @router.get("/{slug}/changes")

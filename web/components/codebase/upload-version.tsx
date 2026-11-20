@@ -16,7 +16,8 @@ import { CheckCircle2Icon, FolderUpIcon, UploadIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { codebaseApi, relativePathOf, type PackUploaded } from "@/lib/api";
-import { formatBytes, hitLabel, keptByServer, skippedLocally, UPLOAD_LIMITS } from "@/lib/codebase";
+import { formatBytes, hitLabel, keptByServer, skippedLocally } from "@/lib/codebase";
+import { usePackLimits } from "@/lib/use-pack-limits";
 import { useT } from "@/lib/i18n";
 import { useToken } from "@/lib/use-token";
 import { IngestError } from "@/components/codebase/ingest-error";
@@ -105,12 +106,13 @@ function UploadForm({ packId, onClose }: { packId: string; onClose: () => void }
     onSettled: () => setProgress(null),
   });
 
+  const limits = usePackLimits().upload;
   const bytes = mode === "zip"
     ? archive?.size ?? 0
     : (folder?.files ?? []).reduce((sum, f) => sum + f.size, 0);
   const picked = mode === "zip" ? !!archive : (folder?.files.length ?? 0) > 0;
-  const tooBig = bytes > UPLOAD_LIMITS.archiveBytes;
-  const tooMany = mode === "folder" && (folder?.kept ?? 0) > UPLOAD_LIMITS.files;
+  const tooBig = bytes > limits.archiveBytes;
+  const tooMany = mode === "folder" && (folder?.kept ?? 0) > limits.files;
   const cancelled = upload.error instanceof DOMException && upload.error.name === "AbortError";
 
   const chooseMode = (next: Mode) => {
@@ -232,11 +234,11 @@ function UploadForm({ packId, onClose }: { packId: string; onClose: () => void }
 
       {tooBig && (
         <Callout tone="warning">
-          {t("codebase.upload.tooBig", { size: formatBytes(bytes), limit: formatBytes(UPLOAD_LIMITS.archiveBytes) })}
+          {t("codebase.upload.tooBig", { size: formatBytes(bytes), limit: formatBytes(limits.archiveBytes) })}
         </Callout>
       )}
       {tooMany && !tooBig && (
-        <Callout tone="warning">{t("codebase.upload.tooMany", { limit: UPLOAD_LIMITS.files })}</Callout>
+        <Callout tone="warning">{t("codebase.upload.tooMany", { limit: limits.files })}</Callout>
       )}
 
       <div className="space-y-1.5">
@@ -255,10 +257,10 @@ function UploadForm({ packId, onClose }: { packId: string; onClose: () => void }
           <p>{t("codebase.upload.helpKinds")}</p>
           <p>
             {t("codebase.upload.helpLimits", {
-              files: UPLOAD_LIMITS.files,
-              file: formatBytes(UPLOAD_LIMITS.fileBytes),
-              total: formatBytes(UPLOAD_LIMITS.totalBytes),
-              body: formatBytes(UPLOAD_LIMITS.archiveBytes),
+              files: limits.files,
+              file: formatBytes(limits.fileBytes),
+              total: formatBytes(limits.totalBytes),
+              body: formatBytes(limits.archiveBytes),
             })}
           </p>
           <p>{t("codebase.upload.helpRefused")}</p>

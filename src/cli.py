@@ -108,7 +108,7 @@ def reindex_qdrant(
 
     console.print(f"[cyan]Re-embedding {len(notes)} notes for {repo} (batched)...[/cyan]")
 
-    items: list[tuple[str, str, dict]] = []
+    items: list[tuple] = []
     for note in notes:
         payload = {**note.metadata, "note_path": note.relative_path}
         embed_text = "\n".join(
@@ -122,7 +122,7 @@ def reindex_qdrant(
                 note.content[:6000],
             ]
         )
-        items.append((VaultWriter._note_id(repo, note.relative_path), embed_text, payload))
+        items.append((VaultWriter._note_id(repo, note.relative_path), embed_text, payload, note.content))
 
     # Chunk into API-friendly batches so a single 5-min HTTP call doesn't
     # timeout and rate-limit backoff stays scoped. Gemini's embed_content
@@ -1700,11 +1700,24 @@ def codebase_import_cmd(
     from src.knowledge.visibility import PackNotAccessible
 
     path = Path(source)
+
+    async def workspace_limits():
+        from src.db.session import async_session
+        from src.knowledge import limits as pack_limits
+
+        async with async_session() as session:
+            ws = await importer.workspace_by_ref(session, workspace)
+            return await pack_limits.resolve(session, ws.id)
+
+    try:                                    # the workspace's own limits; a bad ref is reported below
+        lim = _run_codebase(workspace_limits)
+    except Exception:  # noqa: BLE001
+        lim = None
     try:
         if path.is_file() and path.suffix.lower() == ".zip":
-            result = ingest.ingest_zip(path.read_bytes())
+            result = ingest.ingest_zip(path.read_bytes(), lim)
         else:
-            result = ingest.ingest_directory(path)
+            result = ingest.ingest_directory(path, lim)
     except ingest.IngestError as exc:
         console.print(f"[red]✗[/red] {exc.code}: {exc.message}")
         for hit in exc.hits:
@@ -1804,6 +1817,43 @@ def codebase_list_cmd(
     for info in infos:
         version = f"v{info.version.number}" if info.version else "-"
         print(f"{info.slug}\t{info.audience}\t{version}\t{info.files}")
+
+
+@codebase_app.command("index")
+def codebase_index_cmd(
+    workspace: str = typer.Option(
+        "", "--workspace", "-w", help="Only this workspace (id or slug); default: every workspace."),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Index the packs for search by meaning (embeddings + Qdrant).
+
+    Indexes every pack whose current version is not yet indexed under the current
+    embeddings model; packs already up to date are skipped, so it is safe to repeat.
+    The server does the same in the background at start-up (CELMIS_PACK_SEMANTIC_BACKFILL=0
+    turns that off). With no embeddings or no Qdrant it reports that nothing was indexed.
+    """
+    _setup_logging(verbose)
+    from src.knowledge import importer, semantic
+
+    if not semantic.enabled():
+        console.print("semantic pack search is off (CELMIS_PACK_SEMANTIC=0)")
+        raise typer.Exit(1)
+
+    ws_id: str | None = None
+    if workspace.strip():
+        async def resolve():
+            from src.db.session import async_session
+
+            async with async_session() as session:
+                return (await importer.workspace_by_ref(session, workspace)).id
+
+        try:
+            ws_id = _run_codebase(resolve)
+        except importer.ImportRefusedError as exc:
+            console.print(f"[red]✗[/red] {exc}")
+            raise typer.Exit(1) from None
+    done = semantic.backfill(ws_id)
+    console.print(f"indexed versions={done.versions} chunks={done.chunks}")
 
 
 # ─── Access bootstrap (default-deny rollout) ────────────────────────

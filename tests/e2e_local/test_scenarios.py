@@ -46,4 +46,4 @@ def test_the_tools_list_stays_small(report) -> None:
     # measures JSON with spaces; this report measures it compact, so it is
     # smaller and the same cap holds it).
     assert report.tools_list_count >= 13
-    assert report.tools_list_chars < 7700
+    assert report.tools_list_chars < 7800

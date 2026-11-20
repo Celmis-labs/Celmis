@@ -19,7 +19,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   BookTextIcon, DownloadIcon, FileTextIcon, FileUpIcon, PrinterIcon, RefreshCwIcon,
-  SparklesIcon,
+  SparklesIcon, WorkflowIcon,
 } from "lucide-react";
 
 import {
@@ -40,11 +40,14 @@ import { WorkspaceBadge } from "@/components/workspace-badge";
 import {
   filtersActive, KbCardPanel, KbChangesView, KbFilterBar, KbGraphView, KbImportPanel, StatusBadge,
 } from "@/components/docs/knowledge-base";
+import { ProcessesPanel } from "@/components/docs/processes";
 
 type NoteSummary = {
   path: string; title: string; updated_at?: string; words?: number;
   /** A generated note's kind (module, feature, …) or an imported card's own type. */
   type?: string; status?: string; card?: boolean;
+  /** "generate": a process note Celmis wrote from the code. */
+  origin?: string;
 };
 type View = "notes" | "links" | "changes";
 type DocsOverview = { repo_slug: string; notes: NoteSummary[]; omitted: number };
@@ -57,6 +60,7 @@ export default function DocsPage() {
   const [open, setOpen] = useState<string | null>(null);
   const [view, setView] = useState<View>("notes");
   const [showImport, setShowImport] = useState(false);
+  const [showProcesses, setShowProcesses] = useState(false);
   const [filters, setFilters] = useState<KbFilters>({});
 
   const repos = useQuery({
@@ -112,7 +116,11 @@ export default function DocsPage() {
   const notes: NoteSummary[] = filtering ? (kbList.data?.notes ?? []) : allNotes;
   const types = kbList.data?.types ?? [];
   const openNote = (path: string) => { setOpen(path); setView("notes"); };
-  const openIsCard = !!open && (open.startsWith("kb/") || !!notes.find((n) => n.path === open)?.card);
+  // A note Celmis generated from the code (a process note) is a card in shape only:
+  // it keeps the regenerate controls an imported card does not have.
+  const openSummary = notes.find((n) => n.path === open);
+  const openIsCard = !!open && openSummary?.origin !== "generate"
+    && (open.startsWith("kb/") || !!openSummary?.card);
 
   // Redo THIS document, optionally with the other engine.
   //
@@ -189,6 +197,10 @@ export default function DocsPage() {
                 onClick={() => setShowImport((v) => !v)} data-testid="kb-toggle-import">
           <FileUpIcon className="mr-1 h-3.5 w-3.5" /> {t("kb.importButton")}
         </Button>
+        <Button size="sm" variant={showProcesses ? "default" : "outline"} disabled={!slug}
+                onClick={() => setShowProcesses((v) => !v)} data-testid="proc-toggle">
+          <WorkflowIcon className="mr-1 h-3.5 w-3.5" /> {t("proc.button")}
+        </Button>
         <Button size="sm" variant="outline" disabled={!allNotes.length}
                 onClick={() => void download("md")}>
           <DownloadIcon className="mr-1 h-3.5 w-3.5" /> {t("docs.exportMd")}
@@ -221,6 +233,9 @@ export default function DocsPage() {
 
       {showImport && slug && (
         <KbImportPanel token={token} slug={slug} repos={repos.data ?? []} />
+      )}
+      {showProcesses && slug && (
+        <ProcessesPanel key={slug} token={token} slug={slug} onOpen={openNote} />
       )}
 
       {allNotes.length > 0 && (

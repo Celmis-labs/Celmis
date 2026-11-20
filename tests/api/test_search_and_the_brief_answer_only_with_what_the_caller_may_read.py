@@ -68,7 +68,7 @@ async def test_search_has_bounds_and_an_empty_query_finds_nothing(tmp_path, monk
         some = await call(w, "editor_a", "GET", "/api/codebase/search?q=recipe&limit=2")
         assert len(some.json()["hits"]) == 2
         assert set(some.json()["hits"][0]) == {"pack_id", "pack_slug", "pack_title", "item_id", "path",
-                                               "kind", "skill", "name", "snippet", "score"}
+                                               "kind", "skill", "name", "status", "snippet", "score"}
 
 
 async def test_only_the_current_version_is_searched_and_a_deleted_pack_disappears(tmp_path, monkeypatch):

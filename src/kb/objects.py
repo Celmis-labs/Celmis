@@ -118,6 +118,7 @@ class ChangeIndex:
         self.repo_path = repo_path
         self._head: str | None = None
         self._cache: dict[str, tuple[set[str] | None, str]] = {}
+        self._paths: dict[str, tuple[set[str] | None, str]] = {}
 
     def head(self) -> str:
         if self._head is None:
@@ -155,6 +156,29 @@ class ChangeIndex:
                             objs.add(obj)
                 result = (objs, "")
         self._cache[sha] = result
+        return result
+
+    def changed_paths_since(self, sha: str) -> tuple[set[str] | None, str]:
+        """(files changed in ``sha..HEAD``, "") or (None, why it is unknown).
+
+        The same question as :meth:`changed_since`, asked of files: a note about
+        code that is not a 1C configuration is checked against these."""
+        if sha in self._paths:
+            return self._paths[sha]
+        _objs, why = self.changed_since(sha)
+        result: tuple[set[str] | None, str]
+        if _objs is None:
+            result = (None, why)
+        else:
+            from src.sync.incremental import _git_diff
+
+            head = self.head()
+            diff = [] if head.startswith(sha) else _git_diff(self.repo_path, sha, head)
+            if diff is None:
+                result = (None, "git diff failed")
+            else:
+                result = ({rel for entry in diff for rel in entry[1:]}, "")
+        self._paths[sha] = result
         return result
 
 

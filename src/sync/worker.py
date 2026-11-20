@@ -55,6 +55,7 @@ def start_worker() -> None:
     register(jq.KIND_REINDEX_QDRANT, h.handle_reindex_qdrant)
     register(jq.KIND_REGENERATE_NOTES, h.handle_regenerate_notes)
     register(jq.KIND_GENERATE_VAULT, h.handle_generate_vault)
+    register(jq.KIND_GENERATE_PROCESSES, h.handle_generate_processes)
     register(jq.KIND_DEPS_AUDIT, h.handle_deps_audit)
     register(jq.KIND_AUTOMATION_PLAN, h.handle_automation_plan)
     register(jq.KIND_PR_COMMAND, h.handle_pr_command)

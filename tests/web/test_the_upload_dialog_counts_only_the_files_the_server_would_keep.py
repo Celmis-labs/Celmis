@@ -108,6 +108,6 @@ console.log(JSON.stringify(picked.filter((p) => cb.keptByServer(p)).length > cb.
 def test_the_dialog_compares_the_kept_files_with_the_limit_and_says_how_many_it_will_keep():
     code = re.sub(r"/\*.*?\*/", "", DIALOG.read_text(encoding="utf-8"), flags=re.S)
     assert "keptByServer(relativePathOf(f))" in code
-    assert 'const tooMany = mode === "folder" && (folder?.kept ?? 0) > UPLOAD_LIMITS.files;' in code
+    assert 'const tooMany = mode === "folder" && (folder?.kept ?? 0) > limits.files;' in code
     assert "count: folder.kept" in code
-    assert "files.length ?? 0) > UPLOAD_LIMITS.files" not in code
+    assert "files.length ?? 0) > limits.files" not in code
