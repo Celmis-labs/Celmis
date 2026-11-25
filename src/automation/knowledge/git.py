@@ -53,10 +53,17 @@ public repositories); automatic review by POLLING additionally needs the
 classic `notifications` scope — fine-grained tokens cannot poll at all, use a
 webhook instead.
 
-GitLab — personal access token (avatar → Edit profile → Access tokens → Add
-new token) with the `api` scope; `read_api` is not enough (comments cannot be
-posted). gitlab.com requires an expiry date, at most 400 days. The value
-starts with `glpat-` and is shown once.
+GitLab — personal access token (avatar → Edit profile → Personal access
+tokens → Generate token ▾ → Legacy token) with the `api` scope; `read_api` is
+not enough (comments cannot be posted). gitlab.com requires an expiry date, at
+most 400 days. The value starts with `glpat-` and is shown once. A newer
+GitLab opens the fine-grained form by default; a fine-grained token works too:
+User tab — User: Read, Project: Read; Group and project tab (pick the groups
+or projects) — Project: Read, Repository: Read, Branch: Read, Commit: Read,
+Code: Download for indexing and search; reviews add Merge Request: Read,
+Create, Update, Approve, Work Item: Read, Create (MR comments), Commit Status:
+Create, Webhook: Create, Read, Delete; Apply fix adds Code: Push. A 403 from
+GitLab means a permission is missing.
 
 Bitbucket — Atlassian API token (Atlassian account → Security → Create API
 token), workspace-scoped recommended. Required scopes: `read:user:bitbucket`,
@@ -106,7 +113,8 @@ approvals, the MR description, reviewer assignment, apply-fix, polling and
 the one-press webhook install. Other workspaces keep their own GitLab.
 
 Token: a personal (or group/project) access token created ON YOUR INSTANCE
-(avatar → Edit profile → Access tokens) with the `api` scope; `read_api` can
+(avatar → Edit profile → Personal access tokens → Generate token → Legacy
+token) with the `api` scope, or a fine-grained token as above; `read_api` can
 list but not comment or approve. Installing the webhook needs the
 Maintainer role on the project.
 

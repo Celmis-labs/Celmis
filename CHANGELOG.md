@@ -20,6 +20,17 @@ derives it from there.
 
 ## [Unreleased]
 
+## [3.1.42] — 2026-11-25
+
+### Changed
+- **The GitLab card on Git connections follows GitLab's current token page.**
+  A newer GitLab opens the fine-grained form when you press "Generate token",
+  where there is no `api` scope to tick, so the old steps led nowhere. The
+  steps now go to Generate token → Legacy token, and a new note lists the
+  fine-grained permissions Celmis needs: what is enough to index and search
+  code, what reviews add, and what Apply fix adds. The assistant gives the
+  same answer.
+
 ## [3.1.41] — 2026-11-20
 
 ### Fixed

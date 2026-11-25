@@ -424,6 +424,11 @@ function ProviderCard({
             )}
             {provider === "gitlab" && (
               <p className="pt-1 border-t border-[var(--color-border)]">
+                {t("connections.gitlab.fineGrained")}
+              </p>
+            )}
+            {provider === "gitlab" && (
+              <p className="pt-1 border-t border-[var(--color-border)]">
                 {t("connections.gitlab.selfHosted")}
               </p>
             )}

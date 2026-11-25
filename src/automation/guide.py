@@ -50,8 +50,10 @@ comments.
   Contents must be write or "Apply fix" fails with 403. A classic token needs
   the whole `repo` scope; automatic review by polling also needs the classic
   `notifications` scope — fine-grained tokens cannot poll, use a webhook.
-- GitLab: a personal access token (avatar → Edit profile → Access tokens) with
-  the `api` scope; `read_api` is not enough. gitlab.com requires an expiry
+- GitLab: a personal access token (avatar → Edit profile → Personal access
+  tokens → Generate token ▾ → Legacy token) with the `api` scope;
+  `read_api` is not enough. A fine-grained token also works when it has the
+  permissions the Connections card lists (a 403 means one is missing). gitlab.com requires an expiry
   (at most 400 days). The value starts with `glpat-` and is shown once.
   Self-hosted GitLab: enter the instance address in "GitLab URL" on the same
   card (e.g. https://gitlab.example.com or https://example.com/gitlab) and
