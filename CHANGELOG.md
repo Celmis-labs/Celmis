@@ -26,10 +26,11 @@ derives it from there.
 - **The GitLab card on Git connections follows GitLab's current token page.**
   A newer GitLab opens the fine-grained form when you press "Generate token",
   where there is no `api` scope to tick, so the old steps led nowhere. The
-  steps now go to Generate token → Legacy token, and a new note lists the
-  fine-grained permissions Celmis needs: what is enough to index and search
-  code, what reviews add, and what Apply fix adds. The assistant gives the
-  same answer.
+  card now has two step-by-step instructions: Legacy token (Generate token →
+  Legacy token, scope `api`) and Fine-grained token (Generate token →
+  Fine-grained token, with the permissions to add on the User tab and on the
+  Group and project tab: what is enough to index and search code, what
+  reviews add, and what Apply fix adds). The assistant gives the same answer.
 
 ## [3.1.41] — 2026-11-20
 

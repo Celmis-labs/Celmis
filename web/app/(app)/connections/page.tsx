@@ -35,6 +35,9 @@ const PROVIDER_INFO: Record<Provider, {
   tokenUrl: string;
   scopes: string;
   steps: string[];
+  // Several ways to make the token, each with its own title and steps
+  // (GitLab: a legacy token or a fine-grained one). Shown instead of `steps`.
+  variants?: { title: string; steps: string[] }[];
 }> = {
   github: {
     name: "GitHub",
@@ -54,11 +57,28 @@ const PROVIDER_INFO: Record<Provider, {
     color: "bg-orange-600 text-white",
     tokenUrl: "https://gitlab.com/-/user_settings/personal_access_tokens",
     scopes: "connections.gitlab.scopes",
-    steps: [
-      "connections.gitlab.step1",
-      "connections.gitlab.step2",
-      "connections.gitlab.step3",
-      "connections.gitlab.step4",
+    steps: [],
+    variants: [
+      {
+        title: "connections.gitlab.legacyTitle",
+        steps: [
+          "connections.gitlab.step1",
+          "connections.gitlab.step2",
+          "connections.gitlab.step3",
+          "connections.gitlab.step4",
+        ],
+      },
+      {
+        title: "connections.gitlab.fineTitle",
+        steps: [
+          "connections.gitlab.fine1",
+          "connections.gitlab.fine2",
+          "connections.gitlab.fine3",
+          "connections.gitlab.fine4",
+          "connections.gitlab.fine5",
+          "connections.gitlab.fine6",
+        ],
+      },
     ],
   },
   bitbucket: {
@@ -412,19 +432,21 @@ function ProviderCard({
 
         {showInstructions && (
           <div className="text-sm space-y-2 text-[var(--color-muted-foreground)] bg-[var(--color-secondary)] rounded-md p-4">
-            <ol className="list-decimal pl-5 space-y-1">
-              {info.steps.map((s) => (
-                <li key={s}>{t(s)}</li>
-              ))}
-            </ol>
+            {(info.variants ?? [{ title: "", steps: info.steps }]).map((v) => (
+              <div key={v.title || "steps"} className="space-y-1">
+                {v.title && (
+                  <p className="font-medium text-[var(--color-foreground)]">{t(v.title)}</p>
+                )}
+                <ol className="list-decimal pl-5 space-y-1">
+                  {v.steps.map((s) => (
+                    <li key={s}>{t(s)}</li>
+                  ))}
+                </ol>
+              </div>
+            ))}
             {provider === "github" && (
               <p className="pt-1 border-t border-[var(--color-border)]">
                 {t("connections.github.classic")}
-              </p>
-            )}
-            {provider === "gitlab" && (
-              <p className="pt-1 border-t border-[var(--color-border)]">
-                {t("connections.gitlab.fineGrained")}
               </p>
             )}
             {provider === "gitlab" && (
